@@ -571,10 +571,10 @@ fn rebuild_layers(
 ) -> Result<Vec<LayerState>> {
     let mut out = Vec::with_capacity(project.layers.len());
     for lc in project.layers.iter() {
-        let layer = SvgLayer::pending(lc.svg_path.clone());
+        let asset_path = lc.kind.asset_path().to_path_buf();
+        let layer = SvgLayer::pending(asset_path.clone());
         let (job_tx, result_rx) = Worker::spawn();
-        let path = lc.svg_path.clone();
-        let (watcher, watch_rx) = Watcher::new(std::slice::from_ref(&path))?;
+        let (watcher, watch_rx) = Watcher::new(std::slice::from_ref(&asset_path))?;
         let effect_pipeline =
             EffectPipeline::new(device, width.max(1), height.max(1), surface_format);
         let (intermediate_texture, intermediate_view) =
@@ -583,7 +583,7 @@ fn rebuild_layers(
         let generation = 1u64;
         let _ = job_tx.send(RasterJob {
             layer_id,
-            path: lc.svg_path.clone(),
+            path: asset_path.clone(),
             size: (width, height),
             generation,
         });
@@ -651,7 +651,7 @@ fn resize_m5_gpu(state: &mut RunningApp) {
         layer._intermediate_texture = itex;
         layer.intermediate_view = iview;
         layer.generation = layer.generation.wrapping_add(1);
-        let path = state.project.layers[i].svg_path.clone();
+        let path = state.project.layers[i].kind.asset_path().to_path_buf();
         let _ = layer.job_tx.send(RasterJob {
             layer_id: layer.layer_id,
             path,
@@ -1191,7 +1191,7 @@ impl ApplicationHandler for App {
                     while let Ok(_event) = ls.watch_rx.try_recv() {
                         ls.generation = ls.generation.wrapping_add(1);
                         let size = (state.output.config.width, state.output.config.height);
-                        let path = state.project.layers[i].svg_path.clone();
+                        let path = state.project.layers[i].kind.asset_path().to_path_buf();
                         let layer_id = ls.layer_id;
                         let generation = ls.generation;
                         let _ = ls.job_tx.send(RasterJob {

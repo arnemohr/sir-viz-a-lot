@@ -162,9 +162,15 @@ pub fn interpolate(
 }
 
 /// True when both snapshots have a `layers` array of equal length and
-/// matching `svg_path` per index. Used to gate crossfade scheduling: a
-/// structural difference forces the recall to snap instantly so the
-/// renderer's per-layer GPU state stays consistent with `project.layers`.
+/// matching `kind` per index. Used to gate crossfade scheduling: a
+/// structural difference (different layer counts or different layer assets)
+/// forces the recall to snap instantly so the renderer's per-layer GPU
+/// state stays consistent with `project.layers`.
+///
+/// Comparing whole `kind` JSON objects covers both v3 layer variants (Svg
+/// vs Image) and any future LayerKind additions — a fade between an SVG
+/// and a JPG layer at the same slot would require a worker / texture
+/// rebuild, so it correctly trips the "snap instantly" gate.
 pub fn snapshots_share_layer_topology(a: &serde_json::Value, b: &serde_json::Value) -> bool {
     let la = a.get("layers").and_then(|v| v.as_array());
     let lb = b.get("layers").and_then(|v| v.as_array());
@@ -172,7 +178,7 @@ pub fn snapshots_share_layer_topology(a: &serde_json::Value, b: &serde_json::Val
         (Some(la), Some(lb)) if la.len() == lb.len() => la
             .iter()
             .zip(lb.iter())
-            .all(|(x, y)| x.get("svg_path") == y.get("svg_path")),
+            .all(|(x, y)| x.get("kind") == y.get("kind")),
         _ => false,
     }
 }
@@ -180,7 +186,7 @@ pub fn snapshots_share_layer_topology(a: &serde_json::Value, b: &serde_json::Val
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::project::schema::{BlendMode, LayerConfig, Scene, WarpMesh};
+    use crate::project::schema::{BlendMode, LayerConfig, LayerKind, Scene, WarpMesh};
     use std::path::PathBuf;
 
     #[test]
@@ -213,7 +219,9 @@ mod tests {
         original.output_monitor_index = 2;
         original.layers.push(LayerConfig {
             id: "layer_a".into(),
-            svg_path: PathBuf::from("/tmp/fixture.svg"),
+            kind: LayerKind::Svg {
+                svg_path: PathBuf::from("/tmp/fixture.svg"),
+            },
             enabled: true,
             transform: crate::project::schema::Transform2D::default(),
             effects: crate::effects::default_effect_chain(),
@@ -250,7 +258,9 @@ mod tests {
         let mut p = Project::default();
         p.layers.push(LayerConfig {
             id: "a".into(),
-            svg_path: PathBuf::from("fixtures/x.svg"),
+            kind: LayerKind::Svg {
+                svg_path: PathBuf::from("fixtures/x.svg"),
+            },
             enabled: true,
             transform: crate::project::schema::Transform2D::default(),
             effects: crate::effects::default_effect_chain(),
@@ -323,16 +333,24 @@ mod tests {
     }
 
     #[test]
-    fn snapshots_topology_matches_when_paths_align() {
-        let a = serde_json::json!({"layers": [{"svg_path": "/x.svg", "id": "a"}]});
-        let b = serde_json::json!({"layers": [{"svg_path": "/x.svg", "id": "renamed"}]});
+    fn snapshots_topology_matches_when_kind_aligns() {
+        let kind = serde_json::json!({"Svg": {"svg_path": "/x.svg"}});
+        let a = serde_json::json!({"layers": [{"kind": kind.clone(), "id": "a"}]});
+        let b = serde_json::json!({"layers": [{"kind": kind, "id": "renamed"}]});
         assert!(snapshots_share_layer_topology(&a, &b));
     }
 
     #[test]
-    fn snapshots_topology_diverges_on_path_change() {
-        let a = serde_json::json!({"layers": [{"svg_path": "/x.svg"}]});
-        let b = serde_json::json!({"layers": [{"svg_path": "/y.svg"}]});
+    fn snapshots_topology_diverges_on_kind_change() {
+        let a = serde_json::json!({"layers": [{"kind": {"Svg": {"svg_path": "/x.svg"}}}]});
+        let b = serde_json::json!({"layers": [{"kind": {"Svg": {"svg_path": "/y.svg"}}}]});
+        assert!(!snapshots_share_layer_topology(&a, &b));
+    }
+
+    #[test]
+    fn snapshots_topology_diverges_when_kind_variant_changes() {
+        let a = serde_json::json!({"layers": [{"kind": {"Svg": {"svg_path": "/x.svg"}}}]});
+        let b = serde_json::json!({"layers": [{"kind": {"Image": {"path": "/x.jpg", "fit": "Cover", "focal": [0.5, 0.5]}}}]});
         assert!(!snapshots_share_layer_topology(&a, &b));
     }
 }

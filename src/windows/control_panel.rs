@@ -338,7 +338,7 @@ fn show_layers_tab(ui: &mut Ui, project: &mut Project, st: &mut ControlPanelStat
         ui.group(|ui| {
             ui.horizontal(|ui| {
                 ui.checkbox(&mut layer.enabled, &format!("{}", layer.id));
-                ui.label(layer.svg_path.display().to_string());
+                ui.label(layer.kind.asset_path().display().to_string());
             });
             ui.horizontal(|ui| {
                 ui.label("blend");

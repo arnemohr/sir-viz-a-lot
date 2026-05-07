@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 2;
+pub const CURRENT_SCHEMA_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Transform2D {
@@ -24,10 +24,56 @@ pub enum BlendMode {
     Screen,
 }
 
+/// How an `Image` layer's texture maps onto its layer rect.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FitMode {
+    /// Fill the layer rect; crop the texture's overhang. Default for photos —
+    /// matches the operator expectation that a wedding portrait fills the wall.
+    #[default]
+    Cover,
+    /// Fit the texture inside the layer rect; letterbox the remainder.
+    Contain,
+    /// Pass-through UV mapping; no aspect lock.
+    Stretch,
+}
+
+/// Source of pixels for a single layer. v2 splits SVG (rasterized via resvg)
+/// from raster Image (uploaded directly via the `image` crate). The two flow
+/// through the same compositor + effects + warp chain after upload.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum LayerKind {
+    Svg {
+        svg_path: PathBuf,
+    },
+    Image {
+        path: PathBuf,
+        #[serde(default)]
+        fit: FitMode,
+        /// Normalized point the `Cover` crop centers on. Ignored by other fits.
+        #[serde(default = "default_focal")]
+        focal: [f32; 2],
+    },
+}
+
+impl LayerKind {
+    /// Path on disk the renderer (or worker) reads from. Both variants
+    /// have one; the helper saves callers a match arm.
+    pub fn asset_path(&self) -> &std::path::Path {
+        match self {
+            LayerKind::Svg { svg_path } => svg_path.as_path(),
+            LayerKind::Image { path, .. } => path.as_path(),
+        }
+    }
+}
+
+fn default_focal() -> [f32; 2] {
+    [0.5, 0.5]
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LayerConfig {
     pub id: String,
-    pub svg_path: PathBuf,
+    pub kind: LayerKind,
     pub enabled: bool,
     pub transform: Transform2D,
     pub effects: Vec<crate::effects::Effect>,
@@ -199,7 +245,27 @@ pub fn identity_grid(rows: u32, cols: u32) -> Vec<Vec<[f32; 2]>> {
 pub fn layer_from_svg_path(id: impl Into<String>, svg_path: PathBuf) -> LayerConfig {
     LayerConfig {
         id: id.into(),
-        svg_path,
+        kind: LayerKind::Svg { svg_path },
+        enabled: true,
+        transform: Transform2D::default(),
+        effects: crate::effects::default_effect_chain(),
+        blend_mode: BlendMode::Normal,
+        opacity: 1.0,
+    }
+}
+
+/// Build a layer row for an image (JPG/PNG) path using the v1 default chain.
+/// Defaults to `Cover` fit + center focal — matches the "drop a photo,
+/// it fills the wall" operator expectation (T-M8-05).
+#[allow(dead_code)] // Consumed by T-M8-05 drag-drop path; predates that hook.
+pub fn layer_from_image_path(id: impl Into<String>, path: PathBuf) -> LayerConfig {
+    LayerConfig {
+        id: id.into(),
+        kind: LayerKind::Image {
+            path,
+            fit: FitMode::Cover,
+            focal: default_focal(),
+        },
         enabled: true,
         transform: Transform2D::default(),
         effects: crate::effects::default_effect_chain(),
