@@ -21,6 +21,11 @@ use egui::Pos2;
 
 use crate::project::schema::Project;
 
+/// Pixel radius for mask-vertex hit-testing in preview space (M11).
+const MASK_HANDLE_HIT_PX: f32 = 9.0;
+/// Pixel radius for the painted mask handle.
+const MASK_HANDLE_DRAW_PX: f32 = 5.5;
+
 /// What the operator currently has selected in the Scene preview. Single-
 /// select for v2; multi-select is deferred. The non-Layer variants land
 /// at M11 — declared now so the dispatch shape doesn't change later.
@@ -55,17 +60,30 @@ pub enum SourceRectCorner {
     BottomLeft,
 }
 
-/// Drag-time snapshot. The full `Transform2D` is captured at mouse-down so
-/// the live drag computes `start + delta` rather than accumulating per-frame
-/// deltas (no float drift). `mode` is locked at drag-start based on
-/// modifier keys: plain drag = Translate, Shift = Scale, Alt = Rotate.
+/// Drag-time snapshot. Different selection types snapshot different
+/// fields; one struct + one enum covers them so `handle_scene_input`
+/// stays a single match.
 #[derive(Debug, Clone)]
 pub struct DragSession {
     pub start_screen: Pos2,
-    pub start_translate: [f32; 2],
-    pub start_scale: [f32; 2],
-    pub start_rotate_deg: f32,
-    pub mode: DragMode,
+    pub kind: DragKind,
+}
+
+#[derive(Debug, Clone)]
+pub enum DragKind {
+    LayerTransform {
+        start_translate: [f32; 2],
+        start_scale: [f32; 2],
+        start_rotate_deg: f32,
+        mode: DragMode,
+    },
+    /// Mask polygon vertex move (M11). Captures the original normalized
+    /// position so live drag is `start + delta_normalized`.
+    MaskVertex {
+        warp: usize,
+        idx: usize,
+        start_pos: [f32; 2],
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -118,6 +136,39 @@ pub fn hit_layer(
     None
 }
 
+/// Hit-test screen-space `pos` against every mask-polygon vertex of every
+/// warp. Returns the first match within `MASK_HANDLE_HIT_PX`. Walked in
+/// (warp, idx) lexicographic order; ties at the same screen point pick
+/// the first warp's earliest vertex (deterministic, predictable for
+/// undo-style tooling).
+pub fn hit_mask_vertex(
+    project: &Project,
+    pos_screen: Pos2,
+    preview_rect: egui::Rect,
+) -> Option<(usize, usize)> {
+    if !preview_rect.contains(pos_screen) {
+        return None;
+    }
+    let to_screen = |n: [f32; 2]| -> Pos2 {
+        egui::pos2(
+            preview_rect.left() + n[0] * preview_rect.width(),
+            preview_rect.top() + n[1] * preview_rect.height(),
+        )
+    };
+    let r2 = MASK_HANDLE_HIT_PX * MASK_HANDLE_HIT_PX;
+    for (w_idx, warp) in project.warps.iter().enumerate() {
+        for (v_idx, p) in warp.mask_polygon.iter().enumerate() {
+            let s = to_screen(*p);
+            let dx = pos_screen.x - s.x;
+            let dy = pos_screen.y - s.y;
+            if dx * dx + dy * dy <= r2 {
+                return Some((w_idx, v_idx));
+            }
+        }
+    }
+    None
+}
+
 /// Convert a screen pos inside `preview_rect` to normalized [0, 1]
 /// output-space. Returns `None` when `pos` is outside the rect.
 pub fn screen_to_normalized(pos: Pos2, preview_rect: egui::Rect) -> Option<[f32; 2]> {
@@ -156,58 +207,93 @@ pub fn handle_scene_input(
     if response.drag_started() {
         if let Some(pos) = pointer {
             scene.drag = None;
-            match hit_layer(project, pos, preview_rect) {
-                Some(idx) => {
-                    let t = &project.layers[idx].transform;
-                    let mode = if modifiers.shift {
-                        DragMode::Scale
-                    } else if modifiers.alt {
-                        DragMode::Rotate
-                    } else {
-                        DragMode::Translate
-                    };
-                    scene.selected = Some(Selection::Layer(idx));
-                    scene.drag = Some(DragSession {
-                        start_screen: pos,
+            // Hit-test priority: mask vertices first (small handles, easy
+            // to miss), then layer body. Warp corners + source rect land
+            // in M11 future work.
+            if let Some((w_idx, v_idx)) = hit_mask_vertex(project, pos, preview_rect) {
+                let start_pos = project.warps[w_idx].mask_polygon[v_idx];
+                scene.selected = Some(Selection::MaskVertex {
+                    warp: w_idx,
+                    idx: v_idx,
+                });
+                scene.drag = Some(DragSession {
+                    start_screen: pos,
+                    kind: DragKind::MaskVertex {
+                        warp: w_idx,
+                        idx: v_idx,
+                        start_pos,
+                    },
+                });
+            } else if let Some(idx) = hit_layer(project, pos, preview_rect) {
+                let t = &project.layers[idx].transform;
+                let mode = if modifiers.shift {
+                    DragMode::Scale
+                } else if modifiers.alt {
+                    DragMode::Rotate
+                } else {
+                    DragMode::Translate
+                };
+                scene.selected = Some(Selection::Layer(idx));
+                scene.drag = Some(DragSession {
+                    start_screen: pos,
+                    kind: DragKind::LayerTransform {
                         start_translate: t.translate,
                         start_scale: t.scale,
                         start_rotate_deg: t.rotate_deg,
                         mode,
-                    });
-                }
-                None => scene.selected = None,
+                    },
+                });
+            } else {
+                scene.selected = None;
             }
         }
     }
 
     if response.dragged() {
-        if let (Some(pos), Some(drag), Some(Selection::Layer(idx))) =
-            (pointer, scene.drag.as_ref(), scene.selected)
-        {
-            if let Some(layer) = project.layers.get_mut(idx) {
-                let dx = (pos.x - drag.start_screen.x) / preview_rect.width().max(1.0);
-                let dy = (pos.y - drag.start_screen.y) / preview_rect.height().max(1.0);
-                match drag.mode {
-                    DragMode::Translate => {
-                        layer.transform.translate = [
-                            drag.start_translate[0] + dx,
-                            drag.start_translate[1] + dy,
-                        ];
+        if let (Some(pos), Some(drag)) = (pointer, scene.drag.as_ref()) {
+            let dx = (pos.x - drag.start_screen.x) / preview_rect.width().max(1.0);
+            let dy = (pos.y - drag.start_screen.y) / preview_rect.height().max(1.0);
+            match &drag.kind {
+                DragKind::LayerTransform {
+                    start_translate,
+                    start_scale,
+                    start_rotate_deg,
+                    mode,
+                } => {
+                    if let Some(Selection::Layer(idx)) = scene.selected {
+                        if let Some(layer) = project.layers.get_mut(idx) {
+                            match mode {
+                                DragMode::Translate => {
+                                    layer.transform.translate = [
+                                        start_translate[0] + dx,
+                                        start_translate[1] + dy,
+                                    ];
+                                }
+                                DragMode::Scale => {
+                                    let factor = (1.0 + (dx + dy)).max(0.05);
+                                    layer.transform.scale = [
+                                        start_scale[0] * factor,
+                                        start_scale[1] * factor,
+                                    ];
+                                }
+                                DragMode::Rotate => {
+                                    layer.transform.rotate_deg =
+                                        start_rotate_deg + dx * 360.0;
+                                }
+                            }
+                        }
                     }
-                    DragMode::Scale => {
-                        // Uniform scale by the diagonal magnitude. Sign of dy
-                        // (downward = larger; matches operator expectation
-                        // that "drag away from the layer" enlarges).
-                        let factor = (1.0 + (dx + dy)).max(0.05);
-                        layer.transform.scale = [
-                            drag.start_scale[0] * factor,
-                            drag.start_scale[1] * factor,
-                        ];
-                    }
-                    DragMode::Rotate => {
-                        // Horizontal drag distance maps to degrees. 1.0 normalized
-                        // (full preview width) = 360°, so a quarter-drag is 90°.
-                        layer.transform.rotate_deg = drag.start_rotate_deg + dx * 360.0;
+                }
+                DragKind::MaskVertex {
+                    warp,
+                    idx,
+                    start_pos,
+                } => {
+                    if let Some(w) = project.warps.get_mut(*warp) {
+                        if let Some(p) = w.mask_polygon.get_mut(*idx) {
+                            p[0] = (start_pos[0] + dx).clamp(0.0, 1.0);
+                            p[1] = (start_pos[1] + dy).clamp(0.0, 1.0);
+                        }
                     }
                 }
             }
@@ -216,6 +302,56 @@ pub fn handle_scene_input(
 
     if response.drag_stopped() {
         scene.drag = None;
+    }
+}
+
+/// Paint mask polygon overlays for every warp inside `inner` (the
+/// preview rect). Edges + vertex handles are drawn after the texture
+/// so they sit on top of the live image.
+pub fn paint_mask_overlays(
+    project: &Project,
+    scene: &SceneEditorState,
+    painter: &egui::Painter,
+    inner: egui::Rect,
+) {
+    let to_screen = |n: [f32; 2]| {
+        egui::pos2(
+            inner.left() + n[0] * inner.width(),
+            inner.top() + n[1] * inner.height(),
+        )
+    };
+    let edge_color = egui::Color32::from_rgb(140, 100, 200);
+    let edge_stroke = egui::Stroke::new(1.5, edge_color);
+    for (w_idx, warp) in project.warps.iter().enumerate() {
+        let n = warp.mask_polygon.len();
+        if n < 2 {
+            continue;
+        }
+        for i in 0..n {
+            let a = to_screen(warp.mask_polygon[i]);
+            let b = to_screen(warp.mask_polygon[(i + 1) % n]);
+            painter.line_segment([a, b], edge_stroke);
+        }
+        for (v_idx, p) in warp.mask_polygon.iter().enumerate() {
+            let center = to_screen(*p);
+            let is_selected = matches!(
+                scene.selected,
+                Some(Selection::MaskVertex { warp, idx })
+                    if warp == w_idx && idx == v_idx
+            );
+            let (fill, stroke) = if is_selected {
+                (
+                    egui::Color32::from_rgb(255, 230, 110),
+                    egui::Stroke::new(2.0, egui::Color32::WHITE),
+                )
+            } else {
+                (
+                    egui::Color32::from_rgb(180, 130, 220),
+                    egui::Stroke::new(1.0, egui::Color32::from_rgb(40, 40, 40)),
+                )
+            };
+            painter.circle(center, MASK_HANDLE_DRAW_PX, fill, stroke);
+        }
     }
 }
 

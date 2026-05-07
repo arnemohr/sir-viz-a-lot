@@ -2,6 +2,7 @@
 
 pub mod migrate;
 pub mod schema;
+pub mod zone_templates;
 
 pub use schema::Project;
 

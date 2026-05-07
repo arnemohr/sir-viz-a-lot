@@ -277,6 +277,10 @@ fn show_scene_tab(
         egui::StrokeKind::Outside,
     );
 
+    // M11: paint mask polygon overlays + draggable vertex handles before
+    // the layer outline so layer drag still wins on the body of the layer.
+    scene_editor::paint_mask_overlays(project, scene, &painter, inner);
+
     // Highlight the selected layer's static post-Transform rect. Drawn as
     // a thin amber outline so the operator can see what's selected even
     // after they release the drag.
@@ -753,7 +757,31 @@ fn show_mapping_tab(ui: &mut Ui, project: &mut Project) {
     });
 
     ui.add(egui::Slider::new(&mut w.mask_feather, 0.0..=0.25).text("mask feather"));
-    ui.label("Mask polygon: edit JSON/project file for now (vec of [x,y]).");
+
+    // T-M12-02 + T-M12-03: zone-template dropdown + clear button.
+    // The Scene-tab preview lets the operator drag the resulting
+    // vertices into place (T-M11-02).
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        ui.label("Zone:");
+        for (name, build) in crate::project::zone_templates::all_templates() {
+            if ui.button(name).clicked() {
+                w.mask_polygon = build();
+            }
+        }
+        if ui.button("clear mask").clicked() {
+            w.mask_polygon.clear();
+        }
+    });
+    ui.label(format!(
+        "mask: {} vertices ({})",
+        w.mask_polygon.len(),
+        if w.mask_polygon.len() >= 3 {
+            "active"
+        } else {
+            "none — needs ≥ 3 vertices"
+        }
+    ));
 }
 
 fn show_scenes_tab(ui: &mut Ui, project: &mut Project) -> ControlPanelAction {
