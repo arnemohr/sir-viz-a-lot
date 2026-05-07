@@ -3,6 +3,7 @@
 //! Rasterization is performed on a worker thread (`std::thread::spawn` plus
 //! a `crossbeam-channel` for results) so a 200 KB SVG cannot stall a frame.
 
+pub mod watcher;
 pub mod worker;
 
 use std::path::PathBuf;
