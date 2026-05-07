@@ -64,6 +64,13 @@ tracing-appender   = "0.2"
 thiserror = "2"
 anyhow    = "1"
 
+# M7 input-source crates. Each is gated behind its cargo feature so a default
+# build (and the show-day release-show profile) doesn't pull them in.
+cpal    = { version = "0.16", optional = true }
+rustfft = { version = "6",    optional = true }
+midir   = { version = "0.10", optional = true }
+rosc    = { version = "0.11", optional = true }
+
 # macOS-only: display-sleep prevention, App Nap suppression, monitor names.
 # The objc2 family is the modern way to call Apple APIs from Rust; older
 # `cocoa`/`objc` crates are deprecated. Sub-crate versions move together —
@@ -93,8 +100,7 @@ default = []
 # at test time. Off by default so plain `cargo test` stays CPU-only.
 gpu-tests = []
 
-# Reserved for M7 input sources. Uncomment + wire the corresponding deps in
-# the table above when audio / MIDI / OSC support lands.
-# audio = ["dep:cpal", "dep:rustfft"]
-# midi  = ["dep:midir"]
-# osc   = ["dep:rosc"]
+# M7 input sources. Off by default so the wedding-show binary stays lean.
+audio = ["dep:cpal", "dep:rustfft"]
+midi  = ["dep:midir"]
+osc   = ["dep:rosc"]

@@ -693,6 +693,7 @@ fn modulator_slider(
             Modulator::Triangle { .. } => "tri",
             Modulator::Noise { .. } => "noise",
             Modulator::Bpm { .. } => "bpm",
+            Modulator::Audio { .. } => "audio",
         };
         egui::ComboBox::from_id_salt(salt)
             .selected_text(cur_label)
@@ -731,6 +732,20 @@ fn modulator_slider(
         }
         Modulator::Triangle { .. } | Modulator::Noise { .. } | Modulator::Bpm { .. } => {
             ui.label("(this modulator variant has no UI in v1)");
+        }
+        Modulator::Audio {
+            band,
+            smoothing: _,
+            amp,
+            offset,
+        } => {
+            let span = range.end() - range.start();
+            ui.add(egui::DragValue::new(band).range(0..=7u8).prefix("band "));
+            ui.add(egui::Slider::new(amp, 0.0..=span).text("amp"));
+            ui.add(egui::Slider::new(offset, range.clone()).text("offset"));
+            ui.label(
+                "(audio: requires --features audio at build; reads live FFT bands)",
+            );
         }
     }
     ui.add_space(2.0);

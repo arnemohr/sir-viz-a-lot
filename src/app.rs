@@ -108,6 +108,12 @@ struct RunningApp {
     /// Extension-pass lookup for [`Effect::External`] (T-M7-07). Empty in
     /// stock v1; populated by future plugins or in-tree extensions.
     external_registry: ExternalRegistry,
+    /// RAII guard for the optional cpal input stream (T-M7-03). Held on
+    /// the main thread so dropping `RunningApp` stops capture; the
+    /// underlying `cpal::Stream` is `!Send`, so it cannot live inside
+    /// `Arc<dyn AudioProvider>` shared via the audio module's static.
+    #[cfg(feature = "audio")]
+    _audio_capture: Option<crate::modulators::audio::AudioCaptureGuard>,
     _sleep_assertion: SleepAssertion,
     /// Set when the session was started from a `*.rmap.json` CLI argument.
     #[allow(dead_code)]
@@ -413,6 +419,22 @@ fn init_running_app(
     let renderer = Renderer::new(gpu, surface_format)?;
     let sleep_assertion = SleepAssertion::acquire("rmap output window");
 
+    // T-M7-03: bring up the audio capture provider when the `audio` feature
+    // is on. Failure to open the input device is non-fatal — a wedding
+    // venue without a mic still wants the projector running.
+    #[cfg(feature = "audio")]
+    let audio_capture = match crate::modulators::audio::start_default() {
+        Ok((provider, guard)) => {
+            crate::modulators::audio::install(std::sync::Arc::new(provider));
+            tracing::info!("audio capture started; Modulator::Audio bands live");
+            Some(guard)
+        }
+        Err(err) => {
+            tracing::warn!(?err, "audio init failed; Modulator::Audio will read 0.0");
+            None
+        }
+    };
+
     let mut control_panel = ControlPanelState::default();
     if let Some(ref p) = project_file_path {
         control_panel.project_save_path = p.display().to_string();
@@ -453,6 +475,8 @@ fn init_running_app(
         blur_pipeline,
         transform_pipeline,
         external_registry: ExternalRegistry::new(),
+        #[cfg(feature = "audio")]
+        _audio_capture: audio_capture,
         _sleep_assertion: sleep_assertion,
         project_file_path,
         crossfade: None,

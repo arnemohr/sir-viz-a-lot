@@ -1,6 +1,7 @@
 //! Modulator system. Any numeric effect parameter can be `Static` or one of
 //! the time-driven variants; all variants read from the central `Clock`.
 
+pub mod audio;
 pub mod waveforms;
 
 use serde::{Deserialize, Serialize};
@@ -31,8 +32,20 @@ pub enum Modulator {
         amp: f32,
         offset: f32,
     },
-    // Reserved for v1.5:
-    // Audio { band: u8, smoothing: f32, amp: f32, offset: f32 },
+    /// Reads from the live `AudioProvider` installed at startup
+    /// (T-M7-03; gated on `feature = "audio"` for the actual cpal
+    /// capture, but the variant exists unconditionally so projects
+    /// remain readable across build flavors). Returns `0.0` when no
+    /// provider is installed.
+    Audio {
+        band: u8,
+        /// Reserved: per-modulator smoothing currently lives inside the
+        /// provider's one-pole low-pass; this knob is a hook for an
+        /// in-Modulator additional smoothing pass when needed.
+        smoothing: f32,
+        amp: f32,
+        offset: f32,
+    },
 }
 
 impl Modulator {
@@ -63,6 +76,15 @@ impl Modulator {
             } => {
                 let beat_period_s = 60.0 / clock.bpm().max(1e-3) * divisor.max(1e-3);
                 waveforms::sine(t, beat_period_s, *amp, 0.0, *offset)
+            }
+            Self::Audio {
+                band,
+                smoothing: _,
+                amp,
+                offset,
+            } => {
+                let v = audio::current_band(*band);
+                v * amp + offset
             }
         }
     }
