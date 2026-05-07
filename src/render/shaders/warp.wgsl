@@ -55,7 +55,12 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         let feather = max(u_mask.y, 1e-4);
         let d = sample_sdf_bilinear(in.mask_uv);
         let a = 1.0 - smoothstep(-feather, feather, d);
-        c = vec4<f32>(c.rgb, c.a * a);
+        // Premultiply: the projector swapchain ignores alpha, so attenuating
+        // only `c.a` left full-brightness RGB hitting the lamp. Multiplying
+        // RGB by the mask alpha forces black (no light) outside the polygon
+        // and a smooth ramp through the feather band — that's the actual
+        // physical cut-off we want.
+        c = vec4<f32>(c.rgb * a, c.a * a);
     }
     return c;
 }
