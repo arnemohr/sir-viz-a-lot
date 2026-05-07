@@ -63,6 +63,9 @@ pub enum RenderError {
 
     #[error("surface suboptimal")]
     SurfaceSuboptimal,
+
+    #[error("renderer panicked: {message}")]
+    RenderPanic { message: String },
 }
 
 /// Owns the wgpu `Instance`, `Adapter`, `Device`, and `Queue`. Created up
