@@ -33,4 +33,10 @@ Use this top-to-bottom before doors; aim for under five minutes once you know yo
 ## During show
 
 11. **Blackout / freeze** — Know your keys (e.g. blackout / freeze / test pattern) and rehearse once on the actual rig.
-12. **Hot reload** — SVG saves on disk refresh layers that watch those paths; avoid editing paths mid-cue without a fallback cue.
+12. **Hot reload** — SVG saves and JPG/PNG saves on disk refresh layers that watch those paths; avoid editing paths mid-cue without a fallback cue.
+
+## v2 scene editor
+
+13. **Drop targets** — Drag SVG / PNG / JPG files onto the **control window's Scene tab** to add a layer. Dropping on the projector window does nothing (intentional: the drop target is unambiguous).
+14. **Layer manipulation** — Click a layer in the live preview to select it; drag to translate, Shift-drag to scale, Alt-drag to rotate. Esc deselects.
+15. **Mask zones** — Pick a starter shape from the **Mapping** tab's zone palette (window-rectangle, arch-portal, circle-spotlight, void-block); drag each vertex of the painted overlay onto the real venue feature. Double-click an edge to insert a vertex; Shift-click a vertex to delete (won't drop below 3).

@@ -25,6 +25,9 @@ use crate::project::schema::Project;
 const MASK_HANDLE_HIT_PX: f32 = 9.0;
 /// Pixel radius for the painted mask handle.
 const MASK_HANDLE_DRAW_PX: f32 = 5.5;
+/// Distance to a mask edge that counts as "double-click on this edge"
+/// for the insert-vertex gesture (M11).
+const MASK_EDGE_HIT_PX: f32 = 7.0;
 
 /// What the operator currently has selected in the Scene preview. Single-
 /// select for v2; multi-select is deferred. The non-Layer variants land
@@ -167,6 +170,72 @@ pub fn hit_mask_vertex(
         }
     }
     None
+}
+
+/// Distance from `p` to segment `(a, b)` in 2D.
+fn point_segment_distance(p: Pos2, a: Pos2, b: Pos2) -> f32 {
+    let abx = b.x - a.x;
+    let aby = b.y - a.y;
+    let apx = p.x - a.x;
+    let apy = p.y - a.y;
+    let ab2 = abx * abx + aby * aby;
+    if ab2 < 1e-6 {
+        return (apx * apx + apy * apy).sqrt();
+    }
+    let t = ((apx * abx + apy * aby) / ab2).clamp(0.0, 1.0);
+    let cx = a.x + t * abx;
+    let cy = a.y + t * aby;
+    let dx = p.x - cx;
+    let dy = p.y - cy;
+    (dx * dx + dy * dy).sqrt()
+}
+
+/// Hit-test screen-space `pos` against every mask polygon edge. Returns
+/// `(warp, vertex_idx_after_which_to_insert, normalized_xy)` for the
+/// closest edge within `MASK_EDGE_HIT_PX`. The returned index is the
+/// *after* index — the insert call should do
+/// `mask_polygon.insert(idx + 1, pt)` so the new vertex sits between
+/// the old endpoints in list order. Used by the insert-vertex
+/// double-click gesture (M11).
+pub fn hit_mask_edge(
+    project: &Project,
+    pos_screen: Pos2,
+    preview_rect: egui::Rect,
+) -> Option<(usize, usize, [f32; 2])> {
+    if !preview_rect.contains(pos_screen) {
+        return None;
+    }
+    let to_screen = |n: [f32; 2]| -> Pos2 {
+        egui::pos2(
+            preview_rect.left() + n[0] * preview_rect.width(),
+            preview_rect.top() + n[1] * preview_rect.height(),
+        )
+    };
+    let to_norm = |s: Pos2| -> [f32; 2] {
+        [
+            (s.x - preview_rect.left()) / preview_rect.width().max(1.0),
+            (s.y - preview_rect.top()) / preview_rect.height().max(1.0),
+        ]
+    };
+    let mut best: Option<(f32, usize, usize)> = None;
+    for (w_idx, warp) in project.warps.iter().enumerate() {
+        let n = warp.mask_polygon.len();
+        if n < 2 {
+            continue;
+        }
+        for i in 0..n {
+            let a = to_screen(warp.mask_polygon[i]);
+            let b = to_screen(warp.mask_polygon[(i + 1) % n]);
+            let d = point_segment_distance(pos_screen, a, b);
+            if d <= MASK_EDGE_HIT_PX
+                && best.as_ref().map(|(bd, ..)| d < *bd).unwrap_or(true)
+            {
+                best = Some((d, w_idx, i));
+            }
+        }
+    }
+    let (_, w_idx, after) = best?;
+    Some((w_idx, after, to_norm(pos_screen)))
 }
 
 /// Convert a screen pos inside `preview_rect` to normalized [0, 1]

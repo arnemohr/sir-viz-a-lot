@@ -226,7 +226,7 @@ fn show_scene_tab(
     inputs: &ControlPanelInputs,
 ) {
     ui.label(
-        "Live preview of the rendered output. Click a layer to select; drag to move. Drop SVG / PNG / JPG files onto the window to add a layer.",
+        "Live preview. Click a layer to select; drag to move; Shift-drag to scale; Alt-drag to rotate. Drag a mask vertex to move; double-click an edge to insert; Shift-click a vertex to delete. Drop SVG / PNG / JPG to add a layer.",
     );
     if let Some(scene_editor::Selection::Layer(idx)) = scene.selected {
         if let Some(layer) = project.layers.get(idx) {
@@ -256,13 +256,46 @@ fn show_scene_tab(
         h = avail.y.max(120.0);
         w = h * aspect;
     }
-    // Sense click + drag so layer hit-testing and drag-translate fire.
+    // Sense click + drag + click for double-click detection.
     let (resp, painter) = ui.allocate_painter(
         egui::vec2(avail.x, h.max(120.0)),
         egui::Sense::click_and_drag(),
     );
     let outer = resp.rect;
     let inner = egui::Rect::from_center_size(outer.center(), egui::vec2(w, h));
+
+    // T-M11-03: double-click on a mask edge inserts a new vertex at the
+    // click point, between the two endpoints. T-M11-04: shift-click on a
+    // mask vertex deletes it (refused below 4 vertices to keep the SDF
+    // baker happy — `<3` collapses the mask to "no mask").
+    let pointer_now = ui.input(|i| i.pointer.hover_pos());
+    if let Some(pos) = pointer_now {
+        if resp.double_clicked() {
+            if let Some((w_idx, after, point)) =
+                scene_editor::hit_mask_edge(project, pos, inner)
+            {
+                if let Some(w) = project.warps.get_mut(w_idx) {
+                    let insert_at = (after + 1).min(w.mask_polygon.len());
+                    w.mask_polygon.insert(insert_at, point);
+                    scene.selected = Some(scene_editor::Selection::MaskVertex {
+                        warp: w_idx,
+                        idx: insert_at,
+                    });
+                }
+            }
+        }
+        if resp.clicked() && ui.input(|i| i.modifiers.shift) {
+            if let Some((w_idx, v_idx)) = scene_editor::hit_mask_vertex(project, pos, inner) {
+                if let Some(w) = project.warps.get_mut(w_idx) {
+                    if w.mask_polygon.len() > 3 {
+                        w.mask_polygon.remove(v_idx);
+                        scene.selected = None;
+                        scene.drag = None;
+                    }
+                }
+            }
+        }
+    }
     painter.rect_filled(outer, egui::CornerRadius::ZERO, egui::Color32::from_rgb(8, 9, 12));
     painter.image(
         tex_id,
