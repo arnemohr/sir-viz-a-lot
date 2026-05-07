@@ -307,8 +307,57 @@ fn show_scene_tab(
     // Route click + drag through the scene editor. Pointer pos is in
     // egui screen space; the editor converts to inner-rect-relative
     // normalized coords before mutating the project.
-    let pointer = ui.input(|i| i.pointer.hover_pos());
-    scene_editor::handle_scene_input(&resp, project, scene, inner, pointer);
+    let (pointer, modifiers, esc) = ui.input(|i| {
+        (
+            i.pointer.hover_pos(),
+            i.modifiers,
+            i.key_pressed(egui::Key::Escape),
+        )
+    });
+    scene_editor::handle_scene_input(&resp, project, scene, inner, pointer, modifiers);
+    if esc {
+        scene.selected = None;
+        scene.drag = None;
+    }
+
+    // Sidebar properties for the selected layer (T-M10-05). Lives below the
+    // preview canvas so it doesn't compete for horizontal space when the
+    // window is narrow.
+    if let Some(scene_editor::Selection::Layer(idx)) = scene.selected {
+        if let Some(layer) = project.layers.get_mut(idx) {
+            ui.add_space(6.0);
+            egui::CollapsingHeader::new(format!("Selected: {}", layer.id))
+                .default_open(true)
+                .show(ui, |ui| {
+                    ui.label(
+                        "Drag in the preview to move; Shift-drag to scale; Alt-drag to rotate; Esc to deselect.",
+                    );
+                    ui.add(
+                        egui::Slider::new(&mut layer.transform.translate[0], -1.0..=1.0)
+                            .text("translate x"),
+                    );
+                    ui.add(
+                        egui::Slider::new(&mut layer.transform.translate[1], -1.0..=1.0)
+                            .text("translate y"),
+                    );
+                    ui.add(
+                        egui::Slider::new(&mut layer.transform.scale[0], 0.05..=4.0)
+                            .text("scale x"),
+                    );
+                    ui.add(
+                        egui::Slider::new(&mut layer.transform.scale[1], 0.05..=4.0)
+                            .text("scale y"),
+                    );
+                    ui.add(
+                        egui::Slider::new(&mut layer.transform.rotate_deg, -180.0..=180.0)
+                            .text("rotate (deg)"),
+                    );
+                    ui.add(
+                        egui::Slider::new(&mut layer.opacity, 0.0..=1.0).text("opacity"),
+                    );
+                });
+        }
+    }
 }
 
 fn show_effects_tab(ui: &mut Ui, project: &mut Project, st: &mut ControlPanelState) {

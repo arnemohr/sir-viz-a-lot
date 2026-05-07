@@ -55,13 +55,24 @@ pub enum SourceRectCorner {
     BottomLeft,
 }
 
-/// Drag-time snapshot. `start_value` is the project's `[2]` array at the
-/// instant of mouse-down; the live drag computes `start + delta_normalized`
-/// rather than accumulating per-frame deltas.
+/// Drag-time snapshot. The full `Transform2D` is captured at mouse-down so
+/// the live drag computes `start + delta` rather than accumulating per-frame
+/// deltas (no float drift). `mode` is locked at drag-start based on
+/// modifier keys: plain drag = Translate, Shift = Scale, Alt = Rotate.
 #[derive(Debug, Clone)]
 pub struct DragSession {
     pub start_screen: Pos2,
     pub start_translate: [f32; 2],
+    pub start_scale: [f32; 2],
+    pub start_rotate_deg: f32,
+    pub mode: DragMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DragMode {
+    Translate,
+    Scale,
+    Rotate,
 }
 
 #[derive(Default)]
@@ -140,28 +151,35 @@ pub fn handle_scene_input(
     scene: &mut SceneEditorState,
     preview_rect: egui::Rect,
     pointer: Option<Pos2>,
+    modifiers: egui::Modifiers,
 ) {
-    // Drag-start: pointer was just pressed inside the preview.
     if response.drag_started() {
         if let Some(pos) = pointer {
             scene.drag = None;
             match hit_layer(project, pos, preview_rect) {
                 Some(idx) => {
-                    let translate = project.layers[idx].transform.translate;
+                    let t = &project.layers[idx].transform;
+                    let mode = if modifiers.shift {
+                        DragMode::Scale
+                    } else if modifiers.alt {
+                        DragMode::Rotate
+                    } else {
+                        DragMode::Translate
+                    };
                     scene.selected = Some(Selection::Layer(idx));
                     scene.drag = Some(DragSession {
                         start_screen: pos,
-                        start_translate: translate,
+                        start_translate: t.translate,
+                        start_scale: t.scale,
+                        start_rotate_deg: t.rotate_deg,
+                        mode,
                     });
                 }
-                None => {
-                    scene.selected = None;
-                }
+                None => scene.selected = None,
             }
         }
     }
 
-    // Drag-move: while held, recompute translate from the start snapshot.
     if response.dragged() {
         if let (Some(pos), Some(drag), Some(Selection::Layer(idx))) =
             (pointer, scene.drag.as_ref(), scene.selected)
@@ -169,16 +187,33 @@ pub fn handle_scene_input(
             if let Some(layer) = project.layers.get_mut(idx) {
                 let dx = (pos.x - drag.start_screen.x) / preview_rect.width().max(1.0);
                 let dy = (pos.y - drag.start_screen.y) / preview_rect.height().max(1.0);
-                layer.transform.translate = [
-                    drag.start_translate[0] + dx,
-                    drag.start_translate[1] + dy,
-                ];
+                match drag.mode {
+                    DragMode::Translate => {
+                        layer.transform.translate = [
+                            drag.start_translate[0] + dx,
+                            drag.start_translate[1] + dy,
+                        ];
+                    }
+                    DragMode::Scale => {
+                        // Uniform scale by the diagonal magnitude. Sign of dy
+                        // (downward = larger; matches operator expectation
+                        // that "drag away from the layer" enlarges).
+                        let factor = (1.0 + (dx + dy)).max(0.05);
+                        layer.transform.scale = [
+                            drag.start_scale[0] * factor,
+                            drag.start_scale[1] * factor,
+                        ];
+                    }
+                    DragMode::Rotate => {
+                        // Horizontal drag distance maps to degrees. 1.0 normalized
+                        // (full preview width) = 360°, so a quarter-drag is 90°.
+                        layer.transform.rotate_deg = drag.start_rotate_deg + dx * 360.0;
+                    }
+                }
             }
         }
     }
 
-    // Drag-end: clear the snapshot. Selection stays so the operator can
-    // tweak via sidebar (T-M10-05) before clicking elsewhere.
     if response.drag_stopped() {
         scene.drag = None;
     }
