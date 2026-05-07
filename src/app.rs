@@ -140,6 +140,10 @@ struct RunningApp {
     /// control-window redraw request that frame so the preview runs at
     /// roughly half the output's vsync rate (T-M9-03).
     control_redraw_skip: bool,
+    /// Direct-manipulation editor state (selection, drag session) for the
+    /// Scene tab (T-M10-01). Lives on RunningApp because the Scene tab
+    /// mutates `project` based on it; control_panel borrows both per frame.
+    scene_editor: crate::windows::scene_editor::SceneEditorState,
 }
 
 /// One scene-to-scene fade, scheduled by `ControlEvent::SceneRecall` when
@@ -619,6 +623,7 @@ fn init_running_app(
         crossfade: None,
         scene_texture_id: None,
         control_redraw_skip: false,
+        scene_editor: crate::windows::scene_editor::SceneEditorState::default(),
     })
 }
 
@@ -1280,6 +1285,7 @@ impl ApplicationHandler for App {
                                 ui,
                                 &mut state.project,
                                 &mut state.control_panel,
+                                &mut state.scene_editor,
                                 &inputs,
                             );
                         });

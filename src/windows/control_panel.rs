@@ -9,6 +9,7 @@ use crate::effects::Effect;
 use crate::modulators::Modulator;
 use crate::project::schema::{self, BlendMode, Project, Scene};
 use crate::project::snapshot;
+use crate::windows::scene_editor::{self, SceneEditorState};
 
 /// One named effect-chain bundle authored as JSON in `assets/presets/`.
 ///
@@ -130,6 +131,7 @@ pub fn show(
     ui: &mut Ui,
     project: &mut Project,
     st: &mut ControlPanelState,
+    scene: &mut SceneEditorState,
     inputs: &ControlPanelInputs,
 ) -> ControlPanelAction {
     let mut action = ControlPanelAction::None;
@@ -148,7 +150,7 @@ pub fn show(
 
     egui::CentralPanel::default().show_inside(ui, |ui| {
         match st.tab {
-            ControlTab::Scene => show_scene_tab(ui, inputs),
+            ControlTab::Scene => show_scene_tab(ui, project, scene, inputs),
             ControlTab::Effects => show_effects_tab(ui, project, st),
             ControlTab::Layers => {
                 if matches!(show_layers_tab(ui, project, st), ControlPanelAction::RebuildLayers) {
@@ -214,28 +216,39 @@ pub fn show(
     action
 }
 
-/// Show the live scene preview (T-M9-02). The preview is `warp_rt` registered
-/// as an egui native texture; we just paint it inside an aspect-correct rect.
-fn show_scene_tab(ui: &mut Ui, inputs: &ControlPanelInputs) {
+/// Show the live scene preview + handle direct-manipulation input
+/// (T-M9-02 + T-M10-03). The preview is `warp_rt` registered as an egui
+/// native texture; click-and-drag inside it selects + moves layers.
+fn show_scene_tab(
+    ui: &mut Ui,
+    project: &mut Project,
+    scene: &mut SceneEditorState,
+    inputs: &ControlPanelInputs,
+) {
     ui.label(
-        "Live preview of the rendered output. Drop SVG / PNG / JPG files onto the window to add a layer.",
+        "Live preview of the rendered output. Click a layer to select; drag to move. Drop SVG / PNG / JPG files onto the window to add a layer.",
     );
+    if let Some(scene_editor::Selection::Layer(idx)) = scene.selected {
+        if let Some(layer) = project.layers.get(idx) {
+            ui.label(format!(
+                "selected: layer {} ({})",
+                idx,
+                layer.id
+            ));
+        }
+    }
     ui.add_space(4.0);
     let Some(tex_id) = inputs.scene_texture else {
         ui.label("(scene preview not yet registered — output window not initialized)");
         return;
     };
     let (out_w, out_h) = inputs.output_size;
-    // Fall back to 16:9 if the renderer hasn't reported a size yet.
     let aspect = if out_w > 0 && out_h > 0 {
         out_w as f32 / out_h as f32
     } else {
         16.0 / 9.0
     };
 
-    // Aspect-fit the preview inside the available rect, centered, with a
-    // dark letterbox so the panel never collapses to zero height when the
-    // window is very wide.
     let avail = ui.available_size();
     let mut w = avail.x.max(160.0);
     let mut h = w / aspect;
@@ -243,10 +256,13 @@ fn show_scene_tab(ui: &mut Ui, inputs: &ControlPanelInputs) {
         h = avail.y.max(120.0);
         w = h * aspect;
     }
-    let (resp, painter) = ui.allocate_painter(egui::vec2(avail.x, h.max(120.0)), egui::Sense::hover());
+    // Sense click + drag so layer hit-testing and drag-translate fire.
+    let (resp, painter) = ui.allocate_painter(
+        egui::vec2(avail.x, h.max(120.0)),
+        egui::Sense::click_and_drag(),
+    );
     let outer = resp.rect;
     let inner = egui::Rect::from_center_size(outer.center(), egui::vec2(w, h));
-    // Letterbox.
     painter.rect_filled(outer, egui::CornerRadius::ZERO, egui::Color32::from_rgb(8, 9, 12));
     painter.image(
         tex_id,
@@ -260,6 +276,39 @@ fn show_scene_tab(ui: &mut Ui, inputs: &ControlPanelInputs) {
         egui::Stroke::new(1.0, egui::Color32::from_rgb(70, 75, 85)),
         egui::StrokeKind::Outside,
     );
+
+    // Highlight the selected layer's static post-Transform rect. Drawn as
+    // a thin amber outline so the operator can see what's selected even
+    // after they release the drag.
+    if let Some(scene_editor::Selection::Layer(idx)) = scene.selected {
+        if let Some(layer) = project.layers.get(idx) {
+            let t = &layer.transform;
+            let half = [t.scale[0].abs() * 0.5, t.scale[1].abs() * 0.5];
+            let center = [0.5 + t.translate[0], 0.5 + t.translate[1]];
+            let to_screen = |n: [f32; 2]| {
+                egui::pos2(
+                    inner.left() + n[0] * inner.width(),
+                    inner.top() + n[1] * inner.height(),
+                )
+            };
+            let r = egui::Rect::from_min_max(
+                to_screen([center[0] - half[0], center[1] - half[1]]),
+                to_screen([center[0] + half[0], center[1] + half[1]]),
+            );
+            painter.rect_stroke(
+                r,
+                egui::CornerRadius::ZERO,
+                egui::Stroke::new(1.5, egui::Color32::from_rgb(220, 200, 90)),
+                egui::StrokeKind::Outside,
+            );
+        }
+    }
+
+    // Route click + drag through the scene editor. Pointer pos is in
+    // egui screen space; the editor converts to inner-rect-relative
+    // normalized coords before mutating the project.
+    let pointer = ui.input(|i| i.pointer.hover_pos());
+    scene_editor::handle_scene_input(&resp, project, scene, inner, pointer);
 }
 
 fn show_effects_tab(ui: &mut Ui, project: &mut Project, st: &mut ControlPanelState) {

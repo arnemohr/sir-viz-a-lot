@@ -90,7 +90,6 @@ pub fn upload_image_rgba8(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::io::Write;
 
     /// Smoke test: synthesize a 4×4 PNG to a temp file, ensure the path
