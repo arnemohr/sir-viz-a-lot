@@ -23,6 +23,7 @@ mod windows;
 
 use std::path::PathBuf;
 
+use anyhow::Context;
 use clap::Parser;
 
 use crate::app::App;
@@ -41,7 +42,9 @@ struct Cli {
 fn main() -> anyhow::Result<()> {
     init_tracing();
     let cli = Cli::parse();
-    App::run(cli.project, cli.autostart)?;
+    tracing::info!(project = ?cli.project, autostart = cli.autostart, "rmap starting");
+    App::run(cli.project.clone(), cli.autostart)
+        .with_context(|| format!("project={:?}, autostart={}", cli.project, cli.autostart))?;
     Ok(())
 }
 
