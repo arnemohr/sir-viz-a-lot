@@ -7,6 +7,10 @@
 #![allow(dead_code)]
 
 pub mod keyboard;
+#[cfg(feature = "midi")]
+pub mod midi;
+#[cfg(feature = "osc")]
+pub mod osc;
 pub mod param;
 
 use crate::controls::param::SourceRef;

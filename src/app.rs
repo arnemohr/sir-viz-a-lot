@@ -114,6 +114,14 @@ struct RunningApp {
     /// `Arc<dyn AudioProvider>` shared via the audio module's static.
     #[cfg(feature = "audio")]
     _audio_capture: Option<crate::modulators::audio::AudioCaptureGuard>,
+    /// Optional MIDI input source (T-M7-05). Polled per frame alongside
+    /// keyboard. Drop stops all `midir` subscriptions.
+    #[cfg(feature = "midi")]
+    midi: Option<crate::controls::midi::MidiSource>,
+    /// Optional OSC UDP listener (T-M7-06). Polled per frame; drop joins
+    /// the receive thread.
+    #[cfg(feature = "osc")]
+    osc: Option<crate::controls::osc::OscSource>,
     _sleep_assertion: SleepAssertion,
     /// Set when the session was started from a `*.rmap.json` CLI argument.
     #[allow(dead_code)]
@@ -182,6 +190,40 @@ fn schedule_scene_recall(state: &mut RunningApp, slot: usize) -> RecallOutcome {
         });
         tracing::info!(slot, duration_s = dur, "scene crossfade scheduled");
         RecallOutcome::Scheduled
+    }
+}
+
+/// Apply one [`ControlEvent`] to `state`. Used by the keyboard, MIDI,
+/// and OSC sources so all three drive the same behavior.
+///
+/// `Blackout` and `Freeze` toggle the corresponding `OutputState` flag —
+/// matches the keyboard's physical-key handlers (B/F) so an external
+/// surface and a hotkey have identical effect on the projector. The
+/// keyboard's inline B/F handlers (in `window_event`) already do this
+/// directly because they want layout-independent physical-key matching;
+/// for the source-poll path we toggle through here.
+fn dispatch_control_event(state: &mut RunningApp, event: ControlEvent) {
+    match event {
+        ControlEvent::TapTempo => {
+            state.clock.tap();
+            tracing::debug!(bpm = state.clock.bpm(), "tap tempo");
+        }
+        ControlEvent::SceneRecall(idx) => {
+            if matches!(schedule_scene_recall(state, idx), RecallOutcome::Snapped) {
+                rebuild_layers_for_state(state);
+            }
+        }
+        ControlEvent::Blackout => {
+            state.output.state.toggle_blackout();
+            tracing::info!(blackout = state.output.state.blackout, "blackout via source");
+        }
+        ControlEvent::Freeze => {
+            state.output.state.toggle_freeze();
+            tracing::info!(freeze = state.output.state.freeze, "freeze via source");
+        }
+        ControlEvent::ParamSet { .. } => {
+            // Reserved for Param::Bound resolution (v1.5+); v1 has no consumer.
+        }
     }
 }
 
@@ -435,6 +477,28 @@ fn init_running_app(
         }
     };
 
+    // T-M7-05: subscribe to every MIDI input port. Empty port list is fine
+    // (Source produces no events); only init failure of midir itself is logged.
+    #[cfg(feature = "midi")]
+    let midi = match crate::controls::midi::MidiSource::start_all() {
+        Ok(src) => Some(src),
+        Err(err) => {
+            tracing::warn!(?err, "midi init failed; midi events disabled");
+            None
+        }
+    };
+
+    // T-M7-06: bind UDP for OSC. Default port from the controls::osc module;
+    // future work can plumb the port through Project / CLI.
+    #[cfg(feature = "osc")]
+    let osc = match crate::controls::osc::OscSource::start(0) {
+        Ok(src) => Some(src),
+        Err(err) => {
+            tracing::warn!(?err, "osc bind failed; osc events disabled");
+            None
+        }
+    };
+
     let mut control_panel = ControlPanelState::default();
     if let Some(ref p) = project_file_path {
         control_panel.project_save_path = p.display().to_string();
@@ -477,6 +541,10 @@ fn init_running_app(
         external_registry: ExternalRegistry::new(),
         #[cfg(feature = "audio")]
         _audio_capture: audio_capture,
+        #[cfg(feature = "midi")]
+        midi,
+        #[cfg(feature = "osc")]
+        osc,
         _sleep_assertion: sleep_assertion,
         project_file_path,
         crossfade: None,
@@ -1100,23 +1168,23 @@ impl ApplicationHandler for App {
                 resize_m5_gpu(state);
             }
             WindowEvent::RedrawRequested => {
-                // T-M4-10: drain keyboard source and dispatch ControlEvents.
-                // Only TapTempo has a consumer here; other events are handled
-                // inline (Blackout/Freeze) or come online in later tasks
-                // (SceneRecall: T-M5-12, ParamSet: v1.5 MIDI).
-                for e in state.keyboard.poll() {
-                    match e {
-                        ControlEvent::TapTempo => {
-                            state.clock.tap();
-                            tracing::debug!(bpm = state.clock.bpm(), "tap tempo");
-                        }
-                        ControlEvent::SceneRecall(idx) => {
-                            if matches!(schedule_scene_recall(state, idx), RecallOutcome::Snapped) {
-                                rebuild_layers_for_state(state);
-                            }
-                        }
-                        ControlEvent::Blackout | ControlEvent::Freeze | ControlEvent::ParamSet { .. } => {}
-                    }
+                // Drain every registered source through one common dispatcher.
+                // Order doesn't matter for v1 — each event is independent.
+                #[cfg_attr(
+                    not(any(feature = "midi", feature = "osc")),
+                    allow(unused_mut)
+                )]
+                let mut events: Vec<ControlEvent> = state.keyboard.poll();
+                #[cfg(feature = "midi")]
+                if let Some(midi) = state.midi.as_mut() {
+                    events.extend(crate::controls::Source::poll(midi));
+                }
+                #[cfg(feature = "osc")]
+                if let Some(osc) = state.osc.as_mut() {
+                    events.extend(crate::controls::Source::poll(osc));
+                }
+                for e in events {
+                    dispatch_control_event(state, e);
                 }
 
                 for (i, ls) in state.layers.iter_mut().enumerate() {
