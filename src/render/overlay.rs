@@ -296,58 +296,64 @@ fn norm_to_clip(n: [f32; 2]) -> [f32; 2] {
 
 /// Forward-map a point from the compositor source space (y-down [0,1]²,
 /// the same space the warp shader samples via `t_scene`) into the
-/// projector's surface space (also y-down [0,1]², the space the
-/// projector swapchain receives).
+/// projector's surface space (also y-down [0,1]²).
 ///
-/// Walks `warps` in order. The first warp whose `source_rect` contains
-/// `p_src` claims the point, looks up the cell that contains it, builds
-/// the cell's `solve_homography` (the same call `build_warp_vertices`
-/// makes), and pushes the local `(tx, ty)` through it. Result: the
-/// overlay sees exactly the same projective + mesh distortion the
-/// shader applies to the rendered content.
-///
-/// If no warp claims the point (layer drifted off-screen, or only some
-/// `source_rect`s cover it), returns `p_src` unchanged so the overlay
-/// still draws *something* in roughly the right place — better than
-/// silently dropping a corner.
+/// Picks the warp whose `source_rect` contains `p_src`; if none does
+/// (the layer was scaled or moved past the warp's domain), falls back
+/// to the first warp and **extrapolates** through the nearest cell's
+/// homography. The homography is well-defined for the whole plane, not
+/// just `[0,1]²`, so this gives a continuous outline that bows the
+/// same way the rendered content would if it extended that far. The
+/// previous behaviour was to return `p_src` unchanged for outside
+/// points, which spliced un-warped corners onto warped ones and
+/// produced the stretch artefact when a layer was scaled up past the
+/// source rect.
 fn warp_source_to_surface(p_src: [f32; 2], warps: &[WarpMesh]) -> [f32; 2] {
-    for warp in warps {
-        let [sx, sy, sw, sh] = warp.source_rect;
-        let inside = p_src[0] >= sx
-            && p_src[0] <= sx + sw
-            && p_src[1] >= sy
-            && p_src[1] <= sy + sh;
-        if !inside {
-            continue;
-        }
-        let rows = warp.rows as usize;
-        let cols = warp.cols as usize;
-        if rows == 0 || cols == 0 || warp.grid.len() != rows + 1 {
-            continue;
-        }
-        let fu = ((p_src[0] - sx) / sw.max(1e-6)).clamp(0.0, 1.0);
-        let fv = ((p_src[1] - sy) / sh.max(1e-6)).clamp(0.0, 1.0);
-        let gx = fu * cols as f32;
-        let gy = fv * rows as f32;
-        let ix = (gx.floor() as usize).min(cols.saturating_sub(1));
-        let iy = (gy.floor() as usize).min(rows.saturating_sub(1));
-        let tx = gx - ix as f32;
-        let ty = gy - iy as f32;
-        if warp.grid[iy].len() <= ix + 1 || warp.grid[iy + 1].len() <= ix + 1 {
-            continue;
-        }
-        let dst = [
-            warp.grid[iy][ix],
-            warp.grid[iy][ix + 1],
-            warp.grid[iy + 1][ix + 1],
-            warp.grid[iy + 1][ix],
-        ];
-        let src_unit = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
-        if let Some(h) = solve_homography(src_unit, dst) {
-            let v = h * glam::Vec3::new(tx, ty, 1.0);
-            let w = v.z.abs().max(1e-8);
-            return [v.x / w, v.y / w];
-        }
+    if warps.is_empty() {
+        return p_src;
+    }
+    if !p_src[0].is_finite() || !p_src[1].is_finite() {
+        return p_src;
+    }
+    let warp = warps
+        .iter()
+        .find(|w| {
+            let [sx, sy, sw, sh] = w.source_rect;
+            p_src[0] >= sx && p_src[0] <= sx + sw && p_src[1] >= sy && p_src[1] <= sy + sh
+        })
+        .unwrap_or(&warps[0]);
+
+    let rows = warp.rows as usize;
+    let cols = warp.cols as usize;
+    if rows == 0 || cols == 0 || warp.grid.len() != rows + 1 {
+        return p_src;
+    }
+    let [sx, sy, sw, sh] = warp.source_rect;
+    let fu = (p_src[0] - sx) / sw.max(1e-6);
+    let fv = (p_src[1] - sy) / sh.max(1e-6);
+    let gx = fu * cols as f32;
+    let gy = fv * rows as f32;
+    // Clamp the **cell index** to a valid range but let `tx`/`ty` be
+    // unclamped — that's what extrapolates the homography. For 1×1 the
+    // single cell handles the whole plane.
+    let ix = (gx.floor() as i32).clamp(0, cols as i32 - 1) as usize;
+    let iy = (gy.floor() as i32).clamp(0, rows as i32 - 1) as usize;
+    let tx = gx - ix as f32;
+    let ty = gy - iy as f32;
+    if warp.grid[iy].len() <= ix + 1 || warp.grid[iy + 1].len() <= ix + 1 {
+        return p_src;
+    }
+    let dst = [
+        warp.grid[iy][ix],
+        warp.grid[iy][ix + 1],
+        warp.grid[iy + 1][ix + 1],
+        warp.grid[iy + 1][ix],
+    ];
+    let src_unit = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+    if let Some(h) = solve_homography(src_unit, dst) {
+        let v = h * glam::Vec3::new(tx, ty, 1.0);
+        let w = v.z.abs().max(1e-8);
+        return [v.x / w, v.y / w];
     }
     p_src
 }
