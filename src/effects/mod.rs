@@ -3,6 +3,7 @@
 
 pub mod blur;
 pub mod color;
+pub mod registry;
 pub mod transform;
 
 use serde::{Deserialize, Serialize};
@@ -29,6 +30,14 @@ pub enum Effect {
         rotate_deg: Modulator,
         scale_x: Modulator,
         scale_y: Modulator,
+    },
+    /// Extension hook (T-M7-07). Looked up at render time in
+    /// [`registry::ExternalRegistry`]; missing IDs warn-and-skip so a
+    /// project that loads on a binary without the extension still
+    /// renders the rest of its chain.
+    External {
+        id: String,
+        params: serde_json::Value,
     },
 }
 
@@ -57,24 +66,25 @@ pub struct RenderCtx<'a> {
     pub color_uniform: &'a wgpu::Buffer,
     pub blur_uniform: &'a wgpu::Buffer,
     pub transform_uniform: &'a wgpu::Buffer,
+    /// Extension-pass lookup, consulted by [`Effect::External`] (T-M7-07).
+    /// Empty by default; v1 ships no built-in External passes.
+    pub external_registry: &'a registry::ExternalRegistry,
 }
 
 impl Effect {
-    /// Returns false when [`Effect::render`] does not record draws into
-    /// `ctx.dst_view` (Tint stub). Callers must **not** flip the effect
-    /// ping-pong after those variants or the chain reads the wrong texture.
-    pub fn writes_destination(&self) -> bool {
-        !matches!(self, Effect::Tint { .. })
-    }
-
     /// Apply this effect: read from `ctx.source_view`, write to
     /// `ctx.dst_view`. Modulator-typed fields are evaluated against
-    /// `clock` to produce concrete parameters.
+    /// `clock` to produce concrete parameters. Returns `true` when
+    /// the destination view was actually written (so the caller can
+    /// flip its ping-pong) and `false` for no-op stubs and unregistered
+    /// `External` ids.
     ///
     /// `Tint` is currently a no-op stub — the variant exists in the
     /// enum but no TintPipeline has been built. Logged at warn! once
-    /// per call. T-M4-?? (or M5) will land the tint pipeline.
-    pub fn render(&self, ctx: &mut RenderCtx<'_>, clock: &crate::clock::Clock) {
+    /// per call.
+    /// `External { id }` is the extension hook (T-M7-07): looked up
+    /// in `ctx.external_registry`; missing ids warn-and-skip.
+    pub fn render(&self, ctx: &mut RenderCtx<'_>, clock: &crate::clock::Clock) -> bool {
         match self {
             Effect::Color {
                 hue,
@@ -97,16 +107,13 @@ impl Effect {
                     ctx.color_uniform,
                     params,
                 );
+                true
             }
             Effect::Tint { rgba: _, amount: _ } => {
                 tracing::warn!(
                     "Effect::Tint is not yet implemented (no TintPipeline built); skipping"
                 );
-                // No-op: dst_view is left as whatever it was. Caller
-                // (effect chain) should treat this as "this effect did
-                // nothing"; the source_view passes through unchanged
-                // logically because we're not blitting. A future
-                // TintPipeline will fill this in.
+                false
             }
             Effect::Blur { radius_px } => {
                 let params = crate::effects::blur::BlurParams {
@@ -122,6 +129,7 @@ impl Effect {
                     ctx.blur_uniform,
                     params,
                 );
+                true
             }
             Effect::Transform {
                 translate,
@@ -144,6 +152,34 @@ impl Effect {
                     ctx.transform_uniform,
                     params,
                 );
+                true
+            }
+            Effect::External { id, params } => {
+                // Look up the pass via the registry reference held in ctx.
+                // Pulling it into a local lets the borrow-checker treat the
+                // remaining ctx field reborrows (encoder, views) as disjoint.
+                let pass = ctx.external_registry.get(id);
+                match pass {
+                    Some(pass) => {
+                        pass.render(
+                            ctx.device,
+                            ctx.queue,
+                            ctx.encoder,
+                            ctx.source_view,
+                            ctx.dst_view,
+                            params,
+                            clock,
+                        );
+                        pass.writes_destination(params)
+                    }
+                    None => {
+                        tracing::warn!(
+                            id,
+                            "Effect::External: no pass registered under this id; skipping",
+                        );
+                        false
+                    }
+                }
             }
         }
     }

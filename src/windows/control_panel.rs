@@ -632,6 +632,7 @@ fn effect_label(e: &Effect) -> &'static str {
         Effect::Tint { .. } => "Tint",
         Effect::Blur { .. } => "Blur",
         Effect::Transform { .. } => "Transform",
+        Effect::External { .. } => "External",
     }
 }
 
@@ -665,6 +666,14 @@ fn show_effect(ui: &mut Ui, idx: usize, effect: &mut Effect) {
             modulator_slider(ui, (idx, "rot"), "rotate (deg)", rotate_deg, -180.0..=180.0);
             modulator_slider(ui, (idx, "scx"), "scale x", scale_x, 0.1..=3.0);
             modulator_slider(ui, (idx, "scy"), "scale y", scale_y, 0.1..=3.0);
+        }
+        Effect::External { id, params } => {
+            // Extension hook: no rich UI in v1. Display the registered id and
+            // let advanced users edit `params` as raw JSON. Skipped at render
+            // time when no ExternalPass is registered under `id`.
+            ui.label(format!("id: {id}"));
+            ui.label("params (JSON, edited via project file):");
+            ui.label(serde_json::to_string_pretty(params).unwrap_or_else(|_| "<unprintable>".into()));
         }
     }
 }

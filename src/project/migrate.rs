@@ -14,7 +14,11 @@ pub fn migrate(mut value: Value) -> Result<Value, ProjectError> {
 
     match version {
         v if v == CURRENT_SCHEMA_VERSION => Ok(value),
-        0 => {
+        // v0 (no field) and v1 are bit-compatible with v2: the only
+        // change for v2 is the additive `Effect::External` enum variant
+        // (T-M7-07), which a v0/v1 file by definition does not use. So
+        // both old versions stamp straight to current.
+        0 | 1 => {
             value["schema_version"] = serde_json::json!(CURRENT_SCHEMA_VERSION);
             Ok(value)
         }
@@ -34,5 +38,23 @@ mod tests {
         let out = migrate(v).expect("migrate");
         let p: Project = serde_json::from_value(out).expect("deserialize");
         assert_eq!(p.schema_version, CURRENT_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn project_v1_migrate_to_current() {
+        let v = serde_json::json!({"schema_version": 1});
+        let out = migrate(v).expect("migrate");
+        let p: Project = serde_json::from_value(out).expect("deserialize");
+        assert_eq!(p.schema_version, CURRENT_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn project_unsupported_future_version_errors() {
+        let v = serde_json::json!({"schema_version": 999});
+        let err = migrate(v).unwrap_err();
+        assert!(matches!(
+            err,
+            crate::project::ProjectError::UnsupportedVersion(999)
+        ));
     }
 }

@@ -30,6 +30,7 @@ use crate::controls::ControlEvent;
 use crate::controls::Source;
 use crate::effects::blur::BlurPipeline;
 use crate::effects::color::ColorPipeline;
+use crate::effects::registry::ExternalRegistry;
 use crate::effects::transform::TransformPipeline;
 use crate::effects::RenderCtx;
 use crate::error::{Result, RmapError};
@@ -104,6 +105,9 @@ struct RunningApp {
     color_pipeline: ColorPipeline,
     blur_pipeline: BlurPipeline,
     transform_pipeline: TransformPipeline,
+    /// Extension-pass lookup for [`Effect::External`] (T-M7-07). Empty in
+    /// stock v1; populated by future plugins or in-tree extensions.
+    external_registry: ExternalRegistry,
     _sleep_assertion: SleepAssertion,
     /// Set when the session was started from a `*.rmap.json` CLI argument.
     #[allow(dead_code)]
@@ -448,6 +452,7 @@ fn init_running_app(
         color_pipeline,
         blur_pipeline,
         transform_pipeline,
+        external_registry: ExternalRegistry::new(),
         _sleep_assertion: sleep_assertion,
         project_file_path,
         crossfade: None,
@@ -749,6 +754,7 @@ fn render_m5_pipeline(
     color: &ColorPipeline,
     blur: &BlurPipeline,
     transform: &TransformPipeline,
+    external_registry: &ExternalRegistry,
     surface_format: wgpu::TextureFormat,
     clock: &Clock,
 ) -> std::result::Result<(), RenderError> {
@@ -804,11 +810,11 @@ fn render_m5_pipeline(
                         color_uniform: &ls.color_uniform,
                         blur_uniform: &ls.blur_uniform,
                         transform_uniform: &ls.transform_uniform,
+                        external_registry,
                     };
-                    effect.render(&mut ctx, clock);
-                }
-                if effect.writes_destination() {
-                    ls.effect_pipeline.flip();
+                    if effect.render(&mut ctx, clock) {
+                        ls.effect_pipeline.flip();
+                    }
                 }
             }
             composite_inputs.push((
@@ -1183,6 +1189,7 @@ impl ApplicationHandler for App {
                         &state.color_pipeline,
                         &state.blur_pipeline,
                         &state.transform_pipeline,
+                        &state.external_registry,
                         surface_format,
                         &state.clock,
                     )
