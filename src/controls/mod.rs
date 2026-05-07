@@ -2,6 +2,7 @@
 //! v1.5: MIDI (`midir`) and OSC (`rosc`) bindings via a shared
 //! `Param::bind` API. Reserved here so the v1.5 add is non-disruptive.
 
+pub mod keyboard;
 pub mod param;
 
 use crate::controls::param::SourceRef;
