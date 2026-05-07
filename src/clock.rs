@@ -44,3 +44,21 @@ impl Default for Clock {
         Self::new()
     }
 }
+
+#[cfg(test)]
+impl Clock {
+    /// Test-only constructor: produces a Clock that reports `elapsed`
+    /// as exactly `elapsed_target` and `bpm` as `bpm`. Used by
+    /// modulator dispatch tests (T-M4-11) and tap-tempo tests
+    /// (T-M4-12).
+    pub fn for_test(elapsed_target: std::time::Duration, bpm: f32) -> Self {
+        Self {
+            // started = now - elapsed_target so the next elapsed()
+            // call returns ~elapsed_target (modulo the microseconds
+            // between this line and the test's value() call).
+            started: std::time::Instant::now() - elapsed_target,
+            bpm,
+            last_tap: None,
+        }
+    }
+}

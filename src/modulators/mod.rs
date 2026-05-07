@@ -73,3 +73,52 @@ impl Default for Modulator {
         Self::Static(0.0)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+    use crate::clock::Clock;
+
+    #[test]
+    fn dispatch_static() {
+        let clock = Clock::for_test(Duration::from_millis(0), 120.0);
+        let m = Modulator::Static(0.5);
+        let v = m.value(&clock);
+        assert!((v - 0.5).abs() < 1e-6, "expected 0.5, got {v}");
+    }
+
+    #[test]
+    fn dispatch_sine_quarter_period() {
+        // Sine with period 1s evaluated at t=0.25s -> peak (+amp).
+        let clock = Clock::for_test(Duration::from_millis(250), 120.0);
+        let m = Modulator::Sine {
+            period_s: 1.0,
+            amp: 1.0,
+            phase: 0.0,
+            offset: 0.0,
+        };
+        let v = m.value(&clock);
+        // 1e-3 tolerance: the Clock::for_test -> m.value drift across
+        // a few function calls is sub-microsecond, well within 1e-3.
+        assert!((v - 1.0).abs() < 1e-3, "expected ~1.0, got {v}");
+    }
+
+    #[test]
+    fn dispatch_bpm_at_120() {
+        // Bpm modulator with divisor=1 at 120 BPM:
+        //   beat_period_s = 60 / 120 * 1 = 0.5 s
+        // The implementation routes Bpm through `waveforms::sine`
+        // with period = beat_period_s. At t = 0.125s (quarter of the
+        // 0.5s beat period) the Bpm sine peaks at 1.0.
+        let clock = Clock::for_test(Duration::from_millis(125), 120.0);
+        let m = Modulator::Bpm {
+            divisor: 1.0,
+            amp: 1.0,
+            offset: 0.0,
+        };
+        let v = m.value(&clock);
+        assert!((v - 1.0).abs() < 1e-3, "expected ~1.0, got {v}");
+    }
+}
