@@ -8,6 +8,7 @@ mod clock;
 mod controls;
 mod effects;
 mod error;
+mod image_layer;
 mod modulators;
 mod monitors;
 mod project;
