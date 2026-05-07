@@ -193,6 +193,44 @@ fn schedule_scene_recall(state: &mut RunningApp, slot: usize) -> RecallOutcome {
     }
 }
 
+/// Construct a `LayerConfig` from a path the operator dropped onto the
+/// control window. Extension match is permissive (case-insensitive); a
+/// path that doesn't end in `.svg`, `.png`, `.jpg`, or `.jpeg` returns
+/// `None`. Layer id is uniqued via `next_unique_layer_id` so a duplicate
+/// drop produces a distinct slot rather than colliding with an existing
+/// id (T-M8-05).
+fn layer_from_dropped_path(
+    path: &std::path::Path,
+    project: &Project,
+) -> Option<crate::project::schema::LayerConfig> {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_ascii_lowercase());
+    let id = next_unique_layer_id(project);
+    let path_buf = path.to_path_buf();
+    match ext.as_deref() {
+        Some("svg") => Some(schema::layer_from_svg_path(id, path_buf)),
+        Some("png") | Some("jpg") | Some("jpeg") => {
+            Some(schema::layer_from_image_path(id, path_buf))
+        }
+        _ => None,
+    }
+}
+
+/// Pick a layer id of the form `layer{N}` not already used in `project`.
+/// O(N²) in the layer count but N is small for v1 (<10 layers per show).
+fn next_unique_layer_id(project: &Project) -> String {
+    let mut n = project.layers.len();
+    loop {
+        let candidate = format!("layer{n}");
+        if !project.layers.iter().any(|l| l.id == candidate) {
+            return candidate;
+        }
+        n += 1;
+    }
+}
+
 /// Apply one [`ControlEvent`] to `state`. Used by the keyboard, MIDI,
 /// and OSC sources so all three drive the same behavior.
 ///
@@ -1174,6 +1212,25 @@ impl ApplicationHandler for App {
                 WindowEvent::CloseRequested => {
                     // Drop the control window without exiting the app.
                     state.control = None;
+                }
+                WindowEvent::DroppedFile(path) => {
+                    // T-M8-05: extension routes to LayerKind. SVG → existing
+                    // worker path; JPG/PNG → image_layer upload path. Bad
+                    // extensions warn-and-skip.
+                    if let Some(layer) = layer_from_dropped_path(&path, &state.project) {
+                        state.project.layers.push(layer);
+                        rebuild_layers_for_state(state);
+                        tracing::info!(
+                            path = %path.display(),
+                            count = state.project.layers.len(),
+                            "layer added via drop",
+                        );
+                    } else {
+                        tracing::warn!(
+                            path = %path.display(),
+                            "dropped file has unsupported extension; skipping",
+                        );
+                    }
                 }
                 WindowEvent::RedrawRequested => {
                     let device = &state.renderer.gpu.device;
