@@ -125,6 +125,27 @@ impl ControlWindow {
         self.surface.configure(device, &self.config);
     }
 
+    /// Register a wgpu texture view with the egui renderer so it can be
+    /// shown inside the control window's UI as `egui::Image`. Returns
+    /// the egui-side handle. Callers re-register after the underlying
+    /// texture is recreated (e.g. on output-window resize) — the old
+    /// `TextureId` becomes invalid (T-M9-01).
+    pub fn register_native_texture(
+        &mut self,
+        device: &wgpu::Device,
+        view: &wgpu::TextureView,
+    ) -> egui::TextureId {
+        self.egui_renderer
+            .register_native_texture(device, view, wgpu::FilterMode::Linear)
+    }
+
+    /// Drop a previously-registered native texture binding. Pair every
+    /// `register_native_texture` with `free_native_texture` to keep the
+    /// renderer's GPU bind-group cache from growing on resize churn.
+    pub fn free_native_texture(&mut self, id: egui::TextureId) {
+        self.egui_renderer.free_texture(&id);
+    }
+
     /// Render one egui frame. The closure populates the egui UI; the body
     /// of this function handles begin_frame / end_frame, paint, and
     /// surface present.

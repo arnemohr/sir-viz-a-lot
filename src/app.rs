@@ -48,7 +48,9 @@ use crate::svg_layer::watcher::{WatchEvent, Watcher};
 use crate::svg_layer::worker::{LayerId, RasterDone, RasterJob, Worker};
 use crate::test_patterns::{TestPattern, TestPatternRenderer};
 use crate::windows::control::ControlWindow;
-use crate::windows::control_panel::{show as control_panel_show, ControlPanelAction, ControlPanelState};
+use crate::windows::control_panel::{
+    show as control_panel_show, ControlPanelAction, ControlPanelInputs, ControlPanelState,
+};
 use crate::windows::output::OutputWindow;
 
 /// Application root. Holds the persistent state across event-loop iterations.
@@ -129,6 +131,15 @@ struct RunningApp {
     /// In-flight scene crossfade. `None` when no fade is active. Driven from
     /// `RedrawRequested` per frame; cleared at `t = 1`.
     crossfade: Option<ActiveCrossfade>,
+    /// Egui-side handle for the live scene preview (T-M9-01). The handle
+    /// references `warp_rt_view`; re-registered on resize because the
+    /// underlying texture is recreated. `None` when the control window
+    /// is closed or registration failed.
+    scene_texture_id: Option<egui::TextureId>,
+    /// Toggle that flips every `about_to_wait`; a `true` value skips a
+    /// control-window redraw request that frame so the preview runs at
+    /// roughly half the output's vsync rate (T-M9-03).
+    control_redraw_skip: bool,
 }
 
 /// One scene-to-scene fade, scheduled by `ControlEvent::SceneRecall` when
@@ -606,7 +617,26 @@ fn init_running_app(
         _sleep_assertion: sleep_assertion,
         project_file_path,
         crossfade: None,
+        scene_texture_id: None,
+        control_redraw_skip: false,
     })
+}
+
+/// Register `state.warp_rt_view` with the control window's egui renderer
+/// so the Scene tab can paint it as a live preview. Frees any previous
+/// registration first. No-op when the control window is closed.
+/// Called once after init and again after every `resize_m5_gpu`
+/// (the warp_rt texture is recreated there) (T-M9-01).
+fn register_scene_preview(state: &mut RunningApp) {
+    let Some(ctrl) = state.control.as_mut() else {
+        state.scene_texture_id = None;
+        return;
+    };
+    if let Some(old) = state.scene_texture_id.take() {
+        ctrl.free_native_texture(old);
+    }
+    let id = ctrl.register_native_texture(&state.renderer.gpu.device, &state.warp_rt_view);
+    state.scene_texture_id = Some(id);
 }
 
 fn build_initial_project(svg_path: Option<PathBuf>) -> Project {
@@ -1179,7 +1209,8 @@ impl ApplicationHandler for App {
             project_file_path,
             output_windowed,
         ) {
-            Ok(running) => {
+            Ok(mut running) => {
+                register_scene_preview(&mut running);
                 self.state = Some(running);
             }
             Err(e) => {
@@ -1236,10 +1267,21 @@ impl ApplicationHandler for App {
                     let device = &state.renderer.gpu.device;
                     let queue = &state.renderer.gpu.queue;
                     let mut panel_action = ControlPanelAction::None;
+                    let inputs = ControlPanelInputs {
+                        scene_texture: state.scene_texture_id,
+                        output_size: (
+                            state.output.config.width,
+                            state.output.config.height,
+                        ),
+                    };
                     if let Some(ctrl) = state.control.as_mut() {
                         let result = ctrl.render(device, queue, |ui| {
-                            panel_action =
-                                control_panel_show(ui, &mut state.project, &mut state.control_panel);
+                            panel_action = control_panel_show(
+                                ui,
+                                &mut state.project,
+                                &mut state.control_panel,
+                                &inputs,
+                            );
                         });
                         if let Err(e) = result {
                             tracing::warn!(?e, "control window render error");
@@ -1312,6 +1354,10 @@ impl ApplicationHandler for App {
                 state.output.config.height = new_size.height.max(1);
                 state.output.recreate_surface(&state.renderer.gpu.device);
                 resize_m5_gpu(state);
+                // warp_rt was recreated; the egui scene preview's
+                // TextureId now points to a freed view. Re-register so
+                // the Scene tab keeps painting after resize (T-M9-01).
+                register_scene_preview(state);
             }
             WindowEvent::RedrawRequested => {
                 // Drain every registered source through one common dispatcher.
@@ -1494,10 +1540,17 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
-        if let Some(state) = self.state.as_ref() {
+        if let Some(state) = self.state.as_mut() {
             state.output.window.request_redraw();
-            if let Some(ctrl) = state.control.as_ref() {
-                ctrl.window.request_redraw();
+            // T-M9-03: throttle the control window to ~30 fps.
+            // Output stays at vsync (~60 fps); preview at half rate keeps
+            // the wedding-rig CPU budget under control without making
+            // operator drag interactions feel sticky.
+            state.control_redraw_skip = !state.control_redraw_skip;
+            if !state.control_redraw_skip {
+                if let Some(ctrl) = state.control.as_ref() {
+                    ctrl.window.request_redraw();
+                }
             }
         }
     }

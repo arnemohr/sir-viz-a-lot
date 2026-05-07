@@ -68,6 +68,7 @@ pub fn load_presets_from_disk() -> Vec<Preset> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ControlTab {
+    Scene,
     Effects,
     Layers,
     Mapping,
@@ -76,7 +77,9 @@ pub enum ControlTab {
 
 impl Default for ControlTab {
     fn default() -> Self {
-        Self::Effects
+        // T-M9-02: Scene is the v2 default — operators see the live preview
+        // first, the slider tabs are secondary.
+        Self::Scene
     }
 }
 
@@ -110,11 +113,24 @@ pub enum ControlPanelAction {
     SceneRecall(usize),
 }
 
+/// Per-frame inputs from the App into the control panel render. Bundled so the
+/// signature doesn't grow every time we add another piece of state the panel
+/// needs to read.
+pub struct ControlPanelInputs {
+    /// Live scene preview registered with egui as a native texture (T-M9-01).
+    /// `None` when registration failed or the preview isn't available yet.
+    pub scene_texture: Option<egui::TextureId>,
+    /// Output framebuffer dimensions, used to compute the preview's aspect
+    /// (T-M9-02). `(0, 0)` is treated as 16:9 fallback.
+    pub output_size: (u32, u32),
+}
+
 /// Render the control panel. Mutates `project` in place.
 pub fn show(
     ui: &mut Ui,
     project: &mut Project,
     st: &mut ControlPanelState,
+    inputs: &ControlPanelInputs,
 ) -> ControlPanelAction {
     let mut action = ControlPanelAction::None;
 
@@ -122,6 +138,7 @@ pub fn show(
         .resizable(false)
         .show_inside(ui, |ui| {
             ui.horizontal(|ui| {
+                ui.selectable_value(&mut st.tab, ControlTab::Scene, "Scene");
                 ui.selectable_value(&mut st.tab, ControlTab::Effects, "Effects");
                 ui.selectable_value(&mut st.tab, ControlTab::Layers, "Layers");
                 ui.selectable_value(&mut st.tab, ControlTab::Mapping, "Mapping");
@@ -131,6 +148,7 @@ pub fn show(
 
     egui::CentralPanel::default().show_inside(ui, |ui| {
         match st.tab {
+            ControlTab::Scene => show_scene_tab(ui, inputs),
             ControlTab::Effects => show_effects_tab(ui, project, st),
             ControlTab::Layers => {
                 if matches!(show_layers_tab(ui, project, st), ControlPanelAction::RebuildLayers) {
@@ -194,6 +212,54 @@ pub fn show(
     });
 
     action
+}
+
+/// Show the live scene preview (T-M9-02). The preview is `warp_rt` registered
+/// as an egui native texture; we just paint it inside an aspect-correct rect.
+fn show_scene_tab(ui: &mut Ui, inputs: &ControlPanelInputs) {
+    ui.label(
+        "Live preview of the rendered output. Drop SVG / PNG / JPG files onto the window to add a layer.",
+    );
+    ui.add_space(4.0);
+    let Some(tex_id) = inputs.scene_texture else {
+        ui.label("(scene preview not yet registered — output window not initialized)");
+        return;
+    };
+    let (out_w, out_h) = inputs.output_size;
+    // Fall back to 16:9 if the renderer hasn't reported a size yet.
+    let aspect = if out_w > 0 && out_h > 0 {
+        out_w as f32 / out_h as f32
+    } else {
+        16.0 / 9.0
+    };
+
+    // Aspect-fit the preview inside the available rect, centered, with a
+    // dark letterbox so the panel never collapses to zero height when the
+    // window is very wide.
+    let avail = ui.available_size();
+    let mut w = avail.x.max(160.0);
+    let mut h = w / aspect;
+    if h > avail.y.max(120.0) {
+        h = avail.y.max(120.0);
+        w = h * aspect;
+    }
+    let (resp, painter) = ui.allocate_painter(egui::vec2(avail.x, h.max(120.0)), egui::Sense::hover());
+    let outer = resp.rect;
+    let inner = egui::Rect::from_center_size(outer.center(), egui::vec2(w, h));
+    // Letterbox.
+    painter.rect_filled(outer, egui::CornerRadius::ZERO, egui::Color32::from_rgb(8, 9, 12));
+    painter.image(
+        tex_id,
+        inner,
+        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+        egui::Color32::WHITE,
+    );
+    painter.rect_stroke(
+        inner,
+        egui::CornerRadius::ZERO,
+        egui::Stroke::new(1.0, egui::Color32::from_rgb(70, 75, 85)),
+        egui::StrokeKind::Outside,
+    );
 }
 
 fn show_effects_tab(ui: &mut Ui, project: &mut Project, st: &mut ControlPanelState) {
