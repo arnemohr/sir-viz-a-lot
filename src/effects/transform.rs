@@ -197,9 +197,10 @@ impl TransformPipeline {
     /// pass that samples `source_view` and writes the transformed result
     /// into `dst_view`.
     ///
-    /// The render pass clears `dst_view` to black before drawing; the
-    /// fragment shader writes alpha from the source, so fully-transparent
-    /// source pixels produce black pixels with alpha 0 in the output.
+    /// The render pass clears `dst_view` to *transparent* black (α=0)
+    /// before drawing the moved quad. Pixels outside the transformed
+    /// quad must be transparent so the compositor sees layers below them
+    /// — clearing to opaque black would punch a hole in the stack.
     pub fn render(
         &self,
         device: &wgpu::Device,
@@ -239,7 +240,7 @@ impl TransformPipeline {
                 depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                     store: wgpu::StoreOp::Store,
                 },
             })],
