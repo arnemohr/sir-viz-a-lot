@@ -231,10 +231,11 @@ fn dispatch_control_event(state: &mut RunningApp, event: ControlEvent) {
 /// post-snap hook so the keyboard and UI recall paths stay aligned.
 fn rebuild_layers_for_state(state: &mut RunningApp) {
     let device = &state.renderer.gpu.device;
+    let queue = &state.renderer.gpu.queue;
     let w = state.output.config.width.max(1);
     let h = state.output.config.height.max(1);
     let fmt = state.output.config.format;
-    match rebuild_layers(device, &state.project, w, h, fmt) {
+    match rebuild_layers(device, queue, &state.project, w, h, fmt) {
         Ok(layers) => {
             state.layers = layers;
             state.control_panel.selected_layer = state
@@ -517,7 +518,14 @@ fn init_running_app(
         .collect();
     let gamma = GammaPipeline::new(&renderer.gpu.device, surface_format);
     let (warp_rt, warp_rt_view) = make_warp_render_target(&renderer.gpu.device, w, h, surface_format);
-    let layers = rebuild_layers(&renderer.gpu.device, &project, w, h, surface_format)?;
+    let layers = rebuild_layers(
+        &renderer.gpu.device,
+        &renderer.gpu.queue,
+        &project,
+        w,
+        h,
+        surface_format,
+    )?;
 
     Ok(RunningApp {
         output,
@@ -564,6 +572,7 @@ fn build_initial_project(svg_path: Option<PathBuf>) -> Project {
 
 fn rebuild_layers(
     device: &wgpu::Device,
+    queue: &wgpu::Queue,
     project: &Project,
     width: u32,
     height: u32,
@@ -572,7 +581,7 @@ fn rebuild_layers(
     let mut out = Vec::with_capacity(project.layers.len());
     for lc in project.layers.iter() {
         let asset_path = lc.kind.asset_path().to_path_buf();
-        let layer = SvgLayer::pending(asset_path.clone());
+        let mut layer = SvgLayer::pending(asset_path.clone());
         let (job_tx, result_rx) = Worker::spawn();
         let (watcher, watch_rx) = Watcher::new(std::slice::from_ref(&asset_path))?;
         let effect_pipeline =
@@ -581,12 +590,42 @@ fn rebuild_layers(
             make_intermediate_texture(device, width.max(1), height.max(1), surface_format);
         let layer_id = LayerId::next();
         let generation = 1u64;
-        let _ = job_tx.send(RasterJob {
-            layer_id,
-            path: asset_path.clone(),
-            size: (width, height),
-            generation,
-        });
+
+        match &lc.kind {
+            schema::LayerKind::Svg { .. } => {
+                // Existing path: enqueue raster job, worker reads file +
+                // resvg-renders, result lands via the channel + upload.
+                let _ = job_tx.send(RasterJob {
+                    layer_id,
+                    path: asset_path.clone(),
+                    size: (width, height),
+                    generation,
+                });
+            }
+            schema::LayerKind::Image { path, .. } => {
+                // Image path: synchronous decode + GPU upload, no worker
+                // round-trip. Failure logs and leaves the layer texture
+                // empty so the renderer's Option<&TextureView> guard
+                // skips the layer rather than crashes.
+                match crate::image_layer::upload_image_rgba8(device, queue, path) {
+                    Ok((texture, view, dims)) => {
+                        layer.set_uploaded_texture(texture, view);
+                        tracing::info!(
+                            path = %path.display(),
+                            width = dims.0,
+                            height = dims.1,
+                            "image layer loaded",
+                        );
+                    }
+                    Err(err) => tracing::warn!(
+                        path = %path.display(),
+                        ?err,
+                        "image layer load failed; layer will skip render",
+                    ),
+                }
+            }
+        }
+
         let (color_uniform, blur_uniform, transform_uniform, compositor_uniform) =
             create_layer_uniform_buffers(device);
         out.push(LayerState {
@@ -1190,21 +1229,51 @@ impl ApplicationHandler for App {
                 for (i, ls) in state.layers.iter_mut().enumerate() {
                     while let Ok(_event) = ls.watch_rx.try_recv() {
                         ls.generation = ls.generation.wrapping_add(1);
-                        let size = (state.output.config.width, state.output.config.height);
-                        let path = state.project.layers[i].kind.asset_path().to_path_buf();
+                        let kind = &state.project.layers[i].kind;
+                        let asset_path = kind.asset_path().to_path_buf();
                         let layer_id = ls.layer_id;
                         let generation = ls.generation;
-                        let _ = ls.job_tx.send(RasterJob {
-                            layer_id,
-                            path,
-                            size,
-                            generation,
-                        });
-                        tracing::debug!(
-                            generation = ls.generation,
-                            layer = i,
-                            "svg watcher fired; enqueued raster job"
-                        );
+                        match kind {
+                            schema::LayerKind::Svg { .. } => {
+                                let size = (state.output.config.width, state.output.config.height);
+                                let _ = ls.job_tx.send(RasterJob {
+                                    layer_id,
+                                    path: asset_path,
+                                    size,
+                                    generation,
+                                });
+                                tracing::debug!(
+                                    generation = ls.generation,
+                                    layer = i,
+                                    "svg watcher fired; enqueued raster job"
+                                );
+                            }
+                            schema::LayerKind::Image { .. } => {
+                                // Image hot-reload: synchronous re-upload, no
+                                // worker round-trip. Failure leaves the previous
+                                // texture in place — operator sees stale frame
+                                // rather than a black layer mid-show.
+                                match crate::image_layer::upload_image_rgba8(
+                                    &state.renderer.gpu.device,
+                                    &state.renderer.gpu.queue,
+                                    &asset_path,
+                                ) {
+                                    Ok((tex, view, _)) => {
+                                        ls.layer.set_uploaded_texture(tex, view);
+                                        tracing::debug!(
+                                            layer = i,
+                                            path = %asset_path.display(),
+                                            "image hot-reloaded",
+                                        );
+                                    }
+                                    Err(err) => tracing::warn!(
+                                        layer = i,
+                                        ?err,
+                                        "image hot-reload failed; previous texture retained",
+                                    ),
+                                }
+                            }
+                        }
                     }
                     while let Ok(done) = ls.result_rx.try_recv() {
                         if done.layer_id != ls.layer_id || done.generation != ls.generation {

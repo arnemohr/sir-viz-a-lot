@@ -342,6 +342,23 @@ impl SvgLayer {
     pub fn texture_view(&self) -> Option<&wgpu::TextureView> {
         self.gpu_texture_view.as_ref()
     }
+
+    /// Inject a pre-uploaded GPU texture without going through `upload`.
+    /// Used by the Image-layer path (T-M8-03) — `image::open` produces an
+    /// RGBA8 buffer directly, bypassing the SVG raster worker, so the
+    /// resulting `Texture` + `TextureView` are dropped straight into the
+    /// layer's GPU slot the same way `upload` would. The SVG-side raster
+    /// cache key is invalidated so a later SVG reload (impossible for an
+    /// Image layer; defensive) does not skip on a stale match.
+    pub(crate) fn set_uploaded_texture(
+        &mut self,
+        texture: wgpu::Texture,
+        view: wgpu::TextureView,
+    ) {
+        self.gpu_texture = Some(texture);
+        self.gpu_texture_view = Some(view);
+        self.gpu_uploaded_key = None;
+    }
 }
 
 #[cfg(test)]
