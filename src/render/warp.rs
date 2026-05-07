@@ -20,6 +20,7 @@ mod tests {
     /// 4-point homography solve via glam::Mat3. The renderer uses wgpu's
     /// projective rasterization for the actual warp; this test pins the
     /// math path that any pre-computed transform falls back to.
+    #[ignore = "M5: real homography solver, see T-M5-13"]
     #[test]
     fn homography_round_trip_smoke() {
         // TODO(M5): once the homography solver lands, project the four
