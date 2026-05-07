@@ -317,6 +317,32 @@ fn show_mapping_tab(ui: &mut Ui, project: &mut Project) {
         "Drag the corners to map output to projector space. Coordinates are normalized [0,1].",
     );
 
+    // Mesh-resolution controls. Editing rows/cols bilinear-resamples the grid so
+    // the operator's existing customisation survives a resize (T-M7-01).
+    ui.horizontal(|ui| {
+        ui.label("mesh");
+        let mut new_rows = w.rows.max(1);
+        let mut new_cols = w.cols.max(1);
+        let r_resp = ui.add(
+            egui::DragValue::new(&mut new_rows)
+                .range(1..=8u32)
+                .prefix("rows "),
+        );
+        let c_resp = ui.add(
+            egui::DragValue::new(&mut new_cols)
+                .range(1..=8u32)
+                .prefix("cols "),
+        );
+        let changed = (r_resp.changed() || c_resp.changed())
+            && (new_rows != w.rows || new_cols != w.cols);
+        if changed {
+            w.grid = schema::resample_grid(&w.grid, new_rows, new_cols);
+            w.rows = new_rows;
+            w.cols = new_cols;
+        }
+        ui.label(format!("({} × {} cells)", w.rows, w.cols));
+    });
+
     // 16:9 thumbnail of the output framebuffer area. The canvas itself stands in for
     // the framebuffer (we don't have a cross-window snapshot in v1 — see T-M5-08 notes).
     let canvas_size = egui::vec2(480.0, 270.0);

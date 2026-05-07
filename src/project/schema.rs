@@ -132,6 +132,69 @@ pub fn default_warp_mesh() -> WarpMesh {
     }
 }
 
+/// Bilinear-resample a mesh-warp grid to new `rows`/`cols` cell counts,
+/// preserving the four outer corners exactly. New interior points are
+/// interpolated from the bilinear surface implied by the old grid.
+///
+/// Used by the Mapping tab when the operator changes mesh resolution
+/// (T-M7-01) so existing customization isn't lost on resize. The
+/// schema's `rows`/`cols` are cells; the returned grid is
+/// `(rows+1) × (cols+1)` of normalized output-space points.
+pub fn resample_grid(
+    old: &[Vec<[f32; 2]>],
+    new_rows: u32,
+    new_cols: u32,
+) -> Vec<Vec<[f32; 2]>> {
+    let new_r = (new_rows as usize).max(1);
+    let new_c = (new_cols as usize).max(1);
+    if old.len() < 2 || old.iter().any(|row| row.len() != old[0].len()) || old[0].len() < 2 {
+        return identity_grid(new_r as u32, new_c as u32);
+    }
+    let old_r = old.len() - 1;
+    let old_c = old[0].len() - 1;
+    let lerp = |a: [f32; 2], b: [f32; 2], t: f32| {
+        [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]
+    };
+    let mut out = Vec::with_capacity(new_r + 1);
+    for r in 0..=new_r {
+        let fy = r as f32 / new_r as f32 * old_r as f32;
+        let r0 = (fy.floor() as usize).min(old_r.saturating_sub(1));
+        let ty = fy - r0 as f32;
+        let r1 = r0 + 1;
+        let mut row_v = Vec::with_capacity(new_c + 1);
+        for c in 0..=new_c {
+            let fx = c as f32 / new_c as f32 * old_c as f32;
+            let c0 = (fx.floor() as usize).min(old_c.saturating_sub(1));
+            let tx = fx - c0 as f32;
+            let c1 = c0 + 1;
+            let p00 = old[r0][c0];
+            let p10 = old[r0][c1];
+            let p01 = old[r1][c0];
+            let p11 = old[r1][c1];
+            let top = lerp(p00, p10, tx);
+            let bot = lerp(p01, p11, tx);
+            row_v.push(lerp(top, bot, ty));
+        }
+        out.push(row_v);
+    }
+    out
+}
+
+/// Identity grid for `rows × cols` cells: `(rows+1) × (cols+1)` points
+/// uniformly spaced over `[0,1]^2`. Returned by [`resample_grid`] when
+/// the input grid is degenerate.
+pub fn identity_grid(rows: u32, cols: u32) -> Vec<Vec<[f32; 2]>> {
+    let r = rows.max(1) as usize;
+    let c = cols.max(1) as usize;
+    (0..=r)
+        .map(|i| {
+            (0..=c)
+                .map(|j| [j as f32 / c as f32, i as f32 / r as f32])
+                .collect()
+        })
+        .collect()
+}
+
 /// Build a layer row for an SVG path using the v1 default effect chain.
 pub fn layer_from_svg_path(id: impl Into<String>, svg_path: PathBuf) -> LayerConfig {
     LayerConfig {
@@ -142,5 +205,46 @@ pub fn layer_from_svg_path(id: impl Into<String>, svg_path: PathBuf) -> LayerCon
         effects: crate::effects::default_effect_chain(),
         blend_mode: BlendMode::Normal,
         opacity: 1.0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn approx(a: [f32; 2], b: [f32; 2], eps: f32) -> bool {
+        (a[0] - b[0]).abs() < eps && (a[1] - b[1]).abs() < eps
+    }
+
+    #[test]
+    fn resample_grid_preserves_outer_corners() {
+        // Skewed corner pin (definitely not identity).
+        let old = vec![
+            vec![[0.1, 0.05], [0.9, 0.0]],
+            vec![[0.0, 0.95], [1.0, 0.85]],
+        ];
+        let out = resample_grid(&old, 3, 3);
+        assert_eq!(out.len(), 4);
+        assert_eq!(out[0].len(), 4);
+        // Four outer corners should match the input bit-for-bit (lerp endpoints are exact).
+        assert!(approx(out[0][0], [0.1, 0.05], 1e-6));
+        assert!(approx(out[0][3], [0.9, 0.0], 1e-6));
+        assert!(approx(out[3][0], [0.0, 0.95], 1e-6));
+        assert!(approx(out[3][3], [1.0, 0.85], 1e-6));
+    }
+
+    #[test]
+    fn resample_grid_center_of_identity_is_half() {
+        let old = identity_grid(1, 1);
+        let out = resample_grid(&old, 2, 2);
+        // Centre of a 2x2 cell grid (point [1][1]) is (0.5, 0.5).
+        assert!(approx(out[1][1], [0.5, 0.5], 1e-6));
+    }
+
+    #[test]
+    fn resample_grid_falls_back_to_identity_on_degenerate_input() {
+        let degenerate: Vec<Vec<[f32; 2]>> = vec![];
+        let out = resample_grid(&degenerate, 1, 1);
+        assert_eq!(out, identity_grid(1, 1));
     }
 }
