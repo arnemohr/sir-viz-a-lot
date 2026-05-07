@@ -37,6 +37,15 @@ pub struct SvgLayer {
     /// Monotonic counter T-M3-04 will increment when the source file
     /// changes. 0 at construction; bumped externally.
     generation: u64,
+    /// Cached GPU texture mirroring the most-recently-rasterized Pixmap.
+    /// `None` until `upload(...)` is called. The texture is `Rgba8UnormSrgb`
+    /// with **unpremultiplied** alpha (see UNMULTIPLIED ALPHA note on
+    /// `upload`).
+    gpu_texture: Option<wgpu::Texture>,
+    gpu_texture_view: Option<wgpu::TextureView>,
+    /// Last-uploaded (width, height, generation) so `upload(...)` can
+    /// short-circuit when nothing has changed.
+    gpu_uploaded_key: Option<RasterKey>,
 }
 
 impl SvgLayer {
@@ -64,6 +73,9 @@ impl SvgLayer {
             tree,
             cache: None,
             generation: 0,
+            gpu_texture: None,
+            gpu_texture_view: None,
+            gpu_uploaded_key: None,
         })
     }
 
@@ -177,6 +189,110 @@ impl SvgLayer {
     /// layer's effective on-screen size crosses the oversampling threshold.
     pub fn maybe_rerasterize(&mut self) {
         // TODO(M3): notify_debouncer_full + crossbeam-channel worker pool.
+    }
+
+    /// Upload `pixmap` to a GPU texture as `Rgba8UnormSrgb` with
+    /// **unmultiplied** alpha.
+    ///
+    /// Short-circuits if the texture already reflects the current
+    /// `(width, height, generation)` triple so callers can call this every
+    /// frame without redundant uploads.
+    ///
+    /// # UNMULTIPLIED ALPHA
+    ///
+    /// `tiny_skia::Pixmap` stores premultiplied RGBA, but we upload as
+    /// `wgpu::TextureFormat::Rgba8UnormSrgb` with the operator expecting
+    /// standard (unmultiplied) alpha for downstream blending.
+    /// Convert per pixel: `rgb / alpha`. Per the M3 risk note in
+    /// `001-initial-setup-plan.md §3.4`: "an explicit RGBA8 unmultiplied
+    /// path in svg_layer.rs::upload_to_gpu and a comment marking the
+    /// choice".
+    pub fn upload(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        pixmap: &tiny_skia::Pixmap,
+    ) -> crate::error::Result<()> {
+        let key = RasterKey {
+            width: pixmap.width(),
+            height: pixmap.height(),
+            generation: self.generation,
+        };
+
+        // Short-circuit: nothing has changed since the last upload.
+        if self.gpu_uploaded_key == Some(key) && self.gpu_texture.is_some() {
+            return Ok(());
+        }
+
+        let width = pixmap.width();
+        let height = pixmap.height();
+
+        // Unmultiply: walk 4 bytes at a time and undo the premultiplied
+        // encoding that tiny_skia produces.
+        let raw = pixmap.data();
+        let mut unpremultiplied = Vec::with_capacity(raw.len());
+        for chunk in raw.chunks_exact(4) {
+            let (r, g, b, a) = (chunk[0], chunk[1], chunk[2], chunk[3]);
+            if a == 0 {
+                // alpha=0 makes RGB invisible regardless of value;
+                // passthrough is the conventional non-destructive path.
+                unpremultiplied.extend_from_slice(&[r, g, b, a]);
+            } else {
+                let ur = ((r as u32 * 255) / a as u32).min(255) as u8;
+                let ug = ((g as u32 * 255) / a as u32).min(255) as u8;
+                let ub = ((b as u32 * 255) / a as u32).min(255) as u8;
+                unpremultiplied.extend_from_slice(&[ur, ug, ub, a]);
+            }
+        }
+
+        let size = wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        };
+
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("svg_layer texture"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &unpremultiplied,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(4 * width),
+                rows_per_image: Some(height),
+            },
+            size,
+        );
+
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        self.gpu_texture = Some(texture);
+        self.gpu_texture_view = Some(view);
+        self.gpu_uploaded_key = Some(key);
+
+        Ok(())
+    }
+
+    /// Returns the GPU texture view for the most recently uploaded raster,
+    /// or `None` if `upload` has not been called yet.
+    ///
+    /// T-M3-06 uses this to bind the texture as a source for the quad draw.
+    pub fn texture_view(&self) -> Option<&wgpu::TextureView> {
+        self.gpu_texture_view.as_ref()
     }
 }
 
