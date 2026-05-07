@@ -2,4 +2,5 @@
 //! lives on the projector; the control window lives on the primary display.
 
 pub mod control;
+pub mod control_panel;
 pub mod output;

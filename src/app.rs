@@ -18,7 +18,6 @@
 use std::path::PathBuf;
 
 use crossbeam_channel::{Receiver, Sender};
-use egui::CentralPanel;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
@@ -30,7 +29,13 @@ use crate::clock::Clock;
 use crate::controls::ControlEvent;
 use crate::controls::Source;
 use crate::controls::keyboard::KeyboardSource;
+use crate::effects::blur::BlurPipeline;
+use crate::effects::color::ColorPipeline;
+use crate::effects::transform::TransformPipeline;
+use crate::effects::{Effect, RenderCtx};
 use crate::error::{Result, RmapError};
+use crate::modulators::Modulator;
+use crate::render::pipeline::EffectPipeline;
 use crate::render::{GpuContext, RenderError, Renderer};
 use crate::show_day::sleep_assertion::SleepAssertion;
 use crate::svg_layer::SvgLayer;
@@ -87,6 +92,16 @@ struct RunningApp {
     /// Buffers winit keyboard events and translates them into `ControlEvent`s
     /// on `poll()`. T-M4-10.
     keyboard: KeyboardSource,
+    /// Cached effect pipelines. Built once at startup (per spec §2 + plan
+    /// §3.4 M4). T-M4-15 dispatches them through `Effect::render` against
+    /// the per-layer `EffectPipeline` ping-pong.
+    color_pipeline: ColorPipeline,
+    blur_pipeline: BlurPipeline,
+    transform_pipeline: TransformPipeline,
+    /// Operator-editable effect chain (T-M4-15). The control panel mutates
+    /// this through `crate::windows::control_panel::show`; the SVG render
+    /// path reads it on every frame.
+    effects: Vec<Effect>,
     /// Held for the lifetime of the running app — `Drop` releases the
     /// `IOPMAssertion` on macOS, no-op elsewhere. Spec §6 display-sleep
     /// prevention. Field is read only by `Drop`; underscore prefix
@@ -119,6 +134,14 @@ struct SvgState {
     /// Hold the `Watcher` to keep the debouncer thread alive. Drop to stop
     /// watching.
     _watcher: Watcher,
+    /// Per-layer ping-pong textures driven by the effect chain (T-M4-15).
+    /// Sized to the output surface so the final blit is 1:1.
+    effect_pipeline: EffectPipeline,
+    /// Scratch texture for multi-pass effects (currently only blur). Same
+    /// dimensions / format as the ping-pong textures. Held alongside
+    /// `effect_pipeline` so a resize reallocates all three together.
+    _intermediate_texture: wgpu::Texture,
+    intermediate_view: wgpu::TextureView,
 }
 
 impl App {
@@ -240,6 +263,13 @@ fn init_running_app(
     // Build the test-pattern pipelines before handing `gpu` to the
     // Renderer (Renderer takes ownership of `gpu`).
     let test_patterns = TestPatternRenderer::new(&gpu.device, surface_format);
+    // T-M4-15: build effect pipelines once at startup. They share the
+    // surface format with the per-layer EffectPipeline ping-pong textures
+    // (built later, per SvgState), the SvgLayerPipeline, and the surface
+    // itself, so every blit lands in a consistent sRGB pipeline.
+    let color_pipeline = ColorPipeline::new(&gpu.device, surface_format);
+    let blur_pipeline = BlurPipeline::new(&gpu.device, surface_format);
+    let transform_pipeline = TransformPipeline::new(&gpu.device, surface_format);
     let renderer = Renderer::new(gpu, surface_format)?;
     // Spec §6 display-sleep prevention. Held on RunningApp; released on
     // Drop. Failures are logged inside `acquire` and yield a no-op
@@ -252,6 +282,23 @@ fn init_running_app(
         let pipeline = SvgLayerPipeline::new(&renderer.gpu.device, surface_format);
         let (job_tx, result_rx) = Worker::spawn();
         let (watcher, watch_rx) = Watcher::new(std::slice::from_ref(&path))?;
+
+        // T-M4-15: per-layer ping-pong + scratch intermediate. Sized to
+        // the output surface so the final SvgLayerPipeline blit into the
+        // surface texture is a 1:1 fullscreen quad — no resampling penalty
+        // beyond what happens inside individual effect passes.
+        let effect_pipeline = EffectPipeline::new(
+            &renderer.gpu.device,
+            output.config.width.max(1),
+            output.config.height.max(1),
+            surface_format,
+        );
+        let (intermediate_texture, intermediate_view) = make_intermediate_texture(
+            &renderer.gpu.device,
+            output.config.width.max(1),
+            output.config.height.max(1),
+            surface_format,
+        );
 
         // Enqueue the initial raster job. generation=1; 0 is "never rasterized".
         // TODO(T-M3-resize): resize events don't re-enqueue a job yet — the SVG
@@ -274,10 +321,19 @@ fn init_running_app(
             result_rx,
             watch_rx,
             _watcher: watcher,
+            effect_pipeline,
+            _intermediate_texture: intermediate_texture,
+            intermediate_view,
         })
     } else {
         None
     };
+
+    // T-M4-15 default effect chain: Color (no-op identity), Blur (radius 0),
+    // Transform (identity). The operator manipulates these via the egui
+    // control panel; modulator-typed fields default to Static so the chain
+    // is a pass-through until they touch a slider.
+    let effects = default_effect_chain();
 
     Ok(RunningApp {
         output,
@@ -287,8 +343,61 @@ fn init_running_app(
         svg,
         clock: Clock::new(),
         keyboard: KeyboardSource::new(),
+        color_pipeline,
+        blur_pipeline,
+        transform_pipeline,
+        effects,
         _sleep_assertion: sleep_assertion,
     })
+}
+
+/// Allocate the scratch intermediate texture used by multi-pass effects
+/// (currently only blur). Same format / dimensions as the per-layer
+/// ping-pong textures.
+fn make_intermediate_texture(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+    format: wgpu::TextureFormat,
+) -> (wgpu::Texture, wgpu::TextureView) {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("effect intermediate"),
+        size: wgpu::Extent3d {
+            width: width.max(1),
+            height: height.max(1),
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    (texture, view)
+}
+
+/// The v1 default effect chain: Color → Blur → Transform, all
+/// modulator-typed fields set to Static identity values.
+fn default_effect_chain() -> Vec<Effect> {
+    vec![
+        Effect::Color {
+            hue: Modulator::Static(0.0),
+            saturation: Modulator::Static(1.0),
+            brightness: Modulator::Static(0.0),
+            contrast: Modulator::Static(1.0),
+        },
+        Effect::Blur {
+            radius_px: Modulator::Static(0.0),
+        },
+        Effect::Transform {
+            translate: [0.0, 0.0],
+            rotate_deg: Modulator::Static(0.0),
+            scale_x: Modulator::Static(1.0),
+            scale_y: Modulator::Static(1.0),
+        },
+    ]
 }
 
 /// Acquire the next surface texture and translate wgpu 29's
@@ -403,16 +512,39 @@ fn render_test_pattern(
     })
 }
 
-/// Render the uploaded SVG layer texture as a fullscreen quad.
+/// Render the uploaded SVG layer texture, run the operator-defined
+/// effect chain over it, and present the final result on the surface.
 ///
-/// Same surface-acquire + encoder + submit + present boilerplate as
-/// `render_test_pattern`; the inner draw is delegated to
-/// [`SvgLayerPipeline::render`].
-fn render_svg(
+/// Per-frame flow:
+///   1. Blit the SVG GPU texture into `effect_pipeline.current_pair().0`
+///      (the *source* slot for the first effect). No `flip()` here —
+///      the first effect must read what we just wrote, so we leave
+///      `current_pair()` pointing at `(SVG-buffer, other-buffer)`.
+///   2. For each `Effect` in `effects`: borrow `current_pair()` inside a
+///      block so the immutable borrows are released, build `RenderCtx`,
+///      dispatch (reads `.0`, writes `.1`), drop borrows, then `flip()`.
+///      After N effects, the last destination is held in whatever buffer
+///      `final_view()` returns.
+///   3. After all effects: blit `effect_pipeline.final_view()` into the
+///      surface texture via `SvgLayerPipeline::render`.
+///
+/// Empty `effects` falls through correctly: step 1 writes the SVG into
+/// `current_pair().0` (no flip, no effects), `final_view()` returns
+/// that same buffer (it is the only buffer ever written), and step 3
+/// blits it to the surface.
+#[allow(clippy::too_many_arguments)]
+fn render_svg_with_effects(
     renderer: &Renderer,
     output: &OutputWindow,
     pipeline: &SvgLayerPipeline,
     texture_view: &wgpu::TextureView,
+    effect_pipeline: &mut EffectPipeline,
+    intermediate_view: &wgpu::TextureView,
+    color: &ColorPipeline,
+    blur: &BlurPipeline,
+    transform: &TransformPipeline,
+    effects: &[Effect],
+    clock: &Clock,
 ) -> std::result::Result<(), RenderError> {
     crate::show_day::panic_restore::run_frame_assert_unwind_safe(|| {
         let frame = match acquire_frame(output)? {
@@ -429,7 +561,48 @@ fn render_svg(
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                     label: Some("svg encoder"),
                 });
-        pipeline.render(&renderer.gpu.device, &mut encoder, &view, texture_view);
+
+        // Step 1: blit SVG GPU texture into the *source* slot of the
+        // current pair so the first effect (or the final blit, if
+        // effects is empty) reads valid content. We do NOT flip here —
+        // flipping would advance current_pair() past the SVG we just
+        // wrote, making the first effect read the wrong (uninitialized)
+        // buffer instead.
+        {
+            let (src_view, _dst_view) = effect_pipeline.current_pair();
+            pipeline.render(&renderer.gpu.device, &mut encoder, src_view, texture_view);
+        }
+
+        // Step 2: dispatch the effect chain. Each iteration: borrow
+        // current_pair() inside a block, build RenderCtx, dispatch, drop
+        // borrows, then flip().
+        for effect in effects {
+            {
+                let (src, dst) = effect_pipeline.current_pair();
+                let mut ctx = RenderCtx {
+                    device: &renderer.gpu.device,
+                    queue: &renderer.gpu.queue,
+                    encoder: &mut encoder,
+                    source_view: src,
+                    dst_view: dst,
+                    intermediate_view,
+                    color,
+                    blur,
+                    transform,
+                };
+                effect.render(&mut ctx, clock);
+            }
+            effect_pipeline.flip();
+        }
+
+        // Step 3: composite the final effect output onto the surface.
+        pipeline.render(
+            &renderer.gpu.device,
+            &mut encoder,
+            &view,
+            effect_pipeline.final_view(),
+        );
+
         renderer.gpu.queue.submit(std::iter::once(encoder.finish()));
         frame.present();
         Ok(())
@@ -506,15 +679,20 @@ impl ApplicationHandler for App {
                     state.control = None;
                 }
                 WindowEvent::RedrawRequested => {
+                    // Pre-extract disjoint borrows so the closure captures
+                    // only `effects` (the field it actually mutates) and
+                    // not the whole `state`. ControlWindow::render takes
+                    // `&mut self` on `ctrl`; its closure mutably captures
+                    // `effects`. Both are disjoint fields of `state` so
+                    // 2024-edition disjoint-field reasoning admits this,
+                    // but the explicit local makes the intent obvious.
+                    let device = &state.renderer.gpu.device;
+                    let queue = &state.renderer.gpu.queue;
+                    let effects = &mut state.effects;
                     if let Some(ctrl) = state.control.as_mut() {
-                        let result = ctrl.render(
-                            &state.renderer.gpu.device,
-                            &state.renderer.gpu.queue,
-                            |ui| {
-                                egui::CentralPanel::default()
-                                    .show_inside(ui, |ui| ui.label("rmap control"));
-                            },
-                        );
+                        let result = ctrl.render(device, queue, |ui| {
+                            crate::windows::control_panel::show(ui, effects);
+                        });
                         if let Err(e) = result {
                             tracing::warn!(?e, "control window render error");
                         }
@@ -655,13 +833,29 @@ impl ApplicationHandler for App {
                     .as_ref()
                     .is_some_and(|s| s.layer.texture_view().is_some())
                 {
-                    // Safety: we just checked is_some() above.
-                    let svg = state.svg.as_ref().unwrap();
-                    render_svg(
+                    // Safety: we just checked is_some() above. as_mut()
+                    // because the effect_pipeline.flip() inside the call
+                    // takes &mut self.
+                    let svg = state.svg.as_mut().unwrap();
+                    // Bind the texture_view borrow before re-borrowing
+                    // svg.effect_pipeline mutably, so the immut borrow on
+                    // svg.layer (texture_view) and the mut borrow on
+                    // svg.effect_pipeline don't collide. Because both are
+                    // disjoint fields of `svg` (a struct), this is fine
+                    // under disjoint-field reasoning.
+                    let texture_view = svg.layer.texture_view().unwrap();
+                    render_svg_with_effects(
                         &state.renderer,
                         &state.output,
                         &svg.pipeline,
-                        svg.layer.texture_view().unwrap(),
+                        texture_view,
+                        &mut svg.effect_pipeline,
+                        &svg.intermediate_view,
+                        &state.color_pipeline,
+                        &state.blur_pipeline,
+                        &state.transform_pipeline,
+                        &state.effects,
+                        &state.clock,
                     )
                 } else {
                     state.renderer.render_frame(&state.output)
