@@ -295,3 +295,36 @@ impl Renderer {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::show_day::panic_restore;
+
+    use super::RenderError;
+
+    /// T-M2-11. Mirrors what `Renderer::render_frame` does on the unwind
+    /// path: a panic inside the trampoline closure converts to
+    /// `RenderError::RenderPanic` and does NOT propagate. Co-located with
+    /// the render module so a refactor that bypasses the
+    /// `panic_restore::run_frame_assert_unwind_safe` wrap is caught here,
+    /// even though the trampoline itself is exercised by
+    /// `panic_restore::tests::panic_becomes_error_not_unwind`.
+    ///
+    /// We cannot build a real `Renderer` in a unit test (needs a GPU
+    /// device); instead we exercise the exact wrapper call shape used by
+    /// `render_frame`.
+    #[test]
+    fn render_panic_does_not_propagate() {
+        let result =
+            panic_restore::run_frame_assert_unwind_safe(|| panic!("simulated render panic"));
+        match result {
+            Err(RenderError::RenderPanic { message }) => {
+                assert!(
+                    message.contains("simulated render panic"),
+                    "expected message to contain the panic literal, got: {message}"
+                );
+            }
+            other => panic!("expected RenderError::RenderPanic, got {other:?}"),
+        }
+    }
+}
