@@ -137,8 +137,13 @@ impl Effect {
                 scale_x,
                 scale_y,
             } => {
+                // Schema convention: translate is in normalized output-space
+                // [-1, 1] (±1 = a full screen width / height of shift), with
+                // y-down to match the egui preview axes. The GPU shader works
+                // in NDC ([-1, 1] over half the screen, y-up), so map
+                // schema → NDC: multiply by 2 and flip y.
                 let params = crate::effects::transform::TransformParams {
-                    translate: glam::Vec2::new(translate[0], translate[1]),
+                    translate: glam::Vec2::new(translate[0] * 2.0, translate[1] * -2.0),
                     rotate: rotate_deg.value(clock).to_radians(),
                     scale: glam::Vec2::new(scale_x.value(clock), scale_y.value(clock)),
                     anchor: glam::Vec2::ZERO,

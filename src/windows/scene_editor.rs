@@ -464,6 +464,90 @@ pub fn handle_scene_input(
     }
 }
 
+/// Distinct, deterministic per-layer outline color. Cycles through an
+/// 8-entry palette by layer index. The palette is hand-picked for high
+/// contrast against typical projection content (mid-grey to dark
+/// backgrounds) and against each other on screen.
+pub fn layer_color(idx: usize) -> egui::Color32 {
+    const PALETTE: [egui::Color32; 8] = [
+        egui::Color32::from_rgb(255, 110, 130), // pink
+        egui::Color32::from_rgb(110, 200, 255), // sky
+        egui::Color32::from_rgb(180, 240, 130), // lime
+        egui::Color32::from_rgb(255, 200, 90),  // amber
+        egui::Color32::from_rgb(190, 130, 245), // violet
+        egui::Color32::from_rgb(110, 230, 200), // teal
+        egui::Color32::from_rgb(245, 150, 80),  // orange
+        egui::Color32::from_rgb(180, 180, 220), // grey-violet
+    ];
+    PALETTE[idx % PALETTE.len()]
+}
+
+/// Paint a colored, rotation-aware outline for every enabled layer.
+/// Each layer gets a deterministic per-index color (see [`layer_color`])
+/// so the operator can tell which preview rectangle belongs to which
+/// layer in the sidebar list. The currently selected layer is drawn
+/// thicker so it pops without changing its color.
+///
+/// The rect math mirrors what the shader does: the unit quad in NDC
+/// spans (-1, 1), is scaled by `(scale_x, scale_y)`, rotated around the
+/// origin (anchor=0), then translated. Mapped into normalized output-
+/// space ([0, 1] with y-down to match egui), the visible center is
+/// `0.5 + translate` and each half-extent is `scale/2`.
+pub fn paint_layer_outlines(
+    project: &Project,
+    scene: &SceneEditorState,
+    painter: &egui::Painter,
+    inner: egui::Rect,
+) {
+    let to_screen = |n: [f32; 2]| {
+        egui::pos2(
+            inner.left() + n[0] * inner.width(),
+            inner.top() + n[1] * inner.height(),
+        )
+    };
+    for (idx, layer) in project.layers.iter().enumerate() {
+        if !layer.enabled {
+            continue;
+        }
+        let (translate, scale, rotate_deg) = effective_static_transform(layer);
+        let center = [0.5 + translate[0], 0.5 + translate[1]];
+        let half = [scale[0].abs() * 0.5, scale[1].abs() * 0.5];
+        // Renderer rotates math-positive (CCW in NDC, y-up). egui screen-y
+        // is down, so to draw the same on-screen rotation we flip the
+        // sin-axis term — visually a CCW shader rotation appears CCW in
+        // the preview as well.
+        let rad = rotate_deg.to_radians();
+        let cos_r = rad.cos();
+        let sin_r = -rad.sin();
+        let signs = [(-1.0_f32, -1.0_f32), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)];
+        let corners: [egui::Pos2; 4] = std::array::from_fn(|i| {
+            let (sx, sy) = signs[i];
+            let lx = sx * half[0];
+            let ly = sy * half[1];
+            let rx = lx * cos_r - ly * sin_r;
+            let ry = lx * sin_r + ly * cos_r;
+            to_screen([center[0] + rx, center[1] + ry])
+        });
+        let selected = matches!(scene.selected, Some(Selection::Layer(i)) if i == idx);
+        let color = layer_color(idx);
+        let stroke_w = if selected { 2.5 } else { 1.25 };
+        let stroke = egui::Stroke::new(stroke_w, color);
+        for i in 0..4 {
+            painter.line_segment([corners[i], corners[(i + 1) % 4]], stroke);
+        }
+        // Label sits just above the top-left corner so it never overlaps
+        // the rect interior.
+        let label_pos = corners[0] - egui::vec2(0.0, 2.0);
+        painter.text(
+            label_pos,
+            egui::Align2::LEFT_BOTTOM,
+            &layer.id,
+            egui::FontId::proportional(11.0),
+            color,
+        );
+    }
+}
+
 /// Paint mask polygon overlays for every warp inside `inner` (the
 /// preview rect). Edges + vertex handles are drawn after the texture
 /// so they sit on top of the live image.

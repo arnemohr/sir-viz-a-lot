@@ -310,36 +310,11 @@ fn show_scene_tab(
         egui::StrokeKind::Outside,
     );
 
-    // M11: paint mask polygon overlays + draggable vertex handles before
-    // the layer outline so layer drag still wins on the body of the layer.
+    // Per-layer colored outlines for every enabled layer (selected gets a
+    // thicker stroke, same color). Painted before mask overlays so the
+    // mask handles sit on top.
+    scene_editor::paint_layer_outlines(project, scene, &painter, inner);
     scene_editor::paint_mask_overlays(project, scene, &painter, inner);
-
-    // Highlight the selected layer's static post-Transform rect. Drawn as
-    // a thin amber outline so the operator can see what's selected even
-    // after they release the drag.
-    if let Some(scene_editor::Selection::Layer(idx)) = scene.selected {
-        if let Some(layer) = project.layers.get(idx) {
-            let (translate, scale, _rot) = scene_editor::effective_static_transform(layer);
-            let half = [scale[0].abs() * 0.5, scale[1].abs() * 0.5];
-            let center = [0.5 + translate[0], 0.5 + translate[1]];
-            let to_screen = |n: [f32; 2]| {
-                egui::pos2(
-                    inner.left() + n[0] * inner.width(),
-                    inner.top() + n[1] * inner.height(),
-                )
-            };
-            let r = egui::Rect::from_min_max(
-                to_screen([center[0] - half[0], center[1] - half[1]]),
-                to_screen([center[0] + half[0], center[1] + half[1]]),
-            );
-            painter.rect_stroke(
-                r,
-                egui::CornerRadius::ZERO,
-                egui::Stroke::new(1.5, egui::Color32::from_rgb(220, 200, 90)),
-                egui::StrokeKind::Outside,
-            );
-        }
-    }
 
     // Route click + drag through the scene editor. Pointer pos is in
     // egui screen space; the editor converts to inner-rect-relative
