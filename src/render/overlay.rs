@@ -23,7 +23,8 @@ use wgpu::util::DeviceExt;
 
 use crate::effects::Effect;
 use crate::modulators::Modulator;
-use crate::project::schema::{LayerConfig, Project};
+use crate::project::schema::{LayerConfig, Project, WarpMesh};
+use crate::render::warp::solve_homography;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -293,6 +294,64 @@ fn norm_to_clip(n: [f32; 2]) -> [f32; 2] {
     [n[0] * 2.0 - 1.0, 1.0 - n[1] * 2.0]
 }
 
+/// Forward-map a point from the compositor source space (y-down [0,1]²,
+/// the same space the warp shader samples via `t_scene`) into the
+/// projector's surface space (also y-down [0,1]², the space the
+/// projector swapchain receives).
+///
+/// Walks `warps` in order. The first warp whose `source_rect` contains
+/// `p_src` claims the point, looks up the cell that contains it, builds
+/// the cell's `solve_homography` (the same call `build_warp_vertices`
+/// makes), and pushes the local `(tx, ty)` through it. Result: the
+/// overlay sees exactly the same projective + mesh distortion the
+/// shader applies to the rendered content.
+///
+/// If no warp claims the point (layer drifted off-screen, or only some
+/// `source_rect`s cover it), returns `p_src` unchanged so the overlay
+/// still draws *something* in roughly the right place — better than
+/// silently dropping a corner.
+fn warp_source_to_surface(p_src: [f32; 2], warps: &[WarpMesh]) -> [f32; 2] {
+    for warp in warps {
+        let [sx, sy, sw, sh] = warp.source_rect;
+        let inside = p_src[0] >= sx
+            && p_src[0] <= sx + sw
+            && p_src[1] >= sy
+            && p_src[1] <= sy + sh;
+        if !inside {
+            continue;
+        }
+        let rows = warp.rows as usize;
+        let cols = warp.cols as usize;
+        if rows == 0 || cols == 0 || warp.grid.len() != rows + 1 {
+            continue;
+        }
+        let fu = ((p_src[0] - sx) / sw.max(1e-6)).clamp(0.0, 1.0);
+        let fv = ((p_src[1] - sy) / sh.max(1e-6)).clamp(0.0, 1.0);
+        let gx = fu * cols as f32;
+        let gy = fv * rows as f32;
+        let ix = (gx.floor() as usize).min(cols.saturating_sub(1));
+        let iy = (gy.floor() as usize).min(rows.saturating_sub(1));
+        let tx = gx - ix as f32;
+        let ty = gy - iy as f32;
+        if warp.grid[iy].len() <= ix + 1 || warp.grid[iy + 1].len() <= ix + 1 {
+            continue;
+        }
+        let dst = [
+            warp.grid[iy][ix],
+            warp.grid[iy][ix + 1],
+            warp.grid[iy + 1][ix + 1],
+            warp.grid[iy + 1][ix],
+        ];
+        let src_unit = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+        if let Some(h) = solve_homography(src_unit, dst) {
+            let v = h * glam::Vec3::new(tx, ty, 1.0);
+            let w = v.z.abs().max(1e-8);
+            return [v.x / w, v.y / w];
+        }
+    }
+    p_src
+}
+
 /// Build the per-frame overlay line list: one rotation-aware bounding
 /// rectangle per enabled layer plus one polygon outline per warp that
 /// has a mask. `selected_layer` picks which layer (if any) to draw at
@@ -308,22 +367,33 @@ pub fn build_overlay_lines(
 ) -> Vec<OverlayLine> {
     let mut lines = Vec::new();
 
+    // Per-layer outlines: project the four edges through the same warp
+    // the shader uses, so the box on the wall tracks the projected
+    // content under corner-pin and mesh deformation. Each edge is
+    // sampled at `EDGE_SAMPLES + 1` points and emitted as that many
+    // straight segments — enough to follow the bow of a 4-point
+    // perspective without spamming the vertex buffer.
+    const EDGE_SAMPLES: usize = 16;
     for (idx, layer) in project.layers.iter().enumerate() {
         if !layer.enabled {
             continue;
         }
         let (translate, scale, rotate_deg) = effective_static_transform(layer);
-        // Clip-space center: schema translate is normalized [-1,1] with
-        // y-down; clip-space y is up. Multiply by 2 to undo "[0,1] half"
-        // (handled in effects/mod.rs for the GPU side too) and negate y.
-        let cx = translate[0] * 2.0;
-        let cy = -translate[1] * 2.0;
-        let half = [scale[0].abs(), scale[1].abs()];
+        // Layer center + half-extents in normalized output (= source)
+        // space, y-down. The same place the shader samples the layer
+        // FBO from before warping — no `* 2` here, that doubling only
+        // exists for the NDC-space matrix in transform.rs.
+        let cx = 0.5 + translate[0];
+        let cy = 0.5 + translate[1];
+        let half = [scale[0].abs() * 0.5, scale[1].abs() * 0.5];
+        // Negate sin to match the y-down convention (a math-positive
+        // rotation in the y-up shader appears CCW on the wall; do the
+        // same on the y-down overlay coords).
         let rad = rotate_deg.to_radians();
         let cos_r = rad.cos();
-        let sin_r = rad.sin();
+        let sin_r = -rad.sin();
         let signs: [(f32, f32); 4] = [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)];
-        let corners: [[f32; 2]; 4] = std::array::from_fn(|i| {
+        let corners_src: [[f32; 2]; 4] = std::array::from_fn(|i| {
             let (sx, sy) = signs[i];
             let lx = sx * half[0];
             let ly = sy * half[1];
@@ -333,19 +403,26 @@ pub fn build_overlay_lines(
         });
         let selected = selected_layer == Some(idx);
         let mut color = layer_color(idx);
-        // Selected: full alpha. Unselected: a touch dimmer so the
-        // selected layer remains the visual anchor.
         if !selected {
             color[3] = 0.75;
         }
         let thickness_px = if selected { 4.0 } else { 2.5 };
-        for i in 0..4 {
-            lines.push(OverlayLine {
-                a_clip: corners[i],
-                b_clip: corners[(i + 1) % 4],
-                color,
-                thickness_px,
-            });
+        for edge in 0..4 {
+            let a = corners_src[edge];
+            let b = corners_src[(edge + 1) % 4];
+            let mut prev = warp_source_to_surface(a, &project.warps);
+            for i in 1..=EDGE_SAMPLES {
+                let t = i as f32 / EDGE_SAMPLES as f32;
+                let p_src = [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
+                let p_surf = warp_source_to_surface(p_src, &project.warps);
+                lines.push(OverlayLine {
+                    a_clip: norm_to_clip(prev),
+                    b_clip: norm_to_clip(p_surf),
+                    color,
+                    thickness_px,
+                });
+                prev = p_surf;
+            }
         }
     }
 
