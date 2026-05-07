@@ -21,7 +21,7 @@ mod svg_layer;
 mod test_patterns;
 mod windows;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use clap::Parser;
@@ -51,7 +51,7 @@ struct Cli {
 }
 
 fn main() -> anyhow::Result<()> {
-    init_tracing();
+    let _log_guard = init_tracing();
     let cli = Cli::parse();
 
     if cli.list_monitors {
@@ -74,17 +74,49 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn init_tracing() {
+fn init_tracing() -> tracing_appender::non_blocking::WorkerGuard {
     use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("rmap=info,wgpu=warn,naga=warn"));
 
+    // Resolve ~/Library/Logs/rmap/ via $HOME. On macOS HOME is always set,
+    // but we degrade gracefully to a stderr-backed non-blocking writer so
+    // that logging-setup failure never prevents rmap from starting.
+    let log_dir: Option<PathBuf> = match std::env::var("HOME") {
+        Ok(home) => {
+            let dir = Path::new(&home).join("Library/Logs/rmap");
+            match std::fs::create_dir_all(&dir) {
+                Ok(()) => Some(dir),
+                Err(e) => {
+                    eprintln!(
+                        "warning: could not create log dir {}: {e}; file logging disabled",
+                        dir.display()
+                    );
+                    None
+                }
+            }
+        }
+        Err(_) => {
+            eprintln!("warning: $HOME not set; file logging disabled");
+            None
+        }
+    };
+
+    let (file_writer, guard) = if let Some(ref dir) = log_dir {
+        let file_appender = tracing_appender::rolling::daily(dir, "rmap.log");
+        tracing_appender::non_blocking(file_appender)
+    } else {
+        tracing_appender::non_blocking(std::io::stderr())
+    };
+
     tracing_subscriber::registry()
         .with(filter)
         .with(fmt::layer())
+        .with(fmt::layer().with_writer(file_writer).with_ansi(false))
         .init();
 
-    // TODO(M2): add `tracing_appender::rolling::daily` writing to
-    // ~/Library/Logs/rmap/. Keep the stderr layer above for dev.
+    tracing::info!(?log_dir, "logging initialized");
+
+    guard
 }
