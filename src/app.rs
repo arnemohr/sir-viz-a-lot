@@ -25,6 +25,10 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::monitor::MonitorHandle;
 use winit::window::WindowId;
 
+use crate::clock::Clock;
+use crate::controls::ControlEvent;
+use crate::controls::Source;
+use crate::controls::keyboard::KeyboardSource;
 use crate::error::{Result, RmapError};
 use crate::render::{GpuContext, RenderError, Renderer};
 use crate::show_day::sleep_assertion::SleepAssertion;
@@ -70,6 +74,13 @@ struct RunningApp {
     /// projects are T-M6-04's domain). The M1 hello-rect fallback renders
     /// when this is `None`.
     svg: Option<SvgState>,
+    /// Central time/BPM source. Updated by tap-tempo (Space key → TapTempo
+    /// event → `clock.tap()`). Modulators read from this for phase-coherent
+    /// animation. T-M4-10.
+    clock: Clock,
+    /// Buffers winit keyboard events and translates them into `ControlEvent`s
+    /// on `poll()`. T-M4-10.
+    keyboard: KeyboardSource,
     /// Held for the lifetime of the running app — `Drop` releases the
     /// `IOPMAssertion` on macOS, no-op elsewhere. Spec §6 display-sleep
     /// prevention. Field is read only by `Drop`; underscore prefix
@@ -254,6 +265,8 @@ fn init_running_app(
         renderer,
         test_patterns,
         svg,
+        clock: Clock::new(),
+        keyboard: KeyboardSource::new(),
         _sleep_assertion: sleep_assertion,
     })
 }
@@ -496,6 +509,10 @@ impl ApplicationHandler for App {
                     }
                     _ => {}
                 }
+                // T-M4-10: buffer every pressed event into KeyboardSource for
+                // the source-based control path. Unmapped keys (Escape, T, …)
+                // are silently dropped inside push_winit_key.
+                state.keyboard.push_winit_key(key_event.physical_key);
             }
             WindowEvent::Resized(new_size) => {
                 state.output.config.width = new_size.width.max(1);
@@ -503,6 +520,17 @@ impl ApplicationHandler for App {
                 state.output.recreate_surface(&state.renderer.gpu.device);
             }
             WindowEvent::RedrawRequested => {
+                // T-M4-10: drain keyboard source and dispatch ControlEvents.
+                // Only TapTempo has a consumer here; other events are handled
+                // inline (Blackout/Freeze) or come online in later tasks
+                // (SceneRecall: T-M5-12, ParamSet: v1.5 MIDI).
+                for e in state.keyboard.poll() {
+                    if let ControlEvent::TapTempo = e {
+                        state.clock.tap();
+                        tracing::debug!(bpm = state.clock.bpm(), "tap tempo");
+                    }
+                }
+
                 // Per-frame event drain: process watcher + raster results
                 // before deciding which render path to take.
                 if let Some(svg) = state.svg.as_mut() {
