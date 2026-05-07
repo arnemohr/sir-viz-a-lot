@@ -21,6 +21,10 @@ pub struct ControlWindow {
     egui_ctx: egui::Context,
     egui_state: egui_winit::State,
     egui_renderer: egui_wgpu::Renderer,
+    /// Frame counter, used solely to throttle the per-frame diagnostic log
+    /// in `render` to one line every N frames. Wrapping is fine — modulo is
+    /// what we read.
+    frame_counter: u64,
 }
 
 impl ControlWindow {
@@ -97,6 +101,7 @@ impl ControlWindow {
             egui_ctx,
             egui_state,
             egui_renderer,
+            frame_counter: 0,
         })
     }
 
@@ -134,6 +139,11 @@ impl ControlWindow {
         mut ui: F,
     ) -> Result<(), RenderError> {
         let raw_input = self.egui_state.take_egui_input(&self.window);
+        let raw_screen_rect = raw_input.screen_rect;
+        let raw_viewport_pp = raw_input
+            .viewports
+            .get(&raw_input.viewport_id)
+            .and_then(|v| v.native_pixels_per_point);
         let full_output = self.egui_ctx.run_ui(raw_input, |root_ui| {
             ui(root_ui);
         });
@@ -165,7 +175,16 @@ impl ControlWindow {
             label: Some("control window encoder"),
         });
 
-        let pixels_per_point = self.egui_state.egui_ctx().pixels_per_point();
+        // egui docs: prefer `FullOutput::pixels_per_point` for tessellation
+        // and the screen descriptor — it's the value egui used internally
+        // for this frame, so feathering / scissor scaling stay consistent.
+        // Falling back to `egui_ctx.pixels_per_point()` would also work but
+        // can drift if the ctx setting changes mid-frame.
+        let pixels_per_point = full_output.pixels_per_point;
+        let ctx_pp = self.egui_state.egui_ctx().pixels_per_point();
+        let shapes_count = full_output.shapes.len();
+        let textures_set_count = full_output.textures_delta.set.len();
+        let textures_free_count = full_output.textures_delta.free.len();
         let paint_jobs = self
             .egui_ctx
             .tessellate(full_output.shapes, pixels_per_point);
@@ -174,6 +193,32 @@ impl ControlWindow {
             size_in_pixels: [self.config.width, self.config.height],
             pixels_per_point,
         };
+
+        // Per-frame diagnostic, throttled to one line per ~120 frames (≈2 s
+        // at 60 Hz). Ungated by feature so the operator's normal `cargo run`
+        // emits it; `RUST_LOG=rmap=debug` surfaces the line. Cheap: integer
+        // arithmetic + a tracing macro that does nothing if the level is off.
+        // The operator's "dark grey, no UI" report doesn't tell us whether
+        // shapes==0 (closure never paints), shapes>0 but textures missing
+        // (no font atlas), or shapes>0 and textures present (downstream
+        // viewport / scissor / blend issue). This line discriminates.
+        if self.frame_counter % 120 == 0 {
+            tracing::debug!(
+                frame = self.frame_counter,
+                width = self.config.width,
+                height = self.config.height,
+                pixels_per_point,
+                ctx_pp,
+                ?raw_screen_rect,
+                ?raw_viewport_pp,
+                shapes = shapes_count,
+                paint_jobs = paint_jobs.len(),
+                textures_set = textures_set_count,
+                textures_free = textures_free_count,
+                "control window render frame"
+            );
+        }
+        self.frame_counter = self.frame_counter.wrapping_add(1);
 
         for (id, image_delta) in &full_output.textures_delta.set {
             self.egui_renderer
