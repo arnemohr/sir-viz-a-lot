@@ -1,0 +1,94 @@
+[package]
+name        = "rmap"
+version     = "0.1.0"
+edition     = "2024"
+rust-version = "1.85"
+description = "Minimal projection mapping tool — single-projector, single-machine, wedding-scale"
+license     = "MIT OR Apache-2.0"
+
+[[bin]]
+name = "rmap"
+path = "src/main.rs"
+
+# NOTE: egui / egui-wgpu / egui-winit / wgpu / winit form a tightly coupled
+# version set. Bump them in lockstep. Verify the matrix at
+# https://github.com/emilk/egui#integrations before pinning new majors.
+# Versions below were current at spec authoring; run `cargo update` and
+# verify before first build.
+
+[dependencies]
+# GPU + windowing
+winit = "0.30"
+wgpu  = "29"
+
+# Immediate-mode UI on the same wgpu device
+egui       = "0.34"
+egui-wgpu  = "0.34"
+egui-winit = "0.34"
+
+# Block on async wgpu calls without pulling in tokio
+pollster = "0.4"
+
+# Math
+glam = { version = "0.32", features = ["serde"] }
+
+# SVG rasterization (pure Rust, no native deps)
+resvg     = "0.47"
+usvg      = "0.47"
+tiny-skia = "0.12"
+
+# Image I/O for golden-image tests + asset handling
+image = "0.25"
+
+# Hot-reload file watching. `notify` is pulled in transitively; add a direct
+# dep when the watcher implementation in `svg_layer.rs` actually uses
+# notify::* types.
+notify-debouncer-full = "0.7"
+
+# Lock-free message passing for the off-thread SVG rasterization worker
+crossbeam-channel = "0.5"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Project-file (de)serialization
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Logging — daily rolling file appender lives behind tracing-appender
+tracing            = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender   = "0.2"
+
+# Errors — typed at boundaries, contextual at top-level
+thiserror = "2"
+anyhow    = "1"
+
+# macOS-only: display-sleep prevention, App Nap suppression, monitor names.
+# The objc2 family is the modern way to call Apple APIs from Rust; older
+# `cocoa`/`objc` crates are deprecated. Sub-crate versions move together —
+# bump them in lockstep.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2            = "0.6"
+objc2-foundation = "0.3"
+objc2-app-kit    = "0.3"
+objc2-io-kit     = "0.3"
+
+[build-dependencies]
+naga = { version = "29", features = ["wgsl-in"] }
+
+# Show-day binary: longer compile, smaller artifact, no panic-unwind machinery.
+# The renderer still uses `catch_unwind` for in-frame recovery before any
+# eventual abort path is taken.
+[profile.release-show]
+inherits      = "release"
+lto           = "fat"
+codegen-units = 1
+panic         = "abort"
+strip         = true
+
+[features]
+default = []
+# Enables the headless-wgpu golden-image tests; requires a working GPU adapter
+# at test time. Off by default so plain `cargo test` stays CPU-only.
+gpu-tests = []

@@ -1,0 +1,15 @@
+# Tooling versions for `mise install`. See https://mise.jdx.dev
+#
+# rustup users: a `rust-toolchain.toml` is intentionally NOT included to
+# avoid drift with this file. The canonical Rust version lives here. If you
+# prefer rustup, mirror the version below in a local (gitignored)
+# `rust-toolchain.toml`.
+
+[tools]
+rust = "1.92"
+"cargo:cargo-watch"  = "latest"
+"cargo:cargo-bundle" = "latest"
+
+[env]
+RUST_LOG       = "rmap=debug,wgpu=warn,naga=warn,winit=info"
+RUST_BACKTRACE = "1"
