@@ -150,6 +150,17 @@ impl ControlWindow {
         self.egui_state
             .handle_platform_output(&self.window, full_output.platform_output);
 
+        // egui emits each texture delta only once per `TextureManager::take_delta`.
+        // Upload before surface acquire: `get_current_texture` can return
+        // Occluded / Timeout / Outdated / Lost and skip rendering this redraw.
+        // If we returned early without `update_texture`, the font atlas delta is
+        // dropped forever and later frames show `textures_delta.set` empty while
+        // the GPU still has no atlas — blank UI with shapes > 0.
+        for (id, image_delta) in &full_output.textures_delta.set {
+            self.egui_renderer
+                .update_texture(device, queue, *id, image_delta);
+        }
+
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(f)
             | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
@@ -220,10 +231,6 @@ impl ControlWindow {
         }
         self.frame_counter = self.frame_counter.wrapping_add(1);
 
-        for (id, image_delta) in &full_output.textures_delta.set {
-            self.egui_renderer
-                .update_texture(device, queue, *id, image_delta);
-        }
         let user_cmd_bufs = self.egui_renderer.update_buffers(
             device,
             queue,
