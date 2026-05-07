@@ -96,3 +96,75 @@ impl Watcher {
         ))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use crossbeam_channel::TryRecvError;
+
+    use super::*;
+
+    /// Verify that three rapid writes to the same path within the debounce
+    /// window (250 ms) are coalesced into exactly one [`WatchEvent`].
+    ///
+    /// # Timing
+    ///
+    /// - 200 ms initial sleep: lets FSEvents (macOS) arm before we write.
+    ///   Without this delay the first writes can be missed because the kernel
+    ///   watcher hasn't subscribed yet.
+    /// - 3 back-to-back `fs::write` calls: complete in microseconds, well
+    ///   within the 100 ms window specified in the task.
+    /// - 500 ms post-write sleep: well past the 250 ms debounce window, so
+    ///   the debouncer has had ample time to flush.
+    #[test]
+    fn hot_reload_event_coalescing() {
+        let path = std::env::temp_dir().join("rmap_t-m3-07_coalesce.svg");
+
+        // Write a placeholder file so the watcher has something to attach to.
+        std::fs::write(&path, b"<svg/>").expect("write temp file");
+
+        // On macOS, `std::env::temp_dir()` returns `/var/folders/...` which is
+        // a symlink; FSEvents resolves it to `/private/var/folders/...`. Use
+        // the canonical path throughout so the comparison is apples-to-apples.
+        let path = std::fs::canonicalize(&path).expect("canonicalize temp path");
+
+        let (_watcher, rx) = Watcher::new(std::slice::from_ref(&path)).expect("Watcher::new");
+
+        // Give FSEvents time to arm before hammering the file.
+        std::thread::sleep(Duration::from_millis(200));
+
+        // Three back-to-back writes — no inter-write sleep.
+        std::fs::write(&path, b"<svg>1</svg>").expect("write 1");
+        std::fs::write(&path, b"<svg>2</svg>").expect("write 2");
+        std::fs::write(&path, b"<svg>3</svg>").expect("write 3");
+
+        // Wait well past the 250 ms debounce window.
+        std::thread::sleep(Duration::from_millis(500));
+
+        // Drain all events that arrived.
+        let mut events: Vec<WatchEvent> = Vec::new();
+        loop {
+            match rx.try_recv() {
+                Ok(ev) => events.push(ev),
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => break,
+            }
+        }
+
+        // Cleanup before asserting so the file is removed even on failure.
+        let _ = std::fs::remove_file(&path);
+        drop(_watcher);
+
+        assert_eq!(
+            events.len(),
+            1,
+            "expected exactly 1 coalesced WatchEvent, got {}: {events:?}",
+            events.len()
+        );
+        assert_eq!(
+            events[0].path, path,
+            "event path must match the watched file"
+        );
+    }
+}
