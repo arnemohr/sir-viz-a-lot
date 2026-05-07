@@ -33,7 +33,7 @@
 
 | Bucket | Count | Total estimate |
 |---|---:|---:|
-| Cross-cutting (X) | 5 | ~1 day |
+| Cross-cutting (X) | 6 | ~1 day |
 | Decisions (D, all resolved) | 3 | — |
 | M1 — Hello rectangle | 6 | 2 days |
 | M1.5 — Venue dry-run | 1 | ½ day calendar gate |
@@ -149,6 +149,29 @@ These can be picked up at any time; they do not depend on a milestone.
   `homography_round_trip_smoke ... ignored` instead of `... ok`. Total test
   count drops from 4 to 3 passing + 1 ignored.
 - **Estimate**: S (~5 minutes).
+
+### X-06 — Interim monitor selection flags (unblocks T-M1.5-01)
+
+- **Files**: `src/main.rs`, `src/app.rs`
+- **Scope**: Until the egui dropdown (T-M4-15) and the saved
+  `Project.output_monitor_index` (T-M6-04) land, the operator has no way
+  to point the output at a specific projector — `App::resumed` hardcodes
+  monitor index 0. Add two CLI flags:
+  - `--list-monitors`: enumerate monitors (index, name, size@position,
+    scale_factor) and exit before opening the output window.
+  - `--monitor INDEX`: override the default monitor index for the output
+    window. CLI takes precedence over `Project.output_monitor_index`
+    (which T-M6-04 will read from the project file).
+  Required to make T-M1.5-01 venue dry-run actually doable without
+  source edits.
+- **Acceptance**:
+  - `cargo run -- --list-monitors` prints monitor info and exits 0 without
+    opening a fullscreen window.
+  - `cargo run -- --monitor 1` opens the output window on monitor index
+    1 (or logs a clean error if that index is out of range).
+  - Existing `cargo run` (no flags) keeps using monitor 0.
+- **Plan ref**: precedes T-M1.5-01.
+- **Estimate**: S (~½ hour).
 
 ---
 
@@ -1076,7 +1099,7 @@ M7   ── any of T-M7-01..08, ordered by current need
 
 | Milestone | Tasks | S | M | L | Total est. |
 |---|---:|---:|---:|---:|---:|
-| Cross-cutting | 5 | 4 | 1 | 0 | ~1 day |
+| Cross-cutting | 6 | 5 | 1 | 0 | ~1 day |
 | M1 | 6 | 2 | 4 | 0 | 2 days |
 | M1.5 | 1 | 1 | 0 | 0 | ½ day cal. |
 | M2 | 11 | 6 | 5 | 0 | 3 days |

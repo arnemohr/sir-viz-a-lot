@@ -40,6 +40,13 @@ pub struct App {
     /// `--autostart` from CLI. Stored, not acted upon, at M1; T-M6-04
     /// turns this on for real.
     autostart: bool,
+    /// Operator-supplied `--monitor INDEX` override.
+    ///
+    /// Interim v1 path: this is the only way to point the output at a
+    /// non-default monitor until the egui dropdown (T-M4-15) and the saved
+    /// `Project.output_monitor_index` (T-M6-04) land. CLI value takes
+    /// precedence over both. `None` here falls back to monitor 0.
+    monitor_override: Option<usize>,
     /// Lazily-initialised GPU + window state.
     state: Option<RunningApp>,
 }
@@ -52,7 +59,11 @@ struct RunningApp {
 }
 
 impl App {
-    pub fn run(project: Option<PathBuf>, autostart: bool) -> Result<()> {
+    pub fn run(
+        project: Option<PathBuf>,
+        autostart: bool,
+        monitor_index: Option<usize>,
+    ) -> Result<()> {
         let event_loop =
             EventLoop::new().map_err(|e| RmapError::Other(format!("event loop: {e}")))?;
         event_loop.set_control_flow(ControlFlow::Poll);
@@ -60,6 +71,7 @@ impl App {
         let mut app = App {
             project,
             autostart,
+            monitor_override: monitor_index,
             state: None,
         };
 
@@ -68,6 +80,68 @@ impl App {
             .map_err(|e| RmapError::Other(format!("run_app: {e}")))?;
 
         Ok(())
+    }
+
+    /// Enumerate winit-reported monitors and print them to stdout, then exit.
+    ///
+    /// Operator-facing CLI output (driven by `--list-monitors`) — uses
+    /// `println!` rather than `tracing::info!` because the user typed a
+    /// command and expects its output on stdout, not in log telemetry.
+    ///
+    /// Implementation note: winit 0.30 only exposes `available_monitors()` on
+    /// `ActiveEventLoop`, so we have to spin up a real `EventLoop` and
+    /// drive it via `ApplicationHandler::resumed`. We exit immediately —
+    /// no window or GPU device is created.
+    pub fn print_monitors() -> Result<()> {
+        let event_loop =
+            EventLoop::new().map_err(|e| RmapError::Other(format!("event loop: {e}")))?;
+        event_loop.set_control_flow(ControlFlow::Poll);
+
+        let mut handler = ListMonitorsApp { printed: false };
+        event_loop
+            .run_app(&mut handler)
+            .map_err(|e| RmapError::Other(format!("run_app: {e}")))?;
+        Ok(())
+    }
+}
+
+/// One-shot `ApplicationHandler` that prints the monitor list on the first
+/// `resumed` callback and exits the loop. Does not open a window or
+/// initialize wgpu.
+struct ListMonitorsApp {
+    printed: bool,
+}
+
+impl ApplicationHandler for ListMonitorsApp {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        if self.printed {
+            return;
+        }
+        self.printed = true;
+
+        let monitors = crate::monitors::list(event_loop);
+        println!("Monitors detected by winit (use --monitor INDEX to pick):");
+        if monitors.is_empty() {
+            println!("  (none reported)");
+        } else {
+            for m in &monitors {
+                println!(
+                    "  {}  {:?}   {}x{} @ ({},{})    scale {:.2}",
+                    m.index, m.name, m.size.0, m.size.1, m.position.0, m.position.1, m.scale_factor,
+                );
+            }
+        }
+
+        event_loop.exit();
+    }
+
+    fn window_event(
+        &mut self,
+        _event_loop: &ActiveEventLoop,
+        _window_id: WindowId,
+        _event: WindowEvent,
+    ) {
+        // No window is created, so nothing to do here.
     }
 }
 
@@ -98,11 +172,19 @@ impl ApplicationHandler for App {
             return;
         }
 
-        // T-M6-04 will replace this with the saved index from a loaded
-        // Project. At M1 we have not loaded one, so use the first monitor.
+        // X-06: CLI `--monitor INDEX` is the v1 interim override. T-M6-04
+        // will additionally read `Project.output_monitor_index`; T-M4-15
+        // adds the egui dropdown. Until then, fall back to monitor 0.
         let _ = (&self.project, self.autostart);
-        let monitor_index = 0_usize;
+        let monitor_index = self.monitor_override.unwrap_or(0);
         let monitor = event_loop.available_monitors().nth(monitor_index);
+        if monitor.is_none() {
+            tracing::warn!(
+                requested = monitor_index,
+                available = event_loop.available_monitors().count(),
+                "requested monitor index out of range; falling back to platform default",
+            );
+        }
 
         match init_running_app(event_loop, monitor) {
             Ok(running) => {

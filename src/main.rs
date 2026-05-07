@@ -37,14 +37,40 @@ struct Cli {
     /// Open the saved output window automatically on startup
     #[arg(long)]
     autostart: bool,
+
+    /// Print the list of monitors winit reports and exit. Useful for
+    /// figuring out which `--monitor INDEX` to pass.
+    #[arg(long = "list-monitors")]
+    list_monitors: bool,
+
+    /// Index of the monitor to open the output window on. Defaults to 0
+    /// (or the saved index from `Project.output_monitor_index` once
+    /// T-M6-04 lands). CLI takes precedence over the project file.
+    #[arg(long = "monitor", value_name = "INDEX")]
+    monitor: Option<usize>,
 }
 
 fn main() -> anyhow::Result<()> {
     init_tracing();
     let cli = Cli::parse();
-    tracing::info!(project = ?cli.project, autostart = cli.autostart, "rmap starting");
-    App::run(cli.project.clone(), cli.autostart)
-        .with_context(|| format!("project={:?}, autostart={}", cli.project, cli.autostart))?;
+
+    if cli.list_monitors {
+        App::print_monitors()?;
+        return Ok(());
+    }
+
+    tracing::info!(
+        project = ?cli.project,
+        autostart = cli.autostart,
+        monitor = ?cli.monitor,
+        "rmap starting",
+    );
+    App::run(cli.project.clone(), cli.autostart, cli.monitor).with_context(|| {
+        format!(
+            "project={:?}, autostart={}, monitor={:?}",
+            cli.project, cli.autostart, cli.monitor
+        )
+    })?;
     Ok(())
 }
 
