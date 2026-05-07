@@ -81,6 +81,12 @@ pub struct Project {
     pub brightness: f32,
     #[serde(default = "default_one")]
     pub contrast: f32,
+    /// Seconds to interpolate between scenes on recall. `0.0` = instant snap
+    /// (the default; preserves M5 behaviour). Crossfades only fire when both
+    /// snapshots share the same layer paths in the same order; structural
+    /// differences fall back to instant snap.
+    #[serde(default)]
+    pub crossfade_duration_s: f32,
 }
 
 impl Default for Project {
@@ -98,6 +104,7 @@ impl Default for Project {
             gamma: 1.0,
             brightness: 0.0,
             contrast: 1.0,
+            crossfade_duration_s: 0.0,
         }
     }
 }

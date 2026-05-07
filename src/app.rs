@@ -34,7 +34,7 @@ use crate::effects::transform::TransformPipeline;
 use crate::effects::RenderCtx;
 use crate::error::{Result, RmapError};
 use crate::project::schema::{self, Project};
-use crate::project::{restore, ProjectError};
+use crate::project::{interpolate, restore, snapshot, snapshots_share_layer_topology, ProjectError};
 use crate::render::compositor::Compositor;
 use crate::render::gamma::GammaPipeline;
 use crate::render::pipeline::EffectPipeline;
@@ -102,6 +102,90 @@ struct RunningApp {
     /// Set when the session was started from a `*.rmap.json` CLI argument.
     #[allow(dead_code)]
     project_file_path: Option<PathBuf>,
+    /// In-flight scene crossfade. `None` when no fade is active. Driven from
+    /// `RedrawRequested` per frame; cleared at `t = 1`.
+    crossfade: Option<ActiveCrossfade>,
+}
+
+/// One scene-to-scene fade, scheduled by `ControlEvent::SceneRecall` when
+/// `Project::crossfade_duration_s > 0` and both snapshots share layer
+/// topology. Holds the original endpoints so each frame's interpolation
+/// re-derives the live state from immutable inputs (no error accumulation).
+struct ActiveCrossfade {
+    from: serde_json::Value,
+    to: serde_json::Value,
+    started_at: std::time::Instant,
+    duration_s: f32,
+}
+
+/// Outcome from scheduling a scene recall: did the live `Project` mutate
+/// in a way that requires `rebuild_layers`? Crossfade ticks never need
+/// a rebuild because they are gated on identical layer topology.
+#[derive(Clone, Copy)]
+enum RecallOutcome {
+    /// Recall hit a non-existent slot; nothing changed.
+    NoSlot,
+    /// Crossfade scheduled; render loop ticks it. No immediate rebuild.
+    Scheduled,
+    /// Instant snap landed (either zero duration or topology mismatch).
+    /// Caller should rebuild GPU layer state.
+    Snapped,
+    /// Snap path failed inside `restore`. Project unchanged.
+    Failed,
+}
+
+/// Decide whether a recall snaps instantly or schedules a crossfade. Owns
+/// the topology-compatibility check; mutates `crossfade` and `project`
+/// per the chosen path. Used by both the keyboard and UI recall callers
+/// so the policy lives in one place.
+fn schedule_scene_recall(state: &mut RunningApp, slot: usize) -> RecallOutcome {
+    let target = match state.project.scenes.get(slot).map(|s| s.snapshot.clone()) {
+        Some(t) => t,
+        None => return RecallOutcome::NoSlot,
+    };
+    let cur = snapshot(&state.project);
+    let dur = state.project.crossfade_duration_s.max(0.0);
+    let same_topology = snapshots_share_layer_topology(&cur, &target);
+    if dur < 1e-3 || !same_topology {
+        match restore(&mut state.project, &target) {
+            Ok(()) => {
+                state.crossfade = None;
+                RecallOutcome::Snapped
+            }
+            Err(err) => {
+                tracing::warn!(?err, slot, "scene restore failed");
+                RecallOutcome::Failed
+            }
+        }
+    } else {
+        state.crossfade = Some(ActiveCrossfade {
+            from: cur,
+            to: target,
+            started_at: std::time::Instant::now(),
+            duration_s: dur,
+        });
+        tracing::info!(slot, duration_s = dur, "scene crossfade scheduled");
+        RecallOutcome::Scheduled
+    }
+}
+
+/// Rebuild GPU layer state for the current `project.layers`. Common
+/// post-snap hook so the keyboard and UI recall paths stay aligned.
+fn rebuild_layers_for_state(state: &mut RunningApp) {
+    let device = &state.renderer.gpu.device;
+    let w = state.output.config.width.max(1);
+    let h = state.output.config.height.max(1);
+    let fmt = state.output.config.format;
+    match rebuild_layers(device, &state.project, w, h, fmt) {
+        Ok(layers) => {
+            state.layers = layers;
+            state.control_panel.selected_layer = state
+                .control_panel
+                .selected_layer
+                .min(state.project.layers.len().saturating_sub(1));
+        }
+        Err(e) => tracing::error!(?e, "rebuild layers failed"),
+    }
 }
 
 /// Per-layer SVG raster + effect ping-pong + worker.
@@ -354,6 +438,7 @@ fn init_running_app(
         transform_pipeline,
         _sleep_assertion: sleep_assertion,
         project_file_path,
+        crossfade: None,
     })
 }
 
@@ -886,19 +971,18 @@ impl ApplicationHandler for App {
                             tracing::warn!(?e, "control window render error");
                         }
                     }
-                    if matches!(panel_action, ControlPanelAction::RebuildLayers) {
-                        let w = state.output.config.width.max(1);
-                        let h = state.output.config.height.max(1);
-                        let fmt = state.output.config.format;
-                        match rebuild_layers(device, &state.project, w, h, fmt) {
-                            Ok(layers) => {
-                                state.layers = layers;
-                                state.control_panel.selected_layer = state
-                                    .control_panel
-                                    .selected_layer
-                                    .min(state.project.layers.len().saturating_sub(1));
+                    match panel_action {
+                        ControlPanelAction::None => {}
+                        ControlPanelAction::RebuildLayers => {
+                            rebuild_layers_for_state(state);
+                        }
+                        ControlPanelAction::SceneRecall(slot) => {
+                            if matches!(
+                                schedule_scene_recall(state, slot),
+                                RecallOutcome::Snapped
+                            ) {
+                                rebuild_layers_for_state(state);
                             }
-                            Err(e) => tracing::error!(?e, "rebuild layers failed"),
                         }
                     }
                 }
@@ -967,30 +1051,8 @@ impl ApplicationHandler for App {
                             tracing::debug!(bpm = state.clock.bpm(), "tap tempo");
                         }
                         ControlEvent::SceneRecall(idx) => {
-                            let snap = state
-                                .project
-                                .scenes
-                                .get(idx)
-                                .map(|sc| sc.snapshot.clone());
-                            if let Some(snapshot) = snap {
-                                if let Err(err) = restore(&mut state.project, &snapshot) {
-                                    tracing::warn!(?err, slot = idx, "scene restore failed");
-                                } else {
-                                    let device = &state.renderer.gpu.device;
-                                    let w = state.output.config.width.max(1);
-                                    let h = state.output.config.height.max(1);
-                                    let fmt = state.output.config.format;
-                                    match rebuild_layers(device, &state.project, w, h, fmt) {
-                                        Ok(layers) => {
-                                            state.layers = layers;
-                                            state.control_panel.selected_layer = state
-                                                .control_panel
-                                                .selected_layer
-                                                .min(state.project.layers.len().saturating_sub(1));
-                                        }
-                                        Err(err) => tracing::error!(?err, "scene recall rebuild failed"),
-                                    }
-                                }
+                            if matches!(schedule_scene_recall(state, idx), RecallOutcome::Snapped) {
+                                rebuild_layers_for_state(state);
                             }
                         }
                         ControlEvent::Blackout | ControlEvent::Freeze | ControlEvent::ParamSet { .. } => {}
@@ -1035,6 +1097,23 @@ impl ApplicationHandler for App {
                         } else {
                             tracing::debug!(generation = done.generation, "svg uploaded to gpu");
                         }
+                    }
+                }
+
+                // T-M7-04: tick the in-flight scene crossfade. Topology was
+                // already verified at scheduling time so neither endpoint
+                // changes layer count or paths — no `rebuild_layers` needed
+                // mid-fade. Numeric fields blend via `interpolate`; categorical
+                // fields snap at `t = 0.5`.
+                if let Some(cf) = state.crossfade.as_ref() {
+                    let elapsed = cf.started_at.elapsed().as_secs_f32();
+                    let t = (elapsed / cf.duration_s.max(1e-3)).clamp(0.0, 1.0);
+                    let interp = interpolate(&cf.from, &cf.to, t);
+                    if let Err(err) = restore(&mut state.project, &interp) {
+                        tracing::warn!(?err, "crossfade tick restore failed; aborting fade");
+                        state.crossfade = None;
+                    } else if t >= 1.0 {
+                        state.crossfade = None;
                     }
                 }
 

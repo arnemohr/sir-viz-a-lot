@@ -7,7 +7,7 @@ use egui::Ui;
 use crate::effects::Effect;
 use crate::modulators::Modulator;
 use crate::project::schema::{self, BlendMode, Project, Scene};
-use crate::project::{restore, snapshot};
+use crate::project::snapshot;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ControlTab {
@@ -39,6 +39,10 @@ pub enum ControlPanelAction {
     None,
     /// Reload GPU layer runtime from `project.layers` paths.
     RebuildLayers,
+    /// Operator clicked "recall" on a scene slot. App routes through the same
+    /// scheduling logic as the keyboard hotkey so crossfade
+    /// (`Project::crossfade_duration_s`) is honored from the UI too.
+    SceneRecall(usize),
 }
 
 /// Render the control panel. Mutates `project` in place.
@@ -463,6 +467,14 @@ fn show_mapping_tab(ui: &mut Ui, project: &mut Project) {
 fn show_scenes_tab(ui: &mut Ui, project: &mut Project) -> ControlPanelAction {
     let mut action = ControlPanelAction::None;
     ui.label("Slots 1–9 (keyboard recall). Save captures full project JSON.");
+    ui.add(
+        egui::Slider::new(&mut project.crossfade_duration_s, 0.0..=5.0)
+            .text("crossfade duration (s)"),
+    );
+    ui.label(
+        "Crossfade only fires when both scenes share the same layer paths in the same order; structural changes snap instantly.",
+    );
+    ui.add_space(4.0);
     for slot in 0..9 {
         ui.horizontal(|ui| {
             ui.label(format!("{}", slot + 1));
@@ -475,13 +487,11 @@ fn show_scenes_tab(ui: &mut Ui, project: &mut Project) -> ControlPanelAction {
                 }
                 project.scenes[slot].snapshot = snapshot(project);
             }
-            if ui.button("recall").clicked() {
-                if let Some(sc) = project.scenes.get(slot) {
-                    let snap = sc.snapshot.clone();
-                    if restore(project, &snap).is_ok() {
-                        action = ControlPanelAction::RebuildLayers;
-                    }
-                }
+            // App routes recall through the same scheduling logic as the
+            // keyboard hotkey (T-M7-04). Don't `restore` here directly —
+            // that would bypass crossfade scheduling.
+            if ui.button("recall").clicked() && project.scenes.get(slot).is_some() {
+                action = ControlPanelAction::SceneRecall(slot);
             }
         });
     }

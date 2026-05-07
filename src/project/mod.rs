@@ -96,6 +96,87 @@ pub fn restore(project: &mut Project, snap: &serde_json::Value) -> Result<(), se
     Ok(())
 }
 
+/// Linear-interpolate two snapshots field-by-field.
+///
+/// Numbers blend; objects recurse; equal-length arrays recurse element-wise.
+/// Everything else (strings, booleans, mismatched-length arrays, null,
+/// type-mismatched pairs) snaps at the midpoint — so a categorical change
+/// like `BlendMode::Normal -> Add` flips at `t = 0.5`.
+///
+/// Used by the scene crossfade path (T-M7-04) when
+/// [`Project::crossfade_duration_s`] is non-zero AND the two snapshots
+/// share the same layer paths. Structural mismatches must be filtered
+/// out by the caller — interpolating across them is well-defined here
+/// (mid-point snap) but produces visible jolts that defeat the point of
+/// a fade.
+pub fn interpolate(
+    a: &serde_json::Value,
+    b: &serde_json::Value,
+    t: f32,
+) -> serde_json::Value {
+    use serde_json::Value::{Array, Number, Object};
+    let t = t.clamp(0.0, 1.0);
+    match (a, b) {
+        (Number(na), Number(nb)) => {
+            let fa = na.as_f64().unwrap_or(0.0);
+            let fb = nb.as_f64().unwrap_or(0.0);
+            let v = fa + (fb - fa) * t as f64;
+            serde_json::Number::from_f64(v)
+                .map(serde_json::Value::Number)
+                .unwrap_or_else(|| if t < 0.5 { a.clone() } else { b.clone() })
+        }
+        (Array(aa), Array(bb)) if aa.len() == bb.len() => Array(
+            aa.iter()
+                .zip(bb.iter())
+                .map(|(x, y)| interpolate(x, y, t))
+                .collect(),
+        ),
+        (Object(ao), Object(bo)) => {
+            let mut out = serde_json::Map::with_capacity(ao.len().max(bo.len()));
+            for (k, va) in ao.iter() {
+                match bo.get(k) {
+                    Some(vb) => {
+                        out.insert(k.clone(), interpolate(va, vb, t));
+                    }
+                    None if t < 0.5 => {
+                        out.insert(k.clone(), va.clone());
+                    }
+                    None => {}
+                }
+            }
+            for (k, vb) in bo.iter() {
+                if !ao.contains_key(k) && t >= 0.5 {
+                    out.insert(k.clone(), vb.clone());
+                }
+            }
+            Object(out)
+        }
+        _ => {
+            if t < 0.5 {
+                a.clone()
+            } else {
+                b.clone()
+            }
+        }
+    }
+}
+
+/// True when both snapshots have a `layers` array of equal length and
+/// matching `svg_path` per index. Used to gate crossfade scheduling: a
+/// structural difference forces the recall to snap instantly so the
+/// renderer's per-layer GPU state stays consistent with `project.layers`.
+pub fn snapshots_share_layer_topology(a: &serde_json::Value, b: &serde_json::Value) -> bool {
+    let la = a.get("layers").and_then(|v| v.as_array());
+    let lb = b.get("layers").and_then(|v| v.as_array());
+    match (la, lb) {
+        (Some(la), Some(lb)) if la.len() == lb.len() => la
+            .iter()
+            .zip(lb.iter())
+            .all(|(x, y)| x.get("svg_path") == y.get("svg_path")),
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -203,5 +284,55 @@ mod tests {
             serde_json::to_value(&p).unwrap(),
             serde_json::to_value(&q).unwrap()
         );
+    }
+
+    #[test]
+    fn interpolate_numbers_linearly() {
+        let a = serde_json::json!({"x": 0.0});
+        let b = serde_json::json!({"x": 10.0});
+        let mid = interpolate(&a, &b, 0.5);
+        let x = mid["x"].as_f64().expect("number");
+        assert!((x - 5.0).abs() < 1e-6, "got {x}");
+    }
+
+    #[test]
+    fn interpolate_strings_snap_at_midpoint() {
+        let a = serde_json::json!("alpha");
+        let b = serde_json::json!("beta");
+        assert_eq!(interpolate(&a, &b, 0.4), a);
+        assert_eq!(interpolate(&a, &b, 0.6), b);
+    }
+
+    #[test]
+    fn interpolate_nested_objects() {
+        let a = serde_json::json!({"o": {"x": 0.0, "name": "a"}});
+        let b = serde_json::json!({"o": {"x": 10.0, "name": "b"}});
+        let m = interpolate(&a, &b, 0.25);
+        let x = m["o"]["x"].as_f64().expect("number");
+        assert!((x - 2.5).abs() < 1e-6);
+        assert_eq!(m["o"]["name"].as_str(), Some("a"));
+    }
+
+    #[test]
+    fn interpolate_equal_length_arrays_recurse() {
+        let a = serde_json::json!([0.0, 100.0]);
+        let b = serde_json::json!([10.0, 200.0]);
+        let m = interpolate(&a, &b, 0.5);
+        assert!((m[0].as_f64().unwrap() - 5.0).abs() < 1e-6);
+        assert!((m[1].as_f64().unwrap() - 150.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn snapshots_topology_matches_when_paths_align() {
+        let a = serde_json::json!({"layers": [{"svg_path": "/x.svg", "id": "a"}]});
+        let b = serde_json::json!({"layers": [{"svg_path": "/x.svg", "id": "renamed"}]});
+        assert!(snapshots_share_layer_topology(&a, &b));
+    }
+
+    #[test]
+    fn snapshots_topology_diverges_on_path_change() {
+        let a = serde_json::json!({"layers": [{"svg_path": "/x.svg"}]});
+        let b = serde_json::json!({"layers": [{"svg_path": "/y.svg"}]});
+        assert!(!snapshots_share_layer_topology(&a, &b));
     }
 }
