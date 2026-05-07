@@ -38,7 +38,8 @@ impl SvgLayerPipeline {
         });
 
         // Bind group layout: binding 0 = 2-D float texture (fragment-visible),
-        //                    binding 1 = filtering sampler (fragment-visible).
+        //                    binding 1 = filtering sampler (fragment-visible),
+        //                    binding 2 = fit-mode uniform (T-M8-04).
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("svg layer bgl"),
             entries: &[
@@ -56,6 +57,16 @@ impl SvgLayerPipeline {
                     binding: 1,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: std::num::NonZeroU64::new(16),
+                    },
                     count: None,
                 },
             ],
@@ -124,15 +135,24 @@ impl SvgLayerPipeline {
         }
     }
 
-    /// Render `texture_view` (the uploaded SVG raster) as a fullscreen quad
+    /// Render `texture_view` (the uploaded raster) as a fullscreen quad
     /// into `dst`. Builds a fresh bind group per call; clears `dst` to
     /// transparent before sampling so only ink contributes opacity upstream.
+    ///
+    /// `fit_uniform` is a per-layer 16-byte buffer the caller has filled
+    /// with `[fit_mode, aspect_layer, focal_x, focal_y]` (see
+    /// `textured_quad.wgsl`). For SVG layers pass `[0, 1, 0.5, 0.5]`
+    /// (Stretch + 1:1) — the resvg path renders to a square pixmap so
+    /// stretch is identity. For Image layers fill in the actual
+    /// `LayerKind::Image::{fit, focal}` and the texture's true aspect.
+    #[allow(clippy::too_many_arguments)]
     pub fn render(
         &self,
         device: &wgpu::Device,
         encoder: &mut wgpu::CommandEncoder,
         dst: &wgpu::TextureView,
         texture_view: &wgpu::TextureView,
+        fit_uniform: &wgpu::Buffer,
     ) {
         // Fresh bind group per frame: cheap on wgpu, necessary because the
         // texture view may have been replaced since the last upload.
@@ -147,6 +167,10 @@ impl SvgLayerPipeline {
                 wgpu::BindGroupEntry {
                     binding: 1,
                     resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: fit_uniform.as_entire_binding(),
                 },
             ],
         });

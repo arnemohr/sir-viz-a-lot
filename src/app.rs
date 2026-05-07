@@ -264,9 +264,20 @@ struct LayerState {
     blur_uniform: wgpu::Buffer,
     transform_uniform: wgpu::Buffer,
     compositor_uniform: wgpu::Buffer,
+    /// Per-layer fit-mode uniform consumed by the textured-quad shader
+    /// (`textured_quad.wgsl`). 16 bytes: `[fit_mode, aspect, focal_x, focal_y]`.
+    /// SVG layers always write `[0, 1, 0.5, 0.5]` (Stretch + identity);
+    /// Image layers write per `LayerKind::Image` fields plus the texture's
+    /// actual aspect (T-M8-04).
+    fit_uniform: wgpu::Buffer,
+    /// Cached texture aspect (`width / height`) for the most recent upload.
+    /// Image layers learn it from `image_layer::upload_image_rgba8`; SVG
+    /// layers stay at `1.0` (resvg renders a square pixmap).
+    texture_aspect: f32,
 }
 
 fn create_layer_uniform_buffers(device: &wgpu::Device) -> (
+    wgpu::Buffer,
     wgpu::Buffer,
     wgpu::Buffer,
     wgpu::Buffer,
@@ -285,6 +296,7 @@ fn create_layer_uniform_buffers(device: &wgpu::Device) -> (
         mk("layer blur uniform", 16),
         mk("layer transform uniform", 64),
         mk("layer compositor uniform", 16),
+        mk("layer fit uniform", 16),
     )
 }
 
@@ -591,6 +603,7 @@ fn rebuild_layers(
         let layer_id = LayerId::next();
         let generation = 1u64;
 
+        let mut texture_aspect = 1.0_f32;
         match &lc.kind {
             schema::LayerKind::Svg { .. } => {
                 // Existing path: enqueue raster job, worker reads file +
@@ -610,6 +623,7 @@ fn rebuild_layers(
                 match crate::image_layer::upload_image_rgba8(device, queue, path) {
                     Ok((texture, view, dims)) => {
                         layer.set_uploaded_texture(texture, view);
+                        texture_aspect = dims.0.max(1) as f32 / dims.1.max(1) as f32;
                         tracing::info!(
                             path = %path.display(),
                             width = dims.0,
@@ -626,7 +640,7 @@ fn rebuild_layers(
             }
         }
 
-        let (color_uniform, blur_uniform, transform_uniform, compositor_uniform) =
+        let (color_uniform, blur_uniform, transform_uniform, compositor_uniform, fit_uniform) =
             create_layer_uniform_buffers(device);
         out.push(LayerState {
             layer,
@@ -643,6 +657,8 @@ fn rebuild_layers(
             blur_uniform,
             transform_uniform,
             compositor_uniform,
+            fit_uniform,
+            texture_aspect,
         });
     }
     Ok(out)
@@ -920,10 +936,44 @@ fn render_m5_pipeline(
             let Some(tex_view) = ls.layer.texture_view() else {
                 continue;
             };
+            // T-M8-04: write per-layer fit-mode uniform.
+            //   SVG layers: Stretch + identity aspect (resvg pixmap is
+            //   sized to the output; stretching is the no-op case).
+            //   Image layers: Cover/Contain/Stretch + texture's actual
+            //   aspect + focal.
+            let (mode_id, focal) = match &cfg.kind {
+                schema::LayerKind::Svg { .. } => (0u32, [0.5f32, 0.5]),
+                schema::LayerKind::Image { fit, focal, .. } => {
+                    let id = match fit {
+                        schema::FitMode::Stretch => 0u32,
+                        schema::FitMode::Cover => 1,
+                        schema::FitMode::Contain => 2,
+                    };
+                    (id, *focal)
+                }
+            };
+            let fit_data: [f32; 4] = [
+                mode_id as f32,
+                ls.texture_aspect,
+                focal[0],
+                focal[1],
+            ];
+            let mut fit_bytes = [0u8; 16];
+            for (i, f) in fit_data.iter().enumerate() {
+                fit_bytes[i * 4..(i + 1) * 4].copy_from_slice(&f.to_le_bytes());
+            }
+            renderer.gpu.queue.write_buffer(&ls.fit_uniform, 0, &fit_bytes);
+
             ls.effect_pipeline.reset_for_layer_pass();
             {
                 let (src_view, _dst_view) = ls.effect_pipeline.current_pair();
-                svg_pipeline.render(&renderer.gpu.device, &mut encoder, src_view, tex_view);
+                svg_pipeline.render(
+                    &renderer.gpu.device,
+                    &mut encoder,
+                    src_view,
+                    tex_view,
+                    &ls.fit_uniform,
+                );
             }
             for effect in &cfg.effects {
                 {
@@ -1258,8 +1308,10 @@ impl ApplicationHandler for App {
                                     &state.renderer.gpu.queue,
                                     &asset_path,
                                 ) {
-                                    Ok((tex, view, _)) => {
+                                    Ok((tex, view, dims)) => {
                                         ls.layer.set_uploaded_texture(tex, view);
+                                        ls.texture_aspect =
+                                            dims.0.max(1) as f32 / dims.1.max(1) as f32;
                                         tracing::debug!(
                                             layer = i,
                                             path = %asset_path.display(),
