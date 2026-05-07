@@ -97,6 +97,33 @@ pub fn restore(project: &mut Project, snap: &serde_json::Value) -> Result<(), se
     Ok(())
 }
 
+/// Restore a *scene* snapshot — same as [`restore`] except `project.scenes`
+/// and `project.crossfade_duration_s` are preserved.
+///
+/// Why: [`snapshot`] captures the full Project including the scenes vec
+/// and the live crossfade-duration setting. A naïve `restore` therefore
+/// overwrites the slot list with whatever was saved when this snapshot
+/// was first taken, deleting any scenes saved later. The user-facing
+/// symptom: save slot 1, modify, save slot 2, recall slot 1 — slot 2's
+/// saved snapshot is gone, and a subsequent "recall slot 2" silently
+/// no-ops because the slot has been wiped.
+///
+/// `crossfade_duration_s` is preserved because it's a session-level
+/// control (the operator's chosen fade time) rather than scene-level
+/// state — restoring it from a snapshot taken before the operator
+/// adjusted the slider would surprise them mid-show.
+pub fn restore_scene(
+    project: &mut Project,
+    snap: &serde_json::Value,
+) -> Result<(), serde_json::Error> {
+    let saved_scenes = std::mem::take(&mut project.scenes);
+    let saved_crossfade = project.crossfade_duration_s;
+    restore(project, snap)?;
+    project.scenes = saved_scenes;
+    project.crossfade_duration_s = saved_crossfade;
+    Ok(())
+}
+
 /// Linear-interpolate two snapshots field-by-field.
 ///
 /// Numbers blend; objects recurse; equal-length arrays recurse element-wise.
@@ -294,6 +321,136 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&p).unwrap(),
             serde_json::to_value(&q).unwrap()
+        );
+    }
+
+    /// Re-creates the user's reported flow: save slot 0, modify, save
+    /// slot 1, recall slot 0. The layer should snap back to its
+    /// scene-0 state. Was failing in practice because the snapshot's
+    /// embedded `scenes` field clobbered the live slot list on recall
+    /// — this test proves the layer-state half of the round-trip is
+    /// fine, then [`recall_preserves_other_slots`] covers the slot-
+    /// list bug.
+    #[test]
+    fn save_modify_save_recall_restores_first_layer_state() {
+        use crate::effects::Effect;
+        use crate::modulators::Modulator;
+
+        let mut p = Project::default();
+        p.layers.push(LayerConfig {
+            id: "a".into(),
+            kind: LayerKind::Svg {
+                svg_path: PathBuf::from("/tmp/x.svg"),
+            },
+            enabled: true,
+            transform: crate::project::schema::Transform2D::default(),
+            effects: vec![Effect::Transform {
+                translate: [0.1, 0.0],
+                rotate_deg: Modulator::Static(0.0),
+                scale_x: Modulator::Static(1.0),
+                scale_y: Modulator::Static(1.0),
+            }],
+            blend_mode: BlendMode::Normal,
+            opacity: 1.0,
+        });
+        p.scenes.push(Scene {
+            name: "1".into(),
+            snapshot: serde_json::json!({}),
+        });
+        p.scenes[0].snapshot = snapshot(&p);
+
+        // Move
+        if let Effect::Transform { translate, .. } = &mut p.layers[0].effects[0] {
+            *translate = [0.5, 0.0];
+        }
+        p.scenes.push(Scene {
+            name: "2".into(),
+            snapshot: serde_json::json!({}),
+        });
+        p.scenes[1].snapshot = snapshot(&p);
+
+        // Recall scene 1
+        let target = p.scenes[0].snapshot.clone();
+        restore(&mut p, &target).expect("restore");
+        match &p.layers[0].effects[0] {
+            Effect::Transform { translate, .. } => assert_eq!(*translate, [0.1, 0.0]),
+            other => panic!("expected Transform, got {other:?}"),
+        }
+    }
+
+    /// Recalling slot 0 must not clobber slot 1's saved snapshot —
+    /// otherwise the operator can never bounce back to scene 2 once
+    /// they've recalled scene 1.
+    #[test]
+    fn recall_preserves_other_slots() {
+        use crate::effects::Effect;
+        use crate::modulators::Modulator;
+
+        let mut p = Project::default();
+        p.layers.push(LayerConfig {
+            id: "a".into(),
+            kind: LayerKind::Svg {
+                svg_path: PathBuf::from("/tmp/x.svg"),
+            },
+            enabled: true,
+            transform: crate::project::schema::Transform2D::default(),
+            effects: vec![Effect::Transform {
+                translate: [0.1, 0.0],
+                rotate_deg: Modulator::Static(0.0),
+                scale_x: Modulator::Static(1.0),
+                scale_y: Modulator::Static(1.0),
+            }],
+            blend_mode: BlendMode::Normal,
+            opacity: 1.0,
+        });
+        // Save slot 0
+        p.scenes.push(Scene {
+            name: "1".into(),
+            snapshot: serde_json::json!({}),
+        });
+        p.scenes[0].snapshot = snapshot(&p);
+        // Modify + save slot 1
+        if let Effect::Transform { translate, .. } = &mut p.layers[0].effects[0] {
+            *translate = [0.5, 0.0];
+        }
+        p.scenes.push(Scene {
+            name: "2".into(),
+            snapshot: serde_json::json!({}),
+        });
+        p.scenes[1].snapshot = snapshot(&p);
+        let slot1_saved = p.scenes[1].snapshot.clone();
+
+        // Recall slot 0 via the same code path the UI uses.
+        let target = p.scenes[0].snapshot.clone();
+        restore_scene(&mut p, &target).expect("restore_scene");
+
+        // Layer state restored.
+        match &p.layers[0].effects[0] {
+            crate::effects::Effect::Transform { translate, .. } => {
+                assert_eq!(*translate, [0.1, 0.0]);
+            }
+            other => panic!("expected Transform, got {other:?}"),
+        }
+        // Slot 1 must still hold the snapshot we saved before the recall.
+        assert_eq!(
+            p.scenes.get(1).map(|s| &s.snapshot),
+            Some(&slot1_saved),
+            "recall destroyed slot 1's saved snapshot",
+        );
+    }
+
+    /// `restore_scene` should also leave the live crossfade-duration
+    /// slider alone: it's a session control, not part of the scene.
+    #[test]
+    fn restore_scene_preserves_crossfade_duration() {
+        let mut p = Project::default();
+        p.crossfade_duration_s = 0.0;
+        let snap_before = snapshot(&p);
+        p.crossfade_duration_s = 1.5;
+        restore_scene(&mut p, &snap_before).expect("restore");
+        assert_eq!(
+            p.crossfade_duration_s, 1.5,
+            "restore_scene clobbered the live crossfade-duration slider",
         );
     }
 

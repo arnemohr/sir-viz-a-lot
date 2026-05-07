@@ -803,7 +803,7 @@ fn show_mapping_tab(ui: &mut Ui, project: &mut Project) {
 
 fn show_scenes_tab(ui: &mut Ui, project: &mut Project) -> ControlPanelAction {
     let mut action = ControlPanelAction::None;
-    ui.label("Slots 1–9 (keyboard recall). Save captures full project JSON.");
+    ui.label("Slots 1–9 (keyboard recall). Save captures the full project state.");
     ui.add(
         egui::Slider::new(&mut project.crossfade_duration_s, 0.0..=5.0)
             .text("crossfade duration (s)"),
@@ -824,12 +824,27 @@ fn show_scenes_tab(ui: &mut Ui, project: &mut Project) -> ControlPanelAction {
                 }
                 project.scenes[slot].snapshot = snapshot(project);
             }
+            // Tell apart "recall is no-op because the slot was never
+            // saved" from "recall fired but I missed the visual change."
+            // A saved slot's snapshot is non-empty Object; a freshly-
+            // pushed placeholder has `Object({})`. Empty placeholders
+            // shouldn't be recallable.
+            let has_data = project
+                .scenes
+                .get(slot)
+                .map(|s| match &s.snapshot {
+                    serde_json::Value::Object(m) => !m.is_empty(),
+                    _ => false,
+                })
+                .unwrap_or(false);
             // App routes recall through the same scheduling logic as the
             // keyboard hotkey (T-M7-04). Don't `restore` here directly —
             // that would bypass crossfade scheduling.
-            if ui.button("recall").clicked() && project.scenes.get(slot).is_some() {
+            let recall = ui.add_enabled(has_data, egui::Button::new("recall"));
+            if recall.clicked() {
                 action = ControlPanelAction::SceneRecall(slot);
             }
+            ui.label(if has_data { "saved" } else { "empty" });
         });
     }
     action

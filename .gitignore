@@ -16,3 +16,10 @@
 
 # Optional rustup pin if a contributor prefers rustup over mise (see mise.toml)
 rust-toolchain.toml
+
+# User-saved projects (rarely belong in the repo). The literal `~/` dir
+# is what gets created when the operator types `~/foo` into the save-
+# path field — that field doesn't shell-expand.
+*.rmap.json
+/~/
+

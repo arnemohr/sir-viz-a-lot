@@ -35,7 +35,9 @@ use crate::effects::transform::TransformPipeline;
 use crate::effects::RenderCtx;
 use crate::error::{Result, RmapError};
 use crate::project::schema::{self, Project};
-use crate::project::{interpolate, restore, snapshot, snapshots_share_layer_topology, ProjectError};
+use crate::project::{
+    interpolate, restore_scene, snapshot, snapshots_share_layer_topology, ProjectError,
+};
 use crate::render::compositor::Compositor;
 use crate::render::gamma::GammaPipeline;
 use crate::render::overlay::OverlayPipeline;
@@ -192,7 +194,7 @@ fn schedule_scene_recall(state: &mut RunningApp, slot: usize) -> RecallOutcome {
     let dur = state.project.crossfade_duration_s.max(0.0);
     let same_topology = snapshots_share_layer_topology(&cur, &target);
     if dur < 1e-3 || !same_topology {
-        match restore(&mut state.project, &target) {
+        match restore_scene(&mut state.project, &target) {
             Ok(()) => {
                 state.crossfade = None;
                 RecallOutcome::Snapped
@@ -1507,7 +1509,7 @@ impl ApplicationHandler for App {
                     let elapsed = cf.started_at.elapsed().as_secs_f32();
                     let t = (elapsed / cf.duration_s.max(1e-3)).clamp(0.0, 1.0);
                     let interp = interpolate(&cf.from, &cf.to, t);
-                    if let Err(err) = restore(&mut state.project, &interp) {
+                    if let Err(err) = restore_scene(&mut state.project, &interp) {
                         tracing::warn!(?err, "crossfade tick restore failed; aborting fade");
                         state.crossfade = None;
                     } else if t >= 1.0 {
