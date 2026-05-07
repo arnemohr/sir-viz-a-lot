@@ -88,7 +88,13 @@ struct RunningApp {
     /// Shared textured-quad pipeline for SVG upload → effect source.
     svg_pipeline: SvgLayerPipeline,
     compositor: Compositor,
-    warp: WarpRenderer,
+    /// One [`WarpRenderer`] per `project.warps` entry. Each holds its own
+    /// vertex/SDF buffers; renders are chained in order with `LoadOp::Clear`
+    /// for the first and `LoadOp::Load` for subsequent so non-overlapping
+    /// `source_rect` regions co-exist on the same `warp_rt_view` (T-M7-02).
+    /// Roadmap defers true multi-output until single-surface UX is mature;
+    /// this lets multiple warps share one projector without that scope.
+    warps: Vec<WarpRenderer>,
     gamma: GammaPipeline,
     warp_rt: wgpu::Texture,
     warp_rt_view: wgpu::TextureView,
@@ -412,7 +418,13 @@ fn init_running_app(
     let h = output.config.height.max(1);
     let svg_pipeline = SvgLayerPipeline::new(&renderer.gpu.device, surface_format);
     let compositor = Compositor::new(&renderer.gpu.device, w, h, surface_format);
-    let warp = WarpRenderer::new(&renderer.gpu.device, surface_format);
+    // T-M7-02: one WarpRenderer per project.warps entry. Project::load
+    // guarantees a default warp when the file omits `warps`, so this Vec
+    // is always non-empty after init.
+    let warp_count = project.warps.len().max(1);
+    let warps: Vec<WarpRenderer> = (0..warp_count)
+        .map(|_| WarpRenderer::new(&renderer.gpu.device, surface_format))
+        .collect();
     let gamma = GammaPipeline::new(&renderer.gpu.device, surface_format);
     let (warp_rt, warp_rt_view) = make_warp_render_target(&renderer.gpu.device, w, h, surface_format);
     let layers = rebuild_layers(&renderer.gpu.device, &project, w, h, surface_format)?;
@@ -426,7 +438,7 @@ fn init_running_app(
         layers,
         svg_pipeline,
         compositor,
-        warp,
+        warps,
         gamma,
         warp_rt,
         warp_rt_view,
@@ -731,21 +743,23 @@ fn render_m5_pipeline(
     layers: &mut [LayerState],
     svg_pipeline: &SvgLayerPipeline,
     compositor: &Compositor,
-    warp: &mut WarpRenderer,
+    warps: &mut Vec<WarpRenderer>,
     gamma: &GammaPipeline,
     warp_rt_view: &wgpu::TextureView,
     color: &ColorPipeline,
     blur: &BlurPipeline,
     transform: &TransformPipeline,
+    surface_format: wgpu::TextureFormat,
     clock: &Clock,
 ) -> std::result::Result<(), RenderError> {
     crate::show_day::panic_restore::run_frame_assert_unwind_safe(|| {
-        let mesh = project
-            .warps
-            .first()
-            .cloned()
-            .unwrap_or_else(schema::default_warp_mesh);
-        warp.sync_mesh_and_mask(&renderer.gpu.device, &renderer.gpu.queue, &mesh);
+        // T-M7-02: ensure WarpRenderer count matches project.warps. Most
+        // frames this is a no-op compare; only scene recall / project load
+        // can change the warp count.
+        let want = project.warps.len().max(1);
+        if warps.len() != want {
+            warps.resize_with(want, || WarpRenderer::new(&renderer.gpu.device, surface_format));
+        }
 
         let mut encoder = renderer.gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("m5 offscreen encoder"),
@@ -820,15 +834,31 @@ fn render_m5_pipeline(
             &composite_inputs,
         );
 
-        warp.render(
-            &renderer.gpu.device,
-            &renderer.gpu.queue,
-            &mut encoder,
-            warp_rt_view,
-            composed,
-            &mesh,
-            wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-        );
+        // Iterate every warp in `project.warps`. First pass clears the
+        // shared `warp_rt_view`; subsequent passes use `LoadOp::Load` so
+        // disjoint `source_rect` regions co-exist on one output. Where
+        // dst quads overlap the second warp's REPLACE write wins
+        // (matches roadmap-deferred multi-output simplification: this is
+        // multi-region, not multi-projector).
+        let default_mesh = schema::default_warp_mesh();
+        for (i, warp_renderer) in warps.iter_mut().enumerate() {
+            let mesh_ref: &schema::WarpMesh = project.warps.get(i).unwrap_or(&default_mesh);
+            warp_renderer.sync_mesh_and_mask(&renderer.gpu.device, &renderer.gpu.queue, mesh_ref);
+            let load = if i == 0 {
+                wgpu::LoadOp::Clear(wgpu::Color::BLACK)
+            } else {
+                wgpu::LoadOp::Load
+            };
+            warp_renderer.render(
+                &renderer.gpu.device,
+                &renderer.gpu.queue,
+                &mut encoder,
+                warp_rt_view,
+                composed,
+                mesh_ref,
+                load,
+            );
+        }
 
         renderer.gpu.queue.submit(std::iter::once(encoder.finish()));
 
@@ -1139,6 +1169,7 @@ impl ApplicationHandler for App {
                         state.output.state.test_pattern,
                     )
                 } else if !state.project.layers.is_empty() {
+                    let surface_format = state.output.config.format;
                     render_m5_pipeline(
                         &state.renderer,
                         &state.output,
@@ -1146,12 +1177,13 @@ impl ApplicationHandler for App {
                         &mut state.layers,
                         &state.svg_pipeline,
                         &state.compositor,
-                        &mut state.warp,
+                        &mut state.warps,
                         &state.gamma,
                         &state.warp_rt_view,
                         &state.color_pipeline,
                         &state.blur_pipeline,
                         &state.transform_pipeline,
+                        surface_format,
                         &state.clock,
                     )
                 } else {
