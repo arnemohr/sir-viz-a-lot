@@ -302,25 +302,162 @@ fn show_mapping_tab(ui: &mut Ui, project: &mut Project) {
         ui.label("No warp mesh — add `warps` in project.");
         return;
     };
-    if w.rows != 1 || w.cols != 1 || w.grid.len() != 2 || w.grid[0].len() != 2 {
-        ui.label("Mapping UI supports 1×1 corner-pin only for now.");
+    let rows = w.grid.len();
+    let cols = if rows > 0 { w.grid[0].len() } else { 0 };
+    if rows < 2 || cols < 2 || w.grid.iter().any(|row| row.len() != cols) {
+        ui.label("Mapping UI: warp grid must be at least 2×2 (corner pin).");
         return;
     }
-    ui.label("Corner pin (normalized 0–1 output space).");
-    corner_slider(ui, &mut w.grid[0][0], "UL");
-    corner_slider(ui, &mut w.grid[0][1], "UR");
-    corner_slider(ui, &mut w.grid[1][1], "BR");
-    corner_slider(ui, &mut w.grid[1][0], "BL");
+
+    ui.label(
+        "Drag the corners to map output to projector space. Coordinates are normalized [0,1].",
+    );
+
+    // 16:9 thumbnail of the output framebuffer area. The canvas itself stands in for
+    // the framebuffer (we don't have a cross-window snapshot in v1 — see T-M5-08 notes).
+    let canvas_size = egui::vec2(480.0, 270.0);
+    let (canvas_resp, painter) =
+        ui.allocate_painter(canvas_size, egui::Sense::hover());
+    let canvas_rect = canvas_resp.rect;
+
+    // Background placeholder: dark fill + checker pattern + border + axis labels.
+    painter.rect_filled(
+        canvas_rect,
+        egui::CornerRadius::ZERO,
+        egui::Color32::from_rgb(20, 22, 26),
+    );
+    let checker_n = 16usize;
+    let cw = canvas_rect.width() / checker_n as f32;
+    let ch = canvas_rect.height() / (checker_n as f32 * 9.0 / 16.0);
+    let rows_n = ((canvas_rect.height() / ch).ceil() as usize).max(1);
+    for cy in 0..rows_n {
+        for cx in 0..checker_n {
+            if (cx + cy) % 2 == 0 {
+                continue;
+            }
+            let p0 = canvas_rect.left_top()
+                + egui::vec2(cx as f32 * cw, cy as f32 * ch);
+            let r = egui::Rect::from_min_size(p0, egui::vec2(cw, ch))
+                .intersect(canvas_rect);
+            painter.rect_filled(
+                r,
+                egui::CornerRadius::ZERO,
+                egui::Color32::from_rgb(28, 30, 34),
+            );
+        }
+    }
+    painter.rect_stroke(
+        canvas_rect,
+        egui::CornerRadius::ZERO,
+        egui::Stroke::new(1.0, egui::Color32::from_rgb(70, 75, 85)),
+        egui::StrokeKind::Outside,
+    );
+    let label_color = egui::Color32::from_rgb(140, 145, 155);
+    painter.text(
+        canvas_rect.left_top() + egui::vec2(4.0, 2.0),
+        egui::Align2::LEFT_TOP,
+        "0,0",
+        egui::FontId::proportional(11.0),
+        label_color,
+    );
+    painter.text(
+        canvas_rect.right_bottom() + egui::vec2(-4.0, -2.0),
+        egui::Align2::RIGHT_BOTTOM,
+        "1,1",
+        egui::FontId::proportional(11.0),
+        label_color,
+    );
+    painter.text(
+        canvas_rect.center() + egui::vec2(0.0, -2.0),
+        egui::Align2::CENTER_BOTTOM,
+        "output area (placeholder thumbnail)",
+        egui::FontId::proportional(11.0),
+        label_color,
+    );
+
+    // Helper: normalized [0,1]^2 -> screen position inside canvas_rect.
+    let to_screen = |g: [f32; 2]| -> egui::Pos2 {
+        canvas_rect.left_top()
+            + egui::vec2(g[0] * canvas_rect.width(), g[1] * canvas_rect.height())
+    };
+
+    // Mesh edges (low-contrast).
+    let edge_color = egui::Color32::from_rgb(120, 165, 220);
+    let edge_stroke = egui::Stroke::new(1.5, edge_color);
+    for r in 0..rows {
+        for c in 0..cols {
+            let here = to_screen(w.grid[r][c]);
+            if c + 1 < cols {
+                let right = to_screen(w.grid[r][c + 1]);
+                painter.line_segment([here, right], edge_stroke);
+            }
+            if r + 1 < rows {
+                let down = to_screen(w.grid[r + 1][c]);
+                painter.line_segment([here, down], edge_stroke);
+            }
+        }
+    }
+
+    // Handles: filled circles, hover/drag-aware. We allocate per-handle responses
+    // via `ui.interact(...)` so each handle gets its own hit-test rect.
+    let handle_radius = 7.0_f32;
+    let canvas_w = canvas_rect.width();
+    let canvas_h = canvas_rect.height();
+    for r in 0..rows {
+        for c in 0..cols {
+            let center = to_screen(w.grid[r][c]);
+            let rect = egui::Rect::from_center_size(
+                center,
+                egui::vec2(handle_radius * 2.5, handle_radius * 2.5),
+            );
+            let id = canvas_resp.id.with(("corner_handle", r, c));
+            let resp = ui.interact(rect, id, egui::Sense::drag());
+
+            if resp.dragged() {
+                let delta = resp.drag_delta();
+                if canvas_w > 0.0 && canvas_h > 0.0 {
+                    w.grid[r][c][0] =
+                        (w.grid[r][c][0] + delta.x / canvas_w).clamp(0.0, 1.0);
+                    w.grid[r][c][1] =
+                        (w.grid[r][c][1] + delta.y / canvas_h).clamp(0.0, 1.0);
+                }
+            }
+
+            // Re-evaluate center in case of drag this frame.
+            let center = to_screen(w.grid[r][c]);
+            let (fill, stroke) = if resp.dragged() {
+                (
+                    egui::Color32::from_rgb(255, 220, 90),
+                    egui::Stroke::new(2.0, egui::Color32::WHITE),
+                )
+            } else if resp.hovered() {
+                (
+                    egui::Color32::from_rgb(220, 200, 90),
+                    egui::Stroke::new(1.5, egui::Color32::from_rgb(240, 240, 240)),
+                )
+            } else {
+                (
+                    egui::Color32::from_rgb(180, 160, 70),
+                    egui::Stroke::new(1.0, egui::Color32::from_rgb(40, 40, 40)),
+                )
+            };
+            painter.circle(center, handle_radius, fill, stroke);
+        }
+    }
+
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        if ui.button("Reset to identity").clicked() {
+            // Identity 1×1 corner pin: full output rect [0,0]..[1,1].
+            w.rows = 1;
+            w.cols = 1;
+            w.grid = vec![vec![[0.0, 0.0], [1.0, 0.0]], vec![[0.0, 1.0], [1.0, 1.0]]];
+        }
+        ui.label(format!("grid: {}×{}", rows, cols));
+    });
+
     ui.add(egui::Slider::new(&mut w.mask_feather, 0.0..=0.25).text("mask feather"));
     ui.label("Mask polygon: edit JSON/project file for now (vec of [x,y]).");
-}
-
-fn corner_slider(ui: &mut Ui, p: &mut [f32; 2], label: &str) {
-    ui.horizontal(|ui| {
-        ui.label(label);
-        ui.add(egui::Slider::new(&mut p[0], 0.0..=1.0).text("x"));
-        ui.add(egui::Slider::new(&mut p[1], 0.0..=1.0).text("y"));
-    });
 }
 
 fn show_scenes_tab(ui: &mut Ui, project: &mut Project) -> ControlPanelAction {
