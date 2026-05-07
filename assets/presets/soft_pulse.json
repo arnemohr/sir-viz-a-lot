@@ -1,0 +1,28 @@
+{
+  "name": "Soft Pulse",
+  "effects": [
+    {
+      "Color": {
+        "hue": { "Static": 0.0 },
+        "saturation": { "Static": 1.0 },
+        "brightness": {
+          "Sine": { "period_s": 2.0, "amp": 0.15, "phase": 0.0, "offset": 0.0 }
+        },
+        "contrast": { "Static": 1.0 }
+      }
+    },
+    {
+      "Blur": {
+        "radius_px": { "Static": 0.0 }
+      }
+    },
+    {
+      "Transform": {
+        "translate": [0.0, 0.0],
+        "rotate_deg": { "Static": 0.0 },
+        "scale_x": { "Static": 1.0 },
+        "scale_y": { "Static": 1.0 }
+      }
+    }
+  ]
+}

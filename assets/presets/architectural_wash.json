@@ -1,0 +1,26 @@
+{
+  "name": "Architectural Wash",
+  "effects": [
+    {
+      "Color": {
+        "hue": { "Static": -10.0 },
+        "saturation": { "Static": 0.7 },
+        "brightness": { "Static": 0.05 },
+        "contrast": { "Static": 0.95 }
+      }
+    },
+    {
+      "Blur": {
+        "radius_px": { "Static": 4.0 }
+      }
+    },
+    {
+      "Transform": {
+        "translate": [0.0, 0.0],
+        "rotate_deg": { "Static": 0.0 },
+        "scale_x": { "Static": 1.0 },
+        "scale_y": { "Static": 1.0 }
+      }
+    }
+  ]
+}

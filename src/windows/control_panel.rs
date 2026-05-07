@@ -3,11 +3,68 @@
 use std::path::{Path, PathBuf};
 
 use egui::Ui;
+use serde::Deserialize;
 
 use crate::effects::Effect;
 use crate::modulators::Modulator;
 use crate::project::schema::{self, BlendMode, Project, Scene};
 use crate::project::snapshot;
+
+/// One named effect-chain bundle authored as JSON in `assets/presets/`.
+///
+/// Loaded once at startup via [`load_presets_from_disk`] and surfaced in
+/// the Effects tab as an "Apply preset" combobox; the operator picks one
+/// and the selected layer's `effects` are replaced wholesale (T-M7-08).
+#[derive(Debug, Clone, Deserialize)]
+pub struct Preset {
+    pub name: String,
+    pub effects: Vec<Effect>,
+}
+
+/// Discover presets by scanning `assets/presets/*.json` relative to the
+/// current working directory. Robust to a missing directory and to
+/// individual malformed files (logs a warning, skips). Sorted by name so
+/// the dropdown ordering is stable across runs.
+///
+/// Path resolution is intentionally simple: `cargo run` from the repo
+/// root finds the bundled presets, and a packaged macOS bundle ships
+/// the `assets/` directory next to the binary. Operators can drop their
+/// own JSON files into the directory; reload with the "Reload" button.
+pub fn load_presets_from_disk() -> Vec<Preset> {
+    let dir = Path::new("assets/presets");
+    if !dir.exists() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    match std::fs::read_dir(dir) {
+        Ok(entries) => {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                    continue;
+                }
+                match std::fs::read_to_string(&path) {
+                    Ok(text) => match serde_json::from_str::<Preset>(&text) {
+                        Ok(p) => out.push(p),
+                        Err(err) => tracing::warn!(
+                            path = %path.display(),
+                            ?err,
+                            "preset parse failed; skipping",
+                        ),
+                    },
+                    Err(err) => tracing::warn!(
+                        path = %path.display(),
+                        ?err,
+                        "preset read failed; skipping",
+                    ),
+                }
+            }
+        }
+        Err(err) => tracing::warn!(?err, "preset dir scan failed"),
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ControlTab {
@@ -33,6 +90,14 @@ pub struct ControlPanelState {
     /// Target path for **Save** in the Project file panel (`*.rmap.json`).
     pub project_save_path: String,
     pub project_save_message: String,
+    /// Cached preset bundles loaded from `assets/presets/`. Populated lazily
+    /// on first show; refreshed via the "Reload" button (T-M7-08).
+    pub presets: Vec<Preset>,
+    /// `true` once we've tried to load presets — keeps the empty case from
+    /// re-scanning every frame.
+    pub presets_loaded: bool,
+    /// Selected preset index in the Effects-tab dropdown; reset on layer change.
+    pub preset_picker_index: usize,
 }
 
 pub enum ControlPanelAction {
@@ -136,6 +201,10 @@ fn show_effects_tab(ui: &mut Ui, project: &mut Project, st: &mut ControlPanelSta
         ui.label("No layers — open an SVG as the first argument.");
         return;
     }
+    if !st.presets_loaded {
+        st.presets = load_presets_from_disk();
+        st.presets_loaded = true;
+    }
     st.selected_layer = st.selected_layer.min(project.layers.len().saturating_sub(1));
     ui.label(
         "Sliders apply to the selected layer only; each layer has its own effect chain. Warp, gamma, and master brightness/contrast run after all layers are composited.",
@@ -156,6 +225,39 @@ fn show_effects_tab(ui: &mut Ui, project: &mut Project, st: &mut ControlPanelSta
                 }
             });
     });
+
+    // Preset picker (T-M7-08). Picks one of `st.presets` and applies its
+    // entire effect chain to the selected layer on click. Keep the operator
+    // far from per-parameter slider hunting — that's the usability play.
+    ui.horizontal(|ui| {
+        ui.label("Preset:");
+        if st.presets.is_empty() {
+            ui.label("(none — assets/presets/*.json not found)");
+        } else {
+            st.preset_picker_index = st.preset_picker_index.min(st.presets.len() - 1);
+            egui::ComboBox::from_id_salt("preset_pick")
+                .selected_text(st.presets[st.preset_picker_index].name.clone())
+                .show_ui(ui, |ui| {
+                    for (i, preset) in st.presets.iter().enumerate() {
+                        if ui
+                            .selectable_label(st.preset_picker_index == i, &preset.name)
+                            .clicked()
+                        {
+                            st.preset_picker_index = i;
+                        }
+                    }
+                });
+            if ui.button("Apply").clicked() {
+                project.layers[st.selected_layer].effects =
+                    st.presets[st.preset_picker_index].effects.clone();
+            }
+        }
+        if ui.button("Reload").clicked() {
+            st.presets = load_presets_from_disk();
+            st.preset_picker_index = 0;
+        }
+    });
+
     let effects = &mut project.layers[st.selected_layer].effects;
     ui.heading("Effect chain");
     ui.add_space(4.0);

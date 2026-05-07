@@ -1,0 +1,32 @@
+{
+  "name": "Candle Flicker",
+  "effects": [
+    {
+      "Color": {
+        "hue": { "Static": 15.0 },
+        "saturation": { "Static": 1.2 },
+        "brightness": {
+          "Triangle": { "period_s": 0.4, "amp": 0.1, "offset": 0.0 }
+        },
+        "contrast": { "Static": 1.05 }
+      }
+    },
+    {
+      "Blur": {
+        "radius_px": {
+          "Noise": { "period_s": 0.3, "amp": 1.0, "offset": 1.5 }
+        }
+      }
+    },
+    {
+      "Transform": {
+        "translate": [0.0, 0.0],
+        "rotate_deg": {
+          "Sine": { "period_s": 1.7, "amp": 0.3, "phase": 0.0, "offset": 0.0 }
+        },
+        "scale_x": { "Static": 1.0 },
+        "scale_y": { "Static": 1.0 }
+      }
+    }
+  ]
+}
