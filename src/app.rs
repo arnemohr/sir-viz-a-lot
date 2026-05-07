@@ -38,6 +38,7 @@ use crate::project::schema::{self, Project};
 use crate::project::{interpolate, restore, snapshot, snapshots_share_layer_topology, ProjectError};
 use crate::render::compositor::Compositor;
 use crate::render::gamma::GammaPipeline;
+use crate::render::overlay::OverlayPipeline;
 use crate::render::pipeline::EffectPipeline;
 use crate::render::warp::WarpRenderer;
 use crate::render::{GpuContext, RenderError, Renderer};
@@ -99,6 +100,11 @@ struct RunningApp {
     /// this lets multiple warps share one projector without that scope.
     warps: Vec<WarpRenderer>,
     gamma: GammaPipeline,
+    /// Editor-overlay pass painted on top of the projector after gamma
+    /// (toggled by `output.state.show_editor_overlay`). Lets the
+    /// operator see on the actual surface where each layer is mapped
+    /// while dragging in the control window.
+    overlay: OverlayPipeline,
     warp_rt: wgpu::Texture,
     warp_rt_view: wgpu::TextureView,
     control_panel: ControlPanelState,
@@ -582,6 +588,7 @@ fn init_running_app(
         .map(|_| WarpRenderer::new(&renderer.gpu.device, surface_format))
         .collect();
     let gamma = GammaPipeline::new(&renderer.gpu.device, surface_format);
+    let overlay = OverlayPipeline::new(&renderer.gpu.device, surface_format);
     let (warp_rt, warp_rt_view) = make_warp_render_target(&renderer.gpu.device, w, h, surface_format);
     let layers = rebuild_layers(
         &renderer.gpu.device,
@@ -603,6 +610,7 @@ fn init_running_app(
         compositor,
         warps,
         gamma,
+        overlay,
         warp_rt,
         warp_rt_view,
         control_panel,
@@ -970,6 +978,9 @@ fn render_m5_pipeline(
     compositor: &Compositor,
     warps: &mut Vec<WarpRenderer>,
     gamma: &GammaPipeline,
+    overlay: &mut OverlayPipeline,
+    overlay_selected: Option<usize>,
+    overlay_enabled: bool,
     warp_rt_view: &wgpu::TextureView,
     color: &ColorPipeline,
     blur: &BlurPipeline,
@@ -1147,6 +1158,28 @@ fn render_m5_pipeline(
                 project.contrast,
                 wgpu::LoadOp::Clear(wgpu::Color::BLACK),
             );
+            // Editor overlay: paint per-layer outlines + mask polygons on
+            // top of the gamma-corrected frame so the operator can see
+            // on the actual surface where each layer is mapped. Cheap to
+            // build (~40 lines/frame) — only the work skips when the
+            // toggle is off, not the encoder itself, so present timing
+            // stays unchanged.
+            if overlay_enabled {
+                let lines = crate::render::overlay::build_overlay_lines(
+                    project,
+                    overlay_selected,
+                );
+                if !lines.is_empty() {
+                    overlay.render(
+                        &renderer.gpu.device,
+                        &renderer.gpu.queue,
+                        &mut enc_gamma,
+                        &surface_view,
+                        (output.config.width, output.config.height),
+                        &lines,
+                    );
+                }
+            }
             renderer
                 .gpu
                 .queue
@@ -1348,6 +1381,13 @@ impl ApplicationHandler for App {
                             "test pattern"
                         );
                     }
+                    PhysicalKey::Code(KeyCode::KeyO) => {
+                        state.output.state.toggle_editor_overlay();
+                        tracing::info!(
+                            overlay = state.output.state.show_editor_overlay,
+                            "editor overlay toggled",
+                        );
+                    }
                     _ => {}
                 }
                 // T-M4-10: buffer every pressed event into KeyboardSource for
@@ -1498,6 +1538,10 @@ impl ApplicationHandler for App {
                     )
                 } else if !state.project.layers.is_empty() {
                     let surface_format = state.output.config.format;
+                    let overlay_selected = match state.scene_editor.selected {
+                        Some(crate::windows::scene_editor::Selection::Layer(i)) => Some(i),
+                        _ => None,
+                    };
                     render_m5_pipeline(
                         &state.renderer,
                         &state.output,
@@ -1507,6 +1551,9 @@ impl ApplicationHandler for App {
                         &state.compositor,
                         &mut state.warps,
                         &state.gamma,
+                        &mut state.overlay,
+                        overlay_selected,
+                        state.output.state.show_editor_overlay,
                         &state.warp_rt_view,
                         &state.color_pipeline,
                         &state.blur_pipeline,

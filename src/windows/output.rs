@@ -11,7 +11,7 @@ use winit::window::{Fullscreen, Window, WindowAttributes};
 
 use crate::render::RenderError;
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct OutputState {
     pub blackout: bool,
     pub freeze: bool,
@@ -19,6 +19,24 @@ pub struct OutputState {
     /// [`TestPattern::None`]; the `T` key cycles through variants via
     /// [`Self::cycle_test_pattern`].
     pub test_pattern: crate::test_patterns::TestPattern,
+    /// Paint per-layer bounding rects + per-warp mask polygon outlines
+    /// directly on the projector after the gamma pass, so the operator
+    /// sees on the actual surface where each layer is mapped while
+    /// dragging in the control window. Toggle with `O`. Defaults to
+    /// `true`: a fresh user benefits from the feedback far more than
+    /// they're hurt by it; flip it off before the show.
+    pub show_editor_overlay: bool,
+}
+
+impl Default for OutputState {
+    fn default() -> Self {
+        Self {
+            blackout: false,
+            freeze: false,
+            test_pattern: crate::test_patterns::TestPattern::default(),
+            show_editor_overlay: true,
+        }
+    }
 }
 
 impl OutputState {
@@ -32,6 +50,10 @@ impl OutputState {
 
     pub fn cycle_test_pattern(&mut self) {
         self.test_pattern = self.test_pattern.next();
+    }
+
+    pub fn toggle_editor_overlay(&mut self) {
+        self.show_editor_overlay = !self.show_editor_overlay;
     }
 }
 

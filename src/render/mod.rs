@@ -36,6 +36,7 @@
 
 pub mod compositor;
 pub mod gamma;
+pub mod overlay;
 pub mod pipeline;
 pub mod sdf;
 pub mod warp;
