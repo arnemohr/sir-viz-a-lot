@@ -18,6 +18,7 @@
 use std::path::PathBuf;
 
 use crossbeam_channel::{Receiver, Sender};
+use egui::CentralPanel;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
@@ -37,6 +38,7 @@ use crate::svg_layer::render::SvgLayerPipeline;
 use crate::svg_layer::watcher::{WatchEvent, Watcher};
 use crate::svg_layer::worker::{LayerId, RasterDone, RasterJob, Worker};
 use crate::test_patterns::{TestPattern, TestPatternRenderer};
+use crate::windows::control::ControlWindow;
 use crate::windows::output::OutputWindow;
 
 /// Application root. Holds the persistent state across event-loop iterations.
@@ -67,6 +69,10 @@ pub struct App {
 /// the optional SVG layer state, and the IOPMAssertion preventing display sleep.
 struct RunningApp {
     output: OutputWindow,
+    /// Optional egui control window on the primary display. `None` when the
+    /// multi-window init fails (D-01 fallback: the app keeps running with
+    /// only the output window).
+    control: Option<ControlWindow>,
     renderer: Renderer,
     test_patterns: TestPatternRenderer,
     /// Optional SVG layer state. `None` when no `.svg` project file was
@@ -217,6 +223,19 @@ fn init_running_app(
         &gpu.adapter,
         &gpu.device,
     )?;
+    // T-M4-14: open the egui control window on the primary display, sharing
+    // the same wgpu device. Failure is non-fatal — D-01 fallback keeps the
+    // app running with only the output window.
+    let control = match ControlWindow::new(event_loop, &gpu.instance, &gpu.adapter, &gpu.device) {
+        Ok(c) => Some(c),
+        Err(e) => {
+            tracing::warn!(
+                ?e,
+                "control window init failed; continuing without it (D-01 fallback)"
+            );
+            None
+        }
+    };
     let surface_format = output.config.format;
     // Build the test-pattern pipelines before handing `gpu` to the
     // Renderer (Renderer takes ownership of `gpu`).
@@ -262,6 +281,7 @@ fn init_running_app(
 
     Ok(RunningApp {
         output,
+        control,
         renderer,
         test_patterns,
         svg,
@@ -471,8 +491,41 @@ impl ApplicationHandler for App {
             return;
         };
 
-        // T-M4-14 introduces a second window (egui control). Make sure we
-        // only act on events for the output window.
+        // T-M4-14: handle events for the egui control window first. If the
+        // event belongs to the control window, handle it and return — do NOT
+        // fall through to the output-window arms below.
+        if state.control.as_ref().is_some_and(|c| c.id() == window_id) {
+            let ctrl = state.control.as_mut().unwrap();
+            let _ = ctrl.on_window_event(&event);
+            match event {
+                WindowEvent::Resized(new_size) => {
+                    ctrl.resize(&state.renderer.gpu.device, new_size);
+                }
+                WindowEvent::CloseRequested => {
+                    // Drop the control window without exiting the app.
+                    state.control = None;
+                }
+                WindowEvent::RedrawRequested => {
+                    if let Some(ctrl) = state.control.as_mut() {
+                        let result = ctrl.render(
+                            &state.renderer.gpu.device,
+                            &state.renderer.gpu.queue,
+                            |ui| {
+                                egui::CentralPanel::default()
+                                    .show_inside(ui, |ui| ui.label("rmap control"));
+                            },
+                        );
+                        if let Err(e) = result {
+                            tracing::warn!(?e, "control window render error");
+                        }
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
+
+        // Guard: only act on events for the output window from here down.
         if window_id != state.output.window.id() {
             return;
         }
@@ -643,6 +696,9 @@ impl ApplicationHandler for App {
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
         if let Some(state) = self.state.as_ref() {
             state.output.window.request_redraw();
+            if let Some(ctrl) = state.control.as_ref() {
+                ctrl.window.request_redraw();
+            }
         }
     }
 }
