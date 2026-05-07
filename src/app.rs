@@ -17,6 +17,7 @@
 
 use std::path::PathBuf;
 
+use crossbeam_channel::{Receiver, Sender};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
@@ -27,6 +28,10 @@ use winit::window::WindowId;
 use crate::error::{Result, RmapError};
 use crate::render::{GpuContext, RenderError, Renderer};
 use crate::show_day::sleep_assertion::SleepAssertion;
+use crate::svg_layer::SvgLayer;
+use crate::svg_layer::render::SvgLayerPipeline;
+use crate::svg_layer::watcher::{WatchEvent, Watcher};
+use crate::svg_layer::worker::{LayerId, RasterDone, RasterJob, Worker};
 use crate::test_patterns::{TestPattern, TestPatternRenderer};
 use crate::windows::output::OutputWindow;
 
@@ -55,16 +60,48 @@ pub struct App {
 
 /// Bundle of resources that exist only after `resumed`: the output window,
 /// the renderer (which owns the [`GpuContext`]), the test-pattern renderer,
-/// and the IOPMAssertion preventing display sleep.
+/// the optional SVG layer state, and the IOPMAssertion preventing display sleep.
 struct RunningApp {
     output: OutputWindow,
     renderer: Renderer,
     test_patterns: TestPatternRenderer,
+    /// Optional SVG layer state. `None` when no `.svg` project file was
+    /// provided, or when the provided file is not a `.svg` (non-.svg
+    /// projects are T-M6-04's domain). The M1 hello-rect fallback renders
+    /// when this is `None`.
+    svg: Option<SvgState>,
     /// Held for the lifetime of the running app — `Drop` releases the
     /// `IOPMAssertion` on macOS, no-op elsewhere. Spec §6 display-sleep
     /// prevention. Field is read only by `Drop`; underscore prefix
     /// silences the unused-field lint.
     _sleep_assertion: SleepAssertion,
+}
+
+/// All GPU + async state for the single active SVG layer.
+///
+/// Constructed in `init_running_app` when `svg_path` is `Some(path.svg)`.
+/// `None` when the no-SVG path is active.
+struct SvgState {
+    /// Parsed SVG layer (owns `usvg::Tree`, cached pixmap, GPU texture).
+    layer: SvgLayer,
+    /// GPU pipeline for blitting the rasterized SVG onto the output surface.
+    pipeline: SvgLayerPipeline,
+    /// Layer identifier for disambiguating worker traffic. Fixed at `LayerId(0)`
+    /// for the single-layer M3 path; T-M5-01 will allocate these dynamically.
+    layer_id: LayerId,
+    /// Monotonic counter: incremented on each watch event. The worker echoes
+    /// this back in `RasterDone::generation`; stale results are dropped.
+    generation: u64,
+    /// Channel to the off-thread rasterization worker.
+    job_tx: Sender<RasterJob>,
+    /// Channel from the off-thread rasterization worker.
+    result_rx: Receiver<RasterDone>,
+    /// Channel from the file watcher. `try_recv` drained per-frame in
+    /// `RedrawRequested`.
+    watch_rx: Receiver<WatchEvent>,
+    /// Hold the `Watcher` to keep the debouncer thread alive. Drop to stop
+    /// watching.
+    _watcher: Watcher,
 }
 
 impl App {
@@ -154,11 +191,12 @@ impl ApplicationHandler for ListMonitorsApp {
     }
 }
 
-/// Bring up the GPU and the output window. Pulled into a free function so
-/// the error path in `resumed` can `?` cleanly.
+/// Bring up the GPU and the output window, and optionally load the SVG layer.
+/// Pulled into a free function so the error path in `resumed` can `?` cleanly.
 fn init_running_app(
     event_loop: &ActiveEventLoop,
     monitor: Option<MonitorHandle>,
+    svg_path: Option<PathBuf>,
 ) -> Result<RunningApp> {
     let gpu = GpuContext::new()?;
     let output = OutputWindow::new(
@@ -177,10 +215,45 @@ fn init_running_app(
     // Drop. Failures are logged inside `acquire` and yield a no-op
     // assertion (degraded mode) rather than aborting.
     let sleep_assertion = SleepAssertion::acquire("rmap output window");
+
+    // Build optional SVG state. Only wired up when the CLI provides a .svg path.
+    let svg = if let Some(path) = svg_path.filter(|p| p.extension().is_some_and(|e| e == "svg")) {
+        let layer = SvgLayer::load(path.clone())?;
+        let pipeline = SvgLayerPipeline::new(&renderer.gpu.device, surface_format);
+        let (job_tx, result_rx) = Worker::spawn();
+        let (watcher, watch_rx) = Watcher::new(std::slice::from_ref(&path))?;
+
+        // Enqueue the initial raster job. generation=1; 0 is "never rasterized".
+        // TODO(T-M3-resize): resize events don't re-enqueue a job yet — the SVG
+        // won't re-rasterize until the next watcher event fires.
+        let _ = job_tx.send(RasterJob {
+            layer_id: LayerId(0),
+            path: path.clone(),
+            size: (output.config.width, output.config.height),
+            generation: 1,
+        });
+        let path_display = path.display().to_string();
+        tracing::info!(path = %path_display, "svg layer loaded; initial raster job enqueued");
+
+        Some(SvgState {
+            layer,
+            pipeline,
+            layer_id: LayerId(0),
+            generation: 1,
+            job_tx,
+            result_rx,
+            watch_rx,
+            _watcher: watcher,
+        })
+    } else {
+        None
+    };
+
     Ok(RunningApp {
         output,
         renderer,
         test_patterns,
+        svg,
         _sleep_assertion: sleep_assertion,
     })
 }
@@ -297,6 +370,39 @@ fn render_test_pattern(
     })
 }
 
+/// Render the uploaded SVG layer texture as a fullscreen quad.
+///
+/// Same surface-acquire + encoder + submit + present boilerplate as
+/// `render_test_pattern`; the inner draw is delegated to
+/// [`SvgLayerPipeline::render`].
+fn render_svg(
+    renderer: &Renderer,
+    output: &OutputWindow,
+    pipeline: &SvgLayerPipeline,
+    texture_view: &wgpu::TextureView,
+) -> std::result::Result<(), RenderError> {
+    crate::show_day::panic_restore::run_frame_assert_unwind_safe(|| {
+        let frame = match acquire_frame(output)? {
+            Some(f) => f,
+            None => return Ok(()),
+        };
+        let view = frame
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder =
+            renderer
+                .gpu
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("svg encoder"),
+                });
+        pipeline.render(&renderer.gpu.device, &mut encoder, &view, texture_view);
+        renderer.gpu.queue.submit(std::iter::once(encoder.finish()));
+        frame.present();
+        Ok(())
+    })
+}
+
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.state.is_some() {
@@ -308,7 +414,7 @@ impl ApplicationHandler for App {
         // X-06: CLI `--monitor INDEX` is the v1 interim override. T-M6-04
         // will additionally read `Project.output_monitor_index`; T-M4-15
         // adds the egui dropdown. Until then, fall back to monitor 0.
-        let _ = (&self.project, self.autostart);
+        let _ = self.autostart;
         let monitor_index = self.monitor_override.unwrap_or(0);
         let monitor = event_loop.available_monitors().nth(monitor_index);
         if monitor.is_none() {
@@ -319,7 +425,19 @@ impl ApplicationHandler for App {
             );
         }
 
-        match init_running_app(event_loop, monitor) {
+        // Validate the project path: only .svg files are handled at M3.
+        // Non-.svg paths (e.g. .rmap.json) are silently ignored here; T-M6-04
+        // will load project files and T-M6-04's warn guides the operator.
+        if let Some(ref path) = self.project {
+            if path.extension().is_none_or(|e| e != "svg") {
+                tracing::warn!(
+                    path = %path.display(),
+                    "ignoring non-.svg project file; T-M6-04 will load .rmap.json projects",
+                );
+            }
+        }
+
+        match init_running_app(event_loop, monitor, self.project.clone()) {
             Ok(running) => {
                 self.state = Some(running);
             }
@@ -385,8 +503,53 @@ impl ApplicationHandler for App {
                 state.output.recreate_surface(&state.renderer.gpu.device);
             }
             WindowEvent::RedrawRequested => {
+                // Per-frame event drain: process watcher + raster results
+                // before deciding which render path to take.
+                if let Some(svg) = state.svg.as_mut() {
+                    // Drain watch events: bump generation, enqueue raster
+                    // job per affected layer.
+                    while let Ok(_event) = svg.watch_rx.try_recv() {
+                        svg.generation = svg.generation.wrapping_add(1);
+                        let size = (state.output.config.width, state.output.config.height);
+                        let path = svg.layer.path.clone();
+                        let layer_id = svg.layer_id;
+                        let generation = svg.generation;
+                        let _ = svg.job_tx.send(RasterJob {
+                            layer_id,
+                            path,
+                            size,
+                            generation,
+                        });
+                        tracing::debug!(
+                            generation = svg.generation,
+                            "svg watcher fired; enqueued raster job"
+                        );
+                    }
+                    // Drain raster results: upload to GPU on generation match.
+                    while let Ok(done) = svg.result_rx.try_recv() {
+                        if done.layer_id != svg.layer_id || done.generation != svg.generation {
+                            tracing::debug!(
+                                done_gen = done.generation,
+                                current_gen = svg.generation,
+                                "stale raster result dropped",
+                            );
+                            continue;
+                        }
+                        svg.layer.generation = done.generation;
+                        if let Err(e) = svg.layer.upload(
+                            &state.renderer.gpu.device,
+                            &state.renderer.gpu.queue,
+                            &done.pixmap,
+                        ) {
+                            tracing::warn!(?e, "svg gpu upload failed");
+                        } else {
+                            tracing::debug!(generation = done.generation, "svg uploaded to gpu");
+                        }
+                    }
+                }
+
                 // Render-order priority per spec §3.6 / T-M2-09:
-                // blackout > freeze > test_pattern > normal.
+                // blackout > freeze > test_pattern > svg > normal.
                 // Blackout wins over freeze: if the operator hits B
                 // while frozen, the projector goes black immediately
                 // rather than continuing to show the frozen frame.
@@ -405,6 +568,19 @@ impl ApplicationHandler for App {
                         &state.output,
                         &state.test_patterns,
                         state.output.state.test_pattern,
+                    )
+                } else if state
+                    .svg
+                    .as_ref()
+                    .is_some_and(|s| s.layer.texture_view().is_some())
+                {
+                    // Safety: we just checked is_some() above.
+                    let svg = state.svg.as_ref().unwrap();
+                    render_svg(
+                        &state.renderer,
+                        &state.output,
+                        &svg.pipeline,
+                        svg.layer.texture_view().unwrap(),
                     )
                 } else {
                     state.renderer.render_frame(&state.output)

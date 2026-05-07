@@ -3,6 +3,7 @@
 //! Rasterization is performed on a worker thread (`std::thread::spawn` plus
 //! a `crossbeam-channel` for results) so a 200 KB SVG cannot stall a frame.
 
+pub mod render;
 pub mod watcher;
 pub mod worker;
 
@@ -38,8 +39,9 @@ pub struct SvgLayer {
     /// reuse the pixmap").
     cache: Option<(RasterKey, tiny_skia::Pixmap)>,
     /// Monotonic counter T-M3-04 will increment when the source file
-    /// changes. 0 at construction; bumped externally.
-    generation: u64,
+    /// changes. 0 at construction; bumped externally by T-M3-06 when
+    /// a `RasterDone` result is accepted.
+    pub(crate) generation: u64,
     /// Cached GPU texture mirroring the most-recently-rasterized Pixmap.
     /// `None` until `upload(...)` is called. The texture is `Rgba8UnormSrgb`
     /// with **unpremultiplied** alpha (see UNMULTIPLIED ALPHA note on
