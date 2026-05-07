@@ -221,72 +221,77 @@ impl Renderer {
         &self,
         output: &crate::windows::output::OutputWindow,
     ) -> Result<(), RenderError> {
-        let frame = match output.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(f) => f,
-            wgpu::CurrentSurfaceTexture::Suboptimal(_) => {
-                return Err(RenderError::SurfaceSuboptimal);
-            }
-            wgpu::CurrentSurfaceTexture::Timeout => {
-                warn!("surface acquire timed out; dropping frame");
-                return Ok(());
-            }
-            wgpu::CurrentSurfaceTexture::Occluded => {
-                tracing::debug!("surface occluded; skipping frame");
-                return Ok(());
-            }
-            wgpu::CurrentSurfaceTexture::Outdated => {
-                return Err(RenderError::SurfaceOutdated);
-            }
-            wgpu::CurrentSurfaceTexture::Lost => {
-                return Err(RenderError::SurfaceLost);
-            }
-            wgpu::CurrentSurfaceTexture::Validation => {
-                return Err(RenderError::Surface(
-                    "surface acquire validation error".into(),
-                ));
-            }
-        };
+        // T-M2-02's trampoline turns any internal panic into
+        // `RenderError::RenderPanic`, which `App::window_event`'s catch-all
+        // `Err(e)` arm already logs at `error!` (egui overlay wired in T-M2-10).
+        crate::show_day::panic_restore::run_frame_assert_unwind_safe(|| {
+            let frame = match output.surface.get_current_texture() {
+                wgpu::CurrentSurfaceTexture::Success(f) => f,
+                wgpu::CurrentSurfaceTexture::Suboptimal(_) => {
+                    return Err(RenderError::SurfaceSuboptimal);
+                }
+                wgpu::CurrentSurfaceTexture::Timeout => {
+                    warn!("surface acquire timed out; dropping frame");
+                    return Ok(());
+                }
+                wgpu::CurrentSurfaceTexture::Occluded => {
+                    tracing::debug!("surface occluded; skipping frame");
+                    return Ok(());
+                }
+                wgpu::CurrentSurfaceTexture::Outdated => {
+                    return Err(RenderError::SurfaceOutdated);
+                }
+                wgpu::CurrentSurfaceTexture::Lost => {
+                    return Err(RenderError::SurfaceLost);
+                }
+                wgpu::CurrentSurfaceTexture::Validation => {
+                    return Err(RenderError::Surface(
+                        "surface acquire validation error".into(),
+                    ));
+                }
+            };
 
-        let view = frame
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
+            let view = frame
+                .texture
+                .create_view(&wgpu::TextureViewDescriptor::default());
 
-        let mut encoder = self
-            .gpu
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("rmap frame encoder"),
-            });
+            let mut encoder =
+                self.gpu
+                    .device
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("rmap frame encoder"),
+                    });
 
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("triangle pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.05,
-                            g: 0.05,
-                            b: 0.08,
-                            a: 1.0,
-                        }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            pass.set_pipeline(&self.triangle_pipeline);
-            pass.draw(0..6, 0..1);
-        }
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("triangle pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &view,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color {
+                                r: 0.05,
+                                g: 0.05,
+                                b: 0.08,
+                                a: 1.0,
+                            }),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                pass.set_pipeline(&self.triangle_pipeline);
+                pass.draw(0..6, 0..1);
+            }
 
-        self.gpu.queue.submit(iter::once(encoder.finish()));
-        frame.present();
+            self.gpu.queue.submit(iter::once(encoder.finish()));
+            frame.present();
 
-        Ok(())
+            Ok(())
+        })
     }
 }
