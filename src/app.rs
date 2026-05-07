@@ -247,6 +247,10 @@ impl ApplicationHandler for App {
                     tracing::warn!("surface suboptimal; recreating");
                     state.output.recreate_surface(&state.renderer.gpu.device);
                 }
+                Err(RenderError::RenderPanic { message }) => {
+                    tracing::error!(%message, "renderer panicked; recovered");
+                    crate::windows::control::error_overlay(&message);
+                }
                 Err(e) => {
                     tracing::error!(?e, "render error");
                 }
