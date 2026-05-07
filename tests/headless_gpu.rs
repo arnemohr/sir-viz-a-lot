@@ -362,3 +362,694 @@ fn smoke_clear_red() {
         "last pixel should be opaque red after clear"
     );
 }
+
+// ===========================================================================
+// Shared helpers for golden-image tests (T-M5-15 / T-M5-16 / T-M5-17).
+//
+// `tests/*.rs` are each their own test binary, so we keep all golden-image
+// tests in this single file (headless_gpu.rs) to avoid duplicating the
+// harness or these helpers.
+//
+// The crate has no `lib.rs`, so production pipeline structs (ColorPipeline,
+// BlurPipeline, WarpRenderer) are not reachable from integration tests.
+// Instead we rebuild minimal pipelines here, loading the production WGSL via
+// `include_str!` so the shader code under test stays the source of truth.
+// The Rust-side wiring (BGLs, samplers, blend states) mirrors the production
+// versions in src/effects/{color,blur}.rs and src/render/warp.rs.
+// ===========================================================================
+
+const TOLERANCE: u8 = 2;
+
+/// Allocate an offscreen texture with usage suitable as either the source or
+/// destination of a render pass: `TEXTURE_BINDING | RENDER_ATTACHMENT |
+/// COPY_DST`. Used for ping-pong intermediates in the blur test and for the
+/// uploaded-from-CPU input textures in all three tests.
+fn make_io_texture(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+    label: &str,
+) -> (wgpu::Texture, wgpu::TextureView) {
+    let tex = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(label),
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: TARGET_FORMAT,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+    (tex, view)
+}
+
+/// Upload a tightly-packed RGBA8 byte slice into a fresh `TARGET_FORMAT`
+/// texture. The upload path uses `queue.write_texture`; row alignment is
+/// handled by wgpu since we provide `bytes_per_row = width * 4`.
+///
+/// Note: `TARGET_FORMAT` is `Rgba8UnormSrgb`. The bytes are interpreted as
+/// sRGB-encoded values; samplers will linearize them on read. This matches
+/// production: `EffectPipeline` ping-pong textures use the surface format
+/// (`Rgba8UnormSrgb`) and SVG rasterization writes sRGB bytes there too.
+fn upload_rgba8(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    width: u32,
+    height: u32,
+    data: &[u8],
+    label: &str,
+) -> (wgpu::Texture, wgpu::TextureView) {
+    assert_eq!(data.len() as u32, width * height * 4, "rgba8 size mismatch");
+    let (tex, view) = make_io_texture(device, width, height, label);
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &tex,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        data,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(width * 4),
+            rows_per_image: Some(height),
+        },
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+    );
+    (tex, view)
+}
+
+/// Horizontal RGB gradient: R sweeps 0→255 left-to-right, G fixed at 128,
+/// B sweeps 255→0 left-to-right, A=255. Deterministic by construction.
+fn make_gradient(width: u32, height: u32) -> Vec<u8> {
+    let mut out = Vec::with_capacity((width * height * 4) as usize);
+    for _y in 0..height {
+        for x in 0..width {
+            let t = if width > 1 {
+                x as f32 / (width - 1) as f32
+            } else {
+                0.0
+            };
+            let r = (t * 255.0).round() as u8;
+            let g = 128u8;
+            let b = ((1.0 - t) * 255.0).round() as u8;
+            out.extend_from_slice(&[r, g, b, 255]);
+        }
+    }
+    out
+}
+
+/// Black/white checkerboard with `cell`-pixel squares. White in the (0,0)
+/// cell. Alpha=255 everywhere.
+fn make_checkerboard(width: u32, height: u32, cell: u32) -> Vec<u8> {
+    let cell = cell.max(1);
+    let mut out = Vec::with_capacity((width * height * 4) as usize);
+    for y in 0..height {
+        for x in 0..width {
+            let cx = x / cell;
+            let cy = y / cell;
+            let c: u8 = if (cx + cy) % 2 == 0 { 255 } else { 0 };
+            out.extend_from_slice(&[c, c, c, 255]);
+        }
+    }
+    out
+}
+
+/// 16-byte uniform buffer with `UNIFORM | COPY_DST` usage, sized for the
+/// `ColorParams` / `BlurParams` wire formats (both 16 bytes).
+fn make_uniform_buffer(device: &wgpu::Device, label: &str) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some(label),
+        size: 16,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Pipeline rebuilds (no lib.rs ⇒ tests can't import from src/).
+// Each one mirrors the production constructor in src/effects/* and
+// src/render/warp.rs but is kept minimal: only the bits the test exercises.
+// ---------------------------------------------------------------------------
+
+struct EffectBgl {
+    bgl: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
+}
+
+/// BGL + sampler shared by the color and blur pipelines (both use the same
+/// 3-binding layout: float texture, filtering sampler, 16-byte uniform).
+fn make_effect_bgl(device: &wgpu::Device, label: &str) -> EffectBgl {
+    let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some(label),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    multisampled: false,
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+        ],
+    });
+    let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("effect sampler"),
+        address_mode_u: wgpu::AddressMode::ClampToEdge,
+        address_mode_v: wgpu::AddressMode::ClampToEdge,
+        address_mode_w: wgpu::AddressMode::ClampToEdge,
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+        ..Default::default()
+    });
+    EffectBgl { bgl, sampler }
+}
+
+/// Build a fragment-shader-only fullscreen-quad pipeline using the given WGSL
+/// source. Matches the production `BlendState::REPLACE` mode used by the
+/// color and blur effects.
+fn build_quad_pipeline(
+    device: &wgpu::Device,
+    bgl: &wgpu::BindGroupLayout,
+    wgsl: &str,
+    label: &str,
+) -> wgpu::RenderPipeline {
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some(label),
+        source: wgpu::ShaderSource::Wgsl(wgsl.into()),
+    });
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some(label),
+        bind_group_layouts: &[Some(bgl)],
+        immediate_size: 0,
+    });
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some(label),
+        layout: Some(&pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs_main"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            buffers: &[],
+        },
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            strip_index_format: None,
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: None,
+            unclipped_depth: false,
+            polygon_mode: wgpu::PolygonMode::Fill,
+            conservative: false,
+        },
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs_main"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: TARGET_FORMAT,
+                blend: Some(wgpu::BlendState::REPLACE),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
+/// Record a single render pass that samples `src_view` and writes into
+/// `dst_view`, clearing to black first. Used by both the color test and
+/// each blur half-pass.
+#[allow(clippy::too_many_arguments)]
+fn record_quad_pass(
+    device: &wgpu::Device,
+    encoder: &mut wgpu::CommandEncoder,
+    pipeline: &wgpu::RenderPipeline,
+    bgl: &wgpu::BindGroupLayout,
+    sampler: &wgpu::Sampler,
+    src_view: &wgpu::TextureView,
+    dst_view: &wgpu::TextureView,
+    uniform_buffer: &wgpu::Buffer,
+    label: &str,
+) {
+    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some(label),
+        layout: bgl,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(src_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: uniform_buffer.as_entire_binding(),
+            },
+        ],
+    });
+    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some(label),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view: dst_view,
+            depth_slice: None,
+            resolve_target: None,
+            ops: wgpu::Operations {
+                load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                store: wgpu::StoreOp::Store,
+            },
+        })],
+        depth_stencil_attachment: None,
+        timestamp_writes: None,
+        occlusion_query_set: None,
+        multiview_mask: None,
+    });
+    pass.set_pipeline(pipeline);
+    pass.set_bind_group(0, &bg, &[]);
+    pass.draw(0..6, 0..1);
+}
+
+// ---------------------------------------------------------------------------
+// T-M5-15 — Golden image: color pass.
+// 64×64 horizontal RGB gradient → ColorParams { hue=+30°, sat=1.5 }
+// → tests/golden/color.png. tolerance = 2.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn color_pass_golden() {
+    const W: u32 = 64;
+    const H: u32 = 64;
+    let h = Headless::new().expect("Headless::new");
+
+    let bytes = h.render_to_rgba8(W, H, |device, queue, view| {
+        // Build the color pipeline from the production WGSL.
+        let effect = make_effect_bgl(device, "color test bgl");
+        let pipeline = build_quad_pipeline(
+            device,
+            &effect.bgl,
+            include_str!("../src/render/shaders/color.wgsl"),
+            "color test pipeline",
+        );
+
+        // Input texture: gradient.
+        let gradient = make_gradient(W, H);
+        let (_src_tex, src_view) =
+            upload_rgba8(device, queue, W, H, &gradient, "color input gradient");
+
+        // Uniform: ColorParams wire layout (matches src/effects/color.rs).
+        // hue_shift_deg=30, saturation_mul=1.5, brightness_add=0, contrast_mul=1.
+        let uniform = make_uniform_buffer(device, "color params");
+        let mut wire = [0u8; 16];
+        wire[0..4].copy_from_slice(&30.0f32.to_le_bytes());
+        wire[4..8].copy_from_slice(&1.5f32.to_le_bytes());
+        wire[8..12].copy_from_slice(&0.0f32.to_le_bytes());
+        wire[12..16].copy_from_slice(&1.0f32.to_le_bytes());
+        queue.write_buffer(&uniform, 0, &wire);
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("color test encoder"),
+        });
+        record_quad_pass(
+            device,
+            &mut encoder,
+            &pipeline,
+            &effect.bgl,
+            &effect.sampler,
+            &src_view,
+            view,
+            &uniform,
+            "color test pass",
+        );
+        queue.submit(std::iter::once(encoder.finish()));
+    });
+
+    assert_image_matches(&bytes, W, H, "tests/golden/color.png", TOLERANCE);
+}
+
+// ---------------------------------------------------------------------------
+// T-M5-16 — Golden image: blur pass.
+// 64×64 horizontal RGB gradient → BlurParams { radius_px=8.0 }, separable
+// h+v passes → tests/golden/blur.png. tolerance = 2.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn blur_pass_golden() {
+    const W: u32 = 64;
+    const H: u32 = 64;
+    let h = Headless::new().expect("Headless::new");
+
+    let bytes = h.render_to_rgba8(W, H, |device, queue, view| {
+        let effect = make_effect_bgl(device, "blur test bgl");
+        let pipeline_h = build_quad_pipeline(
+            device,
+            &effect.bgl,
+            include_str!("../src/render/shaders/blur_h.wgsl"),
+            "blur h test pipeline",
+        );
+        let pipeline_v = build_quad_pipeline(
+            device,
+            &effect.bgl,
+            include_str!("../src/render/shaders/blur_v.wgsl"),
+            "blur v test pipeline",
+        );
+
+        // Input + intermediate textures.
+        let gradient = make_gradient(W, H);
+        let (_src_tex, src_view) =
+            upload_rgba8(device, queue, W, H, &gradient, "blur input gradient");
+        let (_mid_tex, mid_view) = make_io_texture(device, W, H, "blur intermediate");
+
+        // Uniform: BlurParams wire layout — single f32 at offset 0, padded.
+        let uniform = make_uniform_buffer(device, "blur params");
+        let mut wire = [0u8; 16];
+        wire[0..4].copy_from_slice(&8.0f32.to_le_bytes());
+        queue.write_buffer(&uniform, 0, &wire);
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("blur test encoder"),
+        });
+        // Horizontal: src -> intermediate.
+        record_quad_pass(
+            device,
+            &mut encoder,
+            &pipeline_h,
+            &effect.bgl,
+            &effect.sampler,
+            &src_view,
+            &mid_view,
+            &uniform,
+            "blur h pass",
+        );
+        // Vertical: intermediate -> output (the harness's view).
+        record_quad_pass(
+            device,
+            &mut encoder,
+            &pipeline_v,
+            &effect.bgl,
+            &effect.sampler,
+            &mid_view,
+            view,
+            &uniform,
+            "blur v pass",
+        );
+        queue.submit(std::iter::once(encoder.finish()));
+    });
+
+    assert_image_matches(&bytes, W, H, "tests/golden/blur.png", TOLERANCE);
+}
+
+// ---------------------------------------------------------------------------
+// T-M5-17 — Golden image: corner-pin warp.
+// 128×128 checkerboard input → 4 corners pinned to a known trapezoid, no
+// mask → tests/golden/warp.png. tolerance = 2.
+//
+// The production WarpRenderer requires a `WarpMesh` (private to the binary
+// crate) and an SDF texture. For the 1×1 corner-pin case we emit two
+// triangles directly with hard-coded UVs and bind a 1×1 dummy R32Float SDF
+// with use_mask=0 so warp.wgsl's mask branch is skipped.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn warp_pass_golden() {
+    const W: u32 = 128;
+    const H: u32 = 128;
+    let h = Headless::new().expect("Headless::new");
+
+    let bytes = h.render_to_rgba8(W, H, |device, queue, view| {
+        // --- Pipeline (rebuild from production warp.wgsl) ---
+        let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("warp test bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: std::num::NonZeroU64::new(16),
+                    },
+                    count: None,
+                },
+            ],
+        });
+
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("warp test shader"),
+            source: wgpu::ShaderSource::Wgsl(
+                include_str!("../src/render/shaders/warp.wgsl").into(),
+            ),
+        });
+
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("warp test pipeline layout"),
+            bind_group_layouts: &[Some(&bgl)],
+            immediate_size: 0,
+        });
+
+        // Vertex layout: pos_clip (Float32x2), src_uv (Float32x2). Stride 16.
+        let vb_layout = wgpu::VertexBufferLayout {
+            array_stride: 16,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2],
+        };
+
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("warp test pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[vb_layout],
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: TARGET_FORMAT,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        // --- Input scene texture: checkerboard, 8-px cells ---
+        let cb = make_checkerboard(W, H, 8);
+        let (_src_tex, src_view) = upload_rgba8(device, queue, W, H, &cb, "warp checkerboard");
+
+        let scene_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("warp test scene sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
+        });
+
+        // --- Dummy 1×1 R32Float SDF (unused: use_mask=0) ---
+        let sdf_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("warp test dummy sdf"),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R32Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &sdf_tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &0.0f32.to_le_bytes(),
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(4),
+                rows_per_image: Some(1),
+            },
+            wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+        );
+        let sdf_view = sdf_tex.create_view(&wgpu::TextureViewDescriptor::default());
+
+        // --- Mask uniform: use_mask=0, feather doesn't matter ---
+        let mask_uniform = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("warp test mask u"),
+            size: 16,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut mu = [0u8; 16];
+        // [use_mask, feather, sdf_size, _]
+        mu[0..4].copy_from_slice(&0.0f32.to_le_bytes());
+        mu[4..8].copy_from_slice(&1.0f32.to_le_bytes());
+        mu[8..12].copy_from_slice(&1.0f32.to_le_bytes());
+        queue.write_buffer(&mask_uniform, 0, &mu);
+
+        // --- Trapezoid corners in normalized output space (x right, y down).
+        // Matches the spec hint: top edge slightly indented, bottom edge full-
+        // width.   TL=(0.1, 0.0)   TR=(0.9, 0.05)   BL=(0.0, 1.0)   BR=(1.0, 0.95)
+        // Convert to clip: x = 2u-1, y = 1-2v.
+        let to_clip = |u: f32, v: f32| -> [f32; 2] { [u * 2.0 - 1.0, 1.0 - v * 2.0] };
+        let tl = to_clip(0.1, 0.0);
+        let tr = to_clip(0.9, 0.05);
+        let bl = to_clip(0.0, 1.0);
+        let br = to_clip(1.0, 0.95);
+
+        // Two triangles covering the trapezoid.
+        // Each vertex = [pos.x, pos.y, uv.u, uv.v].
+        // CCW in NDC (y-up): TL → BL → TR, then TR → BL → BR.
+        let verts: [[f32; 4]; 6] = [
+            [tl[0], tl[1], 0.0, 0.0],
+            [bl[0], bl[1], 0.0, 1.0],
+            [tr[0], tr[1], 1.0, 0.0],
+            [tr[0], tr[1], 1.0, 0.0],
+            [bl[0], bl[1], 0.0, 1.0],
+            [br[0], br[1], 1.0, 1.0],
+        ];
+        let vb_bytes: &[u8] = unsafe {
+            std::slice::from_raw_parts(verts.as_ptr().cast::<u8>(), std::mem::size_of_val(&verts))
+        };
+        let vb = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("warp test vb"),
+            size: vb_bytes.len() as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(&vb, 0, vb_bytes);
+
+        // --- Bind group ---
+        let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("warp test bg"),
+            layout: &bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&src_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&scene_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&sdf_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: mask_uniform.as_entire_binding(),
+                },
+            ],
+        });
+
+        // --- Encode ---
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("warp test encoder"),
+        });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("warp test pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &bg, &[]);
+            pass.set_vertex_buffer(0, vb.slice(..));
+            pass.draw(0..6, 0..1);
+        }
+        queue.submit(std::iter::once(encoder.finish()));
+    });
+
+    assert_image_matches(&bytes, W, H, "tests/golden/warp.png", TOLERANCE);
+}
