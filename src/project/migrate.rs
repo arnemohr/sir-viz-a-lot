@@ -21,3 +21,18 @@ pub fn migrate(mut value: Value) -> Result<Value, ProjectError> {
         v => Err(ProjectError::UnsupportedVersion(v)),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::migrate;
+    use crate::project::Project;
+    use crate::project::schema::CURRENT_SCHEMA_VERSION;
+
+    #[test]
+    fn project_v0_migrate() {
+        let v = serde_json::json!({});
+        let out = migrate(v).expect("migrate");
+        let p: Project = serde_json::from_value(out).expect("deserialize");
+        assert_eq!(p.schema_version, CURRENT_SCHEMA_VERSION);
+    }
+}

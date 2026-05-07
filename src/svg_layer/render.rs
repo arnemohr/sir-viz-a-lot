@@ -25,8 +25,10 @@ impl SvgLayerPipeline {
     /// `init_running_app`; the result is cached for the lifetime of the app.
     ///
     /// Blend mode: [`wgpu::BlendState::ALPHA_BLENDING`] so transparent SVG
-    /// areas compose with the cleared-black background rather than turning
-    /// opaque (`BlendState::REPLACE` would ignore alpha).
+    /// areas stay transparent over the clear color (`REPLACE` would ignore
+    /// alpha). The pass clears to transparent black so letterboxing and
+    /// layer margins do not become opaque black when composited over layers
+    /// below.
     pub fn new(device: &wgpu::Device, surface_format: wgpu::TextureFormat) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("textured_quad.wgsl"),
@@ -123,8 +125,8 @@ impl SvgLayerPipeline {
     }
 
     /// Render `texture_view` (the uploaded SVG raster) as a fullscreen quad
-    /// into `dst`. Builds a fresh bind group per call; clears `dst` to black
-    /// before sampling.
+    /// into `dst`. Builds a fresh bind group per call; clears `dst` to
+    /// transparent before sampling so only ink contributes opacity upstream.
     pub fn render(
         &self,
         device: &wgpu::Device,
@@ -156,7 +158,7 @@ impl SvgLayerPipeline {
                 depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                     store: wgpu::StoreOp::Store,
                 },
             })],

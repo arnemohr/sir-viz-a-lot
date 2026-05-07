@@ -3,6 +3,11 @@
 //! Rasterization is performed on a worker thread (`std::thread::spawn` plus
 //! a `crossbeam-channel` for results) so a 200 KB SVG cannot stall a frame.
 
+// M5/M6 stubs: `SvgLayer::load`, `bbox`, `rasterize`, `maybe_rerasterize`,
+// and the `path`/`tree`/`cache` fields are used by the worker path and will
+// be wired up when the render pipeline is fully connected.
+#![allow(dead_code)]
+
 pub mod render;
 pub mod watcher;
 pub mod worker;
@@ -10,6 +15,20 @@ pub mod worker;
 use std::path::PathBuf;
 
 use crate::error::RmapError;
+
+/// Maps SVG user coordinates into oversample pixmap pixels: uniform scale so
+/// `bbox` fits inside `over_w × over_h`, centered. Letterboxing preserves
+/// aspect ratio; margins stay transparent.
+fn raster_uniform_fit_transform(
+    bbox: &usvg::Rect,
+    over_w: u32,
+    over_h: u32,
+) -> tiny_skia::Transform {
+    let s = (over_w as f32 / bbox.width()).min(over_h as f32 / bbox.height());
+    let tx = (over_w as f32 - bbox.width() * s) * 0.5;
+    let ty = (over_h as f32 - bbox.height() * s) * 0.5;
+    tiny_skia::Transform::from_row(s, 0.0, 0.0, s, tx - s * bbox.left(), ty - s * bbox.top())
+}
 
 /// Cache key for the most recently rasterized pixmap.
 ///
@@ -25,14 +44,15 @@ struct RasterKey {
 
 /// A loaded SVG layer.
 ///
-/// Holds the parsed `usvg::Tree` so later milestones can rasterize it
-/// (T-M3-02) and upload the result to a wgpu texture (T-M3-03) without
-/// re-parsing on every frame.
+/// Holds an optional parsed `usvg::Tree` when loaded via [`SvgLayer::load`].
+/// [`SvgLayer::pending`] skips parse so startup does not block on large SVGs;
+/// the background worker parses once per raster job.
 #[derive(Debug)]
 pub struct SvgLayer {
     pub path: PathBuf,
-    /// Parsed SVG document. Read by the rasterization worker (T-M3-04).
-    pub(crate) tree: usvg::Tree,
+    /// Parsed SVG document. `None` for [`SvgLayer::pending`] layers until a
+    /// future code path assigns it; rasterization in production uses the worker.
+    pub(crate) tree: Option<usvg::Tree>,
     /// Last rasterized result, keyed on (target_size, generation).
     /// `generation` is bumped by T-M3-04 when the SVG file changes on
     /// disk; for now it stays at 0 (caching reduces to "same target size →
@@ -75,13 +95,29 @@ impl SvgLayer {
 
         Ok(Self {
             path,
-            tree,
+            tree: Some(tree),
             cache: None,
             generation: 0,
             gpu_texture: None,
             gpu_texture_view: None,
             gpu_uploaded_key: None,
         })
+    }
+
+    /// Layer shell without reading or parsing the file.
+    ///
+    /// Used when the raster worker will load the SVG off-thread (`RasterJob`);
+    /// avoids parsing twice (main thread + worker) on startup.
+    pub fn pending(path: PathBuf) -> Self {
+        Self {
+            path,
+            tree: None,
+            cache: None,
+            generation: 0,
+            gpu_texture: None,
+            gpu_texture_view: None,
+            gpu_uploaded_key: None,
+        }
     }
 
     /// The SVG's effective bounding box in user (canvas) coordinates.
@@ -92,7 +128,8 @@ impl SvgLayer {
     /// which downstream rasterization (T-M3-02) should treat as "nothing
     /// to draw" rather than panic on a 0×0 pixmap.
     pub fn bbox(&self) -> Option<usvg::Rect> {
-        let r = self.tree.root().abs_bounding_box();
+        let tree = self.tree.as_ref()?;
+        let r = tree.root().abs_bounding_box();
         if r.width() > 0.0 && r.height() > 0.0 {
             Some(r)
         } else {
@@ -135,9 +172,20 @@ impl SvgLayer {
             return Ok(&self.cache.as_ref().unwrap().1);
         }
 
-        let bbox = self
-            .bbox()
-            .ok_or_else(|| RmapError::Other("svg has no content to rasterize".into()))?;
+        let tree = self.tree.as_ref().ok_or_else(|| {
+            RmapError::Other(
+                "svg layer has no parsed tree (use SvgLayer::load before rasterize)".into(),
+            )
+        })?;
+
+        let bbox = {
+            let r = tree.root().abs_bounding_box();
+            if r.width() > 0.0 && r.height() > 0.0 {
+                r
+            } else {
+                return Err(RmapError::Other("svg has no content to rasterize".into()));
+            }
+        };
 
         // 2× oversample render target.
         let over_w = width.saturating_mul(2).max(1);
@@ -149,14 +197,9 @@ impl SvgLayer {
             ))
         })?;
 
-        // Fit the SVG bbox into the oversample pixmap. resvg 0.47's
-        // `render` takes a `PixmapMut` (not `&mut Pixmap`), so go through
-        // `Pixmap::as_mut()`.
-        let scale_x = over_w as f32 / bbox.width();
-        let scale_y = over_h as f32 / bbox.height();
-        let transform = tiny_skia::Transform::from_scale(scale_x, scale_y)
-            .pre_translate(-bbox.left(), -bbox.top());
-        resvg::render(&self.tree, transform, &mut over.as_mut());
+        // Uniform scale + center in the oversample pixmap (letterbox).
+        let transform = raster_uniform_fit_transform(&bbox, over_w, over_h);
+        resvg::render(tree, transform, &mut over.as_mut());
 
         // Downsample via `image` to the final target size.
         // tiny_skia::Pixmap → image::RgbaImage → resize → image::RgbaImage → tiny_skia::Pixmap.

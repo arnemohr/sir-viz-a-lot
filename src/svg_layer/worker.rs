@@ -24,14 +24,27 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::RmapError;
+
+static NEXT_LAYER_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Stable identifier the App assigns to a layer to disambiguate
 /// per-layer worker traffic. T-M3-06 will pick how it's allocated
 /// (probably the layer's index or a monotonic counter on Project).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct LayerId(pub u64);
+
+impl LayerId {
+    /// Mint a fresh `LayerId` from a monotonically increasing global counter.
+    /// Each call returns a unique value that never repeats, preventing stale
+    /// `RasterDone` results from a previous layer vector from matching a new
+    /// `LayerState` rebuilt with the same index-based numeric ID.
+    pub fn next() -> Self {
+        Self(NEXT_LAYER_ID.fetch_add(1, Ordering::Relaxed))
+    }
+}
 
 /// A rasterization request sent to the worker thread.
 #[derive(Debug, Clone)]
@@ -125,7 +138,8 @@ impl Worker {
 /// operates on bare paths and sizes without the `SvgLayer` cache.
 ///
 /// Algorithm: read file → `usvg::Tree::from_str` → 2× oversample via `resvg`
-/// → downsample with `image` Triangle filter → return `tiny_skia::Pixmap`.
+/// (uniform scale, centered letterbox) → downsample with `image` Triangle
+/// filter → return `tiny_skia::Pixmap`.
 fn rasterize_one(job: &RasterJob) -> Result<tiny_skia::Pixmap, RmapError> {
     let (width, height) = job.size;
 
@@ -156,10 +170,7 @@ fn rasterize_one(job: &RasterJob) -> Result<tiny_skia::Pixmap, RmapError> {
         ))
     })?;
 
-    let scale_x = over_w as f32 / bbox.width();
-    let scale_y = over_h as f32 / bbox.height();
-    let transform =
-        tiny_skia::Transform::from_scale(scale_x, scale_y).pre_translate(-bbox.left(), -bbox.top());
+    let transform = super::raster_uniform_fit_transform(&bbox, over_w, over_h);
     resvg::render(&tree, transform, &mut over.as_mut());
 
     // --- Downsample via `image` ---

@@ -10,10 +10,9 @@
 //! continuous redraws so we render at the display's vsync rate.
 //!
 //! Out of scope for M1: scene-recall hotkeys, blackout/freeze, the egui
-//! control window, `--autostart` driving project load, surface-error
-//! recovery beyond simple resize. T-M1-05 owns surface recovery; T-M2-09
-//! owns B/F/T keys; T-M4-14 opens the control window; T-M6-04 wires
-//! `--autostart` to project load.
+//! control window, surface-error recovery beyond simple resize. T-M1-05 owns
+//! surface recovery; T-M2-09 owns B/F/T keys; T-M4-14 opens the control window.
+//! M6: `*.rmap.json` load/save, `--autostart`, and monitor index from project.
 
 use std::path::PathBuf;
 
@@ -26,16 +25,20 @@ use winit::monitor::MonitorHandle;
 use winit::window::WindowId;
 
 use crate::clock::Clock;
+use crate::controls::keyboard::KeyboardSource;
 use crate::controls::ControlEvent;
 use crate::controls::Source;
-use crate::controls::keyboard::KeyboardSource;
 use crate::effects::blur::BlurPipeline;
 use crate::effects::color::ColorPipeline;
 use crate::effects::transform::TransformPipeline;
-use crate::effects::{Effect, RenderCtx};
+use crate::effects::RenderCtx;
 use crate::error::{Result, RmapError};
-use crate::modulators::Modulator;
+use crate::project::schema::{self, Project};
+use crate::project::{restore, ProjectError};
+use crate::render::compositor::Compositor;
+use crate::render::gamma::GammaPipeline;
 use crate::render::pipeline::EffectPipeline;
+use crate::render::warp::WarpRenderer;
 use crate::render::{GpuContext, RenderError, Renderer};
 use crate::show_day::sleep_assertion::SleepAssertion;
 use crate::svg_layer::SvgLayer;
@@ -44,6 +47,7 @@ use crate::svg_layer::watcher::{WatchEvent, Watcher};
 use crate::svg_layer::worker::{LayerId, RasterDone, RasterJob, Worker};
 use crate::test_patterns::{TestPattern, TestPatternRenderer};
 use crate::windows::control::ControlWindow;
+use crate::windows::control_panel::{show as control_panel_show, ControlPanelAction, ControlPanelState};
 use crate::windows::output::OutputWindow;
 
 /// Application root. Holds the persistent state across event-loop iterations.
@@ -52,19 +56,19 @@ use crate::windows::output::OutputWindow;
 /// `resumed` more than once over the lifecycle (e.g. after suspend); the
 /// handler guards against re-init.
 pub struct App {
-    /// Project path from CLI. Currently only stored so future tasks
-    /// (T-M6-04) can load it; no behaviour depends on it at M1.
+    /// CLI path: `*.rmap.json` (full project) or `*.svg` (single-layer bootstrap).
     project: Option<PathBuf>,
-    /// `--autostart` from CLI. Stored, not acted upon, at M1; T-M6-04
-    /// turns this on for real.
+    /// With `.rmap.json`, logging + monitor selection semantics (see `resumed`).
     autostart: bool,
     /// Operator-supplied `--monitor INDEX` override.
     ///
-    /// Interim v1 path: this is the only way to point the output at a
-    /// non-default monitor until the egui dropdown (T-M4-15) and the saved
-    /// `Project.output_monitor_index` (T-M6-04) land. CLI value takes
-    /// precedence over both. `None` here falls back to monitor 0.
+    /// Overrides `Project.output_monitor_index` when set. When omitted, the
+    /// loaded project’s index is used (default `0` for empty / SVG bootstrap).
     monitor_override: Option<usize>,
+    /// `--windowed`: force decorated output window (1280×720 on chosen monitor).
+    cli_windowed: bool,
+    /// `--fullscreen`: force borderless fullscreen; wins over `--windowed` and project.
+    cli_fullscreen: bool,
     /// Lazily-initialised GPU + window state.
     state: Option<RunningApp>,
 }
@@ -74,74 +78,71 @@ pub struct App {
 /// the optional SVG layer state, and the IOPMAssertion preventing display sleep.
 struct RunningApp {
     output: OutputWindow,
-    /// Optional egui control window on the primary display. `None` when the
-    /// multi-window init fails (D-01 fallback: the app keeps running with
-    /// only the output window).
     control: Option<ControlWindow>,
     renderer: Renderer,
     test_patterns: TestPatternRenderer,
-    /// Optional SVG layer state. `None` when no `.svg` project file was
-    /// provided, or when the provided file is not a `.svg` (non-.svg
-    /// projects are T-M6-04's domain). The M1 hello-rect fallback renders
-    /// when this is `None`.
-    svg: Option<SvgState>,
-    /// Central time/BPM source. Updated by tap-tempo (Space key → TapTempo
-    /// event → `clock.tap()`). Modulators read from this for phase-coherent
-    /// animation. T-M4-10.
+    /// Live project (layers, warps, scenes, gamma). T-M5.
+    project: Project,
+    /// GPU runtime per `project.layers` row (order matches).
+    layers: Vec<LayerState>,
+    /// Shared textured-quad pipeline for SVG upload → effect source.
+    svg_pipeline: SvgLayerPipeline,
+    compositor: Compositor,
+    warp: WarpRenderer,
+    gamma: GammaPipeline,
+    warp_rt: wgpu::Texture,
+    warp_rt_view: wgpu::TextureView,
+    control_panel: ControlPanelState,
     clock: Clock,
-    /// Buffers winit keyboard events and translates them into `ControlEvent`s
-    /// on `poll()`. T-M4-10.
     keyboard: KeyboardSource,
-    /// Cached effect pipelines. Built once at startup (per spec §2 + plan
-    /// §3.4 M4). T-M4-15 dispatches them through `Effect::render` against
-    /// the per-layer `EffectPipeline` ping-pong.
     color_pipeline: ColorPipeline,
     blur_pipeline: BlurPipeline,
     transform_pipeline: TransformPipeline,
-    /// Operator-editable effect chain (T-M4-15). The control panel mutates
-    /// this through `crate::windows::control_panel::show`; the SVG render
-    /// path reads it on every frame.
-    effects: Vec<Effect>,
-    /// Held for the lifetime of the running app — `Drop` releases the
-    /// `IOPMAssertion` on macOS, no-op elsewhere. Spec §6 display-sleep
-    /// prevention. Field is read only by `Drop`; underscore prefix
-    /// silences the unused-field lint.
     _sleep_assertion: SleepAssertion,
+    /// Set when the session was started from a `*.rmap.json` CLI argument.
+    #[allow(dead_code)]
+    project_file_path: Option<PathBuf>,
 }
 
-/// All GPU + async state for the single active SVG layer.
-///
-/// Constructed in `init_running_app` when `svg_path` is `Some(path.svg)`.
-/// `None` when the no-SVG path is active.
-struct SvgState {
-    /// Parsed SVG layer (owns `usvg::Tree`, cached pixmap, GPU texture).
+/// Per-layer SVG raster + effect ping-pong + worker.
+struct LayerState {
     layer: SvgLayer,
-    /// GPU pipeline for blitting the rasterized SVG onto the output surface.
-    pipeline: SvgLayerPipeline,
-    /// Layer identifier for disambiguating worker traffic. Fixed at `LayerId(0)`
-    /// for the single-layer M3 path; T-M5-01 will allocate these dynamically.
     layer_id: LayerId,
-    /// Monotonic counter: incremented on each watch event. The worker echoes
-    /// this back in `RasterDone::generation`; stale results are dropped.
     generation: u64,
-    /// Channel to the off-thread rasterization worker.
     job_tx: Sender<RasterJob>,
-    /// Channel from the off-thread rasterization worker.
     result_rx: Receiver<RasterDone>,
-    /// Channel from the file watcher. `try_recv` drained per-frame in
-    /// `RedrawRequested`.
     watch_rx: Receiver<WatchEvent>,
-    /// Hold the `Watcher` to keep the debouncer thread alive. Drop to stop
-    /// watching.
     _watcher: Watcher,
-    /// Per-layer ping-pong textures driven by the effect chain (T-M4-15).
-    /// Sized to the output surface so the final blit is 1:1.
     effect_pipeline: EffectPipeline,
-    /// Scratch texture for multi-pass effects (currently only blur). Same
-    /// dimensions / format as the ping-pong textures. Held alongside
-    /// `effect_pipeline` so a resize reallocates all three together.
     _intermediate_texture: wgpu::Texture,
     intermediate_view: wgpu::TextureView,
+    /// Separate from shared [`ColorPipeline`] so each layer’s write_buffer lands in its own memory.
+    color_uniform: wgpu::Buffer,
+    blur_uniform: wgpu::Buffer,
+    transform_uniform: wgpu::Buffer,
+    compositor_uniform: wgpu::Buffer,
+}
+
+fn create_layer_uniform_buffers(device: &wgpu::Device) -> (
+    wgpu::Buffer,
+    wgpu::Buffer,
+    wgpu::Buffer,
+    wgpu::Buffer,
+) {
+    let mk = |label: &'static str, size: u64| {
+        device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(label),
+            size,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        })
+    };
+    (
+        mk("layer color uniform", 16),
+        mk("layer blur uniform", 16),
+        mk("layer transform uniform", 64),
+        mk("layer compositor uniform", 16),
+    )
 }
 
 impl App {
@@ -149,6 +150,8 @@ impl App {
         project: Option<PathBuf>,
         autostart: bool,
         monitor_index: Option<usize>,
+        cli_windowed: bool,
+        cli_fullscreen: bool,
     ) -> Result<()> {
         let event_loop =
             EventLoop::new().map_err(|e| RmapError::Other(format!("event loop: {e}")))?;
@@ -158,6 +161,8 @@ impl App {
             project,
             autostart,
             monitor_override: monitor_index,
+            cli_windowed,
+            cli_fullscreen,
             state: None,
         };
 
@@ -233,10 +238,59 @@ impl ApplicationHandler for ListMonitorsApp {
 
 /// Bring up the GPU and the output window, and optionally load the SVG layer.
 /// Pulled into a free function so the error path in `resumed` can `?` cleanly.
+fn is_rmap_project_file(path: &std::path::Path) -> bool {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.ends_with(".rmap.json"))
+}
+
+/// Effective windowed vs fullscreen output for this session.
+///
+/// Precedence: `--fullscreen` → fullscreen; else `--windowed` → windowed; else if the
+/// session started from a saved `.rmap.json`, honor `project.output_windowed`; else fullscreen.
+fn resolve_output_windowed(
+    cli_fullscreen: bool,
+    cli_windowed: bool,
+    project: &Project,
+    loaded_from_project_file: bool,
+) -> bool {
+    if cli_fullscreen {
+        return false;
+    }
+    if cli_windowed {
+        return true;
+    }
+    loaded_from_project_file && project.output_windowed
+}
+
+fn load_project_for_startup(
+    cli_path: Option<&PathBuf>,
+) -> std::result::Result<(Project, Option<PathBuf>), ProjectError> {
+    match cli_path {
+        None => Ok((build_initial_project(None), None)),
+        Some(path) => {
+            if is_rmap_project_file(path) {
+                let p = crate::project::Project::load(path)?;
+                Ok((p, Some(path.clone())))
+            } else if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("svg")) {
+                Ok((build_initial_project(Some(path.clone())), None))
+            } else {
+                tracing::warn!(
+                    path = %path.display(),
+                    "expected *.rmap.json or *.svg; starting empty project",
+                );
+                Ok((build_initial_project(None), None))
+            }
+        }
+    }
+}
+
 fn init_running_app(
     event_loop: &ActiveEventLoop,
     monitor: Option<MonitorHandle>,
-    svg_path: Option<PathBuf>,
+    project: Project,
+    project_file_path: Option<PathBuf>,
+    output_windowed: bool,
 ) -> Result<RunningApp> {
     let gpu = GpuContext::new()?;
     let output = OutputWindow::new(
@@ -245,10 +299,8 @@ fn init_running_app(
         &gpu.instance,
         &gpu.adapter,
         &gpu.device,
+        output_windowed,
     )?;
-    // T-M4-14: open the egui control window on the primary display, sharing
-    // the same wgpu device. Failure is non-fatal — D-01 fallback keeps the
-    // app running with only the output window.
     let control = match ControlWindow::new(event_loop, &gpu.instance, &gpu.adapter, &gpu.device) {
         Ok(c) => Some(c),
         Err(e) => {
@@ -260,63 +312,93 @@ fn init_running_app(
         }
     };
     let surface_format = output.config.format;
-    // Build the test-pattern pipelines before handing `gpu` to the
-    // Renderer (Renderer takes ownership of `gpu`).
     let test_patterns = TestPatternRenderer::new(&gpu.device, surface_format);
-    // T-M4-15: build effect pipelines once at startup. They share the
-    // surface format with the per-layer EffectPipeline ping-pong textures
-    // (built later, per SvgState), the SvgLayerPipeline, and the surface
-    // itself, so every blit lands in a consistent sRGB pipeline.
     let color_pipeline = ColorPipeline::new(&gpu.device, surface_format);
     let blur_pipeline = BlurPipeline::new(&gpu.device, surface_format);
     let transform_pipeline = TransformPipeline::new(&gpu.device, surface_format);
     let renderer = Renderer::new(gpu, surface_format)?;
-    // Spec §6 display-sleep prevention. Held on RunningApp; released on
-    // Drop. Failures are logged inside `acquire` and yield a no-op
-    // assertion (degraded mode) rather than aborting.
     let sleep_assertion = SleepAssertion::acquire("rmap output window");
 
-    // Build optional SVG state. Only wired up when the CLI provides a .svg path.
-    let svg = if let Some(path) = svg_path.filter(|p| p.extension().is_some_and(|e| e == "svg")) {
-        let layer = SvgLayer::load(path.clone())?;
-        let pipeline = SvgLayerPipeline::new(&renderer.gpu.device, surface_format);
+    let mut control_panel = ControlPanelState::default();
+    if let Some(ref p) = project_file_path {
+        control_panel.project_save_path = p.display().to_string();
+    }
+
+    let w = output.config.width.max(1);
+    let h = output.config.height.max(1);
+    let svg_pipeline = SvgLayerPipeline::new(&renderer.gpu.device, surface_format);
+    let compositor = Compositor::new(&renderer.gpu.device, w, h, surface_format);
+    let warp = WarpRenderer::new(&renderer.gpu.device, surface_format);
+    let gamma = GammaPipeline::new(&renderer.gpu.device, surface_format);
+    let (warp_rt, warp_rt_view) = make_warp_render_target(&renderer.gpu.device, w, h, surface_format);
+    let layers = rebuild_layers(&renderer.gpu.device, &project, w, h, surface_format)?;
+
+    Ok(RunningApp {
+        output,
+        control,
+        renderer,
+        test_patterns,
+        project,
+        layers,
+        svg_pipeline,
+        compositor,
+        warp,
+        gamma,
+        warp_rt,
+        warp_rt_view,
+        control_panel,
+        clock: Clock::new(),
+        keyboard: KeyboardSource::new(),
+        color_pipeline,
+        blur_pipeline,
+        transform_pipeline,
+        _sleep_assertion: sleep_assertion,
+        project_file_path,
+    })
+}
+
+fn build_initial_project(svg_path: Option<PathBuf>) -> Project {
+    let mut project = Project::default();
+    if let Some(path) = svg_path.filter(|p| p.extension().is_some_and(|e| e == "svg")) {
+        project.layers.push(schema::layer_from_svg_path("layer0", path));
+    }
+    if project.warps.is_empty() {
+        project.warps.push(schema::default_warp_mesh());
+    }
+    project
+}
+
+fn rebuild_layers(
+    device: &wgpu::Device,
+    project: &Project,
+    width: u32,
+    height: u32,
+    surface_format: wgpu::TextureFormat,
+) -> Result<Vec<LayerState>> {
+    let mut out = Vec::with_capacity(project.layers.len());
+    for lc in project.layers.iter() {
+        let layer = SvgLayer::pending(lc.svg_path.clone());
         let (job_tx, result_rx) = Worker::spawn();
+        let path = lc.svg_path.clone();
         let (watcher, watch_rx) = Watcher::new(std::slice::from_ref(&path))?;
-
-        // T-M4-15: per-layer ping-pong + scratch intermediate. Sized to
-        // the output surface so the final SvgLayerPipeline blit into the
-        // surface texture is a 1:1 fullscreen quad — no resampling penalty
-        // beyond what happens inside individual effect passes.
-        let effect_pipeline = EffectPipeline::new(
-            &renderer.gpu.device,
-            output.config.width.max(1),
-            output.config.height.max(1),
-            surface_format,
-        );
-        let (intermediate_texture, intermediate_view) = make_intermediate_texture(
-            &renderer.gpu.device,
-            output.config.width.max(1),
-            output.config.height.max(1),
-            surface_format,
-        );
-
-        // Enqueue the initial raster job. generation=1; 0 is "never rasterized".
-        // TODO(T-M3-resize): resize events don't re-enqueue a job yet — the SVG
-        // won't re-rasterize until the next watcher event fires.
+        let effect_pipeline =
+            EffectPipeline::new(device, width.max(1), height.max(1), surface_format);
+        let (intermediate_texture, intermediate_view) =
+            make_intermediate_texture(device, width.max(1), height.max(1), surface_format);
+        let layer_id = LayerId::next();
+        let generation = 1u64;
         let _ = job_tx.send(RasterJob {
-            layer_id: LayerId(0),
-            path: path.clone(),
-            size: (output.config.width, output.config.height),
-            generation: 1,
+            layer_id,
+            path: lc.svg_path.clone(),
+            size: (width, height),
+            generation,
         });
-        let path_display = path.display().to_string();
-        tracing::info!(path = %path_display, "svg layer loaded; initial raster job enqueued");
-
-        Some(SvgState {
+        let (color_uniform, blur_uniform, transform_uniform, compositor_uniform) =
+            create_layer_uniform_buffers(device);
+        out.push(LayerState {
             layer,
-            pipeline,
-            layer_id: LayerId(0),
-            generation: 1,
+            layer_id,
+            generation,
             job_tx,
             result_rx,
             watch_rx,
@@ -324,31 +406,65 @@ fn init_running_app(
             effect_pipeline,
             _intermediate_texture: intermediate_texture,
             intermediate_view,
-        })
-    } else {
-        None
-    };
+            color_uniform,
+            blur_uniform,
+            transform_uniform,
+            compositor_uniform,
+        });
+    }
+    Ok(out)
+}
 
-    // T-M4-15 default effect chain: Color (no-op identity), Blur (radius 0),
-    // Transform (identity). The operator manipulates these via the egui
-    // control panel; modulator-typed fields default to Static so the chain
-    // is a pass-through until they touch a slider.
-    let effects = default_effect_chain();
+fn make_warp_render_target(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+    format: wgpu::TextureFormat,
+) -> (wgpu::Texture, wgpu::TextureView) {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("warp rt"),
+        size: wgpu::Extent3d {
+            width: width.max(1),
+            height: height.max(1),
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    (texture, view)
+}
 
-    Ok(RunningApp {
-        output,
-        control,
-        renderer,
-        test_patterns,
-        svg,
-        clock: Clock::new(),
-        keyboard: KeyboardSource::new(),
-        color_pipeline,
-        blur_pipeline,
-        transform_pipeline,
-        effects,
-        _sleep_assertion: sleep_assertion,
-    })
+fn resize_m5_gpu(state: &mut RunningApp) {
+    let w = state.output.config.width.max(1);
+    let h = state.output.config.height.max(1);
+    let device = &state.renderer.gpu.device;
+    let fmt = state.output.config.format;
+    state.compositor.resize(device, w, h);
+    let (tex, view) = make_warp_render_target(device, w, h, fmt);
+    state.warp_rt = tex;
+    state.warp_rt_view = view;
+    for (i, layer) in state.layers.iter_mut().enumerate() {
+        if i >= state.project.layers.len() {
+            break;
+        }
+        layer.effect_pipeline.resize(device, w, h);
+        let (itex, iview) = make_intermediate_texture(device, w, h, fmt);
+        layer._intermediate_texture = itex;
+        layer.intermediate_view = iview;
+        layer.generation = layer.generation.wrapping_add(1);
+        let path = state.project.layers[i].svg_path.clone();
+        let _ = layer.job_tx.send(RasterJob {
+            layer_id: layer.layer_id,
+            path,
+            size: (w, h),
+            generation: layer.generation,
+        });
+    }
 }
 
 /// Allocate the scratch intermediate texture used by multi-pass effects
@@ -378,28 +494,6 @@ fn make_intermediate_texture(
     (texture, view)
 }
 
-/// The v1 default effect chain: Color → Blur → Transform, all
-/// modulator-typed fields set to Static identity values.
-fn default_effect_chain() -> Vec<Effect> {
-    vec![
-        Effect::Color {
-            hue: Modulator::Static(0.0),
-            saturation: Modulator::Static(1.0),
-            brightness: Modulator::Static(0.0),
-            contrast: Modulator::Static(1.0),
-        },
-        Effect::Blur {
-            radius_px: Modulator::Static(0.0),
-        },
-        Effect::Transform {
-            translate: [0.0, 0.0],
-            rotate_deg: Modulator::Static(0.0),
-            scale_x: Modulator::Static(1.0),
-            scale_y: Modulator::Static(1.0),
-        },
-    ]
-}
-
 /// Acquire the next surface texture and translate wgpu 29's
 /// [`wgpu::CurrentSurfaceTexture`] discriminants into the same
 /// `Result<Option<SurfaceTexture>, RenderError>` shape used by
@@ -422,7 +516,7 @@ fn acquire_frame(
             Ok(None)
         }
         wgpu::CurrentSurfaceTexture::Occluded => {
-            tracing::debug!("surface occluded; skipping frame");
+            tracing::trace!("surface occluded; skipping frame");
             Ok(None)
         }
         wgpu::CurrentSurfaceTexture::Outdated => Err(RenderError::SurfaceOutdated),
@@ -512,99 +606,178 @@ fn render_test_pattern(
     })
 }
 
-/// Render the uploaded SVG layer texture, run the operator-defined
-/// effect chain over it, and present the final result on the surface.
-///
-/// Per-frame flow:
-///   1. Blit the SVG GPU texture into `effect_pipeline.current_pair().0`
-///      (the *source* slot for the first effect). No `flip()` here —
-///      the first effect must read what we just wrote, so we leave
-///      `current_pair()` pointing at `(SVG-buffer, other-buffer)`.
-///   2. For each `Effect` in `effects`: borrow `current_pair()` inside a
-///      block so the immutable borrows are released, build `RenderCtx`,
-///      dispatch (reads `.0`, writes `.1`), drop borrows, then `flip()`.
-///      After N effects, the last destination is held in whatever buffer
-///      `final_view()` returns.
-///   3. After all effects: blit `effect_pipeline.final_view()` into the
-///      surface texture via `SvgLayerPipeline::render`.
-///
-/// Empty `effects` falls through correctly: step 1 writes the SVG into
-/// `current_pair().0` (no flip, no effects), `final_view()` returns
-/// that same buffer (it is the only buffer ever written), and step 3
-/// blits it to the surface.
+/// Present the swapchain texture on drop so a panic after acquire cannot
+/// strand wgpu in "Surface image is already acquired".
+struct SurfacePresentGuard(Option<wgpu::SurfaceTexture>);
+
+impl SurfacePresentGuard {
+    fn new(frame: wgpu::SurfaceTexture) -> Self {
+        Self(Some(frame))
+    }
+
+    fn texture_view(&self) -> wgpu::TextureView {
+        self.0
+            .as_ref()
+            .expect("surface present guard: missing frame")
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default())
+    }
+
+    fn present(mut self) {
+        if let Some(f) = self.0.take() {
+            f.present();
+        }
+    }
+}
+
+impl Drop for SurfacePresentGuard {
+    fn drop(&mut self) {
+        if let Some(f) = self.0.take() {
+            f.present();
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
-fn render_svg_with_effects(
+fn render_m5_pipeline(
     renderer: &Renderer,
     output: &OutputWindow,
-    pipeline: &SvgLayerPipeline,
-    texture_view: &wgpu::TextureView,
-    effect_pipeline: &mut EffectPipeline,
-    intermediate_view: &wgpu::TextureView,
+    project: &Project,
+    layers: &mut [LayerState],
+    svg_pipeline: &SvgLayerPipeline,
+    compositor: &Compositor,
+    warp: &mut WarpRenderer,
+    gamma: &GammaPipeline,
+    warp_rt_view: &wgpu::TextureView,
     color: &ColorPipeline,
     blur: &BlurPipeline,
     transform: &TransformPipeline,
-    effects: &[Effect],
     clock: &Clock,
 ) -> std::result::Result<(), RenderError> {
     crate::show_day::panic_restore::run_frame_assert_unwind_safe(|| {
+        let mesh = project
+            .warps
+            .first()
+            .cloned()
+            .unwrap_or_else(schema::default_warp_mesh);
+        warp.sync_mesh_and_mask(&renderer.gpu.device, &renderer.gpu.queue, &mesh);
+
+        let mut encoder = renderer.gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("m5 offscreen encoder"),
+        });
+
+        let mut composite_inputs: Vec<(&wgpu::TextureView, schema::BlendMode, f32, &wgpu::Buffer)> =
+            Vec::with_capacity(project.layers.len());
+
+        if project.layers.len() != layers.len() {
+            tracing::warn!(
+                project_layers = project.layers.len(),
+                gpu_layers = layers.len(),
+                "project.layers and GPU LayerState count differ; rebuild layers (render uses zipped pairs only)",
+            );
+        }
+
+        for (cfg, ls) in project.layers.iter().zip(layers.iter_mut()) {
+            if !cfg.enabled {
+                continue;
+            }
+            let Some(tex_view) = ls.layer.texture_view() else {
+                continue;
+            };
+            ls.effect_pipeline.reset_for_layer_pass();
+            {
+                let (src_view, _dst_view) = ls.effect_pipeline.current_pair();
+                svg_pipeline.render(&renderer.gpu.device, &mut encoder, src_view, tex_view);
+            }
+            for effect in &cfg.effects {
+                {
+                    let (src, dst) = ls.effect_pipeline.current_pair();
+                    let mut ctx = RenderCtx {
+                        device: &renderer.gpu.device,
+                        queue: &renderer.gpu.queue,
+                        encoder: &mut encoder,
+                        source_view: src,
+                        dst_view: dst,
+                        intermediate_view: &ls.intermediate_view,
+                        color,
+                        blur,
+                        transform,
+                        color_uniform: &ls.color_uniform,
+                        blur_uniform: &ls.blur_uniform,
+                        transform_uniform: &ls.transform_uniform,
+                    };
+                    effect.render(&mut ctx, clock);
+                }
+                if effect.writes_destination() {
+                    ls.effect_pipeline.flip();
+                }
+            }
+            composite_inputs.push((
+                ls.effect_pipeline.final_view(),
+                cfg.blend_mode,
+                cfg.opacity,
+                &ls.compositor_uniform,
+            ));
+        }
+
+        let c = project.background_color;
+        let bg = wgpu::Color {
+            r: c[0] as f64,
+            g: c[1] as f64,
+            b: c[2] as f64,
+            a: c[3] as f64,
+        };
+        let composed = compositor.composite(
+            &renderer.gpu.device,
+            &renderer.gpu.queue,
+            &mut encoder,
+            bg,
+            &composite_inputs,
+        );
+
+        warp.render(
+            &renderer.gpu.device,
+            &renderer.gpu.queue,
+            &mut encoder,
+            warp_rt_view,
+            composed,
+            &mesh,
+            wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+        );
+
+        renderer.gpu.queue.submit(std::iter::once(encoder.finish()));
+
         let frame = match acquire_frame(output)? {
             Some(f) => f,
             None => return Ok(()),
         };
-        let view = frame
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
-        let mut encoder =
+        let guard = SurfacePresentGuard::new(frame);
+        {
+            let surface_view = guard.texture_view();
+            let mut enc_gamma =
+                renderer
+                    .gpu
+                    .device
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("m5 gamma encoder"),
+                    });
+            gamma.render(
+                &renderer.gpu.device,
+                &renderer.gpu.queue,
+                &mut enc_gamma,
+                &surface_view,
+                warp_rt_view,
+                project.gamma,
+                project.brightness,
+                project.contrast,
+                wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+            );
             renderer
                 .gpu
-                .device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("svg encoder"),
-                });
-
-        // Step 1: blit SVG GPU texture into the *source* slot of the
-        // current pair so the first effect (or the final blit, if
-        // effects is empty) reads valid content. We do NOT flip here —
-        // flipping would advance current_pair() past the SVG we just
-        // wrote, making the first effect read the wrong (uninitialized)
-        // buffer instead.
-        {
-            let (src_view, _dst_view) = effect_pipeline.current_pair();
-            pipeline.render(&renderer.gpu.device, &mut encoder, src_view, texture_view);
+                .queue
+                .submit(std::iter::once(enc_gamma.finish()));
         }
-
-        // Step 2: dispatch the effect chain. Each iteration: borrow
-        // current_pair() inside a block, build RenderCtx, dispatch, drop
-        // borrows, then flip().
-        for effect in effects {
-            {
-                let (src, dst) = effect_pipeline.current_pair();
-                let mut ctx = RenderCtx {
-                    device: &renderer.gpu.device,
-                    queue: &renderer.gpu.queue,
-                    encoder: &mut encoder,
-                    source_view: src,
-                    dst_view: dst,
-                    intermediate_view,
-                    color,
-                    blur,
-                    transform,
-                };
-                effect.render(&mut ctx, clock);
-            }
-            effect_pipeline.flip();
-        }
-
-        // Step 3: composite the final effect output onto the surface.
-        pipeline.render(
-            &renderer.gpu.device,
-            &mut encoder,
-            &view,
-            effect_pipeline.final_view(),
-        );
-
-        renderer.gpu.queue.submit(std::iter::once(encoder.finish()));
-        frame.present();
+        guard.present();
         Ok(())
     })
 }
@@ -617,11 +790,19 @@ impl ApplicationHandler for App {
             return;
         }
 
-        // X-06: CLI `--monitor INDEX` is the v1 interim override. T-M6-04
-        // will additionally read `Project.output_monitor_index`; T-M4-15
-        // adds the egui dropdown. Until then, fall back to monitor 0.
-        let _ = self.autostart;
-        let monitor_index = self.monitor_override.unwrap_or(0);
+        let (project, project_file_path) = match load_project_for_startup(self.project.as_ref()) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::error!(?e, "failed to load project file");
+                event_loop.exit();
+                return;
+            }
+        };
+
+        // `--monitor` overrides [`Project::output_monitor_index`] from the file.
+        let monitor_index = self
+            .monitor_override
+            .unwrap_or(project.output_monitor_index);
         let monitor = event_loop.available_monitors().nth(monitor_index);
         if monitor.is_none() {
             tracing::warn!(
@@ -631,19 +812,33 @@ impl ApplicationHandler for App {
             );
         }
 
-        // Validate the project path: only .svg files are handled at M3.
-        // Non-.svg paths (e.g. .rmap.json) are silently ignored here; T-M6-04
-        // will load project files and T-M6-04's warn guides the operator.
-        if let Some(ref path) = self.project {
-            if path.extension().is_none_or(|e| e != "svg") {
-                tracing::warn!(
-                    path = %path.display(),
-                    "ignoring non-.svg project file; T-M6-04 will load .rmap.json projects",
-                );
-            }
+        if self.autostart && self.project.as_ref().is_some_and(|p| is_rmap_project_file(p)) {
+            tracing::info!(
+                monitor_index,
+                project_path = ?self.project,
+                "autostart: loaded .rmap.json; output targets monitor index (unless --monitor)",
+            );
         }
 
-        match init_running_app(event_loop, monitor, self.project.clone()) {
+        let output_windowed = resolve_output_windowed(
+            self.cli_fullscreen,
+            self.cli_windowed,
+            &project,
+            project_file_path.is_some(),
+        );
+        tracing::info!(
+            output_windowed,
+            monitor_index,
+            "output presentation (windowed = decorated window on monitor)",
+        );
+
+        match init_running_app(
+            event_loop,
+            monitor,
+            project,
+            project_file_path,
+            output_windowed,
+        ) {
             Ok(running) => {
                 self.state = Some(running);
             }
@@ -679,22 +874,31 @@ impl ApplicationHandler for App {
                     state.control = None;
                 }
                 WindowEvent::RedrawRequested => {
-                    // Pre-extract disjoint borrows so the closure captures
-                    // only `effects` (the field it actually mutates) and
-                    // not the whole `state`. ControlWindow::render takes
-                    // `&mut self` on `ctrl`; its closure mutably captures
-                    // `effects`. Both are disjoint fields of `state` so
-                    // 2024-edition disjoint-field reasoning admits this,
-                    // but the explicit local makes the intent obvious.
                     let device = &state.renderer.gpu.device;
                     let queue = &state.renderer.gpu.queue;
-                    let effects = &mut state.effects;
+                    let mut panel_action = ControlPanelAction::None;
                     if let Some(ctrl) = state.control.as_mut() {
                         let result = ctrl.render(device, queue, |ui| {
-                            crate::windows::control_panel::show(ui, effects);
+                            panel_action =
+                                control_panel_show(ui, &mut state.project, &mut state.control_panel);
                         });
                         if let Err(e) = result {
                             tracing::warn!(?e, "control window render error");
+                        }
+                    }
+                    if matches!(panel_action, ControlPanelAction::RebuildLayers) {
+                        let w = state.output.config.width.max(1);
+                        let h = state.output.config.height.max(1);
+                        let fmt = state.output.config.format;
+                        match rebuild_layers(device, &state.project, w, h, fmt) {
+                            Ok(layers) => {
+                                state.layers = layers;
+                                state.control_panel.selected_layer = state
+                                    .control_panel
+                                    .selected_layer
+                                    .min(state.project.layers.len().saturating_sub(1));
+                            }
+                            Err(e) => tracing::error!(?e, "rebuild layers failed"),
                         }
                     }
                 }
@@ -749,6 +953,7 @@ impl ApplicationHandler for App {
                 state.output.config.width = new_size.width.max(1);
                 state.output.config.height = new_size.height.max(1);
                 state.output.recreate_surface(&state.renderer.gpu.device);
+                resize_m5_gpu(state);
             }
             WindowEvent::RedrawRequested => {
                 // T-M4-10: drain keyboard source and dispatch ControlEvents.
@@ -756,46 +961,72 @@ impl ApplicationHandler for App {
                 // inline (Blackout/Freeze) or come online in later tasks
                 // (SceneRecall: T-M5-12, ParamSet: v1.5 MIDI).
                 for e in state.keyboard.poll() {
-                    if let ControlEvent::TapTempo = e {
-                        state.clock.tap();
-                        tracing::debug!(bpm = state.clock.bpm(), "tap tempo");
+                    match e {
+                        ControlEvent::TapTempo => {
+                            state.clock.tap();
+                            tracing::debug!(bpm = state.clock.bpm(), "tap tempo");
+                        }
+                        ControlEvent::SceneRecall(idx) => {
+                            let snap = state
+                                .project
+                                .scenes
+                                .get(idx)
+                                .map(|sc| sc.snapshot.clone());
+                            if let Some(snapshot) = snap {
+                                if let Err(err) = restore(&mut state.project, &snapshot) {
+                                    tracing::warn!(?err, slot = idx, "scene restore failed");
+                                } else {
+                                    let device = &state.renderer.gpu.device;
+                                    let w = state.output.config.width.max(1);
+                                    let h = state.output.config.height.max(1);
+                                    let fmt = state.output.config.format;
+                                    match rebuild_layers(device, &state.project, w, h, fmt) {
+                                        Ok(layers) => {
+                                            state.layers = layers;
+                                            state.control_panel.selected_layer = state
+                                                .control_panel
+                                                .selected_layer
+                                                .min(state.project.layers.len().saturating_sub(1));
+                                        }
+                                        Err(err) => tracing::error!(?err, "scene recall rebuild failed"),
+                                    }
+                                }
+                            }
+                        }
+                        ControlEvent::Blackout | ControlEvent::Freeze | ControlEvent::ParamSet { .. } => {}
                     }
                 }
 
-                // Per-frame event drain: process watcher + raster results
-                // before deciding which render path to take.
-                if let Some(svg) = state.svg.as_mut() {
-                    // Drain watch events: bump generation, enqueue raster
-                    // job per affected layer.
-                    while let Ok(_event) = svg.watch_rx.try_recv() {
-                        svg.generation = svg.generation.wrapping_add(1);
+                for (i, ls) in state.layers.iter_mut().enumerate() {
+                    while let Ok(_event) = ls.watch_rx.try_recv() {
+                        ls.generation = ls.generation.wrapping_add(1);
                         let size = (state.output.config.width, state.output.config.height);
-                        let path = svg.layer.path.clone();
-                        let layer_id = svg.layer_id;
-                        let generation = svg.generation;
-                        let _ = svg.job_tx.send(RasterJob {
+                        let path = state.project.layers[i].svg_path.clone();
+                        let layer_id = ls.layer_id;
+                        let generation = ls.generation;
+                        let _ = ls.job_tx.send(RasterJob {
                             layer_id,
                             path,
                             size,
                             generation,
                         });
                         tracing::debug!(
-                            generation = svg.generation,
+                            generation = ls.generation,
+                            layer = i,
                             "svg watcher fired; enqueued raster job"
                         );
                     }
-                    // Drain raster results: upload to GPU on generation match.
-                    while let Ok(done) = svg.result_rx.try_recv() {
-                        if done.layer_id != svg.layer_id || done.generation != svg.generation {
+                    while let Ok(done) = ls.result_rx.try_recv() {
+                        if done.layer_id != ls.layer_id || done.generation != ls.generation {
                             tracing::debug!(
                                 done_gen = done.generation,
-                                current_gen = svg.generation,
+                                current_gen = ls.generation,
                                 "stale raster result dropped",
                             );
                             continue;
                         }
-                        svg.layer.generation = done.generation;
-                        if let Err(e) = svg.layer.upload(
+                        ls.layer.generation = done.generation;
+                        if let Err(e) = ls.layer.upload(
                             &state.renderer.gpu.device,
                             &state.renderer.gpu.queue,
                             &done.pixmap,
@@ -828,33 +1059,20 @@ impl ApplicationHandler for App {
                         &state.test_patterns,
                         state.output.state.test_pattern,
                     )
-                } else if state
-                    .svg
-                    .as_ref()
-                    .is_some_and(|s| s.layer.texture_view().is_some())
-                {
-                    // Safety: we just checked is_some() above. as_mut()
-                    // because the effect_pipeline.flip() inside the call
-                    // takes &mut self.
-                    let svg = state.svg.as_mut().unwrap();
-                    // Bind the texture_view borrow before re-borrowing
-                    // svg.effect_pipeline mutably, so the immut borrow on
-                    // svg.layer (texture_view) and the mut borrow on
-                    // svg.effect_pipeline don't collide. Because both are
-                    // disjoint fields of `svg` (a struct), this is fine
-                    // under disjoint-field reasoning.
-                    let texture_view = svg.layer.texture_view().unwrap();
-                    render_svg_with_effects(
+                } else if !state.project.layers.is_empty() {
+                    render_m5_pipeline(
                         &state.renderer,
                         &state.output,
-                        &svg.pipeline,
-                        texture_view,
-                        &mut svg.effect_pipeline,
-                        &svg.intermediate_view,
+                        &state.project,
+                        &mut state.layers,
+                        &state.svg_pipeline,
+                        &state.compositor,
+                        &mut state.warp,
+                        &state.gamma,
+                        &state.warp_rt_view,
                         &state.color_pipeline,
                         &state.blur_pipeline,
                         &state.transform_pipeline,
-                        &state.effects,
                         &state.clock,
                     )
                 } else {

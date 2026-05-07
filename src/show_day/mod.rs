@@ -4,5 +4,3 @@
 
 pub mod panic_restore;
 pub mod sleep_assertion;
-
-pub use sleep_assertion::SleepAssertion;

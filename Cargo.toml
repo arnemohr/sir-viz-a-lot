@@ -92,3 +92,9 @@ default = []
 # Enables the headless-wgpu golden-image tests; requires a working GPU adapter
 # at test time. Off by default so plain `cargo test` stays CPU-only.
 gpu-tests = []
+
+# Reserved for M7 input sources. Uncomment + wire the corresponding deps in
+# the table above when audio / MIDI / OSC support lands.
+# audio = ["dep:cpal", "dep:rustfft"]
+# midi  = ["dep:midir"]
+# osc   = ["dep:rosc"]

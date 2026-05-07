@@ -53,9 +53,20 @@ pub struct RenderCtx<'a> {
     pub color: &'a crate::effects::color::ColorPipeline,
     pub blur: &'a crate::effects::blur::BlurPipeline,
     pub transform: &'a crate::effects::transform::TransformPipeline,
+    /// Per-layer GPU uniforms (`queue.write_buffer` must target distinct buffers per layer).
+    pub color_uniform: &'a wgpu::Buffer,
+    pub blur_uniform: &'a wgpu::Buffer,
+    pub transform_uniform: &'a wgpu::Buffer,
 }
 
 impl Effect {
+    /// Returns false when [`Effect::render`] does not record draws into
+    /// `ctx.dst_view` (Tint stub). Callers must **not** flip the effect
+    /// ping-pong after those variants or the chain reads the wrong texture.
+    pub fn writes_destination(&self) -> bool {
+        !matches!(self, Effect::Tint { .. })
+    }
+
     /// Apply this effect: read from `ctx.source_view`, write to
     /// `ctx.dst_view`. Modulator-typed fields are evaluated against
     /// `clock` to produce concrete parameters.
@@ -83,6 +94,7 @@ impl Effect {
                     ctx.encoder,
                     ctx.source_view,
                     ctx.dst_view,
+                    ctx.color_uniform,
                     params,
                 );
             }
@@ -107,6 +119,7 @@ impl Effect {
                     ctx.source_view,
                     ctx.intermediate_view,
                     ctx.dst_view,
+                    ctx.blur_uniform,
                     params,
                 );
             }
@@ -128,9 +141,31 @@ impl Effect {
                     ctx.encoder,
                     ctx.source_view,
                     ctx.dst_view,
+                    ctx.transform_uniform,
                     params,
                 );
             }
         }
     }
+}
+
+/// Default chain: Color → Blur → Transform (all static / identity).
+pub fn default_effect_chain() -> Vec<Effect> {
+    vec![
+        Effect::Color {
+            hue: Modulator::Static(0.0),
+            saturation: Modulator::Static(1.0),
+            brightness: Modulator::Static(0.0),
+            contrast: Modulator::Static(1.0),
+        },
+        Effect::Blur {
+            radius_px: Modulator::Static(0.0),
+        },
+        Effect::Transform {
+            translate: [0.0, 0.0],
+            rotate_deg: Modulator::Static(0.0),
+            scale_x: Modulator::Static(1.0),
+            scale_y: Modulator::Static(1.0),
+        },
+    ]
 }

@@ -2,6 +2,10 @@
 //! v1.5: MIDI (`midir`) and OSC (`rosc`) bindings via a shared
 //! `Param::bind` API. Reserved here so the v1.5 add is non-disruptive.
 
+// M7 hooks: `ParamSet`, `Source::read`, `InputState` and its methods
+// are stubs that MIDI / OSC sources will consume in T-M7-05 / T-M7-06.
+#![allow(dead_code)]
+
 pub mod keyboard;
 pub mod param;
 

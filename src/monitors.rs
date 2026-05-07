@@ -68,6 +68,7 @@ pub fn list(active_loop: &ActiveEventLoop) -> Vec<MonitorInfo> {
 /// `available_monitors()` so it can round-trip into `Project.output_monitor_index`.
 /// If the primary handle is not findable in the iterator (rare; observed on
 /// some hot-plug edge cases), the index falls back to `0`.
+#[allow(dead_code)] // T-M6-04: wired in when output_monitor_index autoselect lands
 pub fn primary(active_loop: &ActiveEventLoop) -> Option<MonitorInfo> {
     let primary = active_loop.primary_monitor()?;
     let index = active_loop

@@ -15,7 +15,7 @@ pub struct Transform2D {
     pub anchor: [f32; 2],
 }
 
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BlendMode {
     #[default]
     Normal,
@@ -43,8 +43,9 @@ pub struct WarpMesh {
     pub source_rect: [f32; 4],
     #[serde(default)]
     pub mask_polygon: Vec<[f32; 2]>,
+    /// Normalized fraction of output extent (0..0.5 useful), not pixels.
     #[serde(default)]
-    pub mask_feather_px: f32,
+    pub mask_feather: f32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -64,6 +65,10 @@ pub struct Project {
     pub scenes: Vec<Scene>,
     #[serde(default)]
     pub output_monitor_index: usize,
+    /// When true, draw output in a decorated window on `output_monitor_index`
+    /// instead of borderless fullscreen. Applied at startup (restart to toggle).
+    #[serde(default)]
+    pub output_windowed: bool,
     #[serde(default)]
     pub output_resolution: Option<(u32, u32)>,
     #[serde(default = "default_bg")]
@@ -86,6 +91,7 @@ impl Default for Project {
             warps: Vec::new(),
             scenes: Vec::new(),
             output_monitor_index: 0,
+            output_windowed: false,
             output_resolution: None,
             background_color: default_bg(),
             asset_root: None,
@@ -102,4 +108,32 @@ fn default_bg() -> [f32; 4] {
 
 fn default_one() -> f32 {
     1.0
+}
+
+/// Full-frame corner pin in normalized output space (0–1). One warp matches one composed frame.
+pub fn default_warp_mesh() -> WarpMesh {
+    WarpMesh {
+        rows: 1,
+        cols: 1,
+        grid: vec![
+            vec![[0.0, 0.0], [1.0, 0.0]],
+            vec![[0.0, 1.0], [1.0, 1.0]],
+        ],
+        source_rect: [0.0, 0.0, 1.0, 1.0],
+        mask_polygon: Vec::new(),
+        mask_feather: 0.02,
+    }
+}
+
+/// Build a layer row for an SVG path using the v1 default effect chain.
+pub fn layer_from_svg_path(id: impl Into<String>, svg_path: PathBuf) -> LayerConfig {
+    LayerConfig {
+        id: id.into(),
+        svg_path,
+        enabled: true,
+        transform: Transform2D::default(),
+        effects: crate::effects::default_effect_chain(),
+        blend_mode: BlendMode::Normal,
+        opacity: 1.0,
+    }
 }

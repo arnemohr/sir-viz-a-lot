@@ -57,9 +57,6 @@ pub struct ColorPipeline {
     pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
-    /// Reusable uniform buffer; we write_buffer to update each frame
-    /// rather than allocating per-frame.
-    uniform_buffer: wgpu::Buffer,
 }
 
 impl ColorPipeline {
@@ -169,21 +166,10 @@ impl ColorPipeline {
             ..Default::default()
         });
 
-        // Uniform buffer: 16 bytes, UNIFORM | COPY_DST.
-        // Initialized to ColorParams::default() so the first render call
-        // is correct even if write_buffer is skipped (not that it should be).
-        let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("color effect uniform buffer"),
-            size: 16,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
         Self {
             pipeline,
             bind_group_layout,
             sampler,
-            uniform_buffer,
         }
     }
 
@@ -201,10 +187,13 @@ impl ColorPipeline {
         encoder: &mut wgpu::CommandEncoder,
         source_view: &wgpu::TextureView,
         dst_view: &wgpu::TextureView,
+        uniform_buffer: &wgpu::Buffer,
         params: ColorParams,
     ) {
-        // Update uniform buffer with the current params.
-        queue.write_buffer(&self.uniform_buffer, 0, &params.to_wire_bytes());
+        // Per-layer buffer: all queue.write_buffer calls for a frame are
+        // applied before the submitted command buffer runs; sharing one
+        // uniform across layers would leave every draw reading the last write.
+        queue.write_buffer(uniform_buffer, 0, &params.to_wire_bytes());
 
         // Build a fresh bind group per call (cheap; texture view varies).
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -221,7 +210,7 @@ impl ColorPipeline {
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
-                    resource: self.uniform_buffer.as_entire_binding(),
+                    resource: uniform_buffer.as_entire_binding(),
                 },
             ],
         });

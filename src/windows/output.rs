@@ -1,11 +1,12 @@
-//! Borderless fullscreen output window on the chosen monitor. Hides the
-//! cursor, owns blackout/freeze state, and recreates its surface on panic
-//! or on `SurfaceError::Lost`/`SurfaceError::Outdated`.
+//! Output surface: borderless fullscreen by default, or a decorated window on
+//! the chosen monitor when windowed. Owns blackout/freeze state and recreates
+//! its surface on panic or on `SurfaceError::Lost`/`SurfaceError::Outdated`.
 
 use std::sync::Arc;
 
 use winit::event_loop::ActiveEventLoop;
 use winit::monitor::MonitorHandle;
+use winit::dpi::LogicalSize;
 use winit::window::{Fullscreen, Window, WindowAttributes};
 
 use crate::render::RenderError;
@@ -34,7 +35,12 @@ impl OutputState {
     }
 }
 
-/// Borderless fullscreen output window plus its `wgpu::Surface` and the
+/// Default inner size when [`OutputWindow::new`] is called with `windowed = true`.
+pub const WINDOWED_DEFAULT_WIDTH: u32 = 1280;
+/// Default inner height for windowed output.
+pub const WINDOWED_DEFAULT_HEIGHT: u32 = 720;
+
+/// Output window plus its `wgpu::Surface` and the
 /// `SurfaceConfiguration` we configured it with. The cached config lets
 /// T-M1-05 re-`configure` the surface verbatim on `Lost`/`Outdated`
 /// without re-deriving the format / present-mode pick.
@@ -51,30 +57,41 @@ pub struct OutputWindow {
 }
 
 impl OutputWindow {
-    /// Open the borderless fullscreen window on `monitor` (or the
-    /// platform-chosen default if `None`), hide the cursor, and create +
-    /// configure the wgpu surface against the supplied `device`.
+    /// Open the output window on `monitor` (used for fullscreen target or
+    /// windowed placement). Borderless fullscreen unless `windowed` is true.
     ///
-    /// Caller (T-M1-03 / T-M1-04) is responsible for having created the
-    /// `Instance`, requested an `Adapter`, and acquired a `Device` *before*
-    /// calling this — Surface creation needs the Instance and surface
-    /// configuration needs the Adapter (for capability queries) and the
-    /// Device (to actually configure).
+    /// Caller must have created `instance`, `adapter`, and `device` before this.
     pub fn new(
         active_loop: &ActiveEventLoop,
         monitor: Option<MonitorHandle>,
         instance: &wgpu::Instance,
         adapter: &wgpu::Adapter,
         device: &wgpu::Device,
+        windowed: bool,
     ) -> Result<Self, RenderError> {
-        let attrs = WindowAttributes::default()
-            .with_title("rmap")
-            .with_fullscreen(Some(Fullscreen::Borderless(monitor)));
+        let attrs = WindowAttributes::default().with_title("rmap");
+        let attrs = if windowed {
+            attrs.with_inner_size(LogicalSize::new(
+                WINDOWED_DEFAULT_WIDTH,
+                WINDOWED_DEFAULT_HEIGHT,
+            ))
+        } else {
+            attrs.with_fullscreen(Some(Fullscreen::Borderless(monitor.clone())))
+        };
 
         let window = active_loop
             .create_window(attrs)
             .map_err(|e| RenderError::Surface(format!("create window: {e}")))?;
-        window.set_cursor_visible(false);
+
+        if windowed {
+            if let Some(mh) = monitor {
+                let _ = window.set_outer_position(mh.position());
+            }
+            window.set_cursor_visible(true);
+        } else {
+            window.set_cursor_visible(false);
+        }
+
         let window = Arc::new(window);
 
         let surface = instance

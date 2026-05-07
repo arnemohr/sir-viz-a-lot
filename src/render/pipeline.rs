@@ -48,6 +48,13 @@ impl EffectPipeline {
         }
     }
 
+    /// Reset ping-pong direction before drawing a layer’s SVG + effect chain
+    /// for this frame. Keeps each layer independent of the previous layer’s
+    /// flip parity (and avoids carrying stale state across frames).
+    pub fn reset_for_layer_pass(&mut self) {
+        self.next_is_pong = true;
+    }
+
     /// Reallocate both textures at the new dimensions. No-op if
     /// dimensions are unchanged. Resets `next_is_pong` to `true` so
     /// the next pass starts from a known state.
@@ -101,14 +108,17 @@ impl EffectPipeline {
         }
     }
 
+    #[allow(dead_code)] // queried by the compositor resize path (T-M5+)
     pub fn width(&self) -> u32 {
         self.width
     }
 
+    #[allow(dead_code)] // queried by the compositor resize path (T-M5+)
     pub fn height(&self) -> u32 {
         self.height
     }
 
+    #[allow(dead_code)] // queried by the compositor resize path (T-M5+)
     pub fn format(&self) -> wgpu::TextureFormat {
         self.format
     }

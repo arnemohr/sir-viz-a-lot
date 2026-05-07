@@ -3,10 +3,6 @@
 //! See `specs/001-initial-setup.md`. This file stays thin; the interesting
 //! wiring lives in `app::App`.
 
-// Skeleton-stage allows. Tighten once milestones fill in: the codebase
-// should not retain these blanket allows past M5.
-#![allow(dead_code, unused_imports)]
-
 mod app;
 mod clock;
 mod controls;
@@ -31,10 +27,11 @@ use crate::app::App;
 #[derive(Debug, Parser)]
 #[command(name = "rmap", version, about = "Minimal projection mapping tool")]
 struct Cli {
-    /// Project file to load (`*.rmap.json`)
+    /// Project file: `*.rmap.json` (full show) or a single `*.svg` layer bootstrap.
     project: Option<PathBuf>,
 
-    /// Open the saved output window automatically on startup
+    /// With a `*.rmap.json` argument: load that project and use its monitor index
+    /// unless `--monitor` is set (no extra startup gate in this build).
     #[arg(long)]
     autostart: bool,
 
@@ -48,6 +45,14 @@ struct Cli {
     /// T-M6-04 lands). CLI takes precedence over the project file.
     #[arg(long = "monitor", value_name = "INDEX")]
     monitor: Option<usize>,
+
+    /// Draw output in a normal window (1280×720) on the chosen monitor instead of borderless fullscreen.
+    #[arg(long, conflicts_with = "fullscreen")]
+    windowed: bool,
+
+    /// Force borderless fullscreen output (overrides `--windowed` and `output_windowed` in the project file).
+    #[arg(long, conflicts_with = "windowed")]
+    fullscreen: bool,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -63,12 +68,21 @@ fn main() -> anyhow::Result<()> {
         project = ?cli.project,
         autostart = cli.autostart,
         monitor = ?cli.monitor,
+        windowed = cli.windowed,
+        fullscreen = cli.fullscreen,
         "rmap starting",
     );
-    App::run(cli.project.clone(), cli.autostart, cli.monitor).with_context(|| {
+    App::run(
+        cli.project.clone(),
+        cli.autostart,
+        cli.monitor,
+        cli.windowed,
+        cli.fullscreen,
+    )
+    .with_context(|| {
         format!(
-            "project={:?}, autostart={}, monitor={:?}",
-            cli.project, cli.autostart, cli.monitor
+            "project={:?}, autostart={}, monitor={:?}, windowed={}, fullscreen={}",
+            cli.project, cli.autostart, cli.monitor, cli.windowed, cli.fullscreen
         )
     })?;
     Ok(())

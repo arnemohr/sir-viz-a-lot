@@ -6,7 +6,7 @@
 //! Plan §3.1 prints the target signature
 //! `Renderer::new(surface: &wgpu::Surface<'_>) -> Result<Self, RenderError>`.
 //! That signature is impossible against the shape that T-M1-02 actually shipped:
-//! `OutputWindow::new(active_loop, monitor, &instance, &adapter, &device)`
+//! `OutputWindow::new(active_loop, monitor, &instance, &adapter, &device, windowed)`
 //! requires the wgpu `Instance`, `Adapter`, and `Device` to *already* exist
 //! before any `Surface` is created (the `Surface` itself is born inside the
 //! window constructor, configured against the device). So a `Renderer::new`
@@ -28,7 +28,7 @@
 //!   triangle.wgsl quad).
 //!
 //! T-M1-04 will call these in order: `GpuContext::new()` →
-//! `OutputWindow::new(..., &gpu.instance, &gpu.adapter, &gpu.device)` →
+//! `OutputWindow::new(..., &gpu.instance, &gpu.adapter, &gpu.device, windowed)` →
 //! `Renderer::new(gpu, output.config.format)`.
 //!
 //! `pollster::block_on` is used internally so callers stay synchronous; the
@@ -37,6 +37,7 @@
 pub mod compositor;
 pub mod gamma;
 pub mod pipeline;
+pub mod sdf;
 pub mod warp;
 
 use std::iter;
@@ -53,6 +54,7 @@ pub enum RenderError {
     Surface(String),
 
     #[error("shader compile failed in {name}: {message}")]
+    #[allow(dead_code)] // shader-hot-reload path (T-M5+) will produce this variant
     ShaderCompile { name: &'static str, message: String },
 
     #[error("surface lost")]
@@ -208,7 +210,7 @@ impl Renderer {
     ///   has already been raised on the device error scope; not a
     ///   recoverable lifecycle event).
     /// - `Timeout` → log a warning and return `Ok(())`. Frame drop is fine.
-    /// - `Occluded` → log at debug level and return `Ok(())`. Window is e.g.
+    /// - `Occluded` → log at trace level and return `Ok(())`. Window is e.g.
     ///   minimized; nothing to draw.
     ///
     /// The three `SurfaceLost` / `SurfaceOutdated` / `SurfaceSuboptimal`
@@ -235,7 +237,7 @@ impl Renderer {
                     return Ok(());
                 }
                 wgpu::CurrentSurfaceTexture::Occluded => {
-                    tracing::debug!("surface occluded; skipping frame");
+                    tracing::trace!("surface occluded; skipping frame");
                     return Ok(());
                 }
                 wgpu::CurrentSurfaceTexture::Outdated => {

@@ -6,6 +6,10 @@
 //! [`InputState::read`], which asks each registered [`Source`] in
 //! turn. If no source owns the handle, `0.0` is returned.
 
+// M7 hooks: `Param<T>` and `Param::value` are stubs for the M7
+// MIDI / OSC binding work (T-M7-05 / T-M7-06).
+#![allow(dead_code)]
+
 use crate::clock::Clock;
 use crate::controls::InputState;
 use crate::modulators::Modulator;

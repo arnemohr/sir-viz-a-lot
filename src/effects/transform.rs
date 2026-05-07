@@ -75,9 +75,6 @@ pub struct TransformPipeline {
     pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
-    /// Reusable uniform buffer; we write_buffer to update each frame
-    /// rather than allocating per-frame.
-    uniform_buffer: wgpu::Buffer,
 }
 
 impl TransformPipeline {
@@ -189,21 +186,10 @@ impl TransformPipeline {
             ..Default::default()
         });
 
-        // Uniform buffer: 64 bytes, UNIFORM | COPY_DST.
-        // Initialized to TransformParams::default() (identity matrix) so the
-        // first render call is correct even if write_buffer is skipped.
-        let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("transform effect uniform buffer"),
-            size: 64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
         Self {
             pipeline,
             bind_group_layout,
             sampler,
-            uniform_buffer,
         }
     }
 
@@ -221,10 +207,10 @@ impl TransformPipeline {
         encoder: &mut wgpu::CommandEncoder,
         source_view: &wgpu::TextureView,
         dst_view: &wgpu::TextureView,
+        uniform_buffer: &wgpu::Buffer,
         params: TransformParams,
     ) {
-        // Update uniform buffer with the current params.
-        queue.write_buffer(&self.uniform_buffer, 0, &params.to_wire_bytes());
+        queue.write_buffer(uniform_buffer, 0, &params.to_wire_bytes());
 
         // Build a fresh bind group per call (cheap; texture view varies).
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -241,7 +227,7 @@ impl TransformPipeline {
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
-                    resource: self.uniform_buffer.as_entire_binding(),
+                    resource: uniform_buffer.as_entire_binding(),
                 },
             ],
         });

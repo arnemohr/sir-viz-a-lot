@@ -17,6 +17,7 @@ use crossbeam_channel::Receiver;
 /// changed; consider it dirty".
 #[derive(Debug, Clone)]
 pub struct WatchEvent {
+    #[allow(dead_code)] // hot-reload handler (T-M3-06) reads this to locate the dirty layer
     pub path: PathBuf,
 }
 

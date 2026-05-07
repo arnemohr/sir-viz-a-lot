@@ -40,7 +40,6 @@ pub struct BlurPipeline {
     pipeline_v: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
-    uniform_buffer: wgpu::Buffer,
 }
 
 impl BlurPipeline {
@@ -187,21 +186,11 @@ impl BlurPipeline {
             ..Default::default()
         });
 
-        // Uniform buffer: 16 bytes, UNIFORM | COPY_DST.
-        // Both passes read the same radius_px value; we write once per apply.
-        let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("blur effect uniform buffer"),
-            size: 16,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
         Self {
             pipeline_h,
             pipeline_v,
             bind_group_layout,
             sampler,
-            uniform_buffer,
         }
     }
 
@@ -224,10 +213,10 @@ impl BlurPipeline {
         source_view: &wgpu::TextureView,
         intermediate_view: &wgpu::TextureView,
         dst_view: &wgpu::TextureView,
+        uniform_buffer: &wgpu::Buffer,
         params: BlurParams,
     ) {
-        // Write the uniform once; both passes share the same radius_px.
-        queue.write_buffer(&self.uniform_buffer, 0, &params.to_wire_bytes());
+        queue.write_buffer(uniform_buffer, 0, &params.to_wire_bytes());
 
         // --- Horizontal pass: source -> intermediate ---
         let bind_group_h = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -244,7 +233,7 @@ impl BlurPipeline {
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
-                    resource: self.uniform_buffer.as_entire_binding(),
+                    resource: uniform_buffer.as_entire_binding(),
                 },
             ],
         });
@@ -287,7 +276,7 @@ impl BlurPipeline {
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
-                    resource: self.uniform_buffer.as_entire_binding(),
+                    resource: uniform_buffer.as_entire_binding(),
                 },
             ],
         });
