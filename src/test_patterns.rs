@@ -27,6 +27,21 @@ impl TestPattern {
             Self::ColorBars => "color bars",
         }
     }
+
+    /// Cycle order driven by the `T` key in `App::window_event`. Wraps
+    /// back to `None` after `ColorBars`. Exhaustive match — adding a
+    /// variant later forces an update here.
+    pub fn next(self) -> Self {
+        match self {
+            Self::None => Self::Grid50,
+            Self::Grid50 => Self::Crosshair,
+            Self::Crosshair => Self::White100,
+            Self::White100 => Self::White50,
+            Self::White50 => Self::White25,
+            Self::White25 => Self::ColorBars,
+            Self::ColorBars => Self::None,
+        }
+    }
 }
 
 /// Owns the cached pipelines + per-mode bind groups for the three test-pattern

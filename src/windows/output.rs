@@ -14,6 +14,10 @@ use crate::render::RenderError;
 pub struct OutputState {
     pub blackout: bool,
     pub freeze: bool,
+    /// Currently-selected built-in test pattern. `Default` is
+    /// [`TestPattern::None`]; the `T` key cycles through variants via
+    /// [`Self::cycle_test_pattern`].
+    pub test_pattern: crate::test_patterns::TestPattern,
 }
 
 impl OutputState {
@@ -23,6 +27,10 @@ impl OutputState {
 
     pub fn toggle_freeze(&mut self) {
         self.freeze = !self.freeze;
+    }
+
+    pub fn cycle_test_pattern(&mut self) {
+        self.test_pattern = self.test_pattern.next();
     }
 }
 
