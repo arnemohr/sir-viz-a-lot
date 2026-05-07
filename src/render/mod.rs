@@ -54,6 +54,15 @@ pub enum RenderError {
 
     #[error("shader compile failed in {name}: {message}")]
     ShaderCompile { name: &'static str, message: String },
+
+    #[error("surface lost")]
+    SurfaceLost,
+
+    #[error("surface outdated")]
+    SurfaceOutdated,
+
+    #[error("surface suboptimal")]
+    SurfaceSuboptimal,
 }
 
 /// Owns the wgpu `Instance`, `Adapter`, `Device`, and `Queue`. Created up
@@ -184,16 +193,25 @@ impl Renderer {
     /// Surface-acquisition outcomes (wgpu 29's
     /// [`wgpu::CurrentSurfaceTexture`]) are mapped as follows:
     ///
-    /// - `Success` / `Suboptimal` → render normally. Suboptimal could be
-    ///   reconfigured for optimality (T-M1-05 territory); the M1 path just
-    ///   uses the texture.
-    /// - `Lost` / `Outdated` → return [`RenderError::Surface`] so T-M1-05 can
-    ///   react.
+    /// - `Success` → render normally.
+    /// - `Suboptimal` → return [`RenderError::SurfaceSuboptimal`] *without*
+    ///   drawing. The App layer reconfigures the surface; the next frame
+    ///   should come back as `Success`. (Drawing on a suboptimal surface is
+    ///   discouraged by the wgpu docs.)
+    /// - `Outdated` → return [`RenderError::SurfaceOutdated`]; App
+    ///   reconfigures.
+    /// - `Lost` → return [`RenderError::SurfaceLost`]; App reconfigures.
     /// - `Validation` → return [`RenderError::Surface`] (a validation error
-    ///   has already been raised on the device error scope).
+    ///   has already been raised on the device error scope; not a
+    ///   recoverable lifecycle event).
     /// - `Timeout` → log a warning and return `Ok(())`. Frame drop is fine.
     /// - `Occluded` → log at debug level and return `Ok(())`. Window is e.g.
     ///   minimized; nothing to draw.
+    ///
+    /// The three `SurfaceLost` / `SurfaceOutdated` / `SurfaceSuboptimal`
+    /// variants are the recoverable ones — the App's `RedrawRequested`
+    /// handler pattern-matches them and calls
+    /// [`OutputWindow::recreate_surface`](crate::windows::output::OutputWindow::recreate_surface).
     ///
     /// [`OutputWindow`]: crate::windows::output::OutputWindow
     pub fn render_frame(
@@ -201,8 +219,10 @@ impl Renderer {
         output: &crate::windows::output::OutputWindow,
     ) -> Result<(), RenderError> {
         let frame = match output.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(f)
-            | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
+            wgpu::CurrentSurfaceTexture::Success(f) => f,
+            wgpu::CurrentSurfaceTexture::Suboptimal(_) => {
+                return Err(RenderError::SurfaceSuboptimal);
+            }
             wgpu::CurrentSurfaceTexture::Timeout => {
                 warn!("surface acquire timed out; dropping frame");
                 return Ok(());
@@ -212,10 +232,10 @@ impl Renderer {
                 return Ok(());
             }
             wgpu::CurrentSurfaceTexture::Outdated => {
-                return Err(RenderError::Surface("surface outdated".into()));
+                return Err(RenderError::SurfaceOutdated);
             }
             wgpu::CurrentSurfaceTexture::Lost => {
-                return Err(RenderError::Surface("surface lost".into()));
+                return Err(RenderError::SurfaceLost);
             }
             wgpu::CurrentSurfaceTexture::Validation => {
                 return Err(RenderError::Surface(

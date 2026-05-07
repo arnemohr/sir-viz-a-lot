@@ -25,7 +25,7 @@ use winit::monitor::MonitorHandle;
 use winit::window::WindowId;
 
 use crate::error::{Result, RmapError};
-use crate::render::{GpuContext, Renderer};
+use crate::render::{GpuContext, RenderError, Renderer};
 use crate::windows::output::OutputWindow;
 
 /// Application root. Holds the persistent state across event-loop iterations.
@@ -149,18 +149,26 @@ impl ApplicationHandler for App {
             WindowEvent::Resized(new_size) => {
                 state.output.config.width = new_size.width.max(1);
                 state.output.config.height = new_size.height.max(1);
-                state
-                    .output
-                    .surface
-                    .configure(&state.renderer.gpu.device, &state.output.config);
+                state.output.recreate_surface(&state.renderer.gpu.device);
             }
-            WindowEvent::RedrawRequested => {
-                if let Err(e) = state.renderer.render_frame(&state.output) {
-                    // T-M1-05 owns SurfaceError-driven recovery; do NOT
-                    // exit on render error in M1.
+            WindowEvent::RedrawRequested => match state.renderer.render_frame(&state.output) {
+                Ok(()) => {}
+                Err(RenderError::SurfaceLost) => {
+                    tracing::warn!("surface lost; recreating");
+                    state.output.recreate_surface(&state.renderer.gpu.device);
+                }
+                Err(RenderError::SurfaceOutdated) => {
+                    tracing::warn!("surface outdated; recreating");
+                    state.output.recreate_surface(&state.renderer.gpu.device);
+                }
+                Err(RenderError::SurfaceSuboptimal) => {
+                    tracing::warn!("surface suboptimal; recreating");
+                    state.output.recreate_surface(&state.renderer.gpu.device);
+                }
+                Err(e) => {
                     tracing::error!(?e, "render error");
                 }
-            }
+            },
             _ => {}
         }
     }

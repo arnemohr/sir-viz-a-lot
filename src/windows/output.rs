@@ -77,14 +77,22 @@ impl OutputWindow {
 
         // Prefer Bgra8UnormSrgb — most desktop GPUs offer it and it gives
         // correct sRGB compositing for free. Fall back to any sRGB format
-        // the surface lists, then to whatever's first.
+        // the surface lists, then to whatever's first. If the surface
+        // reports no formats at all (pathological), error out instead of
+        // panicking on `[0]`.
         let format = if caps.formats.contains(&wgpu::TextureFormat::Bgra8UnormSrgb) {
             wgpu::TextureFormat::Bgra8UnormSrgb
         } else if let Some(srgb) = caps.formats.iter().copied().find(|f| f.is_srgb()) {
             srgb
         } else {
-            caps.formats[0]
+            caps.formats.first().copied().ok_or_else(|| {
+                RenderError::Surface("surface reports no supported formats".into())
+            })?
         };
+
+        let alpha_mode = caps.alpha_modes.first().copied().ok_or_else(|| {
+            RenderError::Surface("surface reports no supported alpha modes".into())
+        })?;
 
         // winit can hand back a 0-sized inner_size during minimization or
         // very early in the lifecycle on some compositors; wgpu refuses to
@@ -99,7 +107,7 @@ impl OutputWindow {
             width,
             height,
             present_mode: wgpu::PresentMode::AutoVsync,
-            alpha_mode: caps.alpha_modes[0],
+            alpha_mode,
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
         };
