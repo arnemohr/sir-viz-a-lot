@@ -1,10 +1,10 @@
 //! `Param<T>` — a parameter that can be a static value, a modulator-
-//! driven value, or (v1.5+) bound to an external source like MIDI
-//! or OSC. Spec §3.2 input/control extension point.
+//! driven value, or bound to an external source like MIDI or OSC.
+//! Spec §3.2 input/control extension point.
 //!
-//! For v1 only `Static` and `Modulated` resolve to a value;
-//! `Bound` is reserved as an enum slot and returns `0.0` so the v1
-//! codebase compiles ahead of the v1.5 source-binding work.
+//! `Static` and `Modulated` resolve locally; `Bound` delegates to
+//! [`InputState::read`], which asks each registered [`Source`] in
+//! turn. If no source owns the handle, `0.0` is returned.
 
 use crate::clock::Clock;
 use crate::controls::InputState;
@@ -34,18 +34,13 @@ impl<T: Copy + Default> Default for Param<T> {
 }
 
 impl Param<f32> {
-    /// Resolve to a concrete `f32`. `inputs` is needed by the `Bound`
-    /// arm in v1.5; v1 ignores it.
+    /// Resolve to a concrete `f32`. `inputs` is consulted by the
+    /// `Bound` arm to look up the registered source's current value.
     pub fn value(&self, clock: &Clock, inputs: &InputState) -> f32 {
         match self {
             Self::Static(v) => *v,
             Self::Modulated(m) => m.value(clock),
-            Self::Bound(_source_ref) => {
-                // v1.5: look up the source in `inputs` and read its
-                // current value. v1: stub returns 0.0.
-                let _ = inputs;
-                0.0
-            }
+            Self::Bound(source_ref) => inputs.read(*source_ref).unwrap_or(0.0),
         }
     }
 }
