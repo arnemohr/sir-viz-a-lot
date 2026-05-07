@@ -319,9 +319,9 @@ fn show_scene_tab(
     // after they release the drag.
     if let Some(scene_editor::Selection::Layer(idx)) = scene.selected {
         if let Some(layer) = project.layers.get(idx) {
-            let t = &layer.transform;
-            let half = [t.scale[0].abs() * 0.5, t.scale[1].abs() * 0.5];
-            let center = [0.5 + t.translate[0], 0.5 + t.translate[1]];
+            let (translate, scale, _rot) = scene_editor::effective_static_transform(layer);
+            let half = [scale[0].abs() * 0.5, scale[1].abs() * 0.5];
+            let center = [0.5 + translate[0], 0.5 + translate[1]];
             let to_screen = |n: [f32; 2]| {
                 egui::pos2(
                     inner.left() + n[0] * inner.width(),
@@ -363,32 +363,41 @@ fn show_scene_tab(
     if let Some(scene_editor::Selection::Layer(idx)) = scene.selected {
         if let Some(layer) = project.layers.get_mut(idx) {
             ui.add_space(6.0);
-            egui::CollapsingHeader::new(format!("Selected: {}", layer.id))
+            let header = format!("Selected: {}", layer.id);
+            egui::CollapsingHeader::new(header)
                 .default_open(true)
                 .show(ui, |ui| {
                     ui.label(
                         "Drag in the preview to move; Shift-drag to scale; Alt-drag to rotate; Esc to deselect.",
                     );
-                    ui.add(
-                        egui::Slider::new(&mut layer.transform.translate[0], -1.0..=1.0)
-                            .text("translate x"),
-                    );
-                    ui.add(
-                        egui::Slider::new(&mut layer.transform.translate[1], -1.0..=1.0)
-                            .text("translate y"),
-                    );
-                    ui.add(
-                        egui::Slider::new(&mut layer.transform.scale[0], 0.05..=4.0)
-                            .text("scale x"),
-                    );
-                    ui.add(
-                        egui::Slider::new(&mut layer.transform.scale[1], 0.05..=4.0)
-                            .text("scale y"),
-                    );
-                    ui.add(
-                        egui::Slider::new(&mut layer.transform.rotate_deg, -180.0..=180.0)
-                            .text("rotate (deg)"),
-                    );
+                    let (mut t, mut s, mut r) = scene_editor::effective_static_transform(layer);
+                    let mut changed = false;
+                    changed |= ui
+                        .add(egui::Slider::new(&mut t[0], -1.0..=1.0).text("translate x"))
+                        .changed();
+                    changed |= ui
+                        .add(egui::Slider::new(&mut t[1], -1.0..=1.0).text("translate y"))
+                        .changed();
+                    changed |= ui
+                        .add(egui::Slider::new(&mut s[0], 0.05..=4.0).text("scale x"))
+                        .changed();
+                    changed |= ui
+                        .add(egui::Slider::new(&mut s[1], 0.05..=4.0).text("scale y"))
+                        .changed();
+                    changed |= ui
+                        .add(egui::Slider::new(&mut r, -180.0..=180.0).text("rotate (deg)"))
+                        .changed();
+                    if changed {
+                        scene_editor::mutate_transform_effect(
+                            layer,
+                            |trans, rot, sx, sy| {
+                                *trans = t;
+                                *sx = Modulator::Static(s[0]);
+                                *sy = Modulator::Static(s[1]);
+                                *rot = Modulator::Static(r);
+                            },
+                        );
+                    }
                     ui.add(
                         egui::Slider::new(&mut layer.opacity, 0.0..=1.0).text("opacity"),
                     );

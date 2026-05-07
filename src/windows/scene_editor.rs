@@ -19,7 +19,9 @@
 
 use egui::Pos2;
 
-use crate::project::schema::Project;
+use crate::effects::Effect;
+use crate::modulators::Modulator;
+use crate::project::schema::{LayerConfig, Project};
 
 /// Pixel radius for mask-vertex hit-testing in preview space (M11).
 const MASK_HANDLE_HIT_PX: f32 = 9.0;
@@ -102,16 +104,88 @@ pub struct SceneEditorState {
     pub drag: Option<DragSession>,
 }
 
+/// Read the layer's effective static `(translate, scale, rotate_deg)` from
+/// the first `Effect::Transform` in its effect chain. Modulator-driven
+/// values are *not* sampled — selection is operator-edit-time, not
+/// animation-time, so we use the `Modulator::Static(v)` arms and fall
+/// back to identity when other variants are present (a sine-modulated
+/// scale uses 1.0 here so the hit-rect doesn't pulse with the audio).
+///
+/// Returns identity (translate 0, scale 1, rotate 0) when the chain has
+/// no Transform effect — matches what the renderer would do.
+pub fn effective_static_transform(layer: &LayerConfig) -> ([f32; 2], [f32; 2], f32) {
+    for e in layer.effects.iter() {
+        if let Effect::Transform {
+            translate,
+            scale_x,
+            scale_y,
+            rotate_deg,
+        } = e
+        {
+            let s_x = match scale_x {
+                Modulator::Static(v) => *v,
+                _ => 1.0,
+            };
+            let s_y = match scale_y {
+                Modulator::Static(v) => *v,
+                _ => 1.0,
+            };
+            let rot = match rotate_deg {
+                Modulator::Static(v) => *v,
+                _ => 0.0,
+            };
+            return (*translate, [s_x, s_y], rot);
+        }
+    }
+    ([0.0, 0.0], [1.0, 1.0], 0.0)
+}
+
+/// Mutate the layer's first `Effect::Transform` via the given closure.
+/// If the chain doesn't yet contain a Transform effect, append one with
+/// identity defaults first — so `mutate_transform_effect` is always safe
+/// to call from a drag handler.
+pub fn mutate_transform_effect<F>(layer: &mut LayerConfig, mutate: F)
+where
+    F: FnOnce(&mut [f32; 2], &mut Modulator, &mut Modulator, &mut Modulator),
+{
+    if !layer
+        .effects
+        .iter()
+        .any(|e| matches!(e, Effect::Transform { .. }))
+    {
+        layer.effects.push(Effect::Transform {
+            translate: [0.0, 0.0],
+            rotate_deg: Modulator::Static(0.0),
+            scale_x: Modulator::Static(1.0),
+            scale_y: Modulator::Static(1.0),
+        });
+    }
+    for e in layer.effects.iter_mut() {
+        if let Effect::Transform {
+            translate,
+            rotate_deg,
+            scale_x,
+            scale_y,
+        } = e
+        {
+            mutate(translate, rotate_deg, scale_x, scale_y);
+            return;
+        }
+    }
+}
+
 /// Hit-test screen-space `pos` against every layer in `project`, walking
 /// reverse draw order so the topmost layer wins. Returns the layer index
 /// of the topmost match.
 ///
-/// "Inside" means "the screen-space point falls inside the layer's
-/// post-`Transform` axis-aligned rectangle in normalized output space".
-/// Modulator-driven Transform components are not factored in: selection
-/// is operator-edit-time, not animation-time, so we use the static base
-/// translate / scale only. Matches the way every comparable tool
-/// (MadMapper, Resolume editors) handles hit-testing.
+/// Each layer's hit rect is the unit-quad shifted by its static
+/// `Effect::Transform.translate` and shrunk by `scale_x / scale_y`. The
+/// renderer's textured-quad pipeline always covers the full layer rect
+/// in normalized output space; `Effect::Transform` shifts and scales
+/// the *content* within that rect, so for picking purposes we treat the
+/// transform-shifted box as the "where the layer is on-screen" region.
+/// Modulator-animated Transform fields fall back to identity (see
+/// `effective_static_transform`) so drag-pick doesn't drift mid-music.
 pub fn hit_layer(
     project: &Project,
     pos_screen: Pos2,
@@ -122,12 +196,9 @@ pub fn hit_layer(
         if !layer.enabled {
             continue;
         }
-        let t = &layer.transform;
-        // Layer's static rect in normalized output space, centered on
-        // `0.5 + translate`, sized by `scale`. Translate is in normalized
-        // output units (matches the way the runtime transform shader uses it).
-        let half = [t.scale[0].abs() * 0.5, t.scale[1].abs() * 0.5];
-        let center = [0.5 + t.translate[0], 0.5 + t.translate[1]];
+        let (translate, scale, _rot) = effective_static_transform(layer);
+        let half = [scale[0].abs() * 0.5, scale[1].abs() * 0.5];
+        let center = [0.5 + translate[0], 0.5 + translate[1]];
         if pos_norm[0] >= center[0] - half[0]
             && pos_norm[0] <= center[0] + half[0]
             && pos_norm[1] >= center[1] - half[1]
@@ -294,7 +365,8 @@ pub fn handle_scene_input(
                     },
                 });
             } else if let Some(idx) = hit_layer(project, pos, preview_rect) {
-                let t = &project.layers[idx].transform;
+                let (translate, scale, rotate) =
+                    effective_static_transform(&project.layers[idx]);
                 let mode = if modifiers.shift {
                     DragMode::Scale
                 } else if modifiers.alt {
@@ -306,9 +378,9 @@ pub fn handle_scene_input(
                 scene.drag = Some(DragSession {
                     start_screen: pos,
                     kind: DragKind::LayerTransform {
-                        start_translate: t.translate,
-                        start_scale: t.scale,
-                        start_rotate_deg: t.rotate_deg,
+                        start_translate: translate,
+                        start_scale: scale,
+                        start_rotate_deg: rotate,
                         mode,
                     },
                 });
@@ -331,23 +403,41 @@ pub fn handle_scene_input(
                 } => {
                     if let Some(Selection::Layer(idx)) = scene.selected {
                         if let Some(layer) = project.layers.get_mut(idx) {
+                            // Mutate the layer's first Effect::Transform —
+                            // the field the M5 render pipeline actually reads.
+                            // LayerConfig.transform is currently unused at
+                            // render time; mutating it would just make drag
+                            // visually do nothing.
                             match mode {
                                 DragMode::Translate => {
-                                    layer.transform.translate = [
+                                    let new_t = [
                                         start_translate[0] + dx,
                                         start_translate[1] + dy,
                                     ];
+                                    mutate_transform_effect(layer, |t, _r, _sx, _sy| {
+                                        *t = new_t;
+                                    });
                                 }
                                 DragMode::Scale => {
                                     let factor = (1.0 + (dx + dy)).max(0.05);
-                                    layer.transform.scale = [
-                                        start_scale[0] * factor,
-                                        start_scale[1] * factor,
-                                    ];
+                                    let new_sx = start_scale[0] * factor;
+                                    let new_sy = start_scale[1] * factor;
+                                    mutate_transform_effect(
+                                        layer,
+                                        |_t, _r, sx, sy| {
+                                            *sx = Modulator::Static(new_sx);
+                                            *sy = Modulator::Static(new_sy);
+                                        },
+                                    );
                                 }
                                 DragMode::Rotate => {
-                                    layer.transform.rotate_deg =
-                                        start_rotate_deg + dx * 360.0;
+                                    let new_rot = start_rotate_deg + dx * 360.0;
+                                    mutate_transform_effect(
+                                        layer,
+                                        |_t, r, _sx, _sy| {
+                                            *r = Modulator::Static(new_rot);
+                                        },
+                                    );
                                 }
                             }
                         }
@@ -430,6 +520,9 @@ mod tests {
     use crate::project::schema::{LayerConfig, LayerKind, Transform2D, BlendMode};
     use std::path::PathBuf;
 
+    /// Build a layer whose Effect::Transform produces the given static
+    /// translate / scale. Hit-testing reads the chain, so the static
+    /// `LayerConfig.transform` field is left at its (unused) default.
     fn dummy_layer(id: &str, translate: [f32; 2], scale: [f32; 2]) -> LayerConfig {
         LayerConfig {
             id: id.into(),
@@ -437,13 +530,13 @@ mod tests {
                 svg_path: PathBuf::from("/tmp/x.svg"),
             },
             enabled: true,
-            transform: Transform2D {
+            transform: Transform2D::default(),
+            effects: vec![Effect::Transform {
                 translate,
-                rotate_deg: 0.0,
-                scale,
-                anchor: [0.0, 0.0],
-            },
-            effects: Vec::new(),
+                rotate_deg: Modulator::Static(0.0),
+                scale_x: Modulator::Static(scale[0]),
+                scale_y: Modulator::Static(scale[1]),
+            }],
             blend_mode: BlendMode::Normal,
             opacity: 1.0,
         }
@@ -484,6 +577,41 @@ mod tests {
         project.layers.push(top);
         let rect = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(100.0, 100.0));
         assert_eq!(hit_layer(&project, egui::pos2(50.0, 50.0), rect), Some(0));
+    }
+
+    /// `mutate_transform_effect` appends a default Transform effect when the
+    /// chain has none, so a fresh hand-edited project where the operator
+    /// removed the default Transform still works for drag.
+    #[test]
+    fn mutate_transform_effect_appends_when_missing() {
+        let mut layer = LayerConfig {
+            id: "a".into(),
+            kind: LayerKind::Svg {
+                svg_path: PathBuf::from("/tmp/x.svg"),
+            },
+            enabled: true,
+            transform: Transform2D::default(),
+            effects: Vec::new(), // No Transform effect.
+            blend_mode: BlendMode::Normal,
+            opacity: 1.0,
+        };
+        mutate_transform_effect(&mut layer, |t, _r, _sx, _sy| {
+            *t = [0.25, 0.0];
+        });
+        assert_eq!(layer.effects.len(), 1);
+        match &layer.effects[0] {
+            Effect::Transform { translate, .. } => assert_eq!(*translate, [0.25, 0.0]),
+            other => panic!("expected Transform, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn effective_static_transform_reads_chain() {
+        let layer = dummy_layer("a", [0.1, 0.2], [0.5, 0.5]);
+        let (t, s, r) = effective_static_transform(&layer);
+        assert_eq!(t, [0.1, 0.2]);
+        assert_eq!(s, [0.5, 0.5]);
+        assert_eq!(r, 0.0);
     }
 
     #[test]
