@@ -1592,11 +1592,27 @@ fn handle_editing_window_event(
                 // T-M8-05: extension routes to LayerKind. SVG → existing
                 // worker path; JPG/PNG → image_layer upload path. Bad
                 // extensions warn-and-skip.
+                // 003-T1.31: route through Mutation::AddLayer so the drop
+                // becomes Cmd-Z reversible. Mutation::needs_layer_rebuild()
+                // returns true for AddLayer, so we trigger rebuild after
+                // push (mirrors the pending_mutations drain path).
                 if let Some(layer) = layer_from_dropped_path(&path, &state.project) {
-                    state.project.layers.push(layer);
-                    rebuild_layers_for_state(state);
+                    let display_path = path.display().to_string();
+                    #[cfg(feature = "v3")]
+                    {
+                        let position = state.project.layers.len();
+                        let mutation =
+                            crate::project::command::Mutation::AddLayer { layer, position };
+                        state.undo_stack.push(mutation, &mut state.project);
+                        rebuild_layers_for_state(state);
+                    }
+                    #[cfg(not(feature = "v3"))]
+                    {
+                        state.project.layers.push(layer);
+                        rebuild_layers_for_state(state);
+                    }
                     tracing::info!(
-                        path = %path.display(),
+                        path = %display_path,
                         count = state.project.layers.len(),
                         "layer added via drop",
                     );
