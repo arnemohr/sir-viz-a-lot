@@ -147,7 +147,7 @@ fn modulator_at_mut(
 /// `non_undoable` discriminator: see [`Mutation::is_non_undoable`].
 /// Currently the only non-undoable variant is the crossfade-tick
 /// flavour of `ApplyProjectSnapshot`.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 #[allow(dead_code)] // T-003-T1.18+ wires call sites; foundation lives here from T1.14.
 pub enum Mutation {
