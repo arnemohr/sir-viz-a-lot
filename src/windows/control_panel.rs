@@ -446,8 +446,8 @@ fn show_scene_tab(
                     #[cfg(feature = "v3")]
                     {
                         st.pending_mutations.push(
-                            crate::project::command::Mutation::AddMaskVertex {
-                                warp_idx: w_idx,
+                            crate::project::command::Mutation::AddLayerMaskVertex {
+                                layer_idx: w_idx,
                                 position: insert_at,
                                 point,
                             },
@@ -477,8 +477,8 @@ fn show_scene_tab(
                         #[cfg(feature = "v3")]
                         {
                             st.pending_mutations.push(
-                                crate::project::command::Mutation::RemoveMaskVertex {
-                                    warp_idx: w_idx,
+                                crate::project::command::Mutation::RemoveLayerMaskVertex {
+                                    layer_idx: w_idx,
                                     idx: v_idx,
                                 },
                             );
@@ -1083,8 +1083,8 @@ fn show_mapping_tab(
                 let new_cols = new_cols_opt.unwrap_or(w.cols).max(1);
                 if new_rows != w.rows || new_cols != w.cols {
                     let new_grid = schema::resample_grid(&w.grid, new_rows, new_cols);
-                    st.pending_mutations.push(Mutation::SetWarpDimensions {
-                        warp_idx: 0,
+                    st.pending_mutations.push(Mutation::SetLayerWarpDimensions {
+                        layer_idx: 0,
                         new_rows,
                         new_cols,
                         new_grid,
@@ -1260,8 +1260,8 @@ fn show_mapping_tab(
                 new_mesh.rows = 1;
                 new_mesh.cols = 1;
                 new_mesh.grid = vec![vec![[0.0, 0.0], [1.0, 0.0]], vec![[0.0, 1.0], [1.0, 1.0]]];
-                st.pending_mutations.push(Mutation::ResetWarpMesh {
-                    warp_idx: 0,
+                st.pending_mutations.push(Mutation::ResetLayerWarpMesh {
+                    layer_idx: 0,
                     new: new_mesh,
                     old,
                 });
@@ -1286,8 +1286,8 @@ fn show_mapping_tab(
             w.mask_feather,
             0.0..=0.25,
         ) {
-            st.pending_mutations.push(Mutation::SetWarpMaskFeather {
-                warp_idx: 0,
+            st.pending_mutations.push(Mutation::SetLayerMaskFeather {
+                layer_idx: 0,
                 new,
                 old: w.mask_feather,
             });
@@ -1308,8 +1308,8 @@ fn show_mapping_tab(
             if ui.button(name).clicked() {
                 #[cfg(feature = "v3")]
                 {
-                    st.pending_mutations.push(Mutation::SetMaskPolygon {
-                        warp_idx: 0,
+                    st.pending_mutations.push(Mutation::SetLayerMaskPolygon {
+                        layer_idx: 0,
                         new: build(),
                         old: w.mask_polygon.clone(),
                     });
@@ -1323,8 +1323,8 @@ fn show_mapping_tab(
         if ui.button("clear mask").clicked() {
             #[cfg(feature = "v3")]
             {
-                st.pending_mutations.push(Mutation::SetMaskPolygon {
-                    warp_idx: 0,
+                st.pending_mutations.push(Mutation::SetLayerMaskPolygon {
+                    layer_idx: 0,
                     new: Vec::new(),
                     old: w.mask_polygon.clone(),
                 });

@@ -334,8 +334,8 @@ impl ProjectAudit {
                         grid_first_cols,
                         warp.grid.iter().any(|row| row.len() != grid_first_cols),
                     ),
-                    autofix: Some(Mutation::ResetWarpMesh {
-                        warp_idx,
+                    autofix: Some(Mutation::ResetLayerWarpMesh {
+                        layer_idx: warp_idx,
                         new: new_mesh,
                         old: warp.clone(),
                     }),
@@ -357,8 +357,8 @@ impl ProjectAudit {
                          Clear the mask or add vertices.",
                         warp_idx, vertex_count,
                     ),
-                    autofix: Some(Mutation::SetMaskPolygon {
-                        warp_idx,
+                    autofix: Some(Mutation::SetLayerMaskPolygon {
+                        layer_idx: warp_idx,
                         new: Vec::new(),
                         old: warp.mask_polygon.clone(),
                     }),

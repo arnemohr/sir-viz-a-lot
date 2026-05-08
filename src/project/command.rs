@@ -190,24 +190,24 @@ pub enum Mutation {
         /// Pre-mutation value.
         old: bool,
     },
-    /// Replace `WarpMesh.mask_feather` for the warp at `warp_idx`.
-    SetWarpMaskFeather {
-        /// Index into `Project.layers`; the layers `warp` is the target.
-        warp_idx: usize,
+    /// Replace `WarpMesh.mask_feather` for the layer at `layer_idx`.
+    SetLayerMaskFeather {
+        /// Index into `Project.layers`; the layer's `warp` is the target.
+        layer_idx: usize,
         /// Value to write.
         new: f32,
         /// Pre-mutation value.
         old: f32,
     },
-    /// Replace `WarpMesh.rows`/`cols`/`grid` for the warp at `warp_idx`.
+    /// Replace `WarpMesh.rows`/`cols`/`grid` for the layer at `layer_idx`.
     /// Editing rows or cols bilinear-resamples the grid (the existing
     /// T-M7-01 helper); the resample is lossy, so this variant follows
     /// Reverse rule 3 — the `old_grid` snapshot lets undo restore the
     /// pre-mutation grid byte-equally instead of attempting a reverse-
     /// resample.
-    SetWarpDimensions {
-        /// Index into `Project.layers`; the layers `warp` is the target.
-        warp_idx: usize,
+    SetLayerWarpDimensions {
+        /// Index into `Project.layers`; the layer's `warp` is the target.
+        layer_idx: usize,
         /// Cell-row count to write.
         new_rows: u32,
         /// Cell-column count to write.
@@ -331,27 +331,27 @@ pub enum Mutation {
         old: crate::modulators::Modulator,
     },
 
-    /// Replace the entire `WarpMesh` at `warp_idx` (rule 3 snapshot
+    /// Replace the entire `WarpMesh` at `layer_idx` (rule 3 snapshot
     /// Reverse). Used by the Mapping tab's "Reset to identity" button so
     /// undo restores the full pre-reset mesh — including `mask_polygon`,
     /// `mask_feather`, and `source_rect` even though Reset only currently
     /// writes `rows`, `cols`, and `grid`. The full-snapshot shape
     /// future-proofs against Reset growing to touch more fields.
-    ResetWarpMesh {
-        /// Index into `Project.layers`; the layers `warp` is the target.
-        warp_idx: usize,
+    ResetLayerWarpMesh {
+        /// Index into `Project.layers`; the layer's `warp` is the target.
+        layer_idx: usize,
         /// Full `WarpMesh` to install.
         new: crate::project::schema::WarpMesh,
         /// Pre-mutation `WarpMesh` snapshot.
         old: crate::project::schema::WarpMesh,
     },
-    /// Replace `WarpMesh.mask_polygon` for the warp at `warp_idx`.
+    /// Replace `WarpMesh.mask_polygon` for the layer at `layer_idx`.
     /// Both sides are full polygon snapshots (whole-Vec Reverse). Used
     /// by the Mapping tab's zone-template buttons and the "clear mask"
     /// button.
-    SetMaskPolygon {
-        /// Index into `Project.layers`; the layers `warp` is the target.
-        warp_idx: usize,
+    SetLayerMaskPolygon {
+        /// Index into `Project.layers`; the layer's `warp` is the target.
+        layer_idx: usize,
         /// Polygon to install.
         new: Vec<[f32; 2]>,
         /// Pre-mutation polygon snapshot.
@@ -359,30 +359,46 @@ pub enum Mutation {
     },
 
     /// Insert a new vertex into `WarpMesh.mask_polygon` at `position`
-    /// (0..=polygon.len()). Reverse is `RemoveMaskVertex { warp_idx, idx: position }`.
-    AddMaskVertex {
-        /// Index into `Project.layers`; the layers `warp` is the target.
-        warp_idx: usize,
+    /// (0..=polygon.len()). Reverse is `RemoveLayerMaskVertex { layer_idx, idx: position }`.
+    AddLayerMaskVertex {
+        /// Index into `Project.layers`; the layer's `warp` is the target.
+        layer_idx: usize,
         /// Insertion index (0..=polygon.len()).
         position: usize,
         /// The vertex coordinates to insert (normalized output-space).
         point: [f32; 2],
     },
     /// Remove the vertex at `idx` from `WarpMesh.mask_polygon`.
-    /// Reverse is `AddMaskVertex { warp_idx, position: idx, point: removed }`.
-    RemoveMaskVertex {
-        /// Index into `Project.layers`; the layers `warp` is the target.
-        warp_idx: usize,
+    /// Reverse is `AddLayerMaskVertex { layer_idx, position: idx, point: removed }`.
+    RemoveLayerMaskVertex {
+        /// Index into `Project.layers`; the layer's `warp` is the target.
+        layer_idx: usize,
         /// Index of the vertex to remove.
         idx: usize,
     },
     /// Replace `WarpMesh.mask_polygon[idx]` with `new`. Reverse swaps
     /// `new` and `old`. Like `SetGamma` but for a polygon vertex.
-    SetMaskVertex {
-        /// Index into `Project.layers`; the layers `warp` is the target.
-        warp_idx: usize,
+    SetLayerMaskVertex {
+        /// Index into `Project.layers`; the layer's `warp` is the target.
+        layer_idx: usize,
         /// Index of the vertex inside `mask_polygon`.
         idx: usize,
+        /// Value to write.
+        new: [f32; 2],
+        /// Pre-mutation value; `apply` `debug_assert!`s this matches the live state.
+        old: [f32; 2],
+    },
+
+    /// Replace `WarpMesh.grid[r][c]` for the layer at `layer_idx`.
+    /// Direct corner-pin manipulation; `is_non_undoable = false`,
+    /// `needs_layer_rebuild = false`.
+    SetLayerWarpCorner {
+        /// Index into `Project.layers`; the layer's `warp` is the target.
+        layer_idx: usize,
+        /// Grid row index (vertex coords, 0..=warp.rows).
+        r: usize,
+        /// Grid column index (vertex coords, 0..=warp.cols).
+        c: usize,
         /// Value to write.
         new: [f32; 2],
         /// Pre-mutation value; `apply` `debug_assert!`s this matches the live state.
@@ -486,27 +502,31 @@ impl Mutation {
                 project.output_windowed = new;
                 Mutation::SetOutputWindowed { new: old, old: new }
             }
-            Mutation::SetWarpMaskFeather { warp_idx, new, old } => {
+            Mutation::SetLayerMaskFeather {
+                layer_idx,
+                new,
+                old,
+            } => {
                 let warp = &mut project
                     .layers
-                    .get_mut(warp_idx)
-                    .expect("SetWarpMaskFeather: warp_idx out of range")
+                    .get_mut(layer_idx)
+                    .expect("SetLayerMaskFeather: layer_idx out of range")
                     .warp;
                 debug_assert!(
                     (warp.mask_feather - old).abs() < 1e-6,
-                    "SetWarpMaskFeather stale Reverse: warp.mask_feather={}, expected old={}",
+                    "SetLayerMaskFeather stale Reverse: warp.mask_feather={}, expected old={}",
                     warp.mask_feather,
                     old
                 );
                 warp.mask_feather = new;
-                Mutation::SetWarpMaskFeather {
-                    warp_idx,
+                Mutation::SetLayerMaskFeather {
+                    layer_idx,
                     new: old,
                     old: new,
                 }
             }
-            Mutation::SetWarpDimensions {
-                warp_idx,
+            Mutation::SetLayerWarpDimensions {
+                layer_idx,
                 new_rows,
                 new_cols,
                 new_grid,
@@ -516,8 +536,8 @@ impl Mutation {
             } => {
                 let warp = &mut project
                     .layers
-                    .get_mut(warp_idx)
-                    .expect("SetWarpDimensions: warp_idx out of range")
+                    .get_mut(layer_idx)
+                    .expect("SetLayerWarpDimensions: layer_idx out of range")
                     .warp;
                 // Snapshot Reverse: only assert the scalar dimensions
                 // match. The grid is restored byte-equally via the
@@ -525,7 +545,7 @@ impl Mutation {
                 // proptest round-trip rather than per-mutation.
                 debug_assert!(
                     warp.rows == old_rows && warp.cols == old_cols,
-                    "SetWarpDimensions stale Reverse: warp dims=({}, {}), expected old=({}, {})",
+                    "SetLayerWarpDimensions stale Reverse: warp dims=({}, {}), expected old=({}, {})",
                     warp.rows,
                     warp.cols,
                     old_rows,
@@ -541,8 +561,8 @@ impl Mutation {
                 warp.grid = post_grid.clone();
                 warp.rows = new_rows;
                 warp.cols = new_cols;
-                Mutation::SetWarpDimensions {
-                    warp_idx,
+                Mutation::SetLayerWarpDimensions {
+                    layer_idx,
                     new_rows: old_rows,
                     new_cols: old_cols,
                     new_grid: old_grid,
@@ -740,11 +760,15 @@ impl Mutation {
                     old: new,
                 }
             }
-            Mutation::ResetWarpMesh { warp_idx, new, old } => {
+            Mutation::ResetLayerWarpMesh {
+                layer_idx,
+                new,
+                old,
+            } => {
                 let warp = &mut project
                     .layers
-                    .get_mut(warp_idx)
-                    .expect("ResetWarpMesh: warp_idx out of range")
+                    .get_mut(layer_idx)
+                    .expect("ResetLayerWarpMesh: layer_idx out of range")
                     .warp;
                 // Snapshot Reverse: cheap-assert that the carried `old`
                 // describes the live state by comparing rows/cols (the
@@ -752,7 +776,7 @@ impl Mutation {
                 // deeper drift.
                 debug_assert!(
                     warp.rows == old.rows && warp.cols == old.cols,
-                    "ResetWarpMesh stale Reverse: warp dims=({}, {}), expected old=({}, {})",
+                    "ResetLayerWarpMesh stale Reverse: warp dims=({}, {}), expected old=({}, {})",
                     warp.rows,
                     warp.cols,
                     old.rows,
@@ -760,41 +784,45 @@ impl Mutation {
                 );
                 let post = new;
                 *warp = post.clone();
-                Mutation::ResetWarpMesh {
-                    warp_idx,
+                Mutation::ResetLayerWarpMesh {
+                    layer_idx,
                     new: old,
                     old: post,
                 }
             }
-            Mutation::SetMaskPolygon { warp_idx, new, old } => {
+            Mutation::SetLayerMaskPolygon {
+                layer_idx,
+                new,
+                old,
+            } => {
                 let warp = &mut project
                     .layers
-                    .get_mut(warp_idx)
-                    .expect("SetMaskPolygon: warp_idx out of range")
+                    .get_mut(layer_idx)
+                    .expect("SetLayerMaskPolygon: layer_idx out of range")
                     .warp;
                 debug_assert!(
                     warp.mask_polygon.len() == old.len(),
-                    "SetMaskPolygon stale Reverse: mask_polygon.len()={}, expected old.len()={}",
+                    "SetLayerMaskPolygon stale Reverse: mask_polygon.len()={}, expected old.len()={}",
                     warp.mask_polygon.len(),
                     old.len()
                 );
                 let post = new;
                 warp.mask_polygon = post.clone();
-                Mutation::SetMaskPolygon {
-                    warp_idx,
+                Mutation::SetLayerMaskPolygon {
+                    layer_idx,
                     new: old,
                     old: post,
                 }
             }
-            Mutation::AddMaskVertex {
-                warp_idx,
+            Mutation::AddLayerMaskVertex {
+                layer_idx,
                 position,
                 point,
             } => {
                 let warp = &mut project
                     .layers
-                    .get_mut(warp_idx)
-                    .expect("AddMaskVertex: warp_idx out of range")
+                    .get_mut(layer_idx)
+                    .expect("AddLayerMaskVertex: layer_idx out of range")
                     .warp;
                 debug_assert!(
                     position <= warp.mask_polygon.len(),
@@ -803,60 +831,90 @@ impl Mutation {
                     warp.mask_polygon.len()
                 );
                 warp.mask_polygon.insert(position, point);
-                Mutation::RemoveMaskVertex {
-                    warp_idx,
+                Mutation::RemoveLayerMaskVertex {
+                    layer_idx,
                     idx: position,
                 }
             }
-            Mutation::RemoveMaskVertex { warp_idx, idx } => {
+            Mutation::RemoveLayerMaskVertex { layer_idx, idx } => {
                 let warp = &mut project
                     .layers
-                    .get_mut(warp_idx)
-                    .expect("RemoveMaskVertex: warp_idx out of range")
+                    .get_mut(layer_idx)
+                    .expect("RemoveLayerMaskVertex: layer_idx out of range")
                     .warp;
                 debug_assert!(
                     idx < warp.mask_polygon.len(),
-                    "RemoveMaskVertex idx out of range: idx={}, len={}",
+                    "RemoveLayerMaskVertex idx out of range: idx={}, len={}",
                     idx,
                     warp.mask_polygon.len()
                 );
                 let point = warp.mask_polygon.remove(idx);
-                Mutation::AddMaskVertex {
-                    warp_idx,
+                Mutation::AddLayerMaskVertex {
+                    layer_idx,
                     position: idx,
                     point,
                 }
             }
-            Mutation::SetMaskVertex {
-                warp_idx,
+            Mutation::SetLayerMaskVertex {
+                layer_idx,
                 idx,
                 new,
                 old,
             } => {
                 let warp = &mut project
                     .layers
-                    .get_mut(warp_idx)
-                    .expect("SetMaskVertex: warp_idx out of range")
+                    .get_mut(layer_idx)
+                    .expect("SetLayerMaskVertex: layer_idx out of range")
                     .warp;
                 debug_assert!(
                     idx < warp.mask_polygon.len(),
-                    "SetMaskVertex idx out of range: idx={}, len={}",
+                    "SetLayerMaskVertex idx out of range: idx={}, len={}",
                     idx,
                     warp.mask_polygon.len()
                 );
                 let cur = warp.mask_polygon[idx];
                 debug_assert!(
                     (cur[0] - old[0]).abs() < 1e-6 && (cur[1] - old[1]).abs() < 1e-6,
-                    "SetMaskVertex stale Reverse: cur=[{}, {}], expected old=[{}, {}]",
+                    "SetLayerMaskVertex stale Reverse: cur=[{}, {}], expected old=[{}, {}]",
                     cur[0],
                     cur[1],
                     old[0],
                     old[1]
                 );
                 warp.mask_polygon[idx] = new;
-                Mutation::SetMaskVertex {
-                    warp_idx,
+                Mutation::SetLayerMaskVertex {
+                    layer_idx,
                     idx,
+                    new: old,
+                    old: new,
+                }
+            }
+            Mutation::SetLayerWarpCorner {
+                layer_idx,
+                r,
+                c,
+                new,
+                old,
+            } => {
+                let warp = &mut project
+                    .layers
+                    .get_mut(layer_idx)
+                    .expect("SetLayerWarpCorner: layer_idx out of range")
+                    .warp;
+                debug_assert!(
+                    (warp.grid[r][c][0] - old[0]).abs() < 1e-6
+                        && (warp.grid[r][c][1] - old[1]).abs() < 1e-6,
+                    "SetLayerWarpCorner stale Reverse: cur=[{}, {}], expected old=[{}, {}]",
+                    warp.grid[r][c][0],
+                    warp.grid[r][c][1],
+                    old[0],
+                    old[1]
+                );
+                warp.grid[r][c] = new;
+                Mutation::SetLayerWarpCorner {
+                    layer_idx,
+                    r,
+                    c,
                     new: old,
                     old: new,
                 }
@@ -914,8 +972,8 @@ impl Mutation {
             | Mutation::SetContrast { .. }
             | Mutation::SetCrossfadeDurationS { .. }
             | Mutation::SetOutputWindowed { .. }
-            | Mutation::SetWarpMaskFeather { .. }
-            | Mutation::SetWarpDimensions { .. }
+            | Mutation::SetLayerMaskFeather { .. }
+            | Mutation::SetLayerWarpDimensions { .. }
             | Mutation::SetLayerOpacity { .. }
             | Mutation::SetLayerEnabled { .. }
             | Mutation::SetLayerBlendMode { .. }
@@ -924,11 +982,12 @@ impl Mutation {
             | Mutation::AddLayer { .. }
             | Mutation::RemoveLayer { .. }
             | Mutation::SwapLayers { .. }
-            | Mutation::AddMaskVertex { .. }
-            | Mutation::RemoveMaskVertex { .. }
-            | Mutation::SetMaskVertex { .. }
-            | Mutation::ResetWarpMesh { .. }
-            | Mutation::SetMaskPolygon { .. }
+            | Mutation::AddLayerMaskVertex { .. }
+            | Mutation::RemoveLayerMaskVertex { .. }
+            | Mutation::SetLayerMaskVertex { .. }
+            | Mutation::ResetLayerWarpMesh { .. }
+            | Mutation::SetLayerMaskPolygon { .. }
+            | Mutation::SetLayerWarpCorner { .. }
             | Mutation::SetProjectScenes { .. }
             | Mutation::SetOutputMonitorIndex { .. }
             | Mutation::RelinkAssetPath { .. } => false,
@@ -1022,34 +1081,33 @@ impl Project {
         }
     }
 
-    /// Build a `SetWarpMaskFeather` mutation. Panics if `warp_idx` is
+    /// Build a `SetLayerMaskFeather` mutation. Panics if `layer_idx` is
     /// out of range — call sites should guard with `project.layers.get`
     /// first; the helper is intentionally not optional so the contract
-    /// stays unambiguous. Under v4 `warp_idx` indexes
-    /// `Project.layers`; T3.0c renames the parameter to `layer_idx`.
-    pub fn set_warp_mask_feather_mutation(&self, warp_idx: usize, new: f32) -> Mutation {
-        let warp = &self.layers[warp_idx].warp;
-        Mutation::SetWarpMaskFeather {
-            warp_idx,
+    /// stays unambiguous.
+    pub fn set_layer_mask_feather_mutation(&self, layer_idx: usize, new: f32) -> Mutation {
+        let warp = &self.layers[layer_idx].warp;
+        Mutation::SetLayerMaskFeather {
+            layer_idx,
             new,
             old: warp.mask_feather,
         }
     }
 
-    /// Build a `SetWarpDimensions` mutation. The new grid is computed
+    /// Build a `SetLayerWarpDimensions` mutation. The new grid is computed
     /// here via [`crate::project::schema::resample_grid`] so callers
     /// don't have to reason about the lossy resample — they just pass
-    /// the new cell counts. `warp_idx` indexes `Project.layers`.
-    pub fn set_warp_dimensions_mutation(
+    /// the new cell counts. `layer_idx` indexes `Project.layers`.
+    pub fn set_layer_warp_dimensions_mutation(
         &self,
-        warp_idx: usize,
+        layer_idx: usize,
         new_rows: u32,
         new_cols: u32,
     ) -> Mutation {
-        let warp = &self.layers[warp_idx].warp;
+        let warp = &self.layers[layer_idx].warp;
         let new_grid = crate::project::schema::resample_grid(&warp.grid, new_rows, new_cols);
-        Mutation::SetWarpDimensions {
-            warp_idx,
+        Mutation::SetLayerWarpDimensions {
+            layer_idx,
             new_rows,
             new_cols,
             new_grid,
@@ -1112,59 +1170,95 @@ impl Project {
         Mutation::SwapLayers { i, j }
     }
 
-    /// Build a `SetMaskVertex` mutation. Captures the current polygon vertex
-    /// as `old`. Panics if `warp_idx` or `idx` are out of range.
-    pub fn set_mask_vertex_mutation(&self, warp_idx: usize, idx: usize, new: [f32; 2]) -> Mutation {
-        let warp = &self.layers[warp_idx].warp;
-        Mutation::SetMaskVertex {
-            warp_idx,
+    /// Build a `SetLayerMaskVertex` mutation. Captures the current polygon vertex
+    /// as `old`. Panics if `layer_idx` or `idx` are out of range.
+    pub fn set_layer_mask_vertex_mutation(
+        &self,
+        layer_idx: usize,
+        idx: usize,
+        new: [f32; 2],
+    ) -> Mutation {
+        let warp = &self.layers[layer_idx].warp;
+        Mutation::SetLayerMaskVertex {
+            layer_idx,
             idx,
             new,
             old: warp.mask_polygon[idx],
         }
     }
 
-    /// Build an `AddMaskVertex` mutation. `position` is the insertion index
-    /// (0..=polygon.len()); the caller must ensure `warp_idx` is valid.
-    pub fn set_add_mask_vertex_mutation(
+    /// Build an `AddLayerMaskVertex` mutation. `position` is the insertion index
+    /// (0..=polygon.len()); the caller must ensure `layer_idx` is valid.
+    pub fn set_add_layer_mask_vertex_mutation(
         &self,
-        warp_idx: usize,
+        layer_idx: usize,
         position: usize,
         point: [f32; 2],
     ) -> Mutation {
-        Mutation::AddMaskVertex {
-            warp_idx,
+        Mutation::AddLayerMaskVertex {
+            layer_idx,
             position,
             point,
         }
     }
 
-    /// Build a `RemoveMaskVertex` mutation. `idx` must be a valid index into
+    /// Build a `RemoveLayerMaskVertex` mutation. `idx` must be a valid index into
     /// `WarpMesh.mask_polygon` at the time of apply.
-    pub fn set_remove_mask_vertex_mutation(&self, warp_idx: usize, idx: usize) -> Mutation {
-        Mutation::RemoveMaskVertex { warp_idx, idx }
+    pub fn set_remove_layer_mask_vertex_mutation(&self, layer_idx: usize, idx: usize) -> Mutation {
+        Mutation::RemoveLayerMaskVertex { layer_idx, idx }
     }
 
-    /// Build a `ResetWarpMesh` mutation. Captures the current warp mesh
+    /// Build a `ResetLayerWarpMesh` mutation. Captures the current warp mesh
     /// as `old` (full snapshot Reverse — rule 3). `new` is the full
     /// `WarpMesh` to install; typically the caller constructs the
-    /// identity mesh and passes it here. Panics if `warp_idx` is out
+    /// identity mesh and passes it here. Panics if `layer_idx` is out
     /// of range.
-    pub fn set_reset_warp_mesh_mutation(
+    pub fn set_reset_layer_warp_mesh_mutation(
         &self,
-        warp_idx: usize,
+        layer_idx: usize,
         new: crate::project::schema::WarpMesh,
     ) -> Mutation {
-        let old = self.layers[warp_idx].warp.clone();
-        Mutation::ResetWarpMesh { warp_idx, new, old }
+        let old = self.layers[layer_idx].warp.clone();
+        Mutation::ResetLayerWarpMesh {
+            layer_idx,
+            new,
+            old,
+        }
     }
 
-    /// Build a `SetMaskPolygon` mutation. Captures the current
+    /// Build a `SetLayerMaskPolygon` mutation. Captures the current
     /// `mask_polygon` as `old` (whole-Vec Reverse). Panics if
-    /// `warp_idx` is out of range.
-    pub fn set_mask_polygon_mutation(&self, warp_idx: usize, new: Vec<[f32; 2]>) -> Mutation {
-        let old = self.layers[warp_idx].warp.mask_polygon.clone();
-        Mutation::SetMaskPolygon { warp_idx, new, old }
+    /// `layer_idx` is out of range.
+    pub fn set_layer_mask_polygon_mutation(
+        &self,
+        layer_idx: usize,
+        new: Vec<[f32; 2]>,
+    ) -> Mutation {
+        let old = self.layers[layer_idx].warp.mask_polygon.clone();
+        Mutation::SetLayerMaskPolygon {
+            layer_idx,
+            new,
+            old,
+        }
+    }
+
+    /// Build a `SetLayerWarpCorner` mutation. Captures the current grid vertex
+    /// as `old`. Panics if `layer_idx`, `r`, or `c` are out of range.
+    pub fn set_layer_warp_corner_mutation(
+        &self,
+        layer_idx: usize,
+        r: usize,
+        c: usize,
+        new: [f32; 2],
+    ) -> Mutation {
+        let old = self.layers[layer_idx].warp.grid[r][c];
+        Mutation::SetLayerWarpCorner {
+            layer_idx,
+            r,
+            c,
+            new,
+            old,
+        }
     }
 
     /// Build a `SetProjectScenes` mutation (whole-Vec Reverse). Captures the
@@ -1600,6 +1694,13 @@ mod tests {
             },
             /// 003-T1.39 — set output monitor index.
             OutputMonitorIndex(usize),
+            /// T3.0c — set a single warp grid corner.
+            LayerWarpCorner {
+                r_pick: u32,
+                c_pick: u32,
+                x: f32,
+                y: f32,
+            },
         }
 
         fn to_mutation(kind: &MutationKind, project: &Project) -> Mutation {
@@ -1615,14 +1716,14 @@ mod tests {
                     if project.layers.is_empty() {
                         project.set_gamma_mutation(project.gamma) // no-op fallback
                     } else {
-                        project.set_warp_mask_feather_mutation(0, *v)
+                        project.set_layer_mask_feather_mutation(0, *v)
                     }
                 }
                 MutationKind::WarpDimensions { rows, cols } => {
                     if project.layers.is_empty() {
                         project.set_gamma_mutation(project.gamma) // no-op fallback
                     } else {
-                        project.set_warp_dimensions_mutation(0, *rows, *cols)
+                        project.set_layer_warp_dimensions_mutation(0, *rows, *cols)
                     }
                 }
                 MutationKind::Snapshot => {
@@ -1785,7 +1886,7 @@ mod tests {
                     } else {
                         let len = project.layers[0].warp.mask_polygon.len();
                         let idx = (*idx_pick as usize) % len;
-                        project.set_mask_vertex_mutation(
+                        project.set_layer_mask_vertex_mutation(
                             0,
                             idx,
                             [x.clamp(0.0, 1.0), y.clamp(0.0, 1.0)],
@@ -1802,7 +1903,7 @@ mod tests {
                     } else {
                         let len = project.layers[0].warp.mask_polygon.len();
                         let position = (*position_pick as usize) % (len + 1);
-                        project.set_add_mask_vertex_mutation(
+                        project.set_add_layer_mask_vertex_mutation(
                             0,
                             position,
                             [x.clamp(0.0, 1.0), y.clamp(0.0, 1.0)],
@@ -1815,7 +1916,7 @@ mod tests {
                     } else {
                         let len = project.layers[0].warp.mask_polygon.len();
                         let idx = (*idx_pick as usize) % len;
-                        project.set_remove_mask_vertex_mutation(0, idx)
+                        project.set_remove_layer_mask_vertex_mutation(0, idx)
                     }
                 }
                 // 003-T1.28 — reset warp mesh and set mask polygon.
@@ -1847,19 +1948,39 @@ mod tests {
                                     .collect()
                             })
                             .collect();
-                        project.set_reset_warp_mesh_mutation(0, new_mesh)
+                        project.set_reset_layer_warp_mesh_mutation(0, new_mesh)
                     }
                 }
                 MutationKind::SetMaskPolygon { vertices } => {
                     if project.layers.is_empty() {
                         project.set_gamma_mutation(project.gamma) // no-op fallback
                     } else {
-                        project.set_mask_polygon_mutation(0, vertices.clone())
+                        project.set_layer_mask_polygon_mutation(0, vertices.clone())
                     }
                 }
                 // 003-T1.39 — output monitor index coverage.
                 MutationKind::OutputMonitorIndex(v) => {
                     project.set_output_monitor_index_mutation(*v)
+                }
+                // T3.0c — warp corner pin.
+                MutationKind::LayerWarpCorner {
+                    r_pick,
+                    c_pick,
+                    x,
+                    y,
+                } => {
+                    if project.layers.is_empty() {
+                        project.set_gamma_mutation(project.gamma) // no-op fallback
+                    } else {
+                        let warp = &project.layers[0].warp;
+                        if warp.grid.is_empty() || warp.grid[0].is_empty() {
+                            project.set_gamma_mutation(project.gamma) // degenerate grid fallback
+                        } else {
+                            let r = (*r_pick as usize) % warp.grid.len();
+                            let c = (*c_pick as usize) % warp.grid[0].len();
+                            project.set_layer_warp_corner_mutation(0, r, c, [*x, *y])
+                        }
+                    }
                 }
             }
         }
@@ -1994,6 +2115,15 @@ mod tests {
                 .prop_map(|vertices| MutationKind::SetMaskPolygon { vertices }),
                 // 003-T1.39 — output monitor index coverage.
                 (0usize..=4).prop_map(MutationKind::OutputMonitorIndex),
+                // T3.0c — warp corner pin coverage.
+                (any::<u32>(), any::<u32>(), 0.0_f32..=1.0, 0.0_f32..=1.0).prop_map(
+                    |(r_pick, c_pick, x, y)| MutationKind::LayerWarpCorner {
+                        r_pick,
+                        c_pick,
+                        x,
+                        y,
+                    },
+                ),
             ]
         }
 

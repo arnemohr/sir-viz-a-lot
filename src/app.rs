@@ -2117,7 +2117,7 @@ fn emit_mutation_telemetry(t: &mut SessionTelemetry, m: &crate::project::command
                 );
             }
         }
-        Mutation::SetWarpDimensions { .. } => {
+        Mutation::SetLayerWarpDimensions { .. } => {
             if !t.first_warp_drag {
                 t.first_warp_drag = true;
                 tracing::info!(

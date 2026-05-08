@@ -526,12 +526,13 @@ pub fn handle_scene_input(
                             if (new[0] - old[0]).abs() > 1e-6 || (new[1] - old[1]).abs() > 1e-6 {
                                 // Revert live mutation; the drain re-applies `new`.
                                 *p = old;
-                                emitted = Some(crate::project::command::Mutation::SetMaskVertex {
-                                    warp_idx: *warp,
-                                    idx: *idx,
-                                    new,
-                                    old,
-                                });
+                                emitted =
+                                    Some(crate::project::command::Mutation::SetLayerMaskVertex {
+                                        layer_idx: *warp,
+                                        idx: *idx,
+                                        new,
+                                        old,
+                                    });
                             }
                         }
                     }
