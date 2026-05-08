@@ -1234,7 +1234,9 @@ enum EffectChange {
     /// `Effect::Transform.translate[1]` set to `new`.
     TransformTranslateY(f32),
     /// 003-T1.22 — picker chose a different `Modulator` variant.
-    /// Carries the freshly-constructed `Modulator` to install; the
+    /// 003-T1.23 — also emitted when a parameter slider (period_s, amp,
+    /// phase, offset, band, …) commits a value within the current variant.
+    /// In both cases, carries the complete new `Modulator` to install; the
     /// caller (`show_effects_tab`) reads `old` from the project at
     /// emit time and pushes a `Mutation::SetModulator`.
     #[cfg(feature = "v3")]
@@ -1486,7 +1488,21 @@ fn modulator_slider(
                 }
             });
     });
-    modulator_slider_params(ui, m, range);
+    // 003-T1.23: if the picker emitted a variant switch this frame, still
+    // render the parameter widgets for the *current* modulator so the UI
+    // doesn't go blank, but suppress any param emission (picker wins).
+    // If no picker change, wire param commits to EffectChange::ModulatorSwitch.
+    if change.is_none() {
+        if let Some(new) = modulator_slider_params(ui, salt, m, range.clone()) {
+            change = Some(EffectChange::ModulatorSwitch {
+                effect_idx,
+                field,
+                new,
+            });
+        }
+    } else {
+        let _ = modulator_slider_params(ui, salt, m, range);
+    }
     change
 }
 
@@ -1530,13 +1546,154 @@ fn modulator_slider(
                 }
             });
     });
-    modulator_slider_params(ui, m, range);
+    modulator_slider_params(ui, salt, m, range);
     None
 }
 
 /// Parameter sliders for the currently-active `Modulator` variant.
-/// Shared between v3 and non-v3 modulator_slider implementations (T1.23 territory).
-fn modulator_slider_params(ui: &mut Ui, m: &mut Modulator, range: std::ops::RangeInclusive<f32>) {
+///
+/// In v3 mode (`#[cfg(feature = "v3")]`): reads `m` read-only, uses
+/// `command_slider` / `command_dragvalue_u32` helpers, and returns
+/// `Some(new_modulator)` when a slider commits a value.  The caller
+/// (`modulator_slider`) wraps that into `EffectChange::ModulatorSwitch`.
+///
+/// In non-v3 mode: binds `egui::Slider` directly to `*m`'s fields and
+/// always returns `None`.
+///
+/// `salt` is forwarded to the widget id so that each parameter slider has
+/// a globally-unique id even when the same variant appears on multiple
+/// effects or layers.
+#[cfg(feature = "v3")]
+fn modulator_slider_params(
+    ui: &mut Ui,
+    salt: (usize, &'static str),
+    m: &mut Modulator,
+    range: std::ops::RangeInclusive<f32>,
+) -> Option<Modulator> {
+    let mut new_modulator: Option<Modulator> = None;
+    match m {
+        Modulator::Static(v) => {
+            let id = format!("mod_{}_{}_static", salt.0, salt.1);
+            if let Some(new) = command_slider(ui, &id, "value", *v, range.clone()) {
+                new_modulator = Some(Modulator::Static(new));
+            }
+        }
+        Modulator::Sine {
+            period_s,
+            amp,
+            phase,
+            offset,
+        } => {
+            let span = range.end() - range.start();
+            let cur_period_s = *period_s;
+            let cur_amp = *amp;
+            let cur_phase = *phase;
+            let cur_offset = *offset;
+            let id_period = format!("mod_{}_{}_period", salt.0, salt.1);
+            let id_amp = format!("mod_{}_{}_amp", salt.0, salt.1);
+            let id_phase = format!("mod_{}_{}_phase", salt.0, salt.1);
+            let id_offset = format!("mod_{}_{}_offset", salt.0, salt.1);
+            if let Some(new) =
+                command_slider(ui, &id_period, "period (s)", cur_period_s, 0.05..=10.0)
+            {
+                new_modulator = Some(Modulator::Sine {
+                    period_s: new,
+                    amp: cur_amp,
+                    phase: cur_phase,
+                    offset: cur_offset,
+                });
+            }
+            if let Some(new) = command_slider(ui, &id_amp, "amp", cur_amp, 0.0..=span) {
+                new_modulator = new_modulator.or(Some(Modulator::Sine {
+                    period_s: cur_period_s,
+                    amp: new,
+                    phase: cur_phase,
+                    offset: cur_offset,
+                }));
+            }
+            if let Some(new) = command_slider(
+                ui,
+                &id_phase,
+                "phase",
+                cur_phase,
+                0.0..=std::f32::consts::TAU,
+            ) {
+                new_modulator = new_modulator.or(Some(Modulator::Sine {
+                    period_s: cur_period_s,
+                    amp: cur_amp,
+                    phase: new,
+                    offset: cur_offset,
+                }));
+            }
+            if let Some(new) = command_slider(ui, &id_offset, "offset", cur_offset, range.clone()) {
+                new_modulator = new_modulator.or(Some(Modulator::Sine {
+                    period_s: cur_period_s,
+                    amp: cur_amp,
+                    phase: cur_phase,
+                    offset: new,
+                }));
+            }
+        }
+        Modulator::Triangle { .. } | Modulator::Noise { .. } | Modulator::Bpm { .. } => {
+            ui.label("(this modulator variant has no UI in v1)");
+        }
+        Modulator::Audio {
+            band,
+            smoothing,
+            amp,
+            offset,
+        } => {
+            let span = range.end() - range.start();
+            let cur_band = *band;
+            let cur_smoothing = *smoothing;
+            let cur_amp = *amp;
+            let cur_offset = *offset;
+            let id_band = format!("mod_{}_{}_band", salt.0, salt.1);
+            let id_amp = format!("mod_{}_{}_amp", salt.0, salt.1);
+            let id_offset = format!("mod_{}_{}_offset", salt.0, salt.1);
+            if let Some(new) =
+                command_dragvalue_u32(ui, &id_band, cur_band as u32, 0u32..=7u32, "band ")
+            {
+                let band_u8 = new.min(u8::MAX as u32) as u8;
+                new_modulator = Some(Modulator::Audio {
+                    band: band_u8,
+                    smoothing: cur_smoothing,
+                    amp: cur_amp,
+                    offset: cur_offset,
+                });
+            }
+            if let Some(new) = command_slider(ui, &id_amp, "amp", cur_amp, 0.0..=span) {
+                new_modulator = new_modulator.or(Some(Modulator::Audio {
+                    band: cur_band,
+                    smoothing: cur_smoothing,
+                    amp: new,
+                    offset: cur_offset,
+                }));
+            }
+            if let Some(new) = command_slider(ui, &id_offset, "offset", cur_offset, range.clone()) {
+                new_modulator = new_modulator.or(Some(Modulator::Audio {
+                    band: cur_band,
+                    smoothing: cur_smoothing,
+                    amp: cur_amp,
+                    offset: new,
+                }));
+            }
+            ui.label("(audio: requires --features audio at build; reads live FFT bands)");
+        }
+    }
+    ui.add_space(2.0);
+    new_modulator
+}
+
+/// Parameter sliders for the currently-active `Modulator` variant — non-v3 version.
+/// Binds `egui::Slider` / `egui::DragValue` directly to `*m`'s fields. Always returns `None`.
+#[cfg(not(feature = "v3"))]
+fn modulator_slider_params(
+    ui: &mut Ui,
+    _salt: (usize, &'static str),
+    m: &mut Modulator,
+    range: std::ops::RangeInclusive<f32>,
+) -> Option<Modulator> {
     match m {
         Modulator::Static(v) => {
             ui.add(egui::Slider::new(v, range.clone()).text("value"));
@@ -1570,4 +1727,5 @@ fn modulator_slider_params(ui: &mut Ui, m: &mut Modulator, range: std::ops::Rang
         }
     }
     ui.add_space(2.0);
+    None
 }
