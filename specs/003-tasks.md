@@ -274,7 +274,7 @@ multiple. Estimated scope: **S** ≤ 0.5 day, **M** 0.5–2 days, **L**
 | T0.4 | Sketch canvas wireframe (low-fi) | DES | M | Yes |
 | T0.5 | Sketch Advanced disclosure wireframe | DES | M | Yes |
 | T0.6 | Privacy review checklist for telemetry | PO | S | Yes |
-| T0.7 | Add `--features v3` Cargo feature | RUST | S | Yes |
+| ✅ T0.7 | Add `--features v3` Cargo feature | RUST | S | Yes |
 | T0.8 | Stub headless command-driven test harness skeleton | RUST | M | Yes |
 
 ### Phase 1 — architecture foundations
