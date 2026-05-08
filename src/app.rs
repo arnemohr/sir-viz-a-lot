@@ -2827,6 +2827,10 @@ fn handle_editing_window_event(
                     output_size: (state.output.config.width, state.output.config.height),
                     #[cfg(feature = "v3")]
                     session_age: state.session_started_at.elapsed(),
+                    #[cfg(feature = "v3")]
+                    can_undo: state.undo_stack.can_undo(),
+                    #[cfg(feature = "v3")]
+                    can_redo: state.undo_stack.can_redo(),
                 };
                 // 003-T1.42 follow-up: drain expired toasts once per frame
                 // before render. Sticky Error toasts survive; auto-expiring
@@ -2986,6 +2990,27 @@ fn handle_editing_window_event(
                     }
                     ControlPanelAction::SceneRecall(slot) => {
                         if matches!(schedule_scene_recall(state, slot), RecallOutcome::Snapped) {
+                            rebuild_layers_for_state(state);
+                        }
+                    }
+                    // 003-T3.4: toolbar Undo / Redo buttons.
+                    #[cfg(feature = "v3")]
+                    ControlPanelAction::RequestUndo => {
+                        let outcome = state.undo_stack.undo(&mut state.project);
+                        if outcome.is_some() {
+                            tracing::info!(target: "rmap::ux", event = "undo_invoked");
+                        }
+                        if matches!(outcome, Some(true)) {
+                            rebuild_layers_for_state(state);
+                        }
+                    }
+                    #[cfg(feature = "v3")]
+                    ControlPanelAction::RequestRedo => {
+                        let outcome = state.undo_stack.redo(&mut state.project);
+                        if outcome.is_some() {
+                            tracing::info!(target: "rmap::ux", event = "redo_invoked");
+                        }
+                        if matches!(outcome, Some(true)) {
                             rebuild_layers_for_state(state);
                         }
                     }

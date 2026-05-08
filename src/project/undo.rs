@@ -105,6 +105,16 @@ impl UndoStack {
     pub fn is_empty(&self) -> bool {
         self.undo.is_empty()
     }
+
+    /// `true` iff the undo deque is non-empty, i.e. Cmd-Z would do something.
+    pub fn can_undo(&self) -> bool {
+        !self.undo.is_empty()
+    }
+
+    /// `true` iff the redo deque is non-empty, i.e. Cmd-Shift-Z would do something.
+    pub fn can_redo(&self) -> bool {
+        !self.redo.is_empty()
+    }
 }
 
 impl Default for UndoStack {

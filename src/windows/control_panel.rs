@@ -258,6 +258,12 @@ pub enum ControlPanelAction {
     /// scheduling logic as the keyboard hotkey so crossfade
     /// (`Project::crossfade_duration_s`) is honored from the UI too.
     SceneRecall(usize),
+    /// 003-T3.4: toolbar Undo button clicked. App drains through `undo_stack.undo`.
+    #[cfg(feature = "v3")]
+    RequestUndo,
+    /// 003-T3.4: toolbar Redo button clicked. App drains through `undo_stack.redo`.
+    #[cfg(feature = "v3")]
+    RequestRedo,
 }
 
 /// Per-frame inputs from the App into the control panel render. Bundled so the
@@ -277,6 +283,15 @@ pub struct ControlPanelInputs {
     /// dev-log line so existing log-scraping habits don't silently break.
     #[cfg(feature = "v3")]
     pub session_age: std::time::Duration,
+    /// 003-T3.4: `true` when `undo_stack` has entries — disables the Undo
+    /// toolbar button when the stack is empty so the operator gets immediate
+    /// visual feedback. v3-only; v2 has no undo stack.
+    #[cfg(feature = "v3")]
+    pub can_undo: bool,
+    /// 003-T3.4: `true` when `undo_stack` has redo entries — disables the
+    /// Redo toolbar button when nothing has been undone yet.
+    #[cfg(feature = "v3")]
+    pub can_redo: bool,
 }
 
 /// Render the control panel. Mutates `project` in place.
@@ -387,14 +402,10 @@ pub fn show(
         // mode-aware drawing.
         #[cfg(feature = "v3")]
         {
-            // Temporary toggle for the Advanced side panel; T3.4
-            // replaces this with the proper toolbar (Warp / Advanced /
-            // Go-live). Project File + Master controls render below as
-            // a transitional placement; T3.12 moves Master into the
-            // Advanced disclosure.
-            ui.horizontal(|ui| {
-                ui.checkbox(&mut st.advanced_open, "Advanced");
-            });
+            // 003-T3.4: real toolbar replacing the T3.1 temporary checkbox.
+            if let Some(req) = crate::windows::toolbar::show(ui, project, st, scene, inputs) {
+                action = req;
+            }
             show_scene_tab(ui, project, st, scene, inputs);
         }
         #[cfg(not(feature = "v3"))]

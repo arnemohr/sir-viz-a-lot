@@ -17,3 +17,5 @@ pub mod primitives;
 pub mod scene_editor;
 #[cfg(feature = "v3")]
 pub mod toast;
+#[cfg(feature = "v3")]
+pub mod toolbar;
