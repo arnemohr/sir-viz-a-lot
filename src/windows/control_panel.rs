@@ -585,16 +585,54 @@ fn show_effects_tab(ui: &mut Ui, project: &mut Project, st: &mut ControlPanelSta
         }
     });
 
-    let effects = &mut project.layers[st.selected_layer].effects;
+    let layer_idx = st.selected_layer;
+    let effects_len = project.layers[layer_idx].effects.len();
     ui.heading("Effect chain");
     ui.add_space(4.0);
-    for (idx, effect) in effects.iter_mut().enumerate() {
+    // 003-T1.21: collect staged EffectChanges emitted by show_effect.
+    // Iteration uses indices so the borrow on project.layers[layer_idx].effects
+    // is fully released after the loop — allowing the subsequent .clone() for
+    // the SetLayerEffects mutation. Under non-v3 the staged_changes vec is
+    // omitted entirely; show_effect still returns Option<EffectChange> but the
+    // caller ignores it.
+    #[cfg(feature = "v3")]
+    let mut staged_changes: Vec<(usize, EffectChange)> = Vec::new();
+    for idx in 0..effects_len {
+        let effect = &mut project.layers[layer_idx].effects[idx];
         egui::CollapsingHeader::new(effect_label(effect))
             .id_salt(idx)
             .default_open(true)
             .show(ui, |ui| {
-                show_effect(ui, idx, effect);
+                #[cfg(feature = "v3")]
+                {
+                    if let Some(change) = show_effect(ui, idx, effect) {
+                        staged_changes.push((idx, change));
+                    }
+                }
+                #[cfg(not(feature = "v3"))]
+                {
+                    let _ = show_effect(ui, idx, effect);
+                }
             });
+    }
+    // 003-T1.21: after the loop, apply staged changes as a single
+    // SetLayerEffects mutation (Effects-Vec Reverse, rule 2).
+    #[cfg(feature = "v3")]
+    if !staged_changes.is_empty() {
+        let old = project.layers[layer_idx].effects.clone();
+        let mut new = old.clone();
+        for (effect_idx, change) in staged_changes {
+            if let Some(crate::effects::Effect::Transform { translate, .. }) =
+                new.get_mut(effect_idx)
+            {
+                match change {
+                    EffectChange::TransformTranslateX(v) => translate[0] = v,
+                    EffectChange::TransformTranslateY(v) => translate[1] = v,
+                }
+            }
+        }
+        st.pending_mutations
+            .push(Mutation::SetLayerEffects { layer_idx, new, old });
     }
 }
 
@@ -1156,7 +1194,28 @@ fn effect_label(e: &Effect) -> &'static str {
     }
 }
 
-fn show_effect(ui: &mut Ui, idx: usize, effect: &mut Effect) {
+/// 003-T1.21 — staged change emitted from `show_effect` when a non-modulator
+/// slider commits. The caller composes this with the pre-edit effects snapshot
+/// to build a `Mutation::SetLayerEffects`.
+///
+/// The enum is unconditional (no cfg gate) so `show_effect`'s return type is
+/// the same under all feature combinations. Under non-v3 builds the type is
+/// dead code; the emit paths inside `show_effect` are cfg-gated so the return
+/// value is always `None` without v3.
+#[allow(dead_code)] // populated only under the v3 feature
+#[derive(Debug, Clone, Copy)]
+enum EffectChange {
+    /// `Effect::Transform.translate[0]` set to `new`.
+    TransformTranslateX(f32),
+    /// `Effect::Transform.translate[1]` set to `new`.
+    TransformTranslateY(f32),
+}
+
+fn show_effect(ui: &mut Ui, idx: usize, effect: &mut Effect) -> Option<EffectChange> {
+    // `mut` is required under v3 (assignment inside cfg block); lint disagrees
+    // in non-v3 builds where the write sites are compiled out.
+    #[allow(unused_mut)]
+    let mut change: Option<EffectChange> = None;
     match effect {
         Effect::Color {
             hue,
@@ -1181,8 +1240,32 @@ fn show_effect(ui: &mut Ui, idx: usize, effect: &mut Effect) {
             scale_x,
             scale_y,
         } => {
-            ui.add(egui::Slider::new(&mut translate[0], -1.0..=1.0).text("tx"));
-            ui.add(egui::Slider::new(&mut translate[1], -1.0..=1.0).text("ty"));
+            #[cfg(feature = "v3")]
+            {
+                if let Some(new) = command_slider(
+                    ui,
+                    &format!("effect_{idx}_tx"),
+                    "tx",
+                    translate[0],
+                    -1.0..=1.0,
+                ) {
+                    change = Some(EffectChange::TransformTranslateX(new));
+                }
+                if let Some(new) = command_slider(
+                    ui,
+                    &format!("effect_{idx}_ty"),
+                    "ty",
+                    translate[1],
+                    -1.0..=1.0,
+                ) {
+                    change = Some(EffectChange::TransformTranslateY(new));
+                }
+            }
+            #[cfg(not(feature = "v3"))]
+            {
+                ui.add(egui::Slider::new(&mut translate[0], -1.0..=1.0).text("tx"));
+                ui.add(egui::Slider::new(&mut translate[1], -1.0..=1.0).text("ty"));
+            }
             modulator_slider(ui, (idx, "rot"), "rotate (deg)", rotate_deg, -180.0..=180.0);
             modulator_slider(ui, (idx, "scx"), "scale x", scale_x, 0.1..=3.0);
             modulator_slider(ui, (idx, "scy"), "scale y", scale_y, 0.1..=3.0);
@@ -1198,6 +1281,7 @@ fn show_effect(ui: &mut Ui, idx: usize, effect: &mut Effect) {
             );
         }
     }
+    change
 }
 
 fn modulator_slider(

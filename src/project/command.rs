@@ -170,6 +170,19 @@ pub enum Mutation {
         old: BlendMode,
     },
 
+    /// Replace a layer's effect chain wholesale (Reverse rule 2: Effects-Vec
+    /// Reverse). Both `new` and `old` are full `Vec<Effect>` snapshots — per-
+    /// field Reverses would leave stray effects on undo because of the
+    /// `mutate_transform_effect` append-on-missing pattern in scene_editor.rs.
+    SetLayerEffects {
+        /// Index into `Project.layers`.
+        layer_idx: usize,
+        /// Effect chain to install.
+        new: Vec<crate::effects::Effect>,
+        /// Pre-mutation snapshot of the chain.
+        old: Vec<crate::effects::Effect>,
+    },
+
     /// Insert `layer` at `position`. Reverse is `RemoveLayer { idx: position }`.
     /// The whole `LayerConfig` is stored — covers Reverse rule 1 (LayerKind
     /// enum) automatically.
@@ -397,6 +410,33 @@ impl Mutation {
                     old: new,
                 }
             }
+            Mutation::SetLayerEffects {
+                layer_idx,
+                new,
+                old,
+            } => {
+                let layer = project
+                    .layers
+                    .get_mut(layer_idx)
+                    .expect("SetLayerEffects: layer_idx out of range");
+                debug_assert!(
+                    layer.effects.len() == old.len(),
+                    "SetLayerEffects stale Reverse: effects.len()={}, expected old.len()={}",
+                    layer.effects.len(),
+                    old.len()
+                );
+                // Effects-Vec Reverse (rule 2): snapshot the whole chain.
+                // Mirror the SetWarpDimensions pattern: capture `new` into a
+                // local so we can write it to `layer.effects` and reference it
+                // as `old` in the Reverse without fighting the borrow checker.
+                let post = new;
+                layer.effects = post.clone();
+                Mutation::SetLayerEffects {
+                    layer_idx,
+                    new: old,
+                    old: post,
+                }
+            }
             Mutation::AddLayer { layer, position } => {
                 debug_assert!(
                     position <= project.layers.len(),
@@ -465,6 +505,7 @@ impl Mutation {
             | Mutation::SetLayerOpacity { .. }
             | Mutation::SetLayerEnabled { .. }
             | Mutation::SetLayerBlendMode { .. }
+            | Mutation::SetLayerEffects { .. }
             | Mutation::AddLayer { .. }
             | Mutation::RemoveLayer { .. }
             | Mutation::SwapLayers { .. } => false,
@@ -625,6 +666,23 @@ impl Project {
     pub fn set_swap_layers_mutation(&self, i: usize, j: usize) -> Mutation {
         Mutation::SwapLayers { i, j }
     }
+
+    /// Build a `SetLayerEffects` mutation. Captures the current effect chain
+    /// as `old` for the Effects-Vec Reverse (rule 2). `new` is moved into
+    /// the mutation; the caller will not be able to use it afterwards.
+    /// Panics if `layer_idx` is out of range.
+    pub fn set_layer_effects_mutation(
+        &self,
+        layer_idx: usize,
+        new: Vec<crate::effects::Effect>,
+    ) -> Mutation {
+        let layer = &self.layers[layer_idx];
+        Mutation::SetLayerEffects {
+            layer_idx,
+            new,
+            old: layer.effects.clone(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -725,6 +783,7 @@ mod tests {
             AddLayer,
             RemoveLayer,
             SwapLayers,
+            LayerEffectsTransformTranslate { x: f32, y: f32 },
         }
 
         fn to_mutation(kind: &MutationKind, project: &Project) -> Mutation {
@@ -798,6 +857,21 @@ mod tests {
                         project.set_swap_layers_mutation(0, 1)
                     }
                 }
+                MutationKind::LayerEffectsTransformTranslate { x, y } => {
+                    if project.layers.is_empty() {
+                        project.set_gamma_mutation(project.gamma) // no-op fallback
+                    } else {
+                        let mut new = project.layers[0].effects.clone();
+                        for effect in new.iter_mut() {
+                            if let crate::effects::Effect::Transform { translate, .. } = effect {
+                                translate[0] = *x;
+                                translate[1] = *y;
+                                break;
+                            }
+                        }
+                        project.set_layer_effects_mutation(0, new)
+                    }
+                }
             }
         }
 
@@ -829,6 +903,9 @@ mod tests {
                 Just(MutationKind::AddLayer),
                 Just(MutationKind::RemoveLayer),
                 Just(MutationKind::SwapLayers),
+                (-1.0_f32..=1.0, -1.0_f32..=1.0).prop_map(|(x, y)| {
+                    MutationKind::LayerEffectsTransformTranslate { x, y }
+                }),
             ]
         }
 
