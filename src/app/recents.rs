@@ -255,6 +255,61 @@ mod tests {
         assert!(result.starts_with("20"), "expected ISO date, got {result}");
     }
 
+    /// 003-T2.21 — `launcher_recents_listing` half: the canonical
+    /// directory layout the launcher sees on first run (a few project
+    /// files plus the `_autosave/` crash-recovery subdir) is filtered
+    /// and ordered correctly.
+    ///
+    /// Mocks the filesystem in a tempdir; verifies:
+    ///
+    /// 1. Exactly the deliberate `*.rmap.json` saves surface, not the
+    ///    non-rmap noise (`notes.txt`).
+    /// 2. `_autosave/` contents are skipped even when they end in
+    ///    `.rmap.json`. This is the load-bearing check — surfacing
+    ///    autosaves in the launcher would teach operators to load
+    ///    partials that don't carry the user-facing project name.
+    /// 3. Order is mtime-descending, so the most recent show is the
+    ///    first entry (the operator's "what I was just editing"
+    ///    expectation).
+    #[test]
+    fn launcher_recents_listing_picks_canonical_layout() {
+        let dir = temp_recents_dir("first-run-canonical");
+
+        // Three deliberate saves in known mtime order. The default
+        // tempfile creation order should map mtimes 1:1 with the
+        // creation sequence on every filesystem we target.
+        std::fs::write(dir.join("first.rmap.json"), b"{}").expect("first save");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(dir.join("middle.rmap.json"), b"{}").expect("middle save");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(dir.join("latest.rmap.json"), b"{}").expect("latest save");
+
+        // Noise the launcher should ignore.
+        std::fs::write(dir.join("notes.txt"), b"ignore me").expect("notes");
+        std::fs::create_dir_all(dir.join("_autosave")).expect("autosave dir");
+        std::fs::write(dir.join("_autosave/recovery.rmap.json"), b"{}").expect("autosave");
+
+        let listing = scan(&dir);
+        let labels: Vec<_> = listing.iter().map(|r| r.label.clone()).collect();
+        assert_eq!(
+            labels,
+            vec!["latest", "middle", "first"],
+            "expected the three deliberate saves in mtime-desc order"
+        );
+        // Defensive: mtime invariant holds even if the test environment
+        // reorders writes (some CI tmpfs mtimes are second-resolution).
+        for w in listing.windows(2) {
+            assert!(
+                w[0].modified >= w[1].modified,
+                "mtime-desc invariant violated: {:?} vs {:?}",
+                w[0],
+                w[1]
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn relative_date_handles_future_modified_time() {
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000_000);
