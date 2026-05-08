@@ -413,7 +413,9 @@ mod tests {
     use super::*;
 
     /// Build a project that passes all audit checks:
-    /// - schema_version = CURRENT (3)
+    /// - schema_version <= CURRENT (4) — uses 3 to mirror the legacy
+    ///   pre-T3.0a fixture; audit only flags `> CURRENT`, so equal-or-
+    ///   older v3 projects remain finding-free.
     /// - one layer with a real on-disk asset (uses Cargo.toml, always present)
     /// - one healthy warp mesh (corner-pin, rows=1, cols=1)
     /// - output_monitor_index = 0, AuditEnv::default() has monitor_count = 1
@@ -444,6 +446,7 @@ mod tests {
             }],
             blend_mode: crate::project::schema::BlendMode::Normal,
             opacity: 1.0,
+            warp: crate::project::schema::WarpMesh::identity(),
         });
         p
     }
@@ -493,6 +496,7 @@ mod tests {
             }],
             blend_mode: crate::project::schema::BlendMode::Normal,
             opacity: 1.0,
+            warp: crate::project::schema::WarpMesh::identity(),
         });
 
         let findings = ProjectAudit::run(&p, &AuditEnv::default());

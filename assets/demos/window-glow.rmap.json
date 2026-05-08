@@ -1,5 +1,5 @@
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "layers": [
     {
       "id": "demo_window_glow",
@@ -19,7 +19,23 @@
       },
       "effects": [],
       "blend_mode": "Normal",
-      "opacity": 1.0
+      "opacity": 1.0,
+      "warp": {
+        "rows": 1,
+        "cols": 1,
+        "grid": [
+          [[0.1, 0.1], [0.9, 0.1]],
+          [[0.1, 0.9], [0.9, 0.9]]
+        ],
+        "source_rect": [0.0, 0.0, 1.0, 1.0],
+        "mask_polygon": [
+          [0.35, 0.1],
+          [0.65, 0.1],
+          [0.65, 0.85],
+          [0.35, 0.85]
+        ],
+        "mask_feather": 0.05
+      }
     }
   ],
   "warps": [

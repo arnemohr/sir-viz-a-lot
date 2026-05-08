@@ -40,11 +40,20 @@ impl Project {
             source,
         })?;
         let value: serde_json::Value = serde_json::from_str(&text)?;
-        let value = migrate::migrate(value)?;
+        let (value, outcome) = migrate::migrate(value)?;
         let mut project: Project = serde_json::from_value(value)?;
+        // Legacy fixup retained while T3.0b's render-graph rewrite is
+        // pending — `Project.warps` still feeds the renderer / audit /
+        // mutations until T3.0b deletes the field.
         if project.warps.is_empty() {
             project.warps.push(schema::default_warp_mesh());
         }
+        // T3.0a side-channel: T3.0d's audit pass reads
+        // `previous_warp_count` to fire `MultipleWarpsConsolidated`
+        // exactly once per session for v3 projects whose migration was
+        // lossy. `transient_audit_signals` is `#[serde(skip)]` so it
+        // never round-trips through save/load.
+        project.transient_audit_signals.previous_warp_count = outcome.previous_warp_count;
         Ok(project)
     }
 
@@ -346,6 +355,7 @@ mod tests {
             effects: crate::effects::default_effect_chain(),
             blend_mode: BlendMode::Screen,
             opacity: 0.5,
+            warp: WarpMesh::identity(),
         });
         original.warps.push(WarpMesh {
             rows: 1,
@@ -385,6 +395,7 @@ mod tests {
             effects: crate::effects::default_effect_chain(),
             blend_mode: BlendMode::Multiply,
             opacity: 0.75,
+            warp: WarpMesh::identity(),
         });
         p.warps.push(WarpMesh {
             rows: 1,
@@ -440,6 +451,7 @@ mod tests {
             }],
             blend_mode: BlendMode::Normal,
             opacity: 1.0,
+            warp: WarpMesh::identity(),
         });
         p.scenes.push(Scene {
             name: "1".into(),
@@ -490,6 +502,7 @@ mod tests {
             }],
             blend_mode: BlendMode::Normal,
             opacity: 1.0,
+            warp: WarpMesh::identity(),
         });
         // Save slot 0
         p.scenes.push(Scene {
@@ -606,7 +619,7 @@ mod tests {
     /// `Project::resolve_asset`.
     #[test]
     fn save_portable_writes_relative_path_for_descendant_asset() {
-        use crate::project::schema::{BlendMode, LayerConfig, LayerKind};
+        use crate::project::schema::{BlendMode, LayerConfig, LayerKind, WarpMesh};
 
         let dir = std::env::temp_dir().join(format!(
             "rmap_t2_23_descendant_{}_{}",
@@ -639,6 +652,7 @@ mod tests {
             effects: crate::effects::default_effect_chain(),
             blend_mode: BlendMode::Normal,
             opacity: 1.0,
+            warp: WarpMesh::identity(),
         });
 
         let project_path = dir.join("show.rmap.json");
@@ -671,7 +685,7 @@ mod tests {
     /// not be silently rewritten on a Save-As to a new location.
     #[test]
     fn save_portable_preserves_absolute_path_for_non_descendant_asset() {
-        use crate::project::schema::{BlendMode, LayerConfig, LayerKind};
+        use crate::project::schema::{BlendMode, LayerConfig, LayerKind, WarpMesh};
 
         let dir = std::env::temp_dir().join(format!(
             "rmap_t2_23_non_descendant_{}_{}",
@@ -705,6 +719,7 @@ mod tests {
             effects: crate::effects::default_effect_chain(),
             blend_mode: BlendMode::Normal,
             opacity: 1.0,
+            warp: WarpMesh::identity(),
         });
 
         let project_path = dir.join("show.rmap.json");
@@ -728,7 +743,7 @@ mod tests {
     /// the absolute one).
     #[test]
     fn has_absolute_asset_paths_detects_any_absolute_layer() {
-        use crate::project::schema::{BlendMode, LayerConfig, LayerKind};
+        use crate::project::schema::{BlendMode, LayerConfig, LayerKind, WarpMesh};
 
         let mut p = Project::default();
         // Pure-relative layers → no absolute paths.
@@ -742,6 +757,7 @@ mod tests {
             effects: crate::effects::default_effect_chain(),
             blend_mode: BlendMode::Normal,
             opacity: 1.0,
+            warp: WarpMesh::identity(),
         });
         assert!(!p.has_absolute_asset_paths());
 
@@ -758,6 +774,7 @@ mod tests {
             effects: crate::effects::default_effect_chain(),
             blend_mode: BlendMode::Normal,
             opacity: 1.0,
+            warp: WarpMesh::identity(),
         });
         assert!(p.has_absolute_asset_paths());
     }

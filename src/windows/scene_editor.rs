@@ -792,7 +792,7 @@ pub fn paint_mask_overlays(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::project::schema::{BlendMode, LayerConfig, LayerKind, Transform2D};
+    use crate::project::schema::{BlendMode, LayerConfig, LayerKind, Transform2D, WarpMesh};
     use std::path::PathBuf;
 
     /// Build a layer whose Effect::Transform produces the given static
@@ -814,6 +814,7 @@ mod tests {
             }],
             blend_mode: BlendMode::Normal,
             opacity: 1.0,
+            warp: WarpMesh::identity(),
         }
     }
 
@@ -877,6 +878,7 @@ mod tests {
             effects: Vec::new(), // No Transform effect.
             blend_mode: BlendMode::Normal,
             opacity: 1.0,
+            warp: WarpMesh::identity(),
         };
         mutate_transform_effect(&mut layer, |t, _r, _sx, _sy| {
             *t = [0.25, 0.0];

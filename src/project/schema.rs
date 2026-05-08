@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 3;
+pub const CURRENT_SCHEMA_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Transform2D {
@@ -79,6 +79,12 @@ pub struct LayerConfig {
     pub effects: Vec<crate::effects::Effect>,
     pub blend_mode: BlendMode,
     pub opacity: f32,
+    /// v4: per-layer warp + mask. T3.0b consumes this in the render
+    /// graph; until then the project-level `Project.warps` field is
+    /// still authoritative and this is populated by `migrate_v3_to_v4`
+    /// for round-trip safety.
+    #[serde(default = "WarpMesh::identity")]
+    pub warp: WarpMesh,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -92,6 +98,17 @@ pub struct WarpMesh {
     /// Normalized fraction of output extent (0..0.5 useful), not pixels.
     #[serde(default)]
     pub mask_feather: f32,
+}
+
+impl WarpMesh {
+    /// Full-canvas identity warp used for `LayerConfig::warp`'s serde
+    /// default and for `Project::default()`. Matches v2's
+    /// [`default_warp_mesh`] (2×2 grid pinned to the unit square,
+    /// `mask_feather: 0.02`) so v3 projects with zero warps migrate to
+    /// v4 with the same on-wall behaviour they had in v3.
+    pub fn identity() -> Self {
+        default_warp_mesh()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -133,6 +150,23 @@ pub struct Project {
     /// differences fall back to instant snap.
     #[serde(default)]
     pub crossfade_duration_s: f32,
+    /// Side-channel state surfaced by [`migrate::migrate_v3_to_v4`] to the
+    /// audit pass (T3.0d). `previous_warp_count > 1` triggers a one-shot
+    /// `MultipleWarpsConsolidated` finding so the operator knows the
+    /// migration was lossy. `#[serde(skip)]` keeps it out of saved files.
+    #[serde(skip, default)]
+    pub transient_audit_signals: TransientAuditSignals,
+}
+
+/// Per-load signals from `migrate` to `audit`. Cleared by the audit pass
+/// once consumed so the toast / finding fires only once per session.
+#[derive(Debug, Clone, Default)]
+pub struct TransientAuditSignals {
+    /// Number of `Project.warps` entries the v3 → v4 migration
+    /// consolidated onto per-layer warps. `0` for v4-native projects;
+    /// `1` for the common case (no audit finding); `> 1` triggers
+    /// `MultipleWarpsConsolidated` exactly once.
+    pub previous_warp_count: usize,
 }
 
 impl Default for Project {
@@ -151,6 +185,7 @@ impl Default for Project {
             brightness: 0.0,
             contrast: 1.0,
             crossfade_duration_s: 0.0,
+            transient_audit_signals: TransientAuditSignals::default(),
         }
     }
 }
@@ -243,6 +278,7 @@ pub fn layer_from_svg_path(id: impl Into<String>, svg_path: PathBuf) -> LayerCon
         effects: crate::effects::default_effect_chain(),
         blend_mode: BlendMode::Normal,
         opacity: 1.0,
+        warp: WarpMesh::identity(),
     }
 }
 
@@ -263,6 +299,7 @@ pub fn layer_from_image_path(id: impl Into<String>, path: PathBuf) -> LayerConfi
         effects: crate::effects::default_effect_chain(),
         blend_mode: BlendMode::Normal,
         opacity: 1.0,
+        warp: WarpMesh::identity(),
     }
 }
 
