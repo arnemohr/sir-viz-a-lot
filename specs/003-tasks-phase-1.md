@@ -63,7 +63,7 @@ Phase 1 unblocks every later phase. M1 is the gate.
 | ✅ T1.11 | Extract `init_render_graph()` | RUST | M | T1.8, T1.9 |
 | ✅ T1.12 | Reduce `init_running_app` to orchestrator | RUST | S | T1.7–T1.11 |
 | ✅ T1.13 | Rename `ControlEvent` → `Command` | RUST | S | T1.1 |
-| T1.14 | Reverse-storage type machinery | RUST | L (justified) | T1.13 |
+| ✅ T1.14 | Reverse-storage type machinery | RUST | L (justified) | T1.13 |
 | T1.15 | `UndoStack<C>` with `non_undoable` | RUST | M | T1.14 |
 | T1.16 | Central `apply_command` function | RUST | S | T1.14 |
 | T1.17 | Proptest harness on `Command::Noop` | RUST | M | T1.15, T1.16 |

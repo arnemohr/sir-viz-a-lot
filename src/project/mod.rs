@@ -1,5 +1,7 @@
 //! Project file: load, save, version migration.
 
+#[cfg(feature = "v3")]
+pub mod command;
 pub mod migrate;
 pub mod schema;
 pub mod zone_templates;
