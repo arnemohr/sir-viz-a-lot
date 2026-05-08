@@ -798,12 +798,13 @@ warnings as toasts on first frame after load:
 | Finding | Severity | Auto-fix |
 |---------|----------|----------|
 | Layer with `transform.scale = [0, 0]` | Warn | `SetLayerScale(idx, [1, 1])` |
-| Warp grid degenerate (< 2×2 or non-monotonic) | Warn | `ResetWarpToCornerPin(idx)` |
-| Mask polygon with < 3 vertices | Info | clear mask |
-| Asset path missing on disk | Critical | `RemoveLayer(idx)` (with confirmation) |
+| Layer warp grid degenerate (< 2×2 or non-monotonic) (`DegenerateLayerWarp`, schema v4) | Warn | `ResetLayerWarpMesh(layer_idx)` |
+| Layer mask polygon with < 3 vertices (`LayerMaskTooFew`, schema v4) | Info | clear that layer's mask |
+| Asset path missing on disk | Warn (schema v4 — was Critical in v3) | `RelinkAssetPath(layer_idx, …)` via T2.24 picker |
 | `output_monitor_index` ≥ available monitors | Warn | reset to 0 |
 | `schema_version` newer than supported | Critical | refuse load, suggest upgrade |
 | Project with zero layers | Info | empty-state hint |
+| Schema v3 project consolidated ≥ 2 warps onto layers (`MultipleWarpsConsolidated`, schema v4 migration) | Warn | None (re-map per layer) |
 
 The audit is deterministic, pure, and unit-testable. It is the
 direct fix for the catastrophic failure mode caught in the audit.
@@ -826,9 +827,9 @@ Within `Editing`, the canvas has interaction modes:
 
 ```
 EditMode
-├── Layer        // drag/scale/rotate the selected layer
-├── Warp         // drag warp corners
-├── Mask         // edit selected warp's mask polygon
+├── Layer        // drag/scale/rotate the selected layer's body
+├── Warp         // drag the selected layer's warp corners
+├── Mask         // edit the selected layer's mask polygon
 └── Inspect      // selection only, no drag
 ```
 
@@ -836,6 +837,106 @@ Mode transitions are explicit and cursor-driven. Banner text
 changes per mode. This replaces today's overloaded handler (the
 v2 scene editor inspects modifier keys to decide between drag /
 scale / rotate within a single mode).
+
+**Each non-Inspect mode is implicitly scoped to the selected
+layer.** Warp and Mask modes paint and hit-test against
+`project.layers[selected].warp` only. With no layer selected, the
+mode banner reads *"Select a layer first."* This matches the
+per-layer mapping data model introduced in §11.6a.
+
+### 11.6a Per-layer warp + mask + effects architecture *(v3 / schema v4)*
+
+**Today (schema v3).** `Project.layers: Vec<LayerConfig>` and
+`Project.warps: Vec<WarpMesh>` are independent collections. The
+render graph composites every layer first into a shared `warp_rt`
+texture, then for each `WarpMesh` reads a `source_rect` of that
+composite and remaps it to the projector. Layers and warps are
+**unbound** — every layer is warped through whatever shared
+geometry the composite gets.
+
+**Target (schema v4).** Each `LayerConfig` owns its own `WarpMesh`
+(which carries the mask polygon and feather):
+
+```rust
+struct Project {
+    schema_version: 4,
+    layers: Vec<LayerConfig>,
+    // warps: Vec<WarpMesh>   REMOVED
+    ...
+}
+
+struct LayerConfig {
+    id, kind, enabled,
+    transform, effects, blend_mode, opacity,
+    warp: WarpMesh,         // NEW: per-layer mapping
+}
+```
+
+**Render graph.**
+
+```
+per-layer raster ──► for each layer in order:
+                       layer_pre_warp ── warp pass ──► warp_scratch (1× projector size)
+                                                          │
+                                                          ▼
+                                                     blend-composite onto projector_rt
+                                                       (uses layer.blend_mode + opacity)
+                       │
+                       ▼
+                    gamma → overlay → swap
+```
+
+`warp_scratch` is a single projector-sized texture reused across
+layers within a frame (clear-write-read-discard). The shared v3
+`warp_rt` is gone. The egui control-window preview re-binds to the
+projector-RT view (post-warp, pre-gamma); the operator sees what
+the projector sees.
+
+**Why per-layer.** Operators expect each layer to map onto its own
+physical surface (photo on wall A, video on wall B, SVG overlay on
+the door). The shared-warp model contradicts the layer-thumbnail
+strip in WP-6: dragging a warp corner deforms every layer regardless
+of which thumbnail is selected. Per-layer mapping aligns the
+interaction model with the data model.
+
+**Migration v3 → v4** (one-shot at load):
+
+- For each layer in v3 `Project.layers`: clone `Project.warps[0]`
+  (or `WarpMesh::identity()` if no warps existed) onto
+  `layer.warp`.
+- Drop the top-level `warps` field.
+- Bump `schema_version` to 4.
+- If the v3 project had > 1 warps: emit
+  `AuditKind::MultipleWarpsConsolidated` (Warn, once per session) so
+  the operator knows the consolidation may have lost intent.
+
+The migration is intentionally lossy when M > 1; preserving the
+multi-warp geometry would require a heuristic ("which layer goes
+with which warp?") that's wrong as often as right. Operators
+re-map per layer, guided by the toast.
+
+**Mutation surface.** All warp/mask-targeted `Mutation` variants
+rename `warp_idx` → `layer_idx`:
+
+| v3 variant | v4 variant |
+|---|---|
+| `SetWarpDimensions` | `SetLayerWarpDimensions` |
+| `SetMaskPolygon` | `SetLayerMaskPolygon` |
+| `AddMaskVertex` / `RemoveMaskVertex` / `SetMaskVertex` | `AddLayerMaskVertex` / `RemoveLayerMaskVertex` / `SetLayerMaskVertex` |
+| `ResetWarpMesh` | `ResetLayerWarpMesh` |
+| `SetWarpMaskFeather` | `SetLayerMaskFeather` |
+| *(new)* | `SetLayerWarpCorner { layer_idx, r, c, new, old }` |
+
+**Audit findings.** `DegenerateWarp` →
+`DegenerateLayerWarp { layer_idx }`; `MaskTooFew` →
+`LayerMaskTooFew { layer_idx, vertex_count }`. New
+`MultipleWarpsConsolidated`.
+
+**Tasks.** This is captured by Phase 3 tasks **T3.0a** (schema +
+migration), **T3.0b** (render graph), **T3.0c** (mutation rename),
+**T3.0d** (audit rename + new finding). They sit at the front of
+Phase 3, gating every other Phase 3 task. See
+`003-tasks-phase-3.md`.
 
 ### 11.7 Decoupling UI panels from render runtime
 
@@ -989,9 +1090,11 @@ Owner roles: **PO** = product owner, **DES** = design,
   - `init_control_window()` — `ControlWindow::new`, optional.
   - `init_inputs()` — keyboard + (feature-gated) audio / MIDI /
     OSC sources.
-  - `init_render_graph()` — `Compositor`, `WarpRenderer` Vec,
-    `GammaPipeline`, `OverlayPipeline`, warp RT, `LayerState`
-    Vec.
+  - `init_render_graph()` — `Compositor`, per-layer `WarpRenderer`
+    instances (one per `LayerState` under schema v4 — see §11.6a),
+    `GammaPipeline`, `OverlayPipeline`, projector RT,
+    `warp_scratch` RT (the per-frame scratch buffer that replaces
+    the v3 shared `warp_rt`), `LayerState` Vec.
   - The launcher uses `init_gpu` + `init_inputs` only; the
     editor adds the rest on transition.
 - **Dependencies.** None (can ship before or alongside WP-1).

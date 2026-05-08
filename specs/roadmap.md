@@ -43,7 +43,7 @@ The UI should always favor scene templates and semantic controls over deep gener
 |---|---|---|---|
 | Rendering core | Strong `wgpu`-based core with warping, masks, effects, layers, scenes, and hot reload.[cite:217] | Needs image-first scene treatment, not only SVG/effect pipelines.[cite:217] | Broadly aligned, though less mature and less proven.[cite:84][cite:251] |
 | Creative workflow | Mostly effect/layer oriented.[cite:217] | Needs scene templates, zone semantics, and photo-aware composition. | Commercial tools typically package faster authoring UX.[cite:238][cite:252] |
-| Surface interaction | Warp and SDF masking are planned.[cite:217] | Needs authored spatial behaviors for windows, cutouts, spill, flow, and reveal logic. | Pro tools often include stronger calibration and mapping ecosystems.[cite:233][cite:237] |
+| Surface interaction | Warp and SDF masking are planned.[cite:217] **v3 schema 4 (M3) makes warp + mask per-layer so each layer maps onto its own surface independently — see `specs/003-ui-ux-overhaul-plan.md` §11.6a and `specs/003-tasks-phase-3.md` T3.0a–T3.0d.** | Needs authored spatial behaviors for windows, cutouts, spill, flow, and reveal logic. | Pro tools often include stronger calibration and mapping ecosystems.[cite:233][cite:237] |
 | Lighting outputs | Reserved features for audio, MIDI, OSC later.[cite:217] | Needs first-class lighting outputs in the scene model. | Mature systems support DMX, Art-Net, sACN, pixel mapping, and hybrid show control.[cite:244][cite:248][cite:251][cite:254] |
 | Operator usability | Some operator-safe features already planned.[cite:217] | Needs a simpler mental model and faster scene setup. | Established tools are more workflow-optimized for operators.[cite:238][cite:249][cite:252] |
 

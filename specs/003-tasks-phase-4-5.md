@@ -111,15 +111,22 @@ a scene is saved.
 Numbered scene slots have no visual recall affordance.
 
 **Implementation details**
-- On `Command::SaveScene`, snapshot the current `warp_rt`
-  texture into a 192 × 108 RGBA8 byte buffer.
-- Store inline in the scene's `Scene` struct (extend the schema
-  to v4 — small change, easy migration).
-- Migration path: v3 schema gets a new optional
-  `thumbnail: Option<ThumbnailRgba>` field; missing →
-  placeholder.
-- Schema migration (T1.40-style version bump) adds the field
-  with `None`.
+- On `Command::SaveScene`, snapshot the current **post-warp,
+  pre-gamma projector RT** (under v3 this was `warp_rt`; under
+  v4, after Phase 3's T3.0b render-graph rewrite, it's the
+  composite-of-warped-layers projector RT that the egui preview
+  also samples — see plan §11.6a) into a 192 × 108 RGBA8 byte
+  buffer.
+- Store inline in the scene's `Scene` struct. **Schema-version
+  note:** Phase 3's T3.0a already bumped `schema_version` to 4 to
+  introduce per-layer warps. T4.1 adds an optional
+  `thumbnail: Option<ThumbnailRgba>` field within the v4 schema —
+  no further version bump; the field is `#[serde(default)]` so
+  v4 projects without thumbnails (saved before this task) still
+  load.
+- Migration path: pre-T3.0a v3 projects migrate to v4 via T3.0a
+  *and* gain `thumbnail: None` defaults via the serde default —
+  one combined migration step.
 
 **Dependencies**
 M3.
@@ -128,8 +135,11 @@ M3.
 With T4.6, T4.14, T4.16, T4.19.
 
 **Acceptance criteria**
-1. Saving a scene captures a thumbnail.
-2. Schema version bumped to 4; v3 projects load and gain `None`.
+1. Saving a scene captures a thumbnail from the projector RT
+   (post-warp, pre-gamma).
+2. v3 projects load via T3.0a + serde default and gain
+   `thumbnail: None`; T4.1 does not introduce its own version
+   bump.
 3. Thumbnails round-trip through save/load.
 
 **Verification**
@@ -602,11 +612,15 @@ Plan §11.10. **Promoted from "highest-risk task in Phase 4" to
 - `OutputWindow::set_fullscreen(bool, monitor: Option<MonitorHandle>)`.
 - Re-creates the projector's wgpu surface bound to the existing
   winit window via `winit::window::Window::set_fullscreen(...)`.
-- **Critical:** the control-window preview (`scene_texture_id`,
-  the egui-registered `warp_rt_view`) is *unaffected* by the
-  projector's surface re-creation. The preview reads from the
-  shared offscreen `warp_rt` texture, not the projector's swap
-  chain. Verify this invariant explicitly in code review.
+- **Critical:** the control-window preview (`scene_texture_id`)
+  is *unaffected* by the projector's surface re-creation. Under
+  v4 (after Phase 3's T3.0b render-graph rewrite, see plan
+  §11.6a) the preview reads from the projector RT view (post-warp,
+  pre-gamma), which is an offscreen texture independent of the
+  projector's swap chain. The shared v3 `warp_rt` is gone; the
+  invariant ("preview source survives surface re-creation") is
+  preserved by binding to the projector RT view instead. Verify
+  this explicitly in code review.
 - During `GoLive`, the control window:
   - keeps showing the live preview (same FPS as `Editing`),
   - keeps the show-day strip visible,
@@ -653,13 +667,15 @@ operator must walk to the projector to verify content state —
 disqualifying the tool for any paid use.
 
 **Risks / notes**
-- The shared `warp_rt` is sampled by both the egui control-
-  window texture binding AND the projector's gamma pass. Any
-  surface re-creation must not invalidate the egui binding. Test
-  on Apple Silicon and Intel; macOS is the primary target.
+- Under v4 the projector RT view is sampled by both the egui
+  control-window texture binding AND the projector's gamma pass.
+  Any surface re-creation must not invalidate the egui binding.
+  Test on Apple Silicon and Intel; macOS is the primary target.
 - Reuse v1's panic recovery; do not invent a new path.
-- Document in code: "the preview's `TextureId` is bound to
-  `warp_rt_view`, which survives `OutputWindow::set_fullscreen`."
+- Document in code: "the preview's `TextureId` is bound to the
+  projector RT view (post-warp, pre-gamma; T3.0b), which survives
+  `OutputWindow::set_fullscreen` because it is an offscreen
+  texture independent of the projector's swap chain."
 
 **Suggested owner**
 RUST.
@@ -753,7 +769,8 @@ control-window preview persists across the transition.
 - Apply transitions `Editing ↔ GoLive`.
 - `EnterGoLive` triggers T4.16 hot-swap to fullscreen on the
   projector and *preserves* the control-window egui texture
-  binding to `warp_rt_view`.
+  binding to the projector RT view (the post-warp, pre-gamma
+  composite under schema v4 — see T3.0b).
 - `ExitGoLive` reverses on the projector side; the control
   window is unaffected throughout.
 - A telemetry span `go_live_clicked` (already stubbed in T1.46)

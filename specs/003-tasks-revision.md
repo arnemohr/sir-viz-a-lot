@@ -49,6 +49,21 @@ the backlog:
    capability roadmap so users / contributors / contributors
    understand the trajectory.
 
+4a. **Per-layer warp + mask architecture** *(post-Phase-2
+    operator review).* The current render graph composites every
+    layer first, then applies project-level warps to the
+    composite. Operators expect each layer to map onto its own
+    physical surface (photo on wall A, video on wall B, SVG
+    overlay on the door). Without per-layer mapping the
+    layer-thumbnail strip in T3.1+ (Phase 3) contradicts the
+    actual rendering model: dragging a warp corner deforms
+    every layer regardless of which thumbnail is selected. This
+    is a structural change to the project schema, mutation
+    surface, audit pass, and render graph — landed as new tasks
+    **T3.0a–T3.0d** at the very front of Phase 3 (gating every
+    other Phase 3 task). Schema bumps from v3 to v4 with
+    migration. See **F17** below.
+
 5. **Per-display gamma override** missing. Even single-projector
    setups need it (laptop monitor and projector colour spaces
    differ). Small Advanced-section addition; new T3.28.
@@ -149,8 +164,9 @@ academic-usability-grounded (n ≥ 5 lab sessions).
 | F14 | "Reposition product as wedding tool" | "iPad-like projection mapping" overselling | **Partial**: capability-roadmap (T4.23) + README rewrite (T5.11) tone shift; no spec rewrite | Honest positioning is content work, not engineering | 0 days | None |
 | F15 | Field beta before GA | Practitioner-grounded validation | **Critical to incorporate now** | New T5.16 | More relevant GA signal than n=5 lab tests | +3 calendar days; 0 eng days | M5 gate gains a step |
 | F16 | "Find missing media" toast on Open Recent | Asset-portability adjacent | **Already covered by F2 fix** | T2.10 amended | Cheap; obvious | 0 incremental days | None |
+| F17 | Per-layer warp + mask + effects (each layer mapped individually) | "Each layer should be warped and mapped individually" — current shared-warp model contradicts the per-layer thumbnail UX coming in Phase 3 | **Critical to incorporate now** | New T3.0a–T3.0d at the front of Phase 3 | Structural shift: layer thumbnails + warp-on-canvas only make sense once mapping is per-layer. Without it, T3.1+ ships a contradictory product. | +5–7 days Phase 3 (schema bump + render-graph rewrite + mutation rename + audit rename) | Phase 3 cannot ship M3 without it; T3.5 / T3.7 / T3.15 acceptance criteria changed |
 
-**Triage totals:** 6 critical-now, 4 important-now-with-shape-change, 4 deferred-to-v0.4-or-v3.1, 2 already-covered-or-positioning-only.
+**Triage totals:** 7 critical-now, 4 important-now-with-shape-change, 4 deferred-to-v0.4-or-v3.1, 2 already-covered-or-positioning-only.
 
 ---
 
@@ -162,6 +178,10 @@ academic-usability-grounded (n ≥ 5 lab sessions).
 |----|-------|-------|--------|
 | T2.23 | Asset-portability spike: project-relative paths & embed policy | 2 | F2 — cross-machine portability |
 | T2.24 | Missing-media relink flow with `rfd` "Find this file" | 2 | F2 + F16 |
+| **T3.0a** | **Schema v4: per-layer `WarpMesh` + migration from v3 `Project.warps`** | **3** | **F17 — per-layer mapping** |
+| **T3.0b** | **Render graph rewrite: per-layer warp pass + composite-of-warped-layers** | **3** | **F17** |
+| **T3.0c** | **Mutation rename: `warp_idx` → `layer_idx` across all warp/mask variants** | **3** | **F17** |
+| **T3.0d** | **Audit rename + multi-warp consolidation finding** | **3** | **F17** |
 | T3.28 | Advanced > Selected output > per-display gamma + brightness override | 3 | F4 — mixed colour-space setups |
 | T4.16a | Pre-show "Preview as projector" mode (windowed, scaled to projector aspect) | 4 | F1 + practitioner offsite-preview ask |
 | T4.23 | Capability roadmap doc — v3 scope + v0.4 forward plan | 4 | F7 — practitioner-honest expectations |
@@ -173,6 +193,11 @@ academic-usability-grounded (n ≥ 5 lab sessions).
 |----|--------------|--------|
 | T1.14 | Compile-time enforcement → runtime `debug_assert!` + property-test invariant; doc-comment rules; helper constructors `Project::current_*` | F5 — soften the contributor cost; preserve safety |
 | T1.38 | Critical "missing asset" finding extended with relink autofix using new T2.24 flow | F2 + F16 |
+| **T3.3** | **Inspector now shows the selected layer's warp grid + mask info; warp/mask edit affordances are per-layer** | **F17 — per-layer mapping** |
+| **T3.5** | **`Command::SetLayerWarpCorner { layer_idx, … }` (was `SetWarpCorner { warp_idx, … }`); only the selected layer's grid is interactive in Warp mode** | **F17** |
+| **T3.6** | **Per-layer mesh rows/cols + zone templates apply to the selected layer; T3.0c compatibility alias dropped here** | **F17** |
+| **T3.7** | **`EditMode { Warp, Mask }` are scoped to the selected layer; banner copy "Select a layer first" when no layer selected** | **F17** |
+| **T3.15** | **Mesh rows/cols + mask feather move to `Advanced > Selected layer > Mapping` (per-layer surfacing)** | **F17** |
 | T4.16 | Hot-swap windowed↔fullscreen amended to **keep the control-window preview live** during GoLive; the operator never loses sight of the projector content | F1 — show-day-blocking |
 | T4.17 | `Command::EnterGoLive` / `ExitGoLive` amended to confirm preview persistence across the transition; explicit acceptance criterion added | F1 |
 | T5.6 | Rescoped from "5-tester external usability test as GA gate" to "post-GA validation pipeline that informs v3.1." Recruitment is post-tag, not pre-tag | F3 — calendar block + weak signal |
@@ -234,6 +259,10 @@ T0.* (Phase 0 prep)
   → T2.10 (Open Recent uses T2.24 for missing media)
   → T2.11–T2.22
   → M2
+  → T3.0a (schema v4: per-layer warp) ◄── NEW (gates Phase 3)
+  → T3.0b (render graph rewrite: per-layer warp + composite) ◄── NEW
+  → T3.0c (mutation rename warp_idx → layer_idx) ◄── NEW
+  → T3.0d (audit rename + multi-warp consolidation finding) ◄── NEW
   → T3.1–T3.27 (canvas merge + Advanced + glossary + show-day strip)
   → T3.28 (per-display gamma override) ◄── NEW
   → M3
@@ -256,7 +285,12 @@ T0.* (Phase 0 prep)
 - **Phase 2 grows by two tasks** (T2.23, T2.24) which become a hard
   prerequisite for T2.10 (Open Recent). Without them, Open Recent
   can show projects that fail to load with no recovery path.
-- **Phase 3 grows by one task** (T3.28); no reorder needed.
+- **Phase 3 grows by five tasks** (T3.0a, T3.0b, T3.0c, T3.0d, T3.28).
+  T3.0a–T3.0d are inserted at the **front** of Phase 3 — they gate
+  every other Phase 3 task because the per-layer warp + mask data
+  model + render graph is the prerequisite for the layer-thumbnail
+  + warp-corners-on-canvas interaction model. T3.5 / T3.7 / T3.15
+  acceptance criteria adjusted to consume the per-layer model.
 - **Phase 4** has one rewritten task (T4.16), one new task (T4.16a),
   one new doc task (T4.23). Two original tasks (T4.12, T4.13)
   drop out to v3.1.
@@ -268,6 +302,11 @@ T0.* (Phase 0 prep)
 |------|---------------------|----------------|
 | T2.10 (Open Recent listing) | T2.4 | T2.4 + T2.24 (missing-media flow) |
 | M2 declaration | T2.21 | T2.21 + T2.23 + T2.24 |
+| T3.1 (canvas merge) | M2 | M2 + T3.0b (render graph rewrite) |
+| T3.5 (warp-corner direct manipulation) | T3.4 | T3.4 + T3.0c (renamed mutation) |
+| T3.7 (EditMode enum) | T3.1 | T3.1 + T3.0a (per-layer fields) |
+| T3.15 (mesh + mask feather → Advanced) | T3.11 | T3.11 + T3.0a + T3.0c |
+| M3 declaration | T3.27 + others | T3.0a + T3.0b + T3.0c + T3.0d + T3.27 + others |
 | M4 declaration | T4.21 | T4.21 + T4.16a + T4.23 (roadmap doc) |
 | M5 declaration | T5.6 + others | T5.16 + show-rehearsal; T5.6 OUT |
 
@@ -287,7 +326,9 @@ T0.* (Phase 0 prep)
 |------|------------|
 | T1.14 softening leaves a contributor PR with partial Reverse storage that the proptest doesn't catch | The runtime `debug_assert!` fires in test builds; proptest with ≥ 1024 cases catches the rest |
 | T2.23 / T2.24 land *after* T2.10 (Open Recent) is wired, leaving a brief window where a missing-asset project crashes the recent-projects flow | Order T2.10 to consume T2.24's API; gate with a feature-flag during transitions |
-| T4.16's "preview persists during GoLive" introduces a wgpu surface lifecycle subtlety (the offscreen warp_rt is sampled by both the projector full-screen surface AND the control-window egui texture) | Reuse the existing `register_native_texture` path from T-M9-01; verify no double-free on transition |
+| T4.16's "preview persists during GoLive" introduces a wgpu surface lifecycle subtlety (the offscreen warp_rt is sampled by both the projector full-screen surface AND the control-window egui texture) | Reuse the existing `register_native_texture` path from T-M9-01; verify no double-free on transition. **Post-T3.0b note:** the shared `warp_rt` is gone; the egui preview now binds to the projector RT view (post-warp, pre-gamma). The same `register_native_texture` helper applies, just to a different texture. |
+| T3.0b render graph rewrite breaks the existing single-`warp_rt` invariant; any code path that assumes "all layers composite into one buffer before warp" silently produces wrong output | Land T3.0a + T3.0b + T3.0c + T3.0d behind a sub-flag (`v3-per-layer-warp`) until the golden-image suite passes; flip default once green. The headless GPU test `per_layer_warp_distinct_corners` (T3.0b acceptance #2) is the smoke test. |
+| T3.0a v3 → v4 migration loses information when M > 1 warps existed in the original project | The `MultipleWarpsConsolidated` audit toast (T3.0d) tells the operator. The migration is intentionally lossy because preserving M > 1 warps in a per-layer-mapping model would require a heuristic ("which layer goes with which warp?") that's wrong as often as right. |
 | T5.16 field beta produces show-stopping bugs that block GA | T5.16 happens after T5.4 show rehearsal; treat as "go / no-go" not "happy path." If field beta finds blockers, M5 slips and they are fixed via T5.10 |
 | Capability roadmap (T4.23) sets expectations the team can't keep | Roadmap is a "v0.4 spec exists, scope is X" declaration, not a date promise |
 
@@ -299,7 +340,7 @@ The actual task-content edits live in:
 
 - **`003-tasks-phase-1.md`**: T1.14 rewritten; T1.36–T1.40 reprioritised; T1.38 extended.
 - **`003-tasks-phase-2.md`**: T2.23, T2.24 added; T2.10, T2.21 amended.
-- **`003-tasks-phase-3.md`**: T3.28 added.
+- **`003-tasks-phase-3.md`**: T3.0a, T3.0b, T3.0c, T3.0d **added at the front** (gate every other Phase 3 task). T3.3, T3.5, T3.6, T3.7, T3.15 acceptance criteria amended for the per-layer model. T3.28 added.
 - **`003-tasks-phase-4-5.md`**: T4.16, T4.17 rewritten; T4.16a, T4.23, T5.16 added; T4.12, T4.13 marked v3.1; T4.19 marked deferrable; T5.6 rescoped.
 - **`003-tasks.md`**: index, milestone gates, summary table updated.
 
@@ -365,6 +406,56 @@ Successful relink emits `Command::RelinkAssetPath` (same struct
 as T1.38) and re-runs `ProjectAudit` for any other missing assets
 sharing the same parent folder ("Found 3 missing files in
 `/old/path/`. Relink all from `/new/path/`?").
+
+#### T3.0a — new (Phase 3)
+
+**Schema v4: per-layer `WarpMesh` + migration from v3 `Project.warps`.**
+Move mapping into the layer. `LayerConfig` gains
+`pub warp: WarpMesh`; `Project.warps` is removed. Bump
+`CURRENT_SCHEMA_VERSION` to 4. v3 → v4 migration copies `warps[0]`
+(or a default identity warp if the v3 project had none) onto each
+layer; if M > 1 warps existed, T3.0d's audit fires the
+`MultipleWarpsConsolidated` Warn finding once. The bundled demo
+(`assets/demos/window-glow.rmap.json`) is rewritten in the same
+commit so the canonical bundle ships v4. Full task body lives in
+`003-tasks-phase-3.md`.
+
+#### T3.0b — new (Phase 3)
+
+**Render graph rewrite: per-layer warp pass + composite-of-warped-
+layers.** Replace the shared-`warp_rt` composite-then-warp model
+with a per-layer warp-then-composite. Each layer is warped onto a
+single reusable `warp_scratch` RT (sized to projector), then
+alpha-composited onto the running projector RT with the layer's
+`blend_mode` and `opacity`. `scene_texture_id` re-binds to the
+projector RT view (post-warp, pre-gamma). `OverlayPipeline` and
+`panic_restore` integration unchanged. New headless GPU test
+`per_layer_warp_distinct_corners` validates that ≥ 3 layers each
+land in their own corner-pinned region.
+
+#### T3.0c — new (Phase 3)
+
+**Mutation rename: `warp_idx` → `layer_idx` across all warp/mask
+variants.** Mechanical rename of `Mutation::SetWarpDimensions`,
+`SetMaskPolygon`, `AddMaskVertex`, `RemoveMaskVertex`,
+`SetMaskVertex`, `ResetWarpMesh`, `SetWarpMaskFeather` to their
+`SetLayer*` / `Layer*` siblings. Plus a new
+`Mutation::SetLayerWarpCorner { layer_idx, r, c, new, old }` for
+T3.5's per-layer corner drag. Apply / Reverse logic structurally
+unchanged; only the index source changes. Helper constructors
+`Project::set_layer_*_mutation(...)` ship alongside. Proptest
+harness extended.
+
+#### T3.0d — new (Phase 3)
+
+**Audit rename + multi-warp consolidation finding.**
+`AuditKind::DegenerateWarp` → `DegenerateLayerWarp { layer_idx }`;
+`MaskTooFew` → `LayerMaskTooFew { layer_idx, vertex_count }`. New
+`AuditKind::MultipleWarpsConsolidated { previous_warp_count,
+layer_count }` with `Severity::Warn`, fired exactly once per
+session for v3 projects whose migration consolidated > 1 warps
+onto layers. Audit pass walks `project.layers` (no longer reads a
+non-existent `Project.warps`).
 
 #### T3.28 — new (Phase 3)
 
@@ -664,6 +755,7 @@ For each numbered practitioner-feedback item from the review:
 | Field beta before GA | T5.16 (new) |
 | Find missing media on Open Recent | T2.10 (amended via T2.24) |
 | Offsite preview mode | T4.16a (new) |
+| Per-layer warp + mask + effects | T3.0a, T3.0b, T3.0c, T3.0d (new); T3.3, T3.5, T3.6, T3.7, T3.15 (amended) |
 
 End of revision document. Apply the targeted edits to the four
 phase files and the master index before starting Sprint 1.

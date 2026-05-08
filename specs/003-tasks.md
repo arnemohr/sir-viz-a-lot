@@ -16,7 +16,7 @@
 | **`003-tasks-revision.md`** | All | **Revision pass after practitioner review.** Read this before executing any phase: triage matrix, change log, updated sequencing, decision-tasks D11–D14, post-revision first execution slice. |
 | `003-tasks-phase-1.md` | Phase 1 | Architecture foundations (state machine, commands, undo, project audit, telemetry hooks). T1.14 rewritten; T1.36–T1.40 reprioritised; T1.38 extended. |
 | `003-tasks-phase-2.md` | Phase 2 | First-run experience (launcher, demo, drag-drop, empty states, monitor names) **+ T2.23 + T2.24** (asset portability + missing-media relink). |
-| `003-tasks-phase-3.md` | Phase 3 | Interaction overhaul (canvas merge, Advanced disclosure, glossary, show-day strip) **+ T3.28** (per-display gamma override). |
+| `003-tasks-phase-3.md` | Phase 3 | Interaction overhaul (canvas merge, Advanced disclosure, glossary, show-day strip) **+ T3.0a–T3.0d (per-layer warp + mask architecture; gates the rest of Phase 3)** + T3.28 (per-display gamma override). |
 | `003-tasks-phase-4-5.md` | Phases 4 + 5 | Polish, native menu, autosave, scene picker, theme, validation, GA. **T4.16/T4.17 rewritten** (preview persists during GoLive). **T4.16a + T4.23** added. **T5.6 rescoped**; **T5.16** field beta added. T4.12/T4.13/T4.19 deferred. |
 
 ---
@@ -254,6 +254,8 @@ Strict ordering of the critical path:
 | Adding telemetry payload data (T1.45+) instead of command-kind only | Privacy review fails; hotfix required. **Medium.** |
 | Hot-swapping windowed↔fullscreen at runtime (T4.16) without `catch_unwind` recovery | Show-day panic. **Critical.** Must reuse v1's panic-recovery path. |
 | Skipping macOS keyboard-accelerator audit (T4.18) | Cmd-Z conflicts with an existing hotkey discovered during dogfooding. **Low–Medium.** |
+| Shipping the canvas merge (T3.1+) **before** per-layer warp + mask schema + render-graph migration (T3.0a/T3.0b) | Layer-thumbnail strip + warp-corners-on-canvas contradict each other (selecting layer 0, dragging a corner, deforms every layer). The interaction model has to be re-explained or re-implemented — large rework. **High.** |
+| Renaming warp-targeted `Mutation` variants (T3.0c) **after** migrating UI sites in T3.5 / T3.7 / T3.15 | Every UI site has to be patched twice. Rename first, then wire UI. **Medium.** |
 
 ---
 
@@ -309,10 +311,14 @@ See `003-tasks-phase-2.md`. **22 tasks.** Highlights:
 
 ### Phase 3 — interaction overhaul
 
-See `003-tasks-phase-3.md`. **27 tasks.** Highlights:
+See `003-tasks-phase-3.md`. **32 tasks.** Highlights:
 
 | ID | Title | Owner | Scope |
 |----|-------|-------|-------|
+| **T3.0a** | **Schema v4: per-layer `WarpMesh` + migration** | RUST | L |
+| **T3.0b** | **Render graph: per-layer warp + composite-of-warped-layers** | RUST | L |
+| **T3.0c** | **Mutation rename: `warp_idx` → `layer_idx`** | RUST | M |
+| **T3.0d** | **Audit rename + multi-warp consolidation finding** | RUST | S |
 | T3.1 | Promote scene preview to full canvas | RUST | M |
 | T3.5 | Wire `Selection::WarpCorner` direct manipulation | RUST | M |
 | T3.6 | Remove `ControlTab::Mapping` arm + checker placeholder | RUST | S |
@@ -346,11 +352,14 @@ See `003-tasks-phase-4-5.md`. **15 tasks for Phase 5.** Highlights:
 | T5.11 | README rewrite | PO + RUST | M |
 | T5.13 | CHANGELOG + migration notes | PO | M |
 
-**Total tasks across all phases: 147** (post-revision: +6 net new
-tasks — T2.23, T2.24, T3.28, T4.16a, T4.23, T5.16; T4.12/T4.13/T4.19
-deferred but kept in-file for v3.1 cross-reference). **Net
-engineering days: ~0** (calendar shortened ~1 week by removing
-T5.6 from the GA gate).
+**Total tasks across all phases: 152** (post-revision: +6 net new
+tasks — T2.23, T2.24, T3.28, T4.16a, T4.23, T5.16; **post-per-layer-
+mapping amendment: +4 more — T3.0a, T3.0b, T3.0c, T3.0d;**
+T4.12/T4.13/T4.19 deferred but kept in-file for v3.1 cross-
+reference). **Net engineering days: +5–7 days for T3.0a–d** (Phase 3
+calendar grows by ~1 week; the canvas-merge UX tasks T3.1+ now
+ship with a per-layer mapping model that matches the layer-thumbnail
+strip, instead of contradicting it).
 
 ---
 
@@ -386,7 +395,7 @@ dependencies live in each phase file's task descriptions.
 | **M0** | Phase 0 done | Decision register signed; wireframes approved; demo asset license-cleared. |
 | **M1** | Phase 1 done | All P0 tasks (WP-1, WP-1.1, WP-2, WP-15, WP-17 hooks) acceptance criteria green. Proptest passes on the full `Command` enum. ProjectAudit covers ≥ 6 finding kinds. `--features v3` builds and ships behind the flag. |
 | **M2** | Phase 2 done — **alpha** | Launcher launches; "Try a demo" reaches projected pixel in ≤ 30 s; drag-drop adds a layer; empty state replaces dev-log line. Old UI still default on `main`. |
-| **M3** | Phase 3 done — **internal beta** | Canvas merge live; Advanced disclosure feature-complete; show-day strip visible; glossary popovers functional. Default UI on `main`. Old Mapping/Layers/Scenes tab arms deleted. |
+| **M3** | Phase 3 done — **internal beta** | **Per-layer warp + mask + effects architecture (schema v4) shipped (T3.0a–T3.0d)**; canvas merge live with per-layer warp corners on the live image; Advanced disclosure feature-complete with per-layer Mapping section; show-day strip visible; glossary popovers functional. Default UI on `main`. Old Mapping/Layers/Scenes tab arms deleted. v3 → v4 migration tested on bundled demo + at least one user fixture. |
 | **M4** | Phase 4 done — **external beta** | Scene picker, autosave, native menu, theme polish, hot-swap windowed↔fullscreen. Tagged `v0.3.0-beta`. |
 | **M5** | Phase 5 done — **GA** | Section-5 metrics measured and meeting target (or explicit deferral). **Show-day rehearsal green (T5.4) + practitioner field beta blockers fixed (T5.16)**. Capability roadmap (T4.23) published. README rewritten. Cross-machine portability + missing-media relink validated. Tagged `v0.3.0`. *(Note post-revision: original "n ≥ 5 external usability" gate moved to a post-GA validation cycle (T5.6).)* |
 
