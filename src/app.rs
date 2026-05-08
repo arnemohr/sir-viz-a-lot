@@ -138,6 +138,21 @@ impl AppState {
             _ => None,
         }
     }
+
+    /// 003-T1.4: per-state event-loop control-flow.
+    ///
+    /// `Editing` and `GoLive` need `Poll` (vsync redraws drive
+    /// rendering). `Launcher` and `Failed` are idle screens with
+    /// no animation — `Wait` keeps the laptop CPU + battery quiet
+    /// until the user does something. `Booting` is transient
+    /// (one frame before transition); `Wait` is the safest
+    /// default.
+    fn control_flow(&self) -> ControlFlow {
+        match self {
+            Self::Editing(_) | Self::GoLive(_) => ControlFlow::Poll,
+            Self::Booting | Self::Launcher(_) | Self::Failed(_) => ControlFlow::Wait,
+        }
+    }
 }
 
 /// Unit-testable Booting→Failed transition (T-003-T1.2 acceptance #5).
@@ -468,7 +483,12 @@ impl App {
     ) -> Result<()> {
         let event_loop =
             EventLoop::new().map_err(|e| RmapError::Other(format!("event loop: {e}")))?;
-        event_loop.set_control_flow(ControlFlow::Poll);
+        // 003-T1.4: initial control flow — `about_to_wait` derives
+        // the per-state value (Poll for Editing/GoLive, Wait for
+        // Booting/Launcher/Failed) on every loop iteration.
+        // Setting Wait here keeps the very first iteration cheap
+        // before about_to_wait runs.
+        event_loop.set_control_flow(ControlFlow::Wait);
 
         let mut app = App {
             project,
@@ -1735,7 +1755,13 @@ impl ApplicationHandler for App {
     }
 
 
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // 003-T1.4: derive ControlFlow from AppState every loop tick.
+        // Switching from Editing→Launcher (and back) flips Poll↔Wait
+        // automatically; no explicit set_control_flow call elsewhere
+        // needed.
+        event_loop.set_control_flow(self.state.control_flow());
+
         if let Some(state) = self.state.editing_mut() {
             state.output.window.request_redraw();
             // T-M9-03: throttle the control window to ~30 fps.
@@ -1790,6 +1816,28 @@ mod tests {
             s,
             AppState::Failed(FailureKind::RenderInitFailed)
         ));
+    }
+
+    /// 003-T1.4 acceptance: ControlFlow is derived per-state.
+    /// Editing/GoLive must be Poll; Booting/Launcher/Failed must
+    /// be Wait so idle states don't burn battery.
+    #[test]
+    fn app_state_control_flow_per_variant() {
+        assert!(matches!(
+            AppState::Booting.control_flow(),
+            ControlFlow::Wait
+        ));
+        assert!(matches!(
+            AppState::Launcher(LauncherState).control_flow(),
+            ControlFlow::Wait
+        ));
+        assert!(matches!(
+            AppState::Failed(FailureKind::RenderInitFailed).control_flow(),
+            ControlFlow::Wait
+        ));
+        // Editing/GoLive payloads can't be constructed without wgpu
+        // in a unit test; the match in `control_flow` covers their
+        // arms by structural exhaustiveness checked at compile time.
     }
 
     /// 003-T1.2 acceptance criterion 5: project-load failure
