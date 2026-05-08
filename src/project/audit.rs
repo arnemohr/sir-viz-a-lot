@@ -35,12 +35,14 @@
 //! `AppState::Failed`; Warn findings surface as Toasts (T1.41–T1.43).
 
 #![deny(missing_docs)]
-#![allow(dead_code)] // T-003-T1.35+ wire the audit kinds; foundation lands here.
+#![allow(dead_code)] // T-003-T1.43/T1.44 wire audit to app load path; foundation wired here.
 
 use std::path::PathBuf;
 
+use crate::effects::Effect;
+use crate::modulators::Modulator;
 use crate::project::command::Mutation;
-use crate::project::schema::Project;
+use crate::project::schema::{LayerConfig, Project};
 
 /// Severity of an audit finding. Drives UX routing: `Info` and `Warn`
 /// surface as toasts the operator can dismiss; `Critical` blocks the
@@ -162,22 +164,215 @@ pub struct ProjectAudit;
 impl ProjectAudit {
     /// Walk `project` against `env` and return every applicable
     /// finding. Returns an empty Vec for a project with no issues.
-    /// Findings are emitted in roughly the order they're checked
-    /// (project-level → layer-level → warp-level), but callers
-    /// shouldn't depend on ordering for correctness.
-    ///
-    /// T1.34 lands the foundation; T1.35–T1.40 wire individual
-    /// detectors. The body is intentionally empty here so a clean
-    /// project returns `Vec::new()`.
-    pub fn run(_project: &Project, _env: &AuditEnv) -> Vec<AuditFinding> {
-        Vec::new()
+    /// Findings are emitted in project-level → layer-level → warp-level
+    /// order, but callers shouldn't depend on ordering for correctness.
+    pub fn run(project: &Project, env: &AuditEnv) -> Vec<AuditFinding> {
+        let mut findings = Vec::new();
+
+        // --- Project-level checks ---
+
+        // T1.40: schema_version newer than this build supports.
+        if project.schema_version > crate::project::schema::CURRENT_SCHEMA_VERSION {
+            findings.push(AuditFinding {
+                kind: AuditKind::SchemaTooNew {
+                    project_version: project.schema_version,
+                    max_supported: crate::project::schema::CURRENT_SCHEMA_VERSION,
+                },
+                severity: Severity::Critical,
+                message: format!(
+                    "Project schema_version {} is newer than this build supports (max {}). \
+                     Upgrade rmap to load this project.",
+                    project.schema_version,
+                    crate::project::schema::CURRENT_SCHEMA_VERSION,
+                ),
+                autofix: None,
+            });
+        }
+
+        // T1.39: output_monitor_index >= monitor_count.
+        if (project.output_monitor_index as u32) >= env.monitor_count {
+            findings.push(AuditFinding {
+                kind: AuditKind::MonitorOutOfRange {
+                    requested: project.output_monitor_index as u32,
+                    available: env.monitor_count,
+                },
+                severity: Severity::Warn,
+                message: format!(
+                    "Project requests monitor {} but only {} monitor(s) available. \
+                     Falls back to monitor 0.",
+                    project.output_monitor_index, env.monitor_count,
+                ),
+                autofix: Some(project.set_output_monitor_index_mutation(0)),
+            });
+        }
+
+        // EmptyProject (T1.34): no layers configured.
+        if project.layers.is_empty() {
+            findings.push(AuditFinding {
+                kind: AuditKind::EmptyProject,
+                severity: Severity::Info,
+                message: "Project has no layers configured.".into(),
+                autofix: None,
+            });
+        }
+
+        // --- Layer-level checks ---
+
+        for (layer_idx, layer) in project.layers.iter().enumerate() {
+            // T1.35: any Effect::Transform with scale_x and scale_y both Static(< 1e-6).
+            if let Some(autofix) = zero_scale_autofix_for_layer(project, layer, layer_idx) {
+                findings.push(AuditFinding {
+                    kind: AuditKind::ZeroScale { layer_idx },
+                    severity: Severity::Warn,
+                    message: format!(
+                        "Layer {} has zero scale (invisible). Autofix resets scale to 1.0.",
+                        layer.id,
+                    ),
+                    autofix: Some(autofix),
+                });
+            }
+
+            // T1.38: asset path doesn't exist on disk.
+            let asset_path = layer.kind.asset_path();
+            if !asset_path.exists() {
+                findings.push(AuditFinding {
+                    kind: AuditKind::MissingAsset {
+                        layer_idx,
+                        path: asset_path.to_path_buf(),
+                    },
+                    severity: Severity::Critical,
+                    message: format!(
+                        "Layer {} references missing asset: {}. Move the file back to that \
+                         path or relink the layer.",
+                        layer.id,
+                        asset_path.display(),
+                    ),
+                    autofix: None, // Relink flow is T2.24; T1.38 ships without autofix.
+                });
+            }
+        }
+
+        // --- Warp-level checks ---
+
+        for (warp_idx, warp) in project.warps.iter().enumerate() {
+            // T1.36: degenerate grid — fewer than 2 vertex rows/columns, or
+            // non-rectangular row lengths.
+            // Note: rows/cols are *cell* counts; the vertex grid is (rows+1)×(cols+1).
+            // A healthy default_warp_mesh has rows=1, cols=1 with a 2×2 vertex grid.
+            let grid_vertex_rows = warp.grid.len();
+            let grid_first_cols = warp.grid.first().map(|r| r.len()).unwrap_or(0);
+            let is_degenerate = grid_vertex_rows < 2
+                || grid_first_cols < 2
+                || warp.grid.iter().any(|row| row.len() != grid_first_cols);
+            if is_degenerate {
+                // Build the autofix: replace the warp with a corner-pin
+                // (rows=1, cols=1, 2×2 vertex grid — same as default_warp_mesh).
+                let new_mesh = crate::project::schema::WarpMesh {
+                    rows: 1,
+                    cols: 1,
+                    grid: vec![vec![[0.0, 0.0], [1.0, 0.0]], vec![[0.0, 1.0], [1.0, 1.0]]],
+                    source_rect: warp.source_rect,
+                    mask_polygon: warp.mask_polygon.clone(),
+                    mask_feather: warp.mask_feather,
+                };
+                findings.push(AuditFinding {
+                    kind: AuditKind::DegenerateWarp { warp_idx },
+                    severity: Severity::Warn,
+                    message: format!(
+                        "Warp {} has a degenerate grid (vertex rows={}, vertex cols={}, \
+                         non-rectangular: {}). Reset to corner-pin.",
+                        warp_idx,
+                        grid_vertex_rows,
+                        grid_first_cols,
+                        warp.grid.iter().any(|row| row.len() != grid_first_cols),
+                    ),
+                    autofix: Some(Mutation::ResetWarpMesh {
+                        warp_idx,
+                        new: new_mesh,
+                        old: warp.clone(),
+                    }),
+                });
+            }
+
+            // T1.37: mask polygon with 1 or 2 vertices (0 is fine — no mask intended;
+            // ≥3 is fine — valid polygon for SDF baker).
+            let vertex_count = warp.mask_polygon.len();
+            if vertex_count > 0 && vertex_count < 3 {
+                findings.push(AuditFinding {
+                    kind: AuditKind::MaskTooFew {
+                        warp_idx,
+                        vertex_count,
+                    },
+                    severity: Severity::Info,
+                    message: format!(
+                        "Warp {} mask has {} vertex(es); SDF baker requires ≥ 3. \
+                         Clear the mask or add vertices.",
+                        warp_idx, vertex_count,
+                    ),
+                    autofix: Some(Mutation::SetMaskPolygon {
+                        warp_idx,
+                        new: Vec::new(),
+                        old: warp.mask_polygon.clone(),
+                    }),
+                });
+            }
+        }
+
+        findings
     }
+}
+
+/// Returns `Some(SetLayerEffects)` iff the layer contains at least one
+/// `Effect::Transform` whose `scale_x` AND `scale_y` are both
+/// `Modulator::Static(v)` with `v.abs() < 1e-6` (invisible layer).
+/// The autofix replaces those scale fields with `Modulator::Static(1.0)`.
+fn zero_scale_autofix_for_layer(
+    project: &Project,
+    layer: &LayerConfig,
+    layer_idx: usize,
+) -> Option<Mutation> {
+    let has_zero_scale = layer.effects.iter().any(|e| {
+        if let Effect::Transform {
+            scale_x, scale_y, ..
+        } = e
+        {
+            let sx_zero = matches!(scale_x, Modulator::Static(v) if v.abs() < 1e-6);
+            let sy_zero = matches!(scale_y, Modulator::Static(v) if v.abs() < 1e-6);
+            sx_zero && sy_zero
+        } else {
+            false
+        }
+    });
+    if !has_zero_scale {
+        return None;
+    }
+
+    let mut new_effects = layer.effects.clone();
+    for e in new_effects.iter_mut() {
+        if let Effect::Transform {
+            scale_x, scale_y, ..
+        } = e
+        {
+            if matches!(scale_x, Modulator::Static(v) if v.abs() < 1e-6)
+                && matches!(scale_y, Modulator::Static(v) if v.abs() < 1e-6)
+            {
+                *scale_x = Modulator::Static(1.0);
+                *scale_y = Modulator::Static(1.0);
+            }
+        }
+    }
+    Some(project.set_layer_effects_mutation(layer_idx, new_effects))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Build a project that passes all audit checks:
+    /// - schema_version = CURRENT (3)
+    /// - one layer with a real on-disk asset (uses Cargo.toml, always present)
+    /// - one healthy warp mesh (corner-pin, rows=1, cols=1)
+    /// - output_monitor_index = 0, AuditEnv::default() has monitor_count = 1
     fn fresh_project() -> Project {
         let json = serde_json::json!({
             "schema_version": 3,
@@ -188,6 +383,24 @@ mod tests {
         if p.warps.is_empty() {
             p.warps.push(crate::project::schema::default_warp_mesh());
         }
+        // Add a layer with an asset that exists on disk so MissingAsset doesn't fire.
+        // Use Cargo.toml as a stand-in — it exists in the workspace root and is
+        // always present during test runs.
+        let asset = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+        p.layers.push(crate::project::schema::LayerConfig {
+            id: "healthy".into(),
+            kind: crate::project::schema::LayerKind::Svg { svg_path: asset },
+            enabled: true,
+            transform: crate::project::schema::Transform2D::default(),
+            effects: vec![crate::effects::Effect::Transform {
+                translate: [0.0, 0.0],
+                rotate_deg: crate::modulators::Modulator::Static(0.0),
+                scale_x: crate::modulators::Modulator::Static(1.0),
+                scale_y: crate::modulators::Modulator::Static(1.0),
+            }],
+            blend_mode: crate::project::schema::BlendMode::Normal,
+            opacity: 1.0,
+        });
         p
     }
 
@@ -213,5 +426,213 @@ mod tests {
             // Just confirms construction + Eq work.
             assert_eq!(s, s);
         }
+    }
+
+    /// 003-T1.35 — Layer with `Effect::Transform.scale_x = scale_y = 0`
+    /// triggers a Warn finding with a SetLayerEffects autofix that
+    /// restores scale to 1.0.
+    #[test]
+    fn audit_zero_scale_emits_finding_and_autofix() {
+        let mut p = fresh_project();
+        p.layers.push(crate::project::schema::LayerConfig {
+            id: "zero".into(),
+            kind: crate::project::schema::LayerKind::Svg {
+                svg_path: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"),
+            },
+            enabled: true,
+            transform: crate::project::schema::Transform2D::default(),
+            effects: vec![Effect::Transform {
+                translate: [0.0, 0.0],
+                rotate_deg: Modulator::Static(0.0),
+                scale_x: Modulator::Static(0.0),
+                scale_y: Modulator::Static(0.0),
+            }],
+            blend_mode: crate::project::schema::BlendMode::Normal,
+            opacity: 1.0,
+        });
+
+        let findings = ProjectAudit::run(&p, &AuditEnv::default());
+        let zero = findings
+            .iter()
+            .find(|f| matches!(f.kind, AuditKind::ZeroScale { .. }))
+            .expect("expected ZeroScale finding");
+        assert_eq!(zero.severity, Severity::Warn);
+        assert!(zero.autofix.is_some(), "ZeroScale should have an autofix");
+
+        // Apply autofix; assert scale restored to 1.0.
+        let mutation = zero.autofix.clone().unwrap();
+        let _reverse = mutation.apply(&mut p);
+        let layer = p.layers.last().expect("layer present");
+        if let Effect::Transform {
+            scale_x, scale_y, ..
+        } = &layer.effects[0]
+        {
+            assert!(
+                matches!(scale_x, Modulator::Static(v) if (v - 1.0).abs() < 1e-6),
+                "scale_x should be restored to 1.0, got {scale_x:?}"
+            );
+            assert!(
+                matches!(scale_y, Modulator::Static(v) if (v - 1.0).abs() < 1e-6),
+                "scale_y should be restored to 1.0, got {scale_y:?}"
+            );
+        } else {
+            panic!("expected Effect::Transform");
+        }
+    }
+
+    /// 003-T1.36 — Warp with a non-rectangular grid triggers DegenerateWarp
+    /// with a ResetWarpMesh autofix.
+    #[test]
+    fn audit_degenerate_warp_emits_finding() {
+        let mut p = fresh_project();
+        // Force a degenerate grid: claim cols=2 but only 1 vertex per row.
+        p.warps[0].cols = 2;
+        p.warps[0].grid = vec![vec![[0.0, 0.0]], vec![[0.0, 1.0]]]; // 1 col, not 3
+        let findings = ProjectAudit::run(&p, &AuditEnv::default());
+        let f = findings
+            .iter()
+            .find(|f| matches!(f.kind, AuditKind::DegenerateWarp { .. }))
+            .expect("expected DegenerateWarp finding");
+        assert_eq!(f.severity, Severity::Warn);
+        assert!(f.autofix.is_some(), "DegenerateWarp should have an autofix");
+    }
+
+    /// 003-T1.36 — Healthy corner-pin (rows=1, cols=1, 2×2 vertex grid)
+    /// is not flagged as degenerate.
+    #[test]
+    fn audit_degenerate_warp_skips_healthy_grid() {
+        let p = fresh_project();
+        let findings = ProjectAudit::run(&p, &AuditEnv::default());
+        assert!(
+            !findings
+                .iter()
+                .any(|f| matches!(f.kind, AuditKind::DegenerateWarp { .. })),
+            "healthy default warp should not flag DegenerateWarp",
+        );
+    }
+
+    /// 003-T1.37 — mask_polygon with 1 or 2 vertices triggers MaskTooFew.
+    /// 0-vertex polygon and ≥3 polygon do not.
+    #[test]
+    fn audit_mask_too_few_triggers_for_one_or_two_vertices() {
+        for count in [1usize, 2] {
+            let mut p = fresh_project();
+            p.warps[0].mask_polygon = (0..count).map(|i| [i as f32 * 0.1, 0.5]).collect();
+            let findings = ProjectAudit::run(&p, &AuditEnv::default());
+            let f = findings
+                .iter()
+                .find(|f| matches!(f.kind, AuditKind::MaskTooFew { .. }))
+                .unwrap_or_else(|| panic!("expected MaskTooFew for {count}-vertex polygon"));
+            assert_eq!(f.severity, Severity::Info);
+            assert!(f.autofix.is_some());
+        }
+
+        // Empty polygon: not flagged (operator hasn't started).
+        {
+            let mut p = fresh_project();
+            p.warps[0].mask_polygon = vec![];
+            assert!(
+                !ProjectAudit::run(&p, &AuditEnv::default())
+                    .iter()
+                    .any(|f| matches!(f.kind, AuditKind::MaskTooFew { .. })),
+                "empty polygon should not trigger MaskTooFew"
+            );
+        }
+
+        // ≥3 vertex polygon: not flagged.
+        {
+            let mut p = fresh_project();
+            p.warps[0].mask_polygon = vec![[0.0, 0.0], [1.0, 0.0], [0.5, 1.0]];
+            assert!(
+                !ProjectAudit::run(&p, &AuditEnv::default())
+                    .iter()
+                    .any(|f| matches!(f.kind, AuditKind::MaskTooFew { .. })),
+                "3-vertex polygon should not trigger MaskTooFew"
+            );
+        }
+    }
+
+    /// 003-T1.38 — Layer pointing at a missing path triggers Critical
+    /// MissingAsset; an existing file does not. Autofix is None for now
+    /// (T2.24 adds the relink flow).
+    #[test]
+    fn audit_missing_asset_relink_path() {
+        let mut p = fresh_project();
+        p.layers.push(crate::project::schema::layer_from_svg_path(
+            "missing",
+            std::path::PathBuf::from("/definitely/does/not/exist/3791f.svg"),
+        ));
+        let findings = ProjectAudit::run(&p, &AuditEnv::default());
+        let f = findings
+            .iter()
+            .find(|f| matches!(f.kind, AuditKind::MissingAsset { .. }))
+            .expect("expected MissingAsset");
+        assert_eq!(f.severity, Severity::Critical);
+        assert!(
+            f.autofix.is_none(),
+            "MissingAsset autofix is T2.24 territory"
+        );
+
+        // Sanity: an existing file does not trigger MissingAsset.
+        let tmp = std::env::temp_dir().join("rmap_t138_audit_present.svg");
+        std::fs::write(&tmp, b"<svg/>").expect("write tmp");
+        let mut q = fresh_project();
+        q.layers.push(crate::project::schema::layer_from_svg_path(
+            "ok",
+            tmp.clone(),
+        ));
+        assert!(
+            !ProjectAudit::run(&q, &AuditEnv::default())
+                .iter()
+                .any(|f| matches!(f.kind, AuditKind::MissingAsset { .. })),
+            "existing asset should not trigger MissingAsset"
+        );
+        std::fs::remove_file(&tmp).ok();
+    }
+
+    /// 003-T1.39 — output_monitor_index >= AuditEnv.monitor_count triggers
+    /// MonitorOutOfRange with a SetOutputMonitorIndex autofix that resets
+    /// the index to 0.
+    #[test]
+    fn audit_monitor_out_of_range_emits_finding() {
+        let mut p = fresh_project();
+        p.output_monitor_index = 99;
+        let env = AuditEnv { monitor_count: 1 };
+        let findings = ProjectAudit::run(&p, &env);
+        let f = findings
+            .iter()
+            .find(|f| matches!(f.kind, AuditKind::MonitorOutOfRange { .. }))
+            .expect("expected MonitorOutOfRange");
+        assert_eq!(f.severity, Severity::Warn);
+        assert!(f.autofix.is_some(), "MonitorOutOfRange autofix expected");
+
+        // Apply autofix; assert index reset to 0.
+        let mutation = f.autofix.clone().unwrap();
+        let _reverse = mutation.apply(&mut p);
+        assert_eq!(p.output_monitor_index, 0);
+    }
+
+    /// 003-T1.40 — schema_version > CURRENT triggers Critical SchemaTooNew.
+    /// Current version does not.
+    #[test]
+    fn audit_schema_too_new_emits_critical() {
+        let mut p = fresh_project();
+        p.schema_version = 99;
+        let findings = ProjectAudit::run(&p, &AuditEnv::default());
+        let f = findings
+            .iter()
+            .find(|f| matches!(f.kind, AuditKind::SchemaTooNew { .. }))
+            .expect("expected SchemaTooNew");
+        assert_eq!(f.severity, Severity::Critical);
+        assert!(f.autofix.is_none(), "SchemaTooNew has no autofix");
+
+        // schema_version = CURRENT does not trigger.
+        let q = fresh_project();
+        assert!(
+            !ProjectAudit::run(&q, &AuditEnv::default())
+                .iter()
+                .any(|f| matches!(f.kind, AuditKind::SchemaTooNew { .. })),
+            "current schema version should not trigger SchemaTooNew"
+        );
     }
 }

@@ -375,6 +375,16 @@ pub enum Mutation {
         old: Vec<crate::project::schema::Scene>,
     },
 
+    /// Replace `Project.output_monitor_index`. Same simple shape as
+    /// `SetGamma`. Autofix emitted by `ProjectAudit` for
+    /// `AuditKind::MonitorOutOfRange` (T-003-T1.39).
+    SetOutputMonitorIndex {
+        /// Value to write.
+        new: usize,
+        /// Pre-mutation value; `apply` `debug_assert!`s this matches.
+        old: usize,
+    },
+
     /// Replace the entire project from a serde_json snapshot
     /// (Reverse rule 3: snapshot Reverse). T-003-T1.30 routes
     /// scene-recall and crossfade-tick through this variant.
@@ -799,6 +809,16 @@ impl Mutation {
                     old: post,
                 }
             }
+            Mutation::SetOutputMonitorIndex { new, old } => {
+                debug_assert!(
+                    project.output_monitor_index == old,
+                    "SetOutputMonitorIndex stale Reverse: project.output_monitor_index={}, expected old={}",
+                    project.output_monitor_index,
+                    old
+                );
+                project.output_monitor_index = new;
+                Mutation::SetOutputMonitorIndex { new: old, old: new }
+            }
             Mutation::ApplyProjectSnapshot {
                 new,
                 old,
@@ -843,7 +863,8 @@ impl Mutation {
             | Mutation::SetMaskVertex { .. }
             | Mutation::ResetWarpMesh { .. }
             | Mutation::SetMaskPolygon { .. }
-            | Mutation::SetProjectScenes { .. } => false,
+            | Mutation::SetProjectScenes { .. }
+            | Mutation::SetOutputMonitorIndex { .. } => false,
             Mutation::ApplyProjectSnapshot { non_undoable, .. } => *non_undoable,
         }
     }
@@ -920,6 +941,16 @@ impl Project {
         Mutation::SetOutputWindowed {
             new,
             old: self.output_windowed,
+        }
+    }
+
+    /// Build a `SetOutputMonitorIndex` mutation (T-003-T1.39). Captures
+    /// the project's current `output_monitor_index` as `old`. Used by
+    /// `ProjectAudit` to emit an autofix for `MonitorOutOfRange`.
+    pub fn set_output_monitor_index_mutation(&self, new: usize) -> Mutation {
+        Mutation::SetOutputMonitorIndex {
+            new,
+            old: self.output_monitor_index,
         }
     }
 
@@ -1475,6 +1506,8 @@ mod tests {
             SetMaskPolygon {
                 vertices: Vec<[f32; 2]>,
             },
+            /// 003-T1.39 — set output monitor index.
+            OutputMonitorIndex(usize),
         }
 
         fn to_mutation(kind: &MutationKind, project: &Project) -> Mutation {
@@ -1722,6 +1755,10 @@ mod tests {
                         project.set_mask_polygon_mutation(0, vertices.clone())
                     }
                 }
+                // 003-T1.39 — output monitor index coverage.
+                MutationKind::OutputMonitorIndex(v) => {
+                    project.set_output_monitor_index_mutation(*v)
+                }
             }
         }
 
@@ -1853,6 +1890,8 @@ mod tests {
                     0..6,
                 )
                 .prop_map(|vertices| MutationKind::SetMaskPolygon { vertices }),
+                // 003-T1.39 — output monitor index coverage.
+                (0usize..=4).prop_map(MutationKind::OutputMonitorIndex),
             ]
         }
 
