@@ -23,3 +23,9 @@ rust-toolchain.toml
 *.rmap.json
 /~/
 
+# 003-T2.8 — un-ignore bundled demo projects under assets/demos/.
+# They ARE part of the repo (the launcher's "Try a demo" button needs
+# them) and ship inside the .app bundle. User shows still don't belong
+# in the tree, so the broad *.rmap.json ignore stays.
+!/assets/demos/*.rmap.json
+

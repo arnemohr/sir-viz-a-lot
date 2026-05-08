@@ -1297,7 +1297,11 @@ fn apply_launch_command(
         let env = crate::project::audit::AuditEnv {
             monitor_count: event_loop.available_monitors().count() as u32,
         };
-        crate::project::audit::ProjectAudit::run(&project, &env)
+        crate::project::audit::ProjectAudit::run_with_path(
+            &project,
+            &env,
+            project_file_path.as_deref(),
+        )
     };
     let critical: Vec<_> = audit_findings
         .iter()
@@ -2657,7 +2661,11 @@ impl ApplicationHandler for App {
             let env = crate::project::audit::AuditEnv {
                 monitor_count: event_loop.available_monitors().count() as u32,
             };
-            crate::project::audit::ProjectAudit::run(&project, &env)
+            crate::project::audit::ProjectAudit::run_with_path(
+                &project,
+                &env,
+                project_file_path.as_deref(),
+            )
         };
         #[cfg(feature = "v3")]
         {
@@ -3116,6 +3124,77 @@ mod tests {
         assert!(
             result.is_err(),
             "missing demo bundle must surface as a ProjectError, not a panic"
+        );
+    }
+
+    /// 003-T2.8 acceptance criterion 3 — the bundled `window-glow`
+    /// demo loads cleanly and audits with zero findings (assuming a
+    /// monitor is attached, which CI provides via the integration
+    /// runner). The test runs from the repo root because Cargo
+    /// invokes tests with CWD = workspace root.
+    ///
+    /// Skipped when the demo asset is missing (e.g. an external
+    /// developer doing `cargo install rmap` without the repo) — we
+    /// don't fail CI for a missing optional bundle, but on a clean
+    /// repo checkout the file IS present and the test runs.
+    #[cfg(feature = "v3")]
+    #[test]
+    fn demo_loads_clean() {
+        use crate::controls::ProjectSource;
+        let demo_path = std::path::PathBuf::from("assets/demos/window-glow.rmap.json");
+        if !demo_path.exists() {
+            eprintln!(
+                "demo_loads_clean: skipping — `{}` not present (T-003-T2.8 bundle).",
+                demo_path.display(),
+            );
+            return;
+        }
+
+        // Resolve the project source; T2.3's helper handles the
+        // bundle-relative path.
+        let (project, returned_path) = resolve_project_source(&ProjectSource::Demo("window-glow"))
+            .expect("demo project loads");
+        assert!(
+            returned_path
+                .as_deref()
+                .map(|p| p == demo_path.as_path())
+                .unwrap_or(false),
+            "Demo source should return the bundled path"
+        );
+
+        // Audit produces zero findings against a 1-monitor environment
+        // (the smallest valid env; CI test runners always have at
+        // least one). T2.23's run_with_path handles the relative asset
+        // path against the project file's parent.
+        let env = crate::project::audit::AuditEnv { monitor_count: 1 };
+        let findings = crate::project::audit::ProjectAudit::run_with_path(
+            &project,
+            &env,
+            Some(demo_path.as_path()),
+        );
+        assert!(
+            findings.is_empty(),
+            "demo project should audit clean, got: {findings:?}"
+        );
+
+        // Sanity-check the project shape: one image layer, one warp,
+        // one polygon mask, output_windowed = true (so the demo
+        // doesn't fullscreen-on-launch in a CI context).
+        assert_eq!(project.layers.len(), 1, "demo has exactly one image layer");
+        assert!(matches!(
+            project.layers[0].kind,
+            crate::project::schema::LayerKind::Image { .. }
+        ));
+        assert_eq!(project.warps.len(), 1, "demo has exactly one warp");
+        assert!(
+            !project.warps[0].mask_polygon.is_empty(),
+            "demo's warp carries a window-rectangle mask",
+        );
+        assert!(project.output_windowed, "demo opens windowed for safety");
+        assert_eq!(
+            project.layers[0].transform.scale,
+            [1.0, 1.0],
+            "demo's transform.scale must be the identity (not [0, 0])",
         );
     }
 

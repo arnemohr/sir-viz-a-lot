@@ -166,7 +166,28 @@ impl ProjectAudit {
     /// finding. Returns an empty Vec for a project with no issues.
     /// Findings are emitted in project-level → layer-level → warp-level
     /// order, but callers shouldn't depend on ordering for correctness.
+    ///
+    /// 003-T2.23 follow-up: relative asset paths in `LayerKind` are
+    /// resolved against the project file's parent directory before the
+    /// `MissingAsset` existence check fires. Pass the project file path
+    /// via [`run_with_path`] so portable projects (T2.23) audit cleanly;
+    /// this overload defaults `project_path` to `None`, preserving the
+    /// pre-T2.23 behaviour for callers that don't have one.
     pub fn run(project: &Project, env: &AuditEnv) -> Vec<AuditFinding> {
+        Self::run_with_path(project, env, None)
+    }
+
+    /// 003-T2.23 follow-up — same as [`Self::run`] but also resolves
+    /// relative `LayerKind` asset paths against `project_path.parent()`
+    /// when checking for missing assets. The parameter is `Option`-shaped
+    /// because not every audit caller has a path on hand (e.g. an
+    /// in-memory project drafted via the launcher's "Start a new
+    /// show" path).
+    pub fn run_with_path(
+        project: &Project,
+        env: &AuditEnv,
+        project_path: Option<&std::path::Path>,
+    ) -> Vec<AuditFinding> {
         let mut findings = Vec::new();
 
         // --- Project-level checks ---
@@ -233,8 +254,16 @@ impl ProjectAudit {
             }
 
             // T1.38: asset path doesn't exist on disk.
+            // 003-T2.23 — relative paths are resolved against the
+            // project file's parent dir when one is supplied. Falls
+            // back to the as-stored path if `project_path` is None
+            // (in-memory project) or has no parent (path is bare).
             let asset_path = layer.kind.asset_path();
-            if !asset_path.exists() {
+            let resolved = match project_path.and_then(|p| p.parent()) {
+                Some(dir) if asset_path.is_relative() => dir.join(asset_path),
+                _ => asset_path.to_path_buf(),
+            };
+            if !resolved.exists() {
                 findings.push(AuditFinding {
                     kind: AuditKind::MissingAsset {
                         layer_idx,
