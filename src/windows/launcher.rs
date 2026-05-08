@@ -154,6 +154,15 @@ impl LauncherWindow {
         self.window.id()
     }
 
+    /// Ask winit to fire a `RedrawRequested` event on the next loop tick.
+    /// The launcher runs under `ControlFlow::Wait`, so the operator only
+    /// sees a frame when something asks for one — egui's repaint hint
+    /// (returned in [`egui_winit::EventResponse`]) is the usual trigger,
+    /// plus a one-shot call after window creation to paint the first frame.
+    pub fn request_redraw(&self) {
+        self.window.request_redraw();
+    }
+
     /// Forward a winit window event to egui-winit. Returns the egui
     /// response so the App can decide whether to skip downstream
     /// handling (matches `ControlWindow::on_window_event`).

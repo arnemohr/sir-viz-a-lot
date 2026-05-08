@@ -195,9 +195,39 @@ fn failed_state_for_audit_critical(findings: Vec<crate::project::audit::AuditFin
     AppState::Failed(FailureKind::ProjectAuditCritical { findings })
 }
 
-/// Stub for the Phase-2 launcher window state. T-003-T2.2 populates
-/// the body; declared here so the `AppState` enum is stable from
-/// T1.1 onward.
+/// Phase-2 launcher window state. Populated by T-003-T2.2; first-launch
+/// path opens a `LauncherWindow` peer to the eventual output / control
+/// windows so the operator picks a starting point (new show, recent,
+/// demo) before the editor session is constructed.
+///
+/// The struct owns the GPU and input sources that survive across the
+/// `Launcher → Editing` transition (T-003-T2.3) — `init_running_app`
+/// can move them into `EditingState` rather than re-initialising wgpu
+/// and `cpal`/`midir`/`rosc` each time. The launcher window itself is
+/// dropped on transition.
+///
+/// T-003-T2.10 will add `recent: Vec<RecentProject>` (loaded from
+/// `~/Documents/rmap/`); T-003-T2.18 will add `prefs: UserPrefs`
+/// (loaded from `~/Library/Preferences/rmap.toml`). The fields are
+/// not present yet so this struct compiles with only the foundational
+/// dependencies in place.
+#[cfg(feature = "v3")]
+struct LauncherState {
+    launcher: crate::windows::launcher::LauncherWindow,
+    gpu: GpuContext,
+    /// Operator-input sources brought up at launcher mount (keyboard
+    /// always; audio / MIDI / OSC behind their cargo features). Held
+    /// here so the editor reuses them post-transition (T-003-T2.3).
+    /// `#[allow(dead_code)]` until T2.3 plumbs the move; without it
+    /// `cargo check` warns the field is constructed but never read.
+    #[allow(dead_code)]
+    inputs: InputsBundle,
+}
+
+/// Non-v3 build keeps the legacy zero-sized stub so the `AppState`
+/// enum still compiles unchanged on the v2 default. The `Launcher`
+/// arm is unreachable on the v2 path (no constructor wires it).
+#[cfg(not(feature = "v3"))]
 #[allow(dead_code)]
 struct LauncherState;
 
@@ -1081,6 +1111,95 @@ fn assemble_editing_state(
         toast_queue: crate::windows::toast::ToastQueue::new(),
         #[cfg(feature = "v3")]
         telemetry: SessionTelemetry::default(),
+    }
+}
+
+/// 003-T2.2: bring up the launcher window state. Reuses
+/// [`init_gpu`] and [`init_inputs`] so the eventual
+/// `Launcher → Editing` transition (T-003-T2.3) can move them into
+/// `EditingState` without a second wgpu / cpal / midir / rosc
+/// init pass.
+///
+/// The launcher window itself is constructed last because it needs
+/// the GPU (for its surface) but does not need a monitor handle —
+/// the operator picks the projector inside the launcher (T-003-T2.5).
+///
+/// Failure here is fatal in the same sense as `init_running_app`'s
+/// render-init failure: without a GPU the app has nothing to draw,
+/// so the caller routes to `AppState::Failed` and exits.
+#[cfg(feature = "v3")]
+fn init_launcher(event_loop: &ActiveEventLoop) -> Result<LauncherState> {
+    let gpu = init_gpu()?;
+    let inputs = init_inputs();
+    let launcher = crate::windows::launcher::LauncherWindow::new(
+        event_loop,
+        &gpu.instance,
+        &gpu.adapter,
+        &gpu.device,
+    )?;
+    // Kick off the first paint. Without this, winit/macOS may keep
+    // the window invisible until the first user-input event triggers
+    // a `RedrawRequested` — defeating the launcher's purpose as the
+    // first thing the operator sees on a cold start.
+    launcher.request_redraw();
+    Ok(LauncherState {
+        launcher,
+        gpu,
+        inputs,
+    })
+}
+
+/// 003-T2.2: render one launcher frame with the placeholder body.
+/// Extracted so the window-event arm stays focused on event
+/// dispatch; T-003-T2.4 swaps the closure body for the three start
+/// buttons + projector picker.
+#[cfg(feature = "v3")]
+fn launcher_render(state: &mut LauncherState) {
+    let device = &state.gpu.device;
+    let queue = &state.gpu.queue;
+    if let Err(err) = state.launcher.render(device, queue, |ui| {
+        egui::CentralPanel::default().show_inside(ui, |panel_ui| {
+            panel_ui.label("Launcher coming soon.");
+        });
+    }) {
+        tracing::error!(?err, "launcher render frame failed");
+    }
+}
+
+/// 003-T2.2: dispatch a winit window event to the launcher window.
+/// Mirrors `handle_editing_window_event` but for the much smaller
+/// launcher state (no project, no render graph, no keyboard chord
+/// handling). CloseRequested exits the event loop; Resized
+/// reconfigures the surface; RedrawRequested paints one frame; any
+/// other event is forwarded to egui-winit, which may set the
+/// `repaint` hint to ask for a follow-up paint.
+#[cfg(feature = "v3")]
+fn handle_launcher_window_event(
+    state: &mut LauncherState,
+    event_loop: &ActiveEventLoop,
+    window_id: WindowId,
+    event: WindowEvent,
+) {
+    if window_id != state.launcher.id() {
+        return;
+    }
+    let resp = state.launcher.on_window_event(&event);
+    match event {
+        WindowEvent::CloseRequested => {
+            event_loop.exit();
+        }
+        WindowEvent::Resized(new_size) => {
+            state.launcher.resize(&state.gpu.device, new_size);
+            state.launcher.request_redraw();
+        }
+        WindowEvent::RedrawRequested => {
+            launcher_render(state);
+        }
+        _ => {
+            if resp.repaint {
+                state.launcher.request_redraw();
+            }
+        }
     }
 }
 
@@ -2194,6 +2313,34 @@ impl ApplicationHandler for App {
             return;
         }
 
+        // 003-T2.2 — first-launch path. With no project arg, no
+        // autostart, and the v3 feature on, we open the launcher
+        // window instead of going straight into Editing. The launcher
+        // owns the GPU + input sources so the eventual transition to
+        // Editing (T-003-T2.3) does not re-initialise wgpu.
+        //
+        // `--autostart project.rmap.json` and a bare `rmap proj.rmap.json`
+        // both bypass this branch — `self.project.is_none()` is the gate.
+        // The CLI's SVG / unknown-extension paths also flow through
+        // `load_project_for_startup` below so the operator's existing
+        // shorthand (`rmap foo.svg`) keeps working.
+        #[cfg(feature = "v3")]
+        if self.project.is_none() {
+            tracing::info!("no project arg; routing to launcher (003-T2.2)");
+            match init_launcher(event_loop) {
+                Ok(launcher) => {
+                    self.state = AppState::Launcher(launcher);
+                    return;
+                }
+                Err(e) => {
+                    tracing::error!(?e, "launcher init failed; exiting");
+                    self.state = failed_state_for_render_init();
+                    event_loop.exit();
+                    return;
+                }
+            }
+        }
+
         let (project, project_file_path) = match load_project_for_startup(self.project.as_ref()) {
             Ok(v) => v,
             Err(e) => {
@@ -2377,13 +2524,22 @@ impl ApplicationHandler for App {
                     event_loop.exit();
                 }
             }
-            AppState::Launcher(_) => {
-                // 003-T2.1+ wires the launcher's own egui dispatch
-                // here. For now the launcher state is unreachable
-                // (no constructor path yet); honor close so the
-                // window can be shut down regardless.
-                if matches!(event, WindowEvent::CloseRequested) {
-                    event_loop.exit();
+            AppState::Launcher(state) => {
+                // 003-T2.2 — forward to the launcher's egui dispatch.
+                //
+                // On v3 the variant carries a populated state (see
+                // `init_launcher`); on the non-v3 build it is the
+                // legacy unit struct and the constructor path is
+                // unreachable, so we keep the same minimal CloseRequested
+                // → exit behaviour the T1.3 stub had.
+                #[cfg(feature = "v3")]
+                handle_launcher_window_event(state, event_loop, window_id, event);
+                #[cfg(not(feature = "v3"))]
+                {
+                    let _ = state;
+                    if matches!(event, WindowEvent::CloseRequested) {
+                        event_loop.exit();
+                    }
                 }
             }
             AppState::Editing(state) | AppState::GoLive(state) => {
@@ -2431,10 +2587,18 @@ mod tests {
     /// `is_running` discriminates the active variants (Launcher,
     /// Editing, GoLive) from the inactive ones (Booting, Failed)
     /// per the macOS resume-guard contract.
+    ///
+    /// Under v3 the `LauncherState` payload owns wgpu + winit
+    /// resources (003-T2.2) and so cannot be unit-constructed;
+    /// non-v3 keeps the legacy unit struct so the Launcher arm
+    /// stays directly assertable. The structural property — the
+    /// `matches!` arms inside `is_running` — is identical for both
+    /// builds.
     #[test]
     fn app_state_is_running_only_for_active_variants() {
         assert!(!AppState::Booting.is_running());
         assert!(!AppState::Failed(FailureKind::RenderInitFailed).is_running());
+        #[cfg(not(feature = "v3"))]
         assert!(AppState::Launcher(LauncherState).is_running());
         // Editing / GoLive payloads cannot be constructed in a unit
         // test without bringing up wgpu, so the matches! check below
@@ -2461,10 +2625,15 @@ mod tests {
     #[test]
     fn resume_guard_excludes_booting_and_failed() {
         // Live sessions: re-resume must be suppressed.
+        //
+        // Under v3, LauncherState owns wgpu + winit resources (003-T2.2)
+        // so we can't construct the variant in a unit test. The same
+        // applies to Editing / GoLive — the `matches!` arms in
+        // `is_running` cover them structurally. Non-v3 keeps the
+        // legacy unit struct, so we assert the Launcher arm directly
+        // there.
+        #[cfg(not(feature = "v3"))]
         assert!(AppState::Launcher(LauncherState).is_running());
-        // Editing / GoLive carry EditingState which can't be unit-
-        // constructed without wgpu; the structural match in
-        // `is_running` covers them.
 
         // Inactive states: re-resume must be allowed (so Failed can
         // retry).
@@ -2473,11 +2642,13 @@ mod tests {
 
         // Tracing label coverage — none empty, all unique enough to
         // disambiguate at a glance in log review.
-        for label in [
+        let labels: &[&str] = &[
             AppState::Booting.kind_label(),
-            AppState::Launcher(LauncherState).kind_label(),
             AppState::Failed(FailureKind::RenderInitFailed).kind_label(),
-        ] {
+            #[cfg(not(feature = "v3"))]
+            AppState::Launcher(LauncherState).kind_label(),
+        ];
+        for label in labels {
             assert!(!label.is_empty());
             assert!(label.chars().next().is_some_and(|c| c.is_uppercase()));
         }
@@ -2533,12 +2704,19 @@ mod tests {
     /// 003-T1.4 acceptance: ControlFlow is derived per-state.
     /// Editing/GoLive must be Poll; Booting/Launcher/Failed must
     /// be Wait so idle states don't burn battery.
+    ///
+    /// Under v3 the `LauncherState` payload owns wgpu + winit
+    /// resources (003-T2.2) so we cannot unit-construct it here;
+    /// the structural property is preserved by the `match` in
+    /// `control_flow` itself. Non-v3 keeps the legacy unit struct
+    /// so the Launcher arm stays directly assertable.
     #[test]
     fn app_state_control_flow_per_variant() {
         assert!(matches!(
             AppState::Booting.control_flow(),
             ControlFlow::Wait
         ));
+        #[cfg(not(feature = "v3"))]
         assert!(matches!(
             AppState::Launcher(LauncherState).control_flow(),
             ControlFlow::Wait
