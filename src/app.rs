@@ -140,6 +140,21 @@ impl AppState {
     }
 }
 
+/// Unit-testable Booting→Failed transition (T-003-T1.2 acceptance #5).
+///
+/// Pulled out of the inline `resumed` body so the failure routing can
+/// be exercised without bringing up wgpu / winit. Each fn maps an
+/// error kind onto an `AppState::Failed(_)` variant.
+fn failed_state_for_project_load(err: &ProjectError) -> AppState {
+    AppState::Failed(FailureKind::ProjectLoadFailed {
+        reason: format!("{err}"),
+    })
+}
+
+fn failed_state_for_render_init() -> AppState {
+    AppState::Failed(FailureKind::RenderInitFailed)
+}
+
 /// Stub for the Phase-2 launcher window state. T-003-T2.2 populates
 /// the body; declared here so the `AppState` enum is stable from
 /// T1.1 onward.
@@ -1288,6 +1303,12 @@ impl ApplicationHandler for App {
             Ok(v) => v,
             Err(e) => {
                 tracing::error!(?e, "failed to load project file");
+                // T-003-T1.2: route the failure to AppState::Failed so
+                // future code can introspect the reason. T-003-T1.44
+                // upgrades the routing to render a Failed screen
+                // instead of exiting; for now we preserve the v1/v2
+                // exit-on-load-failure behaviour.
+                self.state = failed_state_for_project_load(&e);
                 event_loop.exit();
                 return;
             }
@@ -1339,6 +1360,10 @@ impl ApplicationHandler for App {
             }
             Err(e) => {
                 tracing::error!(?e, "init failed; exiting");
+                // T-003-T1.2: same as the project-load failure above;
+                // route to Failed before exit. T-003-T1.44 will replace
+                // exit() with a Failed-screen render.
+                self.state = failed_state_for_render_init();
                 event_loop.exit();
             }
         }
@@ -1725,5 +1750,48 @@ mod tests {
         // covers the remaining arms via the helper itself.
         let booting = AppState::Booting;
         assert!(matches!(booting, AppState::Booting));
+    }
+
+    /// 003-T1.2 acceptance criterion 5: Booting→Failed transition is
+    /// extracted and unit-testable. `failed_state_for_render_init`
+    /// always yields the `RenderInitFailed` variant.
+    #[test]
+    fn render_init_failure_maps_to_failed() {
+        let s = failed_state_for_render_init();
+        assert!(matches!(
+            s,
+            AppState::Failed(FailureKind::RenderInitFailed)
+        ));
+    }
+
+    /// 003-T1.2 acceptance criterion 5: project-load failure
+    /// transition carries the underlying error's `Display` message
+    /// into the `Failed` payload so users / tests can introspect
+    /// what went wrong.
+    #[test]
+    fn project_load_failure_preserves_reason() {
+        // Synthesise a ProjectError; the inner reason becomes the
+        // string in the `ProjectLoadFailed` payload.
+        let err = ProjectError::Io {
+            path: std::path::PathBuf::from("/missing.rmap.json"),
+            source: std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "no such file",
+            ),
+        };
+        let s = failed_state_for_project_load(&err);
+        match s {
+            AppState::Failed(FailureKind::ProjectLoadFailed { reason }) => {
+                assert!(
+                    reason.contains("/missing.rmap.json"),
+                    "reason should preserve the underlying io error: {reason}"
+                );
+                assert!(
+                    reason.contains("no such file"),
+                    "reason should preserve the underlying io error: {reason}"
+                );
+            }
+            _ => panic!("expected AppState::Failed(ProjectLoadFailed)"),
+        }
     }
 }
