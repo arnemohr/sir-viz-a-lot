@@ -204,18 +204,19 @@ pub fn load_presets_from_disk() -> Vec<Preset> {
     out
 }
 
-// 003-T3.1: under `--features v3` the tab strip is hidden; T3.27
-// deletes this enum once the canvas-merge transition completes.
-#[cfg_attr(feature = "v3", allow(dead_code))]
+// 003-T3.27: ControlTab and the tab field are v2-only. Under v3 these
+// items do not exist at all; the cfg gate replaces the old dual-mode
+// dead_code allow so the v3 build never accidentally references them.
+#[cfg(not(feature = "v3"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ControlTab {
     Scene,
     Effects,
     Layers,
-    Mapping,
     Scenes,
 }
 
+#[cfg(not(feature = "v3"))]
 impl Default for ControlTab {
     fn default() -> Self {
         // T-M9-02: Scene is the v2 default — operators see the live preview
@@ -226,7 +227,7 @@ impl Default for ControlTab {
 
 #[derive(Default)]
 pub struct ControlPanelState {
-    #[cfg_attr(feature = "v3", allow(dead_code))]
+    #[cfg(not(feature = "v3"))]
     pub tab: ControlTab,
     pub selected_layer: usize,
     /// 003-T1.18 — `Mutation`s emitted by `command_*` helpers during
@@ -236,8 +237,9 @@ pub struct ControlPanelState {
     /// v2 builds carry no undo machinery; the field is gated.
     #[cfg(feature = "v3")]
     pub pending_mutations: Vec<Mutation>,
-    /// Buffer for the Layers tab "add layer" path field (v2 only; T2.14+ uses
-    /// a native picker under v3 but the field is kept for API compatibility).
+    /// Buffer for the Layers tab "add layer" path field. Under v3 the layer
+    /// list lives in layer_strip; these fields exist on the shared struct for
+    /// API compatibility but are only read from v2 code paths.
     #[cfg_attr(feature = "v3", allow(dead_code))]
     pub new_layer_path_input: String,
     #[cfg_attr(feature = "v3", allow(dead_code))]
@@ -264,14 +266,14 @@ pub enum ControlPanelAction {
     None,
     /// Reload GPU layer runtime from `project.layers` paths.
     // Under v3, layer adds route through advanced.rs / layer_strip; under v2
-    // show_layers_tab returns this variant. Allow dead_code lint under v3.
+    // show_layers_tab returns this variant. app.rs matches it in all builds.
     #[cfg_attr(feature = "v3", allow(dead_code))]
     RebuildLayers,
     /// Operator clicked "recall" on a scene slot. App routes through the same
     /// scheduling logic as the keyboard hotkey so crossfade
     /// (`Project::crossfade_duration_s`) is honored from the UI too.
     // Under v3, scene recall is keyboard-driven; the v2 Scenes tab returns this
-    // variant.  Allow dead_code lint under v3.
+    // variant. app.rs matches it in all builds.
     #[cfg_attr(feature = "v3", allow(dead_code))]
     SceneRecall(usize),
     /// 003-T3.4: toolbar Undo button clicked. App drains through `undo_stack.undo`.
@@ -337,6 +339,7 @@ pub fn show(
     // T3.4 wires a toolbar button to toggle `advanced_open`).
     //
     // v2 builds keep the tabbed UI unchanged.
+    // 003-T3.6: Mapping tab removed; v2 strip is now Scene/Effects/Layers/Scenes.
     #[cfg(not(feature = "v3"))]
     egui::Panel::top("rmap_tabs")
         .resizable(false)
@@ -345,7 +348,6 @@ pub fn show(
                 ui.selectable_value(&mut st.tab, ControlTab::Scene, "Scene");
                 ui.selectable_value(&mut st.tab, ControlTab::Effects, "Effects");
                 ui.selectable_value(&mut st.tab, ControlTab::Layers, "Layers");
-                ui.selectable_value(&mut st.tab, ControlTab::Mapping, "Mapping");
                 ui.selectable_value(&mut st.tab, ControlTab::Scenes, "Scenes");
             });
         });
@@ -435,6 +437,7 @@ pub fn show(
             }
             show_scene_tab(ui, project, st, scene, inputs);
         }
+        // 003-T3.6: Mapping arm deleted; show_mapping_tab is gone.
         #[cfg(not(feature = "v3"))]
         match st.tab {
             ControlTab::Scene => show_scene_tab(ui, project, st, scene, inputs),
@@ -444,7 +447,6 @@ pub fn show(
                     action = ControlPanelAction::RebuildLayers;
                 }
             }
-            ControlTab::Mapping => show_mapping_tab(ui, project, st),
             ControlTab::Scenes => action = show_scenes_tab(ui, project, st),
         }
 
@@ -1224,306 +1226,10 @@ fn blend_label(m: BlendMode) -> &'static str {
     }
 }
 
-// T3.6 will delete show_mapping_tab when T3.11 (Advanced) has fully replaced
-// its destinations. Until then it is kept for the v2 Mapping tab only.
-#[cfg(not(feature = "v3"))]
-fn show_mapping_tab(ui: &mut Ui, project: &mut Project, st: &mut ControlPanelState) {
-    // v4: warp lives on the first layer. The legacy v2 Mapping tab is
-    // pre-T3.6 deletion; until T3.6 ships the inspector replacement,
-    // this path keeps editing layer 0's warp.
-    let Some(layer) = project.layers.get_mut(0) else {
-        ui.label("No layers — add a layer first.");
-        return;
-    };
-    let w = &mut layer.warp;
-    let rows = w.grid.len();
-    let cols = if rows > 0 { w.grid[0].len() } else { 0 };
-    if rows < 2 || cols < 2 || w.grid.iter().any(|row| row.len() != cols) {
-        ui.label("Mapping UI: warp grid must be at least 2×2 (corner pin).");
-        return;
-    }
-
-    ui.label(
-        "Drag the corners to map output to projector space. Coordinates are normalized [0,1].",
-    );
-
-    // Mesh-resolution controls. Editing rows/cols bilinear-resamples the grid so
-    // the operator's existing customisation survives a resize (T-M7-01).
-    ui.horizontal(|ui| {
-        ui.label("mesh");
-        #[cfg(feature = "v3")]
-        {
-            let new_rows_opt =
-                command_dragvalue_u32(ui, "warp_rows", w.rows.max(1), 1..=8u32, "rows ");
-            let new_cols_opt =
-                command_dragvalue_u32(ui, "warp_cols", w.cols.max(1), 1..=8u32, "cols ");
-            if new_rows_opt.is_some() || new_cols_opt.is_some() {
-                let new_rows = new_rows_opt.unwrap_or(w.rows).max(1);
-                let new_cols = new_cols_opt.unwrap_or(w.cols).max(1);
-                if new_rows != w.rows || new_cols != w.cols {
-                    let new_grid = schema::resample_grid(&w.grid, new_rows, new_cols);
-                    st.pending_mutations.push(Mutation::SetLayerWarpDimensions {
-                        layer_idx: 0,
-                        new_rows,
-                        new_cols,
-                        new_grid,
-                        old_rows: w.rows,
-                        old_cols: w.cols,
-                        old_grid: w.grid.clone(),
-                    });
-                }
-            }
-        }
-        #[cfg(not(feature = "v3"))]
-        {
-            let mut new_rows = w.rows.max(1);
-            let mut new_cols = w.cols.max(1);
-            let r_resp = ui.add(
-                egui::DragValue::new(&mut new_rows)
-                    .range(1..=8u32)
-                    .prefix("rows "),
-            );
-            let c_resp = ui.add(
-                egui::DragValue::new(&mut new_cols)
-                    .range(1..=8u32)
-                    .prefix("cols "),
-            );
-            let changed = (r_resp.changed() || c_resp.changed())
-                && (new_rows != w.rows || new_cols != w.cols);
-            if changed {
-                w.grid = schema::resample_grid(&w.grid, new_rows, new_cols);
-                w.rows = new_rows;
-                w.cols = new_cols;
-            }
-        }
-        ui.label(format!("({} × {} cells)", w.rows, w.cols));
-    });
-
-    // 16:9 thumbnail of the output framebuffer area. The canvas itself stands in for
-    // the framebuffer (we don't have a cross-window snapshot in v1 — see T-M5-08 notes).
-    let canvas_size = egui::vec2(480.0, 270.0);
-    let (canvas_resp, painter) = ui.allocate_painter(canvas_size, egui::Sense::hover());
-    let canvas_rect = canvas_resp.rect;
-
-    // Background placeholder: dark fill + checker pattern + border + axis labels.
-    painter.rect_filled(
-        canvas_rect,
-        egui::CornerRadius::ZERO,
-        egui::Color32::from_rgb(20, 22, 26),
-    );
-    let checker_n = 16usize;
-    let cw = canvas_rect.width() / checker_n as f32;
-    let ch = canvas_rect.height() / (checker_n as f32 * 9.0 / 16.0);
-    let rows_n = ((canvas_rect.height() / ch).ceil() as usize).max(1);
-    for cy in 0..rows_n {
-        for cx in 0..checker_n {
-            if (cx + cy) % 2 == 0 {
-                continue;
-            }
-            let p0 = canvas_rect.left_top() + egui::vec2(cx as f32 * cw, cy as f32 * ch);
-            let r = egui::Rect::from_min_size(p0, egui::vec2(cw, ch)).intersect(canvas_rect);
-            painter.rect_filled(
-                r,
-                egui::CornerRadius::ZERO,
-                egui::Color32::from_rgb(28, 30, 34),
-            );
-        }
-    }
-    painter.rect_stroke(
-        canvas_rect,
-        egui::CornerRadius::ZERO,
-        egui::Stroke::new(1.0, egui::Color32::from_rgb(70, 75, 85)),
-        egui::StrokeKind::Outside,
-    );
-    let label_color = egui::Color32::from_rgb(140, 145, 155);
-    painter.text(
-        canvas_rect.left_top() + egui::vec2(4.0, 2.0),
-        egui::Align2::LEFT_TOP,
-        "0,0",
-        egui::FontId::proportional(11.0),
-        label_color,
-    );
-    painter.text(
-        canvas_rect.right_bottom() + egui::vec2(-4.0, -2.0),
-        egui::Align2::RIGHT_BOTTOM,
-        "1,1",
-        egui::FontId::proportional(11.0),
-        label_color,
-    );
-    painter.text(
-        canvas_rect.center() + egui::vec2(0.0, -2.0),
-        egui::Align2::CENTER_BOTTOM,
-        "output area (placeholder thumbnail)",
-        egui::FontId::proportional(11.0),
-        label_color,
-    );
-
-    // Helper: normalized [0,1]^2 -> screen position inside canvas_rect.
-    let to_screen = |g: [f32; 2]| -> egui::Pos2 {
-        canvas_rect.left_top() + egui::vec2(g[0] * canvas_rect.width(), g[1] * canvas_rect.height())
-    };
-
-    // Mesh edges (low-contrast).
-    let edge_color = egui::Color32::from_rgb(120, 165, 220);
-    let edge_stroke = egui::Stroke::new(1.5, edge_color);
-    for r in 0..rows {
-        for c in 0..cols {
-            let here = to_screen(w.grid[r][c]);
-            if c + 1 < cols {
-                let right = to_screen(w.grid[r][c + 1]);
-                painter.line_segment([here, right], edge_stroke);
-            }
-            if r + 1 < rows {
-                let down = to_screen(w.grid[r + 1][c]);
-                painter.line_segment([here, down], edge_stroke);
-            }
-        }
-    }
-
-    // Handles: filled circles, hover/drag-aware. We allocate per-handle responses
-    // via `ui.interact(...)` so each handle gets its own hit-test rect.
-    let handle_radius = 7.0_f32;
-    let canvas_w = canvas_rect.width();
-    let canvas_h = canvas_rect.height();
-    for r in 0..rows {
-        for c in 0..cols {
-            let center = to_screen(w.grid[r][c]);
-            let rect = egui::Rect::from_center_size(
-                center,
-                egui::vec2(handle_radius * 2.5, handle_radius * 2.5),
-            );
-            let id = canvas_resp.id.with(("corner_handle", r, c));
-            let resp = ui.interact(rect, id, egui::Sense::drag());
-
-            if resp.dragged() {
-                let delta = resp.drag_delta();
-                if canvas_w > 0.0 && canvas_h > 0.0 {
-                    w.grid[r][c][0] = (w.grid[r][c][0] + delta.x / canvas_w).clamp(0.0, 1.0);
-                    w.grid[r][c][1] = (w.grid[r][c][1] + delta.y / canvas_h).clamp(0.0, 1.0);
-                }
-            }
-
-            // Re-evaluate center in case of drag this frame.
-            let center = to_screen(w.grid[r][c]);
-            let (fill, stroke) = if resp.dragged() {
-                (
-                    egui::Color32::from_rgb(255, 220, 90),
-                    egui::Stroke::new(2.0, egui::Color32::WHITE),
-                )
-            } else if resp.hovered() {
-                (
-                    egui::Color32::from_rgb(220, 200, 90),
-                    egui::Stroke::new(1.5, egui::Color32::from_rgb(240, 240, 240)),
-                )
-            } else {
-                (
-                    egui::Color32::from_rgb(180, 160, 70),
-                    egui::Stroke::new(1.0, egui::Color32::from_rgb(40, 40, 40)),
-                )
-            };
-            painter.circle(center, handle_radius, fill, stroke);
-        }
-    }
-
-    ui.add_space(6.0);
-    ui.horizontal(|ui| {
-        if ui.button("Reset to identity").clicked() {
-            #[cfg(feature = "v3")]
-            {
-                // Full-snapshot Reverse (ResetWarpMesh rule 3): capture the
-                // entire pre-reset WarpMesh so undo restores mask_polygon /
-                // mask_feather / source_rect unchanged even though Reset only
-                // writes rows / cols / grid.
-                let old = w.clone();
-                let mut new_mesh = old.clone();
-                new_mesh.rows = 1;
-                new_mesh.cols = 1;
-                new_mesh.grid = vec![vec![[0.0, 0.0], [1.0, 0.0]], vec![[0.0, 1.0], [1.0, 1.0]]];
-                st.pending_mutations.push(Mutation::ResetLayerWarpMesh {
-                    layer_idx: 0,
-                    new: new_mesh,
-                    old,
-                });
-            }
-            #[cfg(not(feature = "v3"))]
-            {
-                // Identity 1×1 corner pin: full output rect [0,0]..[1,1].
-                w.rows = 1;
-                w.cols = 1;
-                w.grid = vec![vec![[0.0, 0.0], [1.0, 0.0]], vec![[0.0, 1.0], [1.0, 1.0]]];
-            }
-        }
-        ui.label(format!("grid: {}×{}", rows, cols));
-    });
-
-    #[cfg(feature = "v3")]
-    {
-        if let Some(new) = command_slider(
-            ui,
-            "mask_feather",
-            "mask feather",
-            w.mask_feather,
-            0.0..=0.25,
-        ) {
-            st.pending_mutations.push(Mutation::SetLayerMaskFeather {
-                layer_idx: 0,
-                new,
-                old: w.mask_feather,
-            });
-        }
-    }
-    #[cfg(not(feature = "v3"))]
-    {
-        ui.add(egui::Slider::new(&mut w.mask_feather, 0.0..=0.25).text("mask feather"));
-    }
-
-    // T-M12-02 + T-M12-03: zone-template dropdown + clear button.
-    // The Scene-tab preview lets the operator drag the resulting
-    // vertices into place (T-M11-02).
-    ui.add_space(6.0);
-    ui.horizontal(|ui| {
-        ui.label("Zone:");
-        for (name, build) in crate::project::zone_templates::all_templates() {
-            if ui.button(name).clicked() {
-                #[cfg(feature = "v3")]
-                {
-                    st.pending_mutations.push(Mutation::SetLayerMaskPolygon {
-                        layer_idx: 0,
-                        new: build(),
-                        old: w.mask_polygon.clone(),
-                    });
-                }
-                #[cfg(not(feature = "v3"))]
-                {
-                    w.mask_polygon = build();
-                }
-            }
-        }
-        if ui.button("clear mask").clicked() {
-            #[cfg(feature = "v3")]
-            {
-                st.pending_mutations.push(Mutation::SetLayerMaskPolygon {
-                    layer_idx: 0,
-                    new: Vec::new(),
-                    old: w.mask_polygon.clone(),
-                });
-            }
-            #[cfg(not(feature = "v3"))]
-            {
-                w.mask_polygon.clear();
-            }
-        }
-    });
-    ui.label(format!(
-        "mask: {} vertices ({})",
-        w.mask_polygon.len(),
-        if w.mask_polygon.len() >= 3 {
-            "active"
-        } else {
-            "none — needs ≥ 3 vertices"
-        }
-    ));
-}
+// 003-T3.6: show_mapping_tab deleted. Mapping content has fully migrated to
+// Advanced > Selected layer > Mapping (T3.15). Zone templates + corner-pin
+// direct manipulation are reachable via the canvas (T3.5). The
+// checker-pattern 480×270 placeholder canvas is gone.
 
 // Scene slot UI lives in the v2 Scenes tab. Under v3 scenes are recalled
 // via keyboard; a future task will surface this UI elsewhere.

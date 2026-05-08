@@ -731,6 +731,87 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// 003-T3.26 — Canonical first session: walk Add layer → corner drag →
+    /// save scene to slot 1 → undo-all through the UndoStack, asserting
+    /// the Mutation chain a real session would produce. Exercises the same
+    /// code paths as operator interaction without requiring an egui context.
+    ///
+    /// Steps:
+    ///  1. Start with `Project::default()` (no layers).
+    ///  2. Add an image layer via `AddLayer` mutation.
+    ///  3. Drag a warp corner via `SetLayerWarpCorner`.
+    ///  4. Save the current state to scene slot 0 via `SetProjectScenes`.
+    ///  5. Undo all the way back; assert the project returns to zero layers.
+    #[cfg(feature = "v3")]
+    #[test]
+    fn canonical_first_session_mutations_round_trip() {
+        use crate::project::command::Mutation;
+        use crate::project::schema::Scene;
+        use crate::project::undo::UndoStack;
+
+        let mut project = Project::default();
+        let mut stack = UndoStack::new();
+
+        // --- step 1 + 2: add an image layer ---
+        let layer = crate::project::schema::layer_from_image_path(
+            "test_layer",
+            std::path::PathBuf::from("/tmp/notreal.png"),
+        );
+        let m = project.set_add_layer_mutation(layer, 0);
+        stack.push(m, &mut project);
+        assert_eq!(project.layers.len(), 1, "layer not added");
+
+        // --- step 3: drag warp corner (row 0, col 0) ---
+        let old_corner = project.layers[0].warp.grid[0][0];
+        let new_corner = [0.05f32, 0.07f32];
+        let m = Mutation::SetLayerWarpCorner {
+            layer_idx: 0,
+            r: 0,
+            c: 0,
+            new: new_corner,
+            old: old_corner,
+        };
+        stack.push(m, &mut project);
+        assert_eq!(
+            project.layers[0].warp.grid[0][0], new_corner,
+            "warp corner not updated",
+        );
+
+        // --- step 4: save current state to scene slot 0 ---
+        {
+            let snap = snapshot(&project);
+            let mut new_scenes = project.scenes.clone();
+            while new_scenes.len() <= 0 {
+                new_scenes.push(Scene {
+                    name: format!("scene{}", new_scenes.len() + 1),
+                    snapshot: serde_json::json!({}),
+                });
+            }
+            new_scenes[0].snapshot = snap;
+            let m = project.set_project_scenes_mutation(new_scenes);
+            stack.push(m, &mut project);
+        }
+        assert!(!project.scenes.is_empty(), "scene slot not saved");
+        let saved_snap = project.scenes[0].snapshot.clone();
+        assert!(
+            saved_snap.get("layers").is_some(),
+            "snapshot should contain layers",
+        );
+
+        // --- step 5: undo-all and verify clean state ---
+        while stack.can_undo() {
+            let _ = stack.undo(&mut project);
+        }
+        assert_eq!(
+            project.layers.len(),
+            0,
+            "layers not restored to empty after full undo",
+        );
+        // WarpMesh identity should be restored — corner [0][0] is [0.0, 0.0]
+        // after the AddLayer undo removes the layer entirely (no layer to check).
+        assert!(!stack.can_undo(), "undo stack not empty after undo-all");
+    }
+
     /// 003-T2.23 — `has_absolute_asset_paths` drives the migration
     /// toast on an existing project. Mixed absolute + relative paths
     /// still trip the flag (the operator should be invited to migrate
