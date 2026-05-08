@@ -4,6 +4,8 @@
 pub mod command;
 pub mod migrate;
 pub mod schema;
+#[cfg(feature = "v3")]
+pub mod undo;
 pub mod zone_templates;
 
 pub use schema::Project;
