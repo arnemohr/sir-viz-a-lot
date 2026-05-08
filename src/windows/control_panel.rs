@@ -160,6 +160,9 @@ pub fn load_presets_from_disk() -> Vec<Preset> {
     out
 }
 
+// 003-T3.1: under `--features v3` the tab strip is hidden; T3.27
+// deletes this enum once the canvas-merge transition completes.
+#[cfg_attr(feature = "v3", allow(dead_code))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ControlTab {
     Scene,
@@ -179,6 +182,7 @@ impl Default for ControlTab {
 
 #[derive(Default)]
 pub struct ControlPanelState {
+    #[cfg_attr(feature = "v3", allow(dead_code))]
     pub tab: ControlTab,
     pub selected_layer: usize,
     /// 003-T1.18 — `Mutation`s emitted by `command_*` helpers during
@@ -202,6 +206,11 @@ pub struct ControlPanelState {
     pub presets_loaded: bool,
     /// Selected preset index in the Effects-tab dropdown; reset on layer change.
     pub preset_picker_index: usize,
+    /// 003-T3.1: when true under `--features v3`, the Advanced disclosure
+    /// panel renders alongside the canvas. T3.4 wires the toolbar
+    /// button that toggles this; T3.11+ refines the panel's content
+    /// layout. v2 builds ignore this flag (the tabbed UI stays).
+    pub advanced_open: bool,
 }
 
 pub enum ControlPanelAction {
@@ -243,6 +252,14 @@ pub fn show(
 ) -> ControlPanelAction {
     let mut action = ControlPanelAction::None;
 
+    // 003-T3.1: under `--features v3`, the canvas IS the control window.
+    // Hide the v2 tab strip; the scene preview becomes the central
+    // surface. The previous Effects/Layers/Mapping/Scenes tab contents
+    // move to the Advanced disclosure panel (T3.11+ refines layout;
+    // T3.4 wires a toolbar button to toggle `advanced_open`).
+    //
+    // v2 builds keep the tabbed UI unchanged.
+    #[cfg(not(feature = "v3"))]
     egui::Panel::top("rmap_tabs")
         .resizable(false)
         .show_inside(ui, |ui| {
@@ -255,7 +272,69 @@ pub fn show(
             });
         });
 
+    // 003-T3.1: Advanced side panel — collapsible right-edge container
+    // for the legacy tab content during the canvas-merge transition.
+    // Closed by default; T3.4's Advanced button + T3.11+ content
+    // reorganisation populate the proper UI. For now, stack the
+    // Effects/Layers/Mapping/Scenes editors so an operator running v3
+    // can still reach those controls while the proper inspector
+    // (T3.3) and Advanced disclosure (T3.11) are in flight.
+    #[cfg(feature = "v3")]
+    if st.advanced_open {
+        egui::SidePanel::right("rmap_advanced")
+            .resizable(true)
+            .default_width(420.0)
+            .show_inside(ui, |ui| {
+                ui.heading("Advanced");
+                ui.label("Effects / Layers / Mapping / Scenes — T3.11+ rearranges this.");
+                ui.separator();
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    egui::CollapsingHeader::new("Layers")
+                        .default_open(true)
+                        .show(ui, |ui| {
+                            if matches!(
+                                show_layers_tab(ui, project, st),
+                                ControlPanelAction::RebuildLayers
+                            ) {
+                                action = ControlPanelAction::RebuildLayers;
+                            }
+                        });
+                    egui::CollapsingHeader::new("Effects")
+                        .default_open(false)
+                        .show(ui, |ui| show_effects_tab(ui, project, st));
+                    egui::CollapsingHeader::new("Mapping")
+                        .default_open(false)
+                        .show(ui, |ui| show_mapping_tab(ui, project, st));
+                    egui::CollapsingHeader::new("Scenes")
+                        .default_open(false)
+                        .show(ui, |ui| {
+                            if let ControlPanelAction::SceneRecall(idx) =
+                                show_scenes_tab(ui, project, st)
+                            {
+                                action = ControlPanelAction::SceneRecall(idx);
+                            }
+                        });
+                });
+            });
+    }
+
     egui::CentralPanel::default().show_inside(ui, |ui| {
+        // 003-T3.1: under v3 the canvas is always the central surface.
+        // T3.4 will replace this hard-coded scene render with toolbar +
+        // mode-aware drawing.
+        #[cfg(feature = "v3")]
+        {
+            // Temporary toggle for the Advanced side panel; T3.4
+            // replaces this with the proper toolbar (Warp / Advanced /
+            // Go-live). Project File + Master controls render below as
+            // a transitional placement; T3.12 moves Master into the
+            // Advanced disclosure.
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut st.advanced_open, "Advanced");
+            });
+            show_scene_tab(ui, project, st, scene, inputs);
+        }
+        #[cfg(not(feature = "v3"))]
         match st.tab {
             ControlTab::Scene => show_scene_tab(ui, project, st, scene, inputs),
             ControlTab::Effects => show_effects_tab(ui, project, st),
