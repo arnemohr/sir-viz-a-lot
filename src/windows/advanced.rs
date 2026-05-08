@@ -25,6 +25,7 @@ use crate::windows::control_panel::{
     ControlPanelAction, ControlPanelState, EffectChange, command_checkbox, command_dragvalue_u32,
     command_slider, effect_label, show_effect,
 };
+use crate::windows::glossary::{GlossaryTerm, glossary_label};
 use crate::windows::scene_editor::{SceneEditorState, Selection};
 
 // ---------------------------------------------------------------------------
@@ -76,23 +77,21 @@ pub fn show(
                 .id_salt(HDR_MASTER)
                 .default_open(false)
                 .show(ui, |ui| {
-                    if let Some(new) =
-                        command_slider(ui, "gamma", "gamma", project.gamma, 0.2..=4.0)
-                    {
+                    // T3.21 — glossary labels replace plain text in slider labels.
+                    glossary_label(ui, GlossaryTerm::Gamma);
+                    if let Some(new) = command_slider(ui, "gamma", "", project.gamma, 0.2..=4.0) {
                         st.pending_mutations.push(project.set_gamma_mutation(new));
                     }
-                    if let Some(new) = command_slider(
-                        ui,
-                        "brightness",
-                        "brightness",
-                        project.brightness,
-                        -1.0..=1.0,
-                    ) {
+                    glossary_label(ui, GlossaryTerm::Brightness);
+                    if let Some(new) =
+                        command_slider(ui, "brightness", "", project.brightness, -1.0..=1.0)
+                    {
                         st.pending_mutations
                             .push(project.set_brightness_mutation(new));
                     }
+                    glossary_label(ui, GlossaryTerm::Contrast);
                     if let Some(new) =
-                        command_slider(ui, "contrast", "contrast", project.contrast, 0.0..=4.0)
+                        command_slider(ui, "contrast", "", project.contrast, 0.0..=4.0)
                     {
                         st.pending_mutations
                             .push(project.set_contrast_mutation(new));
@@ -125,6 +124,8 @@ pub fn show(
                         .id_salt(HDR_BLEND_MODE)
                         .default_open(true)
                         .show(ui, |ui| {
+                            // T3.21 — glossary_label for the section's domain term.
+                            glossary_label(ui, GlossaryTerm::BlendMode);
                             let current_mode = project.layers[layer_idx].blend_mode;
                             let mut staged: Option<BlendMode> = None;
                             ui.horizontal(|ui| {
@@ -167,6 +168,9 @@ pub fn show(
                         .id_salt(HDR_EFFECT_CHAIN)
                         .default_open(true)
                         .show(ui, |ui| {
+                            // T3.21 — domain-term glossary label at the section top.
+                            glossary_label(ui, GlossaryTerm::Effect);
+                            ui.add_space(4.0);
                             show_effect_chain(ui, project, st, layer_idx);
                         });
 
@@ -179,6 +183,9 @@ pub fn show(
                         .id_salt(HDR_MAPPING)
                         .default_open(false)
                         .show(ui, |ui| {
+                            // T3.21 — warp is the core domain term for this section.
+                            glossary_label(ui, GlossaryTerm::Warp);
+                            ui.add_space(4.0);
                             show_layer_mapping(ui, project, st, layer_idx);
                         });
                 });
@@ -330,7 +337,8 @@ fn show_layer_mapping(
     let cur_rows = w.rows.max(1);
     let cur_cols = w.cols.max(1);
 
-    ui.label("Grid detail");
+    // T3.21 — grid detail is a domain term; use the glossary primitive.
+    glossary_label(ui, GlossaryTerm::GridDetail);
     ui.horizontal(|ui| {
         let new_rows_opt = command_dragvalue_u32(
             ui,
@@ -363,9 +371,10 @@ fn show_layer_mapping(
 
     ui.add_space(4.0);
 
-    // Zone templates + clear
+    // T3.21 — zone templates shape the mask polygon; label with glossary term.
     ui.horizontal(|ui| {
-        ui.label("Zone:");
+        glossary_label(ui, GlossaryTerm::MaskPolygon);
+        ui.label("templates:");
         let old_polygon = project.layers[layer_idx].warp.mask_polygon.clone();
         for (name, build) in crate::project::zone_templates::all_templates() {
             if ui.button(name).clicked() {
@@ -387,13 +396,14 @@ fn show_layer_mapping(
         }
     });
 
-    // Mask feather slider
+    // T3.21 — mask feather is a domain term.
+    glossary_label(ui, GlossaryTerm::MaskFeather);
     let w = &project.layers[layer_idx].warp;
     let cur_feather = w.mask_feather;
     if let Some(new) = command_slider(
         ui,
         &format!("adv_mask_feather_{layer_idx}"),
-        "mask feather",
+        "",
         cur_feather,
         0.0..=0.25,
     ) {
