@@ -631,6 +631,15 @@ fn load_project_for_startup(
     }
 }
 
+/// 003-T1.7: bring up the wgpu adapter + device. Pulled out of
+/// `init_running_app` so the launcher (T-003-T2.1) can reuse the
+/// GPU context without instantiating windows or the renderer.
+/// Failure produces an `RmapError::Render` via the existing
+/// `?` lift on `GpuContext::new`.
+fn init_gpu() -> Result<GpuContext> {
+    GpuContext::new().map_err(Into::into)
+}
+
 fn init_running_app(
     event_loop: &ActiveEventLoop,
     monitor: Option<MonitorHandle>,
@@ -638,7 +647,7 @@ fn init_running_app(
     project_file_path: Option<PathBuf>,
     output_windowed: bool,
 ) -> Result<EditingState> {
-    let gpu = GpuContext::new()?;
+    let gpu = init_gpu()?;
     let output = OutputWindow::new(
         event_loop,
         monitor,
