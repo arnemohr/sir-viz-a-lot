@@ -146,18 +146,56 @@ impl Compositor {
         self.height = height;
     }
 
-    /// Composite layers bottom → top. Returns the texture view that holds the final image.
+    /// Composite `layers` bottom → top, writing the final image into
+    /// `target_view`. The compositor's internal ping/pong textures
+    /// hold intermediate iterations; the **last** iteration writes to
+    /// `target_view`, so callers can use the target as both a render
+    /// destination (e.g. the projector RT) and the source for a
+    /// downstream pass (e.g. gamma) without an extra blit.
     ///
-    /// Each layer supplies its own `uniform` buffer (16 bytes: opacity, blend mode code, …)
-    /// so `queue.write_buffer` updates do not clobber each other before the GPU runs this pass.
+    /// Layer count parity therefore no longer affects which buffer
+    /// holds the final image — that was the v3 behaviour, removed
+    /// under v4 (T3.0b) so per-layer warp output flows cleanly into
+    /// the projector RT.
+    ///
+    /// Each layer supplies its own `uniform` buffer (16 bytes:
+    /// opacity, blend mode code, …) so `queue.write_buffer` updates
+    /// do not clobber each other before the GPU runs this pass.
     pub fn composite(
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         background: wgpu::Color,
+        target_view: &wgpu::TextureView,
         layers: &[(&wgpu::TextureView, BlendMode, f32, &wgpu::Buffer)],
-    ) -> &wgpu::TextureView {
+    ) {
+        // No layers: clear the target to the background colour and
+        // bail. Skips the ping clear too — there is nothing to read.
+        if layers.is_empty() {
+            let _ = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("compositor clear-only"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target_view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(background),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            return;
+        }
+
+        // Prime ping with the background; subsequent iterations alternate
+        // ping ↔ pong. The final iteration redirects its write to
+        // `target_view` so the caller doesn't have to pick the right
+        // buffer.
         {
             let pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("compositor clear bg"),
@@ -178,15 +216,14 @@ impl Compositor {
             drop(pass);
         }
 
-        if layers.is_empty() {
-            return &self.ping_view;
-        }
-
         let mut read_view: &wgpu::TextureView = &self.ping_view;
         let mut write_ping = false;
+        let last_idx = layers.len() - 1;
 
-        for (layer_view, blend, opacity, uniform_buf) in layers {
-            let dst_view = if write_ping {
+        for (i, (layer_view, blend, opacity, uniform_buf)) in layers.iter().enumerate() {
+            let dst_view = if i == last_idx {
+                target_view
+            } else if write_ping {
                 &self.ping_view
             } else {
                 &self.pong_view
@@ -247,11 +284,14 @@ impl Compositor {
                 pass.draw(0..6, 0..1);
             }
 
-            read_view = dst_view;
-            write_ping = !write_ping;
+            // Only update read_view + flip if we wrote to a ping/pong
+            // (the final iteration's target is read by gamma, not by
+            // a subsequent compositor iteration).
+            if i != last_idx {
+                read_view = dst_view;
+                write_ping = !write_ping;
+            }
         }
-
-        read_view
     }
 }
 

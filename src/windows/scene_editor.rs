@@ -235,7 +235,8 @@ pub fn hit_mask_vertex(
         )
     };
     let r2 = MASK_HANDLE_HIT_PX * MASK_HANDLE_HIT_PX;
-    for (w_idx, warp) in project.warps.iter().enumerate() {
+    for (w_idx, layer) in project.layers.iter().enumerate() {
+        let warp = &layer.warp;
         for (v_idx, p) in warp.mask_polygon.iter().enumerate() {
             let s = to_screen(*p);
             let dx = pos_screen.x - s.x;
@@ -294,7 +295,8 @@ pub fn hit_mask_edge(
         ]
     };
     let mut best: Option<(f32, usize, usize)> = None;
-    for (w_idx, warp) in project.warps.iter().enumerate() {
+    for (w_idx, layer) in project.layers.iter().enumerate() {
+        let warp = &layer.warp;
         let n = warp.mask_polygon.len();
         if n < 2 {
             continue;
@@ -363,7 +365,7 @@ pub fn handle_scene_input(
             // to miss), then layer body. Warp corners + source rect land
             // in M11 future work.
             if let Some((w_idx, v_idx)) = hit_mask_vertex(project, pos, preview_rect) {
-                let start_pos = project.warps[w_idx].mask_polygon[v_idx];
+                let start_pos = project.layers[w_idx].warp.mask_polygon[v_idx];
                 scene.selected = Some(Selection::MaskVertex {
                     warp: w_idx,
                     idx: v_idx,
@@ -455,8 +457,8 @@ pub fn handle_scene_input(
                     idx,
                     start_pos,
                 } => {
-                    if let Some(w) = project.warps.get_mut(*warp) {
-                        if let Some(p) = w.mask_polygon.get_mut(*idx) {
+                    if let Some(layer) = project.layers.get_mut(*warp) {
+                        if let Some(p) = layer.warp.mask_polygon.get_mut(*idx) {
                             p[0] = (start_pos[0] + dx).clamp(0.0, 1.0);
                             p[1] = (start_pos[1] + dy).clamp(0.0, 1.0);
                         }
@@ -517,8 +519,8 @@ pub fn handle_scene_input(
                     idx,
                     start_pos,
                 } => {
-                    if let Some(w) = project.warps.get_mut(*warp) {
-                        if let Some(p) = w.mask_polygon.get_mut(*idx) {
+                    if let Some(layer) = project.layers.get_mut(*warp) {
+                        if let Some(p) = layer.warp.mask_polygon.get_mut(*idx) {
                             let new = *p;
                             let old = *start_pos;
                             if (new[0] - old[0]).abs() > 1e-6 || (new[1] - old[1]).abs() > 1e-6 {
@@ -557,7 +559,7 @@ pub fn handle_scene_input(
         if let Some(pos) = pointer {
             scene.drag = None;
             if let Some((w_idx, v_idx)) = hit_mask_vertex(project, pos, preview_rect) {
-                let start_pos = project.warps[w_idx].mask_polygon[v_idx];
+                let start_pos = project.layers[w_idx].warp.mask_polygon[v_idx];
                 scene.selected = Some(Selection::MaskVertex {
                     warp: w_idx,
                     idx: v_idx,
@@ -639,8 +641,8 @@ pub fn handle_scene_input(
                     idx,
                     start_pos,
                 } => {
-                    if let Some(w) = project.warps.get_mut(*warp) {
-                        if let Some(p) = w.mask_polygon.get_mut(*idx) {
+                    if let Some(layer) = project.layers.get_mut(*warp) {
+                        if let Some(p) = layer.warp.mask_polygon.get_mut(*idx) {
                             p[0] = (start_pos[0] + dx).clamp(0.0, 1.0);
                             p[1] = (start_pos[1] + dy).clamp(0.0, 1.0);
                         }
@@ -756,7 +758,8 @@ pub fn paint_mask_overlays(
     };
     let edge_color = egui::Color32::from_rgb(140, 100, 200);
     let edge_stroke = egui::Stroke::new(1.5, edge_color);
-    for (w_idx, warp) in project.warps.iter().enumerate() {
+    for (w_idx, layer) in project.layers.iter().enumerate() {
+        let warp = &layer.warp;
         let n = warp.mask_polygon.len();
         if n < 2 {
             continue;

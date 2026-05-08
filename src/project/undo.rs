@@ -118,16 +118,7 @@ mod tests {
     use super::*;
 
     fn fresh_project() -> Project {
-        let json = serde_json::json!({
-            "schema_version": 3,
-            "layers": [],
-            "warps": [],
-        });
-        let mut p: Project = serde_json::from_value(json).expect("project deserialise");
-        if p.warps.is_empty() {
-            p.warps.push(crate::project::schema::default_warp_mesh());
-        }
-        p
+        Project::default()
     }
 
     /// Pushing N mutations grows undo by N; redo stays empty.

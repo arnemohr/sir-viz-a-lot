@@ -42,12 +42,6 @@ impl Project {
         let value: serde_json::Value = serde_json::from_str(&text)?;
         let (value, outcome) = migrate::migrate(value)?;
         let mut project: Project = serde_json::from_value(value)?;
-        // Legacy fixup retained while T3.0b's render-graph rewrite is
-        // pending — `Project.warps` still feeds the renderer / audit /
-        // mutations until T3.0b deletes the field.
-        if project.warps.is_empty() {
-            project.warps.push(schema::default_warp_mesh());
-        }
         // T3.0a side-channel: T3.0d's audit pass reads
         // `previous_warp_count` to fire `MultipleWarpsConsolidated`
         // exactly once per session for v3 projects whose migration was
@@ -355,15 +349,13 @@ mod tests {
             effects: crate::effects::default_effect_chain(),
             blend_mode: BlendMode::Screen,
             opacity: 0.5,
-            warp: WarpMesh::identity(),
-        });
-        original.warps.push(WarpMesh {
-            rows: 1,
-            cols: 1,
-            grid: vec![vec![[0.0, 0.0], [1.0, 0.0]], vec![[0.0, 1.0], [1.0, 1.0]]],
-            source_rect: [0.0, 0.0, 1.0, 1.0],
-            mask_polygon: vec![],
-            mask_feather: 0.05,
+            warp: WarpMesh {
+                rows: 1,
+                cols: 1,
+                grid: vec![vec![[0.0, 0.0], [1.0, 0.0]], vec![[0.0, 1.0], [1.0, 1.0]]],
+                mask_polygon: vec![],
+                mask_feather: 0.05,
+            },
         });
         original.scenes.push(Scene {
             name: "intro".into(),
@@ -395,15 +387,13 @@ mod tests {
             effects: crate::effects::default_effect_chain(),
             blend_mode: BlendMode::Multiply,
             opacity: 0.75,
-            warp: WarpMesh::identity(),
-        });
-        p.warps.push(WarpMesh {
-            rows: 1,
-            cols: 1,
-            grid: vec![vec![[0.1, 0.0], [0.9, 0.05]], vec![[0.0, 1.0], [1.0, 1.0]]],
-            source_rect: [0.0, 0.0, 1.0, 1.0],
-            mask_polygon: vec![[0.2, 0.2], [0.8, 0.2], [0.8, 0.8]],
-            mask_feather: 0.1,
+            warp: WarpMesh {
+                rows: 1,
+                cols: 1,
+                grid: vec![vec![[0.1, 0.0], [0.9, 0.05]], vec![[0.0, 1.0], [1.0, 1.0]]],
+                mask_polygon: vec![[0.2, 0.2], [0.8, 0.2], [0.8, 0.8]],
+                mask_feather: 0.1,
+            },
         });
         p.scenes.push(Scene {
             name: "slot1".into(),

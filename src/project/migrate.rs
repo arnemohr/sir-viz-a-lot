@@ -54,20 +54,20 @@ pub fn migrate(mut value: Value) -> Result<(Value, MigrationOutcome), ProjectErr
 /// old top-level `svg_path` field. v0/v1 layers also flow through this path:
 /// at v0/v1 the same flat field existed, so the migration is identical.
 /// Copy `Project.warps[0]` (or an identity warp) onto each layer's new
-/// `warp` field. Records the original warp count in `outcome` so the
-/// audit pass (T3.0d) can fire `MultipleWarpsConsolidated` exactly once
-/// when the migration was lossy (M > 1 warps consolidated to N layers).
+/// `warp` field, then drop the top-level `warps` array. Records the
+/// original warp count in `outcome` so the audit pass (T3.0d) can fire
+/// `MultipleWarpsConsolidated` exactly once when the migration was lossy
+/// (M > 1 warps consolidated to N layers).
 ///
-/// The project's top-level `warps` array is **preserved**: the v4 render
-/// graph hasn't landed yet (T3.0b), so the renderer, audit, and mutations
-/// still read it. T3.0b deletes the field atomically with the render-graph
-/// rewrite.
+/// Also strips the per-warp `source_rect` field on copied warps —
+/// schema v4 dropped it; serde silently ignores unknown fields, but
+/// scrubbing keeps the migration output minimal.
 fn migrate_v3_to_v4_per_layer_warp(value: &mut Value, outcome: &mut MigrationOutcome) {
     let Some(obj) = value.as_object_mut() else {
         return;
     };
 
-    let template_warp: Value = obj
+    let mut template_warp: Value = obj
         .get("warps")
         .and_then(|w| w.as_array())
         .map(|warps| {
@@ -75,21 +75,27 @@ fn migrate_v3_to_v4_per_layer_warp(value: &mut Value, outcome: &mut MigrationOut
             warps.first().cloned().unwrap_or_else(default_identity_warp)
         })
         .unwrap_or_else(default_identity_warp);
+    if let Some(t) = template_warp.as_object_mut() {
+        t.remove("source_rect");
+    }
 
-    let Some(layers) = obj.get_mut("layers").and_then(|v| v.as_array_mut()) else {
-        return;
-    };
-    for layer in layers.iter_mut() {
-        let Some(layer_obj) = layer.as_object_mut() else {
-            continue;
-        };
-        // Preserve a hand-edited per-layer warp if one is already present
-        // (someone may have written a v4-shaped file by hand and tagged
-        // it `schema_version: 3`).
-        if !layer_obj.contains_key("warp") {
-            layer_obj.insert("warp".into(), template_warp.clone());
+    if let Some(layers) = obj.get_mut("layers").and_then(|v| v.as_array_mut()) {
+        for layer in layers.iter_mut() {
+            let Some(layer_obj) = layer.as_object_mut() else {
+                continue;
+            };
+            // Preserve a hand-edited per-layer warp if one is already present
+            // (someone may have written a v4-shaped file by hand and tagged
+            // it `schema_version: 3`).
+            if !layer_obj.contains_key("warp") {
+                layer_obj.insert("warp".into(), template_warp.clone());
+            } else if let Some(w) = layer_obj.get_mut("warp").and_then(|v| v.as_object_mut()) {
+                w.remove("source_rect");
+            }
         }
     }
+
+    obj.remove("warps");
 }
 
 /// JSON form of `WarpMesh::identity()` — kept inline so migrate doesn't
@@ -102,7 +108,6 @@ fn default_identity_warp() -> Value {
             [[0.0, 0.0], [1.0, 0.0]],
             [[0.0, 1.0], [1.0, 1.0]]
         ],
-        "source_rect": [0.0, 0.0, 1.0, 1.0],
         "mask_polygon": [],
         "mask_feather": 0.02,
     })
@@ -213,7 +218,6 @@ mod tests {
                 [[0.0, 0.5], [0.5, 0.5], [1.0, 0.5]],
                 [[0.0, 1.0], [0.5, 1.0], [1.0, 1.0]],
             ],
-            "source_rect": [0.0, 0.0, 1.0, 1.0],
             "mask_polygon": [[0.1, 0.1], [0.9, 0.1], [0.9, 0.9], [0.1, 0.9]],
             "mask_feather": 0.07,
         });
@@ -245,26 +249,35 @@ mod tests {
             "layers": [v3_layer("a"), v3_layer("b"), v3_layer("c")],
             "warps": [
                 serde_json::json!({
-                    "rows": 1, "cols": 1,
-                    "grid": [[[0.0, 0.0], [1.0, 0.0]], [[0.0, 1.0], [1.0, 1.0]]],
-                    "source_rect": [0.0, 0.0, 0.5, 1.0],
-                    "mask_polygon": [], "mask_feather": 0.02,
+                    "rows": 2, "cols": 2,
+                    "grid": [
+                        [[0.0, 0.0], [0.5, 0.0], [1.0, 0.0]],
+                        [[0.0, 0.5], [0.5, 0.5], [1.0, 0.5]],
+                        [[0.0, 1.0], [0.5, 1.0], [1.0, 1.0]],
+                    ],
+                    "mask_polygon": [], "mask_feather": 0.05,
                 }),
                 serde_json::json!({
                     "rows": 1, "cols": 1,
                     "grid": [[[0.0, 0.0], [1.0, 0.0]], [[0.0, 1.0], [1.0, 1.0]]],
-                    "source_rect": [0.5, 0.0, 0.5, 1.0],
-                    "mask_polygon": [], "mask_feather": 0.02,
+                    "mask_polygon": [], "mask_feather": 0.01,
                 }),
             ],
         });
         let (out, outcome) = migrate(v).expect("migrate");
+        // Top-level `warps` field is dropped from the migrated value.
+        assert!(
+            out.as_object()
+                .map(|o| !o.contains_key("warps"))
+                .unwrap_or(false)
+        );
         let p: Project = serde_json::from_value(out).expect("deserialize as v4");
         assert_eq!(p.schema_version, CURRENT_SCHEMA_VERSION);
         assert_eq!(outcome.previous_warp_count, 2);
-        // Every layer received warps[0] (source_rect[0] == 0.0, not 0.5).
+        // Every layer received warps[0] (rows=2, feather=0.05 — not 1/0.01).
         for layer in &p.layers {
-            assert_eq!(layer.warp.source_rect[0], 0.0);
+            assert_eq!(layer.warp.rows, 2);
+            assert!((layer.warp.mask_feather - 0.05).abs() < 1e-6);
         }
     }
 

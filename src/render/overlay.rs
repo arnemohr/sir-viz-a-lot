@@ -304,48 +304,27 @@ fn norm_to_clip(n: [f32; 2]) -> [f32; 2] {
     [n[0] * 2.0 - 1.0, 1.0 - n[1] * 2.0]
 }
 
-/// Forward-map a point from the compositor source space (y-down [0,1]²,
+/// Forward-map a point from a layer's pre-warp space (y-down [0,1]²,
 /// the same space the warp shader samples via `t_scene`) into the
-/// projector's surface space (also y-down [0,1]²).
+/// projector's surface space (also y-down [0,1]²) using the **layer's
+/// own warp mesh**.
 ///
-/// Picks the warp whose `source_rect` contains `p_src`; if none does
-/// (the layer was scaled or moved past the warp's domain), falls back
-/// to the first warp and **extrapolates** through the nearest cell's
-/// homography. The homography is well-defined for the whole plane, not
-/// just `[0,1]²`, so this gives a continuous outline that bows the
-/// same way the rendered content would if it extended that far. The
-/// previous behaviour was to return `p_src` unchanged for outside
-/// points, which spliced un-warped corners onto warped ones and
-/// produced the stretch artefact when a layer was scaled up past the
-/// source rect.
-fn warp_source_to_surface(p_src: [f32; 2], warps: &[WarpMesh]) -> [f32; 2] {
-    if warps.is_empty() {
-        return p_src;
-    }
+/// v4: each layer owns its warp; the mapping is per-layer so the
+/// outline of layer N follows layer N's deformation. `t`/`tx`/`ty` are
+/// unclamped so the homography extrapolates continuously past the
+/// `[0,1]²` cell domain — gives a smooth outline when a layer is
+/// scaled or translated past the unit square.
+fn warp_source_to_surface(p_src: [f32; 2], warp: &WarpMesh) -> [f32; 2] {
     if !p_src[0].is_finite() || !p_src[1].is_finite() {
         return p_src;
     }
-    let warp = warps
-        .iter()
-        .find(|w| {
-            let [sx, sy, sw, sh] = w.source_rect;
-            p_src[0] >= sx && p_src[0] <= sx + sw && p_src[1] >= sy && p_src[1] <= sy + sh
-        })
-        .unwrap_or(&warps[0]);
-
     let rows = warp.rows as usize;
     let cols = warp.cols as usize;
     if rows == 0 || cols == 0 || warp.grid.len() != rows + 1 {
         return p_src;
     }
-    let [sx, sy, sw, sh] = warp.source_rect;
-    let fu = (p_src[0] - sx) / sw.max(1e-6);
-    let fv = (p_src[1] - sy) / sh.max(1e-6);
-    let gx = fu * cols as f32;
-    let gy = fv * rows as f32;
-    // Clamp the **cell index** to a valid range but let `tx`/`ty` be
-    // unclamped — that's what extrapolates the homography. For 1×1 the
-    // single cell handles the whole plane.
+    let gx = p_src[0] * cols as f32;
+    let gy = p_src[1] * rows as f32;
     let ix = (gx.floor() as i32).clamp(0, cols as i32 - 1) as usize;
     let iy = (gy.floor() as i32).clamp(0, rows as i32 - 1) as usize;
     let tx = gx - ix as f32;
@@ -423,11 +402,11 @@ pub fn build_overlay_lines(project: &Project, selected_layer: Option<usize>) -> 
         for edge in 0..4 {
             let a = corners_src[edge];
             let b = corners_src[(edge + 1) % 4];
-            let mut prev = warp_source_to_surface(a, &project.warps);
+            let mut prev = warp_source_to_surface(a, &layer.warp);
             for i in 1..=EDGE_SAMPLES {
                 let t = i as f32 / EDGE_SAMPLES as f32;
                 let p_src = [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
-                let p_surf = warp_source_to_surface(p_src, &project.warps);
+                let p_surf = warp_source_to_surface(p_src, &layer.warp);
                 lines.push(OverlayLine {
                     a_clip: norm_to_clip(prev),
                     b_clip: norm_to_clip(p_surf),
@@ -440,16 +419,19 @@ pub fn build_overlay_lines(project: &Project, selected_layer: Option<usize>) -> 
     }
 
     // Mask polygons: white, slightly translucent so they don't fully
-    // hide content underneath. One closed loop per warp.
-    for warp in project.warps.iter() {
-        let n = warp.mask_polygon.len();
+    // hide content underneath. One closed loop per layer with a mask.
+    for layer in project.layers.iter() {
+        if !layer.enabled {
+            continue;
+        }
+        let n = layer.warp.mask_polygon.len();
         if n < 2 {
             continue;
         }
         let color = [1.0, 1.0, 1.0, 0.85];
         for i in 0..n {
-            let a = norm_to_clip(warp.mask_polygon[i]);
-            let b = norm_to_clip(warp.mask_polygon[(i + 1) % n]);
+            let a = norm_to_clip(layer.warp.mask_polygon[i]);
+            let b = norm_to_clip(layer.warp.mask_polygon[(i + 1) % n]);
             lines.push(OverlayLine {
                 a_clip: a,
                 b_clip: b,

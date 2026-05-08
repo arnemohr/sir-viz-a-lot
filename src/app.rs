@@ -369,13 +369,6 @@ struct EditingState {
     /// Shared textured-quad pipeline for SVG upload → effect source.
     svg_pipeline: SvgLayerPipeline,
     compositor: Compositor,
-    /// One [`WarpRenderer`] per `project.warps` entry. Each holds its own
-    /// vertex/SDF buffers; renders are chained in order with `LoadOp::Clear`
-    /// for the first and `LoadOp::Load` for subsequent so non-overlapping
-    /// `source_rect` regions co-exist on the same `warp_rt_view` (T-M7-02).
-    /// Roadmap defers true multi-output until single-surface UX is mature;
-    /// this lets multiple warps share one projector without that scope.
-    warps: Vec<WarpRenderer>,
     gamma: GammaPipeline,
     /// Editor-overlay pass painted on top of the projector after gamma
     /// (toggled by `output.state.show_editor_overlay`). Lets the
@@ -818,6 +811,15 @@ struct LayerState {
     /// Image layers learn it from `image_layer::upload_image_rgba8`; SVG
     /// layers stay at `1.0` (resvg renders a square pixmap).
     texture_aspect: f32,
+    /// v4 (T3.0b): per-layer warp pass. Reads the layer's pre-warp
+    /// effect-chain output; writes a projector-sized texture that the
+    /// compositor consumes with the layer's `BlendMode` + `opacity`.
+    /// Replaces the v3 model where one or more `WarpRenderer`s ran
+    /// over the *composited* layers; under v4 each layer warps
+    /// independently and the compositor runs over post-warp views.
+    warp_renderer: WarpRenderer,
+    _warp_texture: wgpu::Texture,
+    warp_view: wgpu::TextureView,
 }
 
 fn create_layer_uniform_buffers(
@@ -1011,7 +1013,6 @@ fn init_gpu() -> Result<GpuContext> {
 struct RenderGraph {
     svg_pipeline: SvgLayerPipeline,
     compositor: Compositor,
-    warps: Vec<WarpRenderer>,
     gamma: GammaPipeline,
     overlay: OverlayPipeline,
     warp_rt: wgpu::Texture,
@@ -1020,9 +1021,9 @@ struct RenderGraph {
 }
 
 /// 003-T1.11: build the per-projector render graph (compositor +
-/// warp renderers + gamma + overlay + warp-RT + per-layer GPU
-/// state). The graph depends on the output's chosen surface
-/// format and on the project's layer / warp configuration.
+/// gamma + overlay + projector RT + per-layer GPU state). T3.0b moved
+/// the warp pass onto each `LayerState`, so there is no project-level
+/// `Vec<WarpRenderer>` any more.
 fn init_render_graph(
     renderer: &Renderer,
     project: &Project,
@@ -1037,14 +1038,6 @@ fn init_render_graph(
     let svg_pipeline = SvgLayerPipeline::new(device, surface_format);
     let compositor = Compositor::new(device, w, h, surface_format);
 
-    // T-M7-02: one WarpRenderer per project.warps entry. Project::load
-    // guarantees a default warp when the file omits `warps`, so this Vec
-    // is always non-empty after init.
-    let warp_count = project.warps.len().max(1);
-    let warps: Vec<WarpRenderer> = (0..warp_count)
-        .map(|_| WarpRenderer::new(device, surface_format))
-        .collect();
-
     let gamma = GammaPipeline::new(device, surface_format);
     let overlay = OverlayPipeline::new(device, surface_format);
     let (warp_rt, warp_rt_view) = make_warp_render_target(device, w, h, surface_format);
@@ -1053,7 +1046,6 @@ fn init_render_graph(
     Ok(RenderGraph {
         svg_pipeline,
         compositor,
-        warps,
         gamma,
         overlay,
         warp_rt,
@@ -1303,7 +1295,6 @@ fn assemble_editing_state(
         layers: graph.layers,
         svg_pipeline: graph.svg_pipeline,
         compositor: graph.compositor,
-        warps: graph.warps,
         gamma: graph.gamma,
         overlay: graph.overlay,
         warp_rt: graph.warp_rt,
@@ -2163,9 +2154,6 @@ fn build_initial_project(svg_path: Option<PathBuf>) -> Project {
             .layers
             .push(schema::layer_from_svg_path("layer0", path));
     }
-    if project.warps.is_empty() {
-        project.warps.push(schema::default_warp_mesh());
-    }
     project
 }
 
@@ -2244,6 +2232,9 @@ fn rebuild_layers(
 
         let (color_uniform, blur_uniform, transform_uniform, compositor_uniform, fit_uniform) =
             create_layer_uniform_buffers(device);
+        let warp_renderer = WarpRenderer::new(device, surface_format);
+        let (warp_texture, warp_view) =
+            make_layer_warp_texture(device, width, height, surface_format);
         out.push(LayerState {
             layer,
             layer_id,
@@ -2261,9 +2252,40 @@ fn rebuild_layers(
             compositor_uniform,
             fit_uniform,
             texture_aspect,
+            warp_renderer,
+            _warp_texture: warp_texture,
+            warp_view,
         });
     }
     Ok(out)
+}
+
+/// Allocate a per-layer warp output texture sized to the projector RT.
+/// Each layer's warp pass writes here; the compositor then blends the
+/// per-layer warp views together with each layer's `BlendMode` +
+/// `opacity` (T3.0b).
+fn make_layer_warp_texture(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+    format: wgpu::TextureFormat,
+) -> (wgpu::Texture, wgpu::TextureView) {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("layer warp output"),
+        size: wgpu::Extent3d {
+            width: width.max(1),
+            height: height.max(1),
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    (texture, view)
 }
 
 fn make_warp_render_target(
@@ -2307,6 +2329,11 @@ fn resize_m5_gpu(state: &mut EditingState) {
         let (itex, iview) = make_intermediate_texture(device, w, h, fmt);
         layer._intermediate_texture = itex;
         layer.intermediate_view = iview;
+        // T3.0b: per-layer warp output is projector-sized; recreate
+        // alongside the rest of the GPU resources on resize.
+        let (wtex, wview) = make_layer_warp_texture(device, w, h, fmt);
+        layer._warp_texture = wtex;
+        layer.warp_view = wview;
         layer.generation = layer.generation.wrapping_add(1);
         let path = state.project.layers[i].kind.asset_path().to_path_buf();
         let _ = layer.job_tx.send(RasterJob {
@@ -2497,7 +2524,6 @@ fn render_m5_pipeline(
     layers: &mut [LayerState],
     svg_pipeline: &SvgLayerPipeline,
     compositor: &Compositor,
-    warps: &mut Vec<WarpRenderer>,
     gamma: &GammaPipeline,
     overlay: &mut OverlayPipeline,
     overlay_selected: Option<usize>,
@@ -2507,20 +2533,10 @@ fn render_m5_pipeline(
     blur: &BlurPipeline,
     transform: &TransformPipeline,
     external_registry: &ExternalRegistry,
-    surface_format: wgpu::TextureFormat,
+    _surface_format: wgpu::TextureFormat,
     clock: &Clock,
 ) -> std::result::Result<(), RenderError> {
     crate::show_day::panic_restore::run_frame_assert_unwind_safe(|| {
-        // T-M7-02: ensure WarpRenderer count matches project.warps. Most
-        // frames this is a no-op compare; only scene recall / project load
-        // can change the warp count.
-        let want = project.warps.len().max(1);
-        if warps.len() != want {
-            warps.resize_with(want, || {
-                WarpRenderer::new(&renderer.gpu.device, surface_format)
-            });
-        }
-
         let mut encoder =
             renderer
                 .gpu
@@ -2540,6 +2556,16 @@ fn render_m5_pipeline(
             );
         }
 
+        // T3.0b: per-layer pipeline. Each enabled layer
+        //   1. rasters its source + runs the effect chain (existing path,
+        //      `effect_pipeline.final_view()` is the pre-warp result),
+        //   2. is warped through *its own* `WarpMesh` into a per-layer
+        //      `warp_view` texture (projector space),
+        //   3. is fed to the compositor as a post-warp view; the
+        //      compositor then blends layers with each layer's
+        //      `BlendMode` + `opacity`, writing the final image directly
+        //      into `warp_rt_view` (the projector RT) so the gamma pass
+        //      and the egui scene preview can both consume it.
         for (cfg, ls) in project.layers.iter().zip(layers.iter_mut()) {
             if !cfg.enabled {
                 continue;
@@ -2607,8 +2633,26 @@ fn render_m5_pipeline(
                     }
                 }
             }
-            composite_inputs.push((
+            // Per-layer warp pass: pre-warp effect output → ls.warp_view.
+            // `LoadOp::Clear` so the previous frame's contents (or another
+            // layer's earlier write to a different layer's warp_view)
+            // never bleed in.
+            ls.warp_renderer.sync_mesh_and_mask(
+                &renderer.gpu.device,
+                &renderer.gpu.queue,
+                &cfg.warp,
+            );
+            ls.warp_renderer.render(
+                &renderer.gpu.device,
+                &renderer.gpu.queue,
+                &mut encoder,
+                &ls.warp_view,
                 ls.effect_pipeline.final_view(),
+                &cfg.warp,
+                wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+            );
+            composite_inputs.push((
+                &ls.warp_view,
                 cfg.blend_mode,
                 cfg.opacity,
                 &ls.compositor_uniform,
@@ -2622,39 +2666,17 @@ fn render_m5_pipeline(
             b: c[2] as f64,
             a: c[3] as f64,
         };
-        let composed = compositor.composite(
+        // Compositor writes the final blended image directly into
+        // `warp_rt_view` (the projector RT). Gamma + egui both read
+        // from there.
+        compositor.composite(
             &renderer.gpu.device,
             &renderer.gpu.queue,
             &mut encoder,
             bg,
+            warp_rt_view,
             &composite_inputs,
         );
-
-        // Iterate every warp in `project.warps`. First pass clears the
-        // shared `warp_rt_view`; subsequent passes use `LoadOp::Load` so
-        // disjoint `source_rect` regions co-exist on one output. Where
-        // dst quads overlap the second warp's REPLACE write wins
-        // (matches roadmap-deferred multi-output simplification: this is
-        // multi-region, not multi-projector).
-        let default_mesh = schema::default_warp_mesh();
-        for (i, warp_renderer) in warps.iter_mut().enumerate() {
-            let mesh_ref: &schema::WarpMesh = project.warps.get(i).unwrap_or(&default_mesh);
-            warp_renderer.sync_mesh_and_mask(&renderer.gpu.device, &renderer.gpu.queue, mesh_ref);
-            let load = if i == 0 {
-                wgpu::LoadOp::Clear(wgpu::Color::BLACK)
-            } else {
-                wgpu::LoadOp::Load
-            };
-            warp_renderer.render(
-                &renderer.gpu.device,
-                &renderer.gpu.queue,
-                &mut encoder,
-                warp_rt_view,
-                composed,
-                mesh_ref,
-                load,
-            );
-        }
 
         renderer.gpu.queue.submit(std::iter::once(encoder.finish()));
 
@@ -3240,7 +3262,6 @@ fn handle_editing_window_event(
                     &mut state.layers,
                     &state.svg_pipeline,
                     &state.compositor,
-                    &mut state.warps,
                     &state.gamma,
                     &mut state.overlay,
                     overlay_selected,
@@ -3893,18 +3914,17 @@ mod tests {
             "demo project should audit clean, got: {findings:?}"
         );
 
-        // Sanity-check the project shape: one image layer, one warp,
-        // one polygon mask, output_windowed = true (so the demo
-        // doesn't fullscreen-on-launch in a CI context).
+        // Sanity-check the project shape: one image layer with a
+        // per-layer warp + polygon mask, output_windowed = true (so the
+        // demo doesn't fullscreen-on-launch in a CI context).
         assert_eq!(project.layers.len(), 1, "demo has exactly one image layer");
         assert!(matches!(
             project.layers[0].kind,
             crate::project::schema::LayerKind::Image { .. }
         ));
-        assert_eq!(project.warps.len(), 1, "demo has exactly one warp");
         assert!(
-            !project.warps[0].mask_polygon.is_empty(),
-            "demo's warp carries a window-rectangle mask",
+            !project.layers[0].warp.mask_polygon.is_empty(),
+            "demo's layer warp carries a window-rectangle mask",
         );
         assert!(project.output_windowed, "demo opens windowed for safety");
         assert_eq!(

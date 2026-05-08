@@ -81,13 +81,13 @@ pub enum AuditKind {
     /// Warp at `warp_idx` has rows < 2, cols < 2, or non-rectangular
     /// row lengths.
     DegenerateWarp {
-        /// Index into `Project.warps`.
+        /// Index into `Project.layers`; the layers `warp` is the target.
         warp_idx: usize,
     },
     /// Warp at `warp_idx` has a mask polygon with fewer than 3
     /// vertices; the SDF baker silently drops these.
     MaskTooFew {
-        /// Index into `Project.warps`.
+        /// Index into `Project.layers`; the layers `warp` is the target.
         warp_idx: usize,
         /// Number of vertices in the polygon (0, 1, or 2).
         vertex_count: usize,
@@ -296,13 +296,18 @@ impl ProjectAudit {
             }
         }
 
-        // --- Warp-level checks ---
-
-        for (warp_idx, warp) in project.warps.iter().enumerate() {
+        // --- Per-layer warp checks (v4) ---
+        //
+        // `warp_idx` here indexes `Project.layers` — under v4 each
+        // layer owns its `WarpMesh`. The `AuditKind::DegenerateWarp` /
+        // `MaskTooFew` variants keep the `warp_idx` field name pending
+        // T3.0d's rename (`DegenerateLayerWarp { layer_idx }`).
+        for (warp_idx, layer) in project.layers.iter().enumerate() {
+            let warp = &layer.warp;
             // T1.36: degenerate grid — fewer than 2 vertex rows/columns, or
             // non-rectangular row lengths.
             // Note: rows/cols are *cell* counts; the vertex grid is (rows+1)×(cols+1).
-            // A healthy default_warp_mesh has rows=1, cols=1 with a 2×2 vertex grid.
+            // A healthy WarpMesh::identity has rows=1, cols=1 with a 2×2 vertex grid.
             let grid_vertex_rows = warp.grid.len();
             let grid_first_cols = warp.grid.first().map(|r| r.len()).unwrap_or(0);
             let is_degenerate = grid_vertex_rows < 2
@@ -310,12 +315,11 @@ impl ProjectAudit {
                 || warp.grid.iter().any(|row| row.len() != grid_first_cols);
             if is_degenerate {
                 // Build the autofix: replace the warp with a corner-pin
-                // (rows=1, cols=1, 2×2 vertex grid — same as default_warp_mesh).
+                // (rows=1, cols=1, 2×2 vertex grid — same as identity).
                 let new_mesh = crate::project::schema::WarpMesh {
                     rows: 1,
                     cols: 1,
                     grid: vec![vec![[0.0, 0.0], [1.0, 0.0]], vec![[0.0, 1.0], [1.0, 1.0]]],
-                    source_rect: warp.source_rect,
                     mask_polygon: warp.mask_polygon.clone(),
                     mask_feather: warp.mask_feather,
                 };
@@ -323,7 +327,7 @@ impl ProjectAudit {
                     kind: AuditKind::DegenerateWarp { warp_idx },
                     severity: Severity::Warn,
                     message: format!(
-                        "Warp {} has a degenerate grid (vertex rows={}, vertex cols={}, \
+                        "Layer {} warp has a degenerate grid (vertex rows={}, vertex cols={}, \
                          non-rectangular: {}). Reset to corner-pin.",
                         warp_idx,
                         grid_vertex_rows,
@@ -349,7 +353,7 @@ impl ProjectAudit {
                     },
                     severity: Severity::Info,
                     message: format!(
-                        "Warp {} mask has {} vertex(es); SDF baker requires ≥ 3. \
+                        "Layer {} mask has {} vertex(es); SDF baker requires ≥ 3. \
                          Clear the mask or add vertices.",
                         warp_idx, vertex_count,
                     ),
@@ -413,22 +417,12 @@ mod tests {
     use super::*;
 
     /// Build a project that passes all audit checks:
-    /// - schema_version <= CURRENT (4) — uses 3 to mirror the legacy
-    ///   pre-T3.0a fixture; audit only flags `> CURRENT`, so equal-or-
-    ///   older v3 projects remain finding-free.
+    /// - schema_version = CURRENT (4)
     /// - one layer with a real on-disk asset (uses Cargo.toml, always present)
-    /// - one healthy warp mesh (corner-pin, rows=1, cols=1)
+    /// - layer carries the identity warp (rows=1, cols=1, 2×2 grid)
     /// - output_monitor_index = 0, AuditEnv::default() has monitor_count = 1
     fn fresh_project() -> Project {
-        let json = serde_json::json!({
-            "schema_version": 3,
-            "layers": [],
-            "warps": [],
-        });
-        let mut p: Project = serde_json::from_value(json).expect("project deserialise");
-        if p.warps.is_empty() {
-            p.warps.push(crate::project::schema::default_warp_mesh());
-        }
+        let mut p = Project::default();
         // Add a layer with an asset that exists on disk so MissingAsset doesn't fire.
         // Use Cargo.toml as a stand-in — it exists in the workspace root and is
         // always present during test runs.
@@ -534,8 +528,8 @@ mod tests {
     fn audit_degenerate_warp_emits_finding() {
         let mut p = fresh_project();
         // Force a degenerate grid: claim cols=2 but only 1 vertex per row.
-        p.warps[0].cols = 2;
-        p.warps[0].grid = vec![vec![[0.0, 0.0]], vec![[0.0, 1.0]]]; // 1 col, not 3
+        p.layers[0].warp.cols = 2;
+        p.layers[0].warp.grid = vec![vec![[0.0, 0.0]], vec![[0.0, 1.0]]]; // 1 col, not 3
         let findings = ProjectAudit::run(&p, &AuditEnv::default());
         let f = findings
             .iter()
@@ -565,7 +559,7 @@ mod tests {
     fn audit_mask_too_few_triggers_for_one_or_two_vertices() {
         for count in [1usize, 2] {
             let mut p = fresh_project();
-            p.warps[0].mask_polygon = (0..count).map(|i| [i as f32 * 0.1, 0.5]).collect();
+            p.layers[0].warp.mask_polygon = (0..count).map(|i| [i as f32 * 0.1, 0.5]).collect();
             let findings = ProjectAudit::run(&p, &AuditEnv::default());
             let f = findings
                 .iter()
@@ -578,7 +572,7 @@ mod tests {
         // Empty polygon: not flagged (operator hasn't started).
         {
             let mut p = fresh_project();
-            p.warps[0].mask_polygon = vec![];
+            p.layers[0].warp.mask_polygon = vec![];
             assert!(
                 !ProjectAudit::run(&p, &AuditEnv::default())
                     .iter()
@@ -590,7 +584,7 @@ mod tests {
         // ≥3 vertex polygon: not flagged.
         {
             let mut p = fresh_project();
-            p.warps[0].mask_polygon = vec![[0.0, 0.0], [1.0, 0.0], [0.5, 1.0]];
+            p.layers[0].warp.mask_polygon = vec![[0.0, 0.0], [1.0, 0.0], [0.5, 1.0]];
             assert!(
                 !ProjectAudit::run(&p, &AuditEnv::default())
                     .iter()

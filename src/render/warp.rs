@@ -80,7 +80,10 @@ fn clip_from_normalized_output(xy: Vec2) -> [f32; 2] {
     [xy.x * 2.0 - 1.0, 1.0 - xy.y * 2.0]
 }
 
-/// Tessellate each cell into `sub×sub` micro-quads with per-cell homography (unit square → quad).
+/// Tessellate each cell into `sub×sub` micro-quads with per-cell
+/// homography (unit square → quad). Under v4 each layer's warp samples
+/// the entire layer output; the v3 `source_rect` field is gone, so
+/// `src_uv` runs over the full `[0,1]²` domain.
 fn build_warp_vertices(mesh: &WarpMesh, sub: u32) -> (Vec<WarpVertex>, Vec<u32>) {
     let sub = sub.max(1);
     let rows = mesh.rows as usize;
@@ -92,12 +95,6 @@ fn build_warp_vertices(mesh: &WarpMesh, sub: u32) -> (Vec<WarpVertex>, Vec<u32>)
     let nv = (rows * sub as usize + 1) * (cols * sub as usize + 1);
     let mut vertices = Vec::with_capacity(nv);
     let mut indices = Vec::new();
-
-    let sr = mesh.source_rect;
-    let sx = sr[0];
-    let sy = sr[1];
-    let sw = sr[2];
-    let sh = sr[3];
 
     let cs = cols * sub as usize;
     let rs = rows * sub as usize;
@@ -131,18 +128,7 @@ fn build_warp_vertices(mesh: &WarpMesh, sub: u32) -> (Vec<WarpVertex>, Vec<u32>)
             let w = dh.z.abs().max(1e-8);
             let dst_xy = Vec2::new(dh.x / w, dh.y / w);
 
-            let u0 = sx + (ix as f32 / cols as f32) * sw;
-            let u1 = sx + ((ix + 1) as f32 / cols as f32) * sw;
-            let v0 = sy + (iy as f32 / rows as f32) * sh;
-            let v1 = sy + ((iy + 1) as f32 / rows as f32) * sh;
-            let s00 = Vec2::new(u0, v0);
-            let s10 = Vec2::new(u1, v0);
-            let s01 = Vec2::new(u0, v1);
-            let s11 = Vec2::new(u1, v1);
-            let src_uv = (1.0 - tx) * (1.0 - ty) * s00
-                + tx * (1.0 - ty) * s10
-                + (1.0 - tx) * ty * s01
-                + tx * ty * s11;
+            let src_uv = Vec2::new(fu, fv);
 
             let clip = clip_from_normalized_output(dst_xy);
             vertices.push(WarpVertex {
@@ -321,9 +307,6 @@ impl WarpRenderer {
         serde_json::to_string(&mesh.grid)
             .unwrap_or_default()
             .hash(&mut h);
-        for x in mesh.source_rect {
-            x.to_bits().hash(&mut h);
-        }
         std::hash::Hasher::finish(&h)
     }
 
@@ -505,7 +488,7 @@ fn empty_mesh_and_dummy_sdf(
     wgpu::Texture,
     wgpu::TextureView,
 ) {
-    let mesh = crate::project::schema::default_warp_mesh();
+    let mesh = crate::project::schema::WarpMesh::identity();
     let (v, idx) = build_warp_vertices(&mesh, 1);
     let (vb, ib, ic) = upload_mesh(device, &v, &idx);
     let tex = device.create_texture(&wgpu::TextureDescriptor {

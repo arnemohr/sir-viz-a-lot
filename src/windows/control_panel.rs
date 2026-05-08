@@ -439,9 +439,9 @@ fn show_scene_tab(
         if resp.double_clicked() {
             if let Some((w_idx, after, point)) = scene_editor::hit_mask_edge(project, pos, inner) {
                 let insert_at = project
-                    .warps
+                    .layers
                     .get(w_idx)
-                    .map(|w| (after + 1).min(w.mask_polygon.len()));
+                    .map(|l| (after + 1).min(l.warp.mask_polygon.len()));
                 if let Some(insert_at) = insert_at {
                     #[cfg(feature = "v3")]
                     {
@@ -458,8 +458,8 @@ fn show_scene_tab(
                         });
                     }
                     #[cfg(not(feature = "v3"))]
-                    if let Some(w) = project.warps.get_mut(w_idx) {
-                        w.mask_polygon.insert(insert_at, point);
+                    if let Some(layer) = project.layers.get_mut(w_idx) {
+                        layer.warp.mask_polygon.insert(insert_at, point);
                         scene.selected = Some(scene_editor::Selection::MaskVertex {
                             warp: w_idx,
                             idx: insert_at,
@@ -470,7 +470,7 @@ fn show_scene_tab(
         }
         if resp.clicked() && ui.input(|i| i.modifiers.shift) {
             if let Some((w_idx, v_idx)) = scene_editor::hit_mask_vertex(project, pos, inner) {
-                let len = project.warps.get(w_idx).map(|w| w.mask_polygon.len());
+                let len = project.layers.get(w_idx).map(|l| l.warp.mask_polygon.len());
                 if let Some(len) = len {
                     if len > 3 {
                         // ≥3 guard preserved on both code paths.
@@ -486,8 +486,8 @@ fn show_scene_tab(
                             scene.drag = None;
                         }
                         #[cfg(not(feature = "v3"))]
-                        if let Some(w) = project.warps.get_mut(w_idx) {
-                            w.mask_polygon.remove(v_idx);
+                        if let Some(layer) = project.layers.get_mut(w_idx) {
+                            layer.warp.mask_polygon.remove(v_idx);
                             scene.selected = None;
                             scene.drag = None;
                         }
@@ -1049,10 +1049,14 @@ fn show_mapping_tab(
     project: &mut Project,
     #[cfg_attr(not(feature = "v3"), allow(unused_variables))] st: &mut ControlPanelState,
 ) {
-    let Some(w) = project.warps.get_mut(0) else {
-        ui.label("No warp mesh — add `warps` in project.");
+    // v4: warp lives on the first layer. The legacy v2 Mapping tab is
+    // pre-T3.6 deletion; until T3.6 ships the inspector replacement,
+    // this path keeps editing layer 0's warp.
+    let Some(layer) = project.layers.get_mut(0) else {
+        ui.label("No layers — add a layer first.");
         return;
     };
+    let w = &mut layer.warp;
     let rows = w.grid.len();
     let cols = if rows > 0 { w.grid[0].len() } else { 0 };
     if rows < 2 || cols < 2 || w.grid.iter().any(|row| row.len() != cols) {

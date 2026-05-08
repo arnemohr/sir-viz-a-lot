@@ -92,7 +92,6 @@ pub struct WarpMesh {
     pub rows: u32,
     pub cols: u32,
     pub grid: Vec<Vec<[f32; 2]>>,
-    pub source_rect: [f32; 4],
     #[serde(default)]
     pub mask_polygon: Vec<[f32; 2]>,
     /// Normalized fraction of output extent (0..0.5 useful), not pixels.
@@ -102,12 +101,18 @@ pub struct WarpMesh {
 
 impl WarpMesh {
     /// Full-canvas identity warp used for `LayerConfig::warp`'s serde
-    /// default and for `Project::default()`. Matches v2's
-    /// [`default_warp_mesh`] (2×2 grid pinned to the unit square,
-    /// `mask_feather: 0.02`) so v3 projects with zero warps migrate to
-    /// v4 with the same on-wall behaviour they had in v3.
+    /// default and for `Project::default()`: 2×2 grid pinned to the
+    /// unit square, `mask_feather: 0.02`. v3's `source_rect` field is
+    /// gone — under v4 each layer's warp samples the entire layer
+    /// output, so the source-rect concept doesn't apply.
     pub fn identity() -> Self {
-        default_warp_mesh()
+        WarpMesh {
+            rows: 1,
+            cols: 1,
+            grid: vec![vec![[0.0, 0.0], [1.0, 0.0]], vec![[0.0, 1.0], [1.0, 1.0]]],
+            mask_polygon: Vec::new(),
+            mask_feather: 0.02,
+        }
     }
 }
 
@@ -122,8 +127,6 @@ pub struct Project {
     pub schema_version: u32,
     #[serde(default)]
     pub layers: Vec<LayerConfig>,
-    #[serde(default)]
-    pub warps: Vec<WarpMesh>,
     #[serde(default)]
     pub scenes: Vec<Scene>,
     #[serde(default)]
@@ -174,7 +177,6 @@ impl Default for Project {
         Self {
             schema_version: CURRENT_SCHEMA_VERSION,
             layers: Vec::new(),
-            warps: Vec::new(),
             scenes: Vec::new(),
             output_monitor_index: 0,
             output_windowed: false,
@@ -196,18 +198,6 @@ fn default_bg() -> [f32; 4] {
 
 fn default_one() -> f32 {
     1.0
-}
-
-/// Full-frame corner pin in normalized output space (0–1). One warp matches one composed frame.
-pub fn default_warp_mesh() -> WarpMesh {
-    WarpMesh {
-        rows: 1,
-        cols: 1,
-        grid: vec![vec![[0.0, 0.0], [1.0, 0.0]], vec![[0.0, 1.0], [1.0, 1.0]]],
-        source_rect: [0.0, 0.0, 1.0, 1.0],
-        mask_polygon: Vec::new(),
-        mask_feather: 0.02,
-    }
 }
 
 /// Bilinear-resample a mesh-warp grid to new `rows`/`cols` cell counts,
