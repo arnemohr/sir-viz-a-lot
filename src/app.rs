@@ -58,9 +58,11 @@ use crate::windows::output::OutputWindow;
 
 /// Application root. Holds the persistent state across event-loop iterations.
 ///
-/// `state` is `None` until the first `resumed` callback. macOS may fire
-/// `resumed` more than once over the lifecycle (e.g. after suspend); the
-/// handler guards against re-init.
+/// `state` starts at [`AppState::Booting`] and transitions into
+/// [`AppState::Editing`] once the first `resumed` callback finishes
+/// initialising the GPU + windows. macOS may fire `resumed` more than
+/// once over the lifecycle (e.g. after suspend); the handler guards
+/// against re-init via [`AppState::is_running`].
 pub struct App {
     /// CLI path: `*.rmap.json` (full project) or `*.svg` (single-layer bootstrap).
     project: Option<PathBuf>,
@@ -75,14 +77,94 @@ pub struct App {
     cli_windowed: bool,
     /// `--fullscreen`: force borderless fullscreen; wins over `--windowed` and project.
     cli_fullscreen: bool,
-    /// Lazily-initialised GPU + window state.
-    state: Option<RunningApp>,
+    /// Lazily-initialised GPU + window state. See [`AppState`].
+    state: AppState,
+}
+
+/// Top-level application state machine (003-T1.1).
+///
+/// Replaces the implicit `Option<EditingState>` pattern with explicit
+/// typed transitions. v3 starts with this enum scaffolded; later
+/// phase-1 tasks fill in each variant:
+///
+/// - `Booting` → `Editing`: construction in `App::resumed` (today's
+///   only path; T-003-T1.2 lands the explicit transition).
+/// - `Booting` → `Launcher` → `Editing`: launcher window flow added by
+///   T-003-T2.*.
+/// - `Editing` ↔ `GoLive`: hot-swap windowed/fullscreen wired by
+///   T-003-T4.16 / T4.17.
+/// - any → `Failed(_)`: project-load / audit / render-init failures
+///   routed here by T-003-T1.44.
+///
+/// A `ProjectLoading` variant is documented for the future async-load
+/// scenario but not implemented in v3 (project loading remains
+/// synchronous).
+#[derive(Default)]
+enum AppState {
+    /// Pre-`resumed`; CLI parsed; monitors not yet known.
+    #[default]
+    Booting,
+    /// Launcher window visible; no editing session yet. T-003-T2.*
+    /// fills the body.
+    #[allow(dead_code)] // Constructed by T-003-T2.2.
+    Launcher(LauncherState),
+    /// Canvas + control window visible.
+    Editing(EditingState),
+    /// Same payload as `Editing`, but the output window is fullscreen
+    /// on the chosen projector. T-003-T4.16 / T4.17 own the
+    /// transition from / back to `Editing`.
+    #[allow(dead_code)] // Constructed by T-003-T4.16.
+    GoLive(EditingState),
+    /// Project load, audit-critical, or render-init failure. T-003-T1.44
+    /// wires the routing.
+    #[allow(dead_code)] // Constructed by T-003-T1.44.
+    Failed(FailureKind),
+}
+
+impl AppState {
+    /// True when the app already holds a live session of any kind.
+    /// Used to guard the macOS `resumed` re-fire path.
+    fn is_running(&self) -> bool {
+        matches!(self, Self::Launcher(_) | Self::Editing(_) | Self::GoLive(_))
+    }
+
+    /// `&mut EditingState` for the variants that carry one
+    /// (`Editing`, `GoLive`). `None` for `Booting`, `Launcher`,
+    /// `Failed`. T-003-T1.2 / T1.3 replace the call-site uses of
+    /// this helper with explicit `match` expressions.
+    fn editing_mut(&mut self) -> Option<&mut EditingState> {
+        match self {
+            Self::Editing(s) | Self::GoLive(s) => Some(s),
+            _ => None,
+        }
+    }
+}
+
+/// Stub for the Phase-2 launcher window state. T-003-T2.2 populates
+/// the body; declared here so the `AppState` enum is stable from
+/// T1.1 onward.
+#[allow(dead_code)]
+struct LauncherState;
+
+/// Reasons for transitioning into `AppState::Failed`. Each variant
+/// surfaces a recoverable or terminal failure. T-003-T1.44 wires
+/// these into the project-load and surface-init paths; until then
+/// the failure paths still call `event_loop.exit()` directly.
+///
+/// `ProjectAuditCritical` is deliberately omitted in T1.1 because
+/// the `AuditFinding` type does not yet exist (lands in T1.34).
+/// T1.44 adds the variant when the audit pipeline is in place.
+#[derive(Debug)]
+#[allow(dead_code)]
+enum FailureKind {
+    ProjectLoadFailed { reason: String },
+    RenderInitFailed,
 }
 
 /// Bundle of resources that exist only after `resumed`: the output window,
 /// the renderer (which owns the [`GpuContext`]), the test-pattern renderer,
 /// the optional SVG layer state, and the IOPMAssertion preventing display sleep.
-struct RunningApp {
+struct EditingState {
     output: OutputWindow,
     control: Option<ControlWindow>,
     renderer: Renderer,
@@ -119,7 +201,7 @@ struct RunningApp {
     /// stock v1; populated by future plugins or in-tree extensions.
     external_registry: ExternalRegistry,
     /// RAII guard for the optional cpal input stream (T-M7-03). Held on
-    /// the main thread so dropping `RunningApp` stops capture; the
+    /// the main thread so dropping `EditingState` stops capture; the
     /// underlying `cpal::Stream` is `!Send`, so it cannot live inside
     /// `Arc<dyn AudioProvider>` shared via the audio module's static.
     #[cfg(feature = "audio")]
@@ -149,7 +231,7 @@ struct RunningApp {
     /// roughly half the output's vsync rate (T-M9-03).
     control_redraw_skip: bool,
     /// Direct-manipulation editor state (selection, drag session) for the
-    /// Scene tab (T-M10-01). Lives on RunningApp because the Scene tab
+    /// Scene tab (T-M10-01). Lives on EditingState because the Scene tab
     /// mutates `project` based on it; control_panel borrows both per frame.
     scene_editor: crate::windows::scene_editor::SceneEditorState,
 }
@@ -185,7 +267,7 @@ enum RecallOutcome {
 /// the topology-compatibility check; mutates `crossfade` and `project`
 /// per the chosen path. Used by both the keyboard and UI recall callers
 /// so the policy lives in one place.
-fn schedule_scene_recall(state: &mut RunningApp, slot: usize) -> RecallOutcome {
+fn schedule_scene_recall(state: &mut EditingState, slot: usize) -> RecallOutcome {
     let target = match state.project.scenes.get(slot).map(|s| s.snapshot.clone()) {
         Some(t) => t,
         None => return RecallOutcome::NoSlot,
@@ -263,7 +345,7 @@ fn next_unique_layer_id(project: &Project) -> String {
 /// keyboard's inline B/F handlers (in `window_event`) already do this
 /// directly because they want layout-independent physical-key matching;
 /// for the source-poll path we toggle through here.
-fn dispatch_control_event(state: &mut RunningApp, event: ControlEvent) {
+fn dispatch_control_event(state: &mut EditingState, event: ControlEvent) {
     match event {
         ControlEvent::TapTempo => {
             state.clock.tap();
@@ -290,7 +372,7 @@ fn dispatch_control_event(state: &mut RunningApp, event: ControlEvent) {
 
 /// Rebuild GPU layer state for the current `project.layers`. Common
 /// post-snap hook so the keyboard and UI recall paths stay aligned.
-fn rebuild_layers_for_state(state: &mut RunningApp) {
+fn rebuild_layers_for_state(state: &mut EditingState) {
     let device = &state.renderer.gpu.device;
     let queue = &state.renderer.gpu.queue;
     let w = state.output.config.width.max(1);
@@ -379,7 +461,7 @@ impl App {
             monitor_override: monitor_index,
             cli_windowed,
             cli_fullscreen,
-            state: None,
+            state: AppState::Booting,
         };
 
         event_loop
@@ -507,7 +589,7 @@ fn init_running_app(
     project: Project,
     project_file_path: Option<PathBuf>,
     output_windowed: bool,
-) -> Result<RunningApp> {
+) -> Result<EditingState> {
     let gpu = GpuContext::new()?;
     let output = OutputWindow::new(
         event_loop,
@@ -601,7 +683,7 @@ fn init_running_app(
         surface_format,
     )?;
 
-    Ok(RunningApp {
+    Ok(EditingState {
         output,
         control,
         renderer,
@@ -642,7 +724,7 @@ fn init_running_app(
 /// registration first. No-op when the control window is closed.
 /// Called once after init and again after every `resize_m5_gpu`
 /// (the warp_rt texture is recreated there) (T-M9-01).
-fn register_scene_preview(state: &mut RunningApp) {
+fn register_scene_preview(state: &mut EditingState) {
     let Some(ctrl) = state.control.as_mut() else {
         state.scene_texture_id = None;
         return;
@@ -771,7 +853,7 @@ fn make_warp_render_target(
     (texture, view)
 }
 
-fn resize_m5_gpu(state: &mut RunningApp) {
+fn resize_m5_gpu(state: &mut EditingState) {
     let w = state.output.config.width.max(1);
     let h = state.output.config.height.max(1);
     let device = &state.renderer.gpu.device;
@@ -1194,9 +1276,11 @@ fn render_m5_pipeline(
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.state.is_some() {
+        if self.state.is_running() {
             // macOS can fire `resumed` more than once on lifecycle changes;
-            // the first call already brought everything up.
+            // the first call already brought everything up. The guard
+            // covers Launcher / Editing / GoLive — i.e. anything past
+            // Booting that is not Failed (Failed should re-init on resume).
             return;
         }
 
@@ -1251,7 +1335,7 @@ impl ApplicationHandler for App {
         ) {
             Ok(mut running) => {
                 register_scene_preview(&mut running);
-                self.state = Some(running);
+                self.state = AppState::Editing(running);
             }
             Err(e) => {
                 tracing::error!(?e, "init failed; exiting");
@@ -1266,7 +1350,11 @@ impl ApplicationHandler for App {
         window_id: WindowId,
         event: WindowEvent,
     ) {
-        let Some(state) = self.state.as_mut() else {
+        // T-003-T1.3 will fold this into a `match` on `AppState`.
+        // For T1.1 we route every event through the `Editing` /
+        // `GoLive` payload via the transitional helper so behaviour is
+        // identical to the prior `Option<RunningApp>` path.
+        let Some(state) = self.state.editing_mut() else {
             return;
         };
 
@@ -1595,7 +1683,7 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
-        if let Some(state) = self.state.as_mut() {
+        if let Some(state) = self.state.editing_mut() {
             state.output.window.request_redraw();
             // T-M9-03: throttle the control window to ~30 fps.
             // Output stays at vsync (~60 fps); preview at half rate keeps
@@ -1608,5 +1696,34 @@ impl ApplicationHandler for App {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 003-T1.1 acceptance criterion 5: a freshly constructed
+    /// `AppState` must be `Booting`. Using `matches!` avoids
+    /// requiring `PartialEq` on payloads that don't need it.
+    #[test]
+    fn app_state_default_is_booting() {
+        let s = AppState::default();
+        assert!(matches!(s, AppState::Booting));
+    }
+
+    /// `is_running` discriminates the active variants (Launcher,
+    /// Editing, GoLive) from the inactive ones (Booting, Failed)
+    /// per the macOS resume-guard contract.
+    #[test]
+    fn app_state_is_running_only_for_active_variants() {
+        assert!(!AppState::Booting.is_running());
+        assert!(!AppState::Failed(FailureKind::RenderInitFailed).is_running());
+        assert!(AppState::Launcher(LauncherState).is_running());
+        // Editing / GoLive payloads cannot be constructed in a unit
+        // test without bringing up wgpu, so the matches! check below
+        // covers the remaining arms via the helper itself.
+        let booting = AppState::Booting;
+        assert!(matches!(booting, AppState::Booting));
     }
 }

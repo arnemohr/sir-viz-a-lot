@@ -50,7 +50,7 @@ Phase 1 unblocks every later phase. M1 is the gate.
 
 | ID | Title | Owner | Scope | Depends |
 |----|-------|-------|-------|---------|
-| T1.1 | Define `AppState` enum | RUST | M | T0.7 |
+| ✅ T1.1 | Define `AppState` enum | RUST | M | T0.7 |
 | T1.2 | Migrate `App::resumed` to AppState | RUST | M | T1.1 |
 | T1.3 | Migrate `App::window_event` to AppState | RUST | M | T1.1 |
 | T1.4 | Per-state `ControlFlow` derivation | RUST | S | T1.2 |
