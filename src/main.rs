@@ -150,6 +150,7 @@ fn init_tracing() -> Vec<tracing_appender::non_blocking::WorkerGuard> {
 
     tracing::info!(?log_dir, "logging initialized");
 
+    #[cfg_attr(not(feature = "v3"), allow(unused_mut))]
     let mut guards = vec![file_guard];
     #[cfg(feature = "v3")]
     if let Some(g) = ux_guard {
