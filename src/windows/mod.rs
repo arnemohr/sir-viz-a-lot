@@ -7,6 +7,8 @@ pub mod control_panel;
 pub mod file_dialogs;
 #[cfg(feature = "v3")]
 pub mod launcher;
+#[cfg(feature = "v3")]
+pub mod layer_strip;
 pub mod output;
 #[cfg(feature = "v3")]
 pub mod primitives;

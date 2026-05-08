@@ -318,6 +318,17 @@ pub fn show(
             });
     }
 
+    // 003-T3.2: layer thumbnail strip on the left edge. Only under v3;
+    // v2 builds keep the tabbed UI unchanged. Rendered BEFORE the
+    // CentralPanel so egui's panel layout claims the left edge first.
+    #[cfg(feature = "v3")]
+    egui::SidePanel::left("rmap_layer_strip")
+        .resizable(false)
+        .exact_width(88.0)
+        .show_inside(ui, |ui| {
+            crate::windows::layer_strip::show(ui, project, st, scene);
+        });
+
     egui::CentralPanel::default().show_inside(ui, |ui| {
         // 003-T3.1: under v3 the canvas is always the central surface.
         // T3.4 will replace this hard-coded scene render with toolbar +
