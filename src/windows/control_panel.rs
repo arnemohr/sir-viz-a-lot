@@ -621,8 +621,17 @@ fn show_effects_tab(ui: &mut Ui, project: &mut Project, st: &mut ControlPanelSta
                     }
                 });
             if ui.button("Apply").clicked() {
-                project.layers[st.selected_layer].effects =
-                    st.presets[st.preset_picker_index].effects.clone();
+                #[cfg(feature = "v3")]
+                {
+                    let new = st.presets[st.preset_picker_index].effects.clone();
+                    st.pending_mutations
+                        .push(project.set_layer_effects_mutation(st.selected_layer, new));
+                }
+                #[cfg(not(feature = "v3"))]
+                {
+                    project.layers[st.selected_layer].effects =
+                        st.presets[st.preset_picker_index].effects.clone();
+                }
             }
         }
         if ui.button("Reload").clicked() {
