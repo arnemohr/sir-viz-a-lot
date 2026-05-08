@@ -31,7 +31,7 @@ use crate::windows::scene_editor::{self, SceneEditorState};
 /// `"gamma"`. Egui derives the actual widget id from the parent
 /// `Ui` plus this string.
 #[cfg(feature = "v3")]
-fn command_slider(
+pub(super) fn command_slider(
     ui: &mut Ui,
     id: &str,
     label: &str,
@@ -62,7 +62,7 @@ fn command_slider(
 /// 003-T1.18 — checkbox companion to [`command_slider`]. Boolean
 /// toggles have no drag, so the helper just emits on `changed()`.
 #[cfg(feature = "v3")]
-fn command_checkbox(ui: &mut Ui, label: &str, project_value: bool) -> Option<bool> {
+pub(super) fn command_checkbox(ui: &mut Ui, label: &str, project_value: bool) -> Option<bool> {
     let mut shown = project_value;
     let resp = ui.checkbox(&mut shown, label);
     if resp.changed() && shown != project_value {
@@ -77,7 +77,7 @@ fn command_checkbox(ui: &mut Ui, label: &str, project_value: bool) -> Option<boo
 /// drags, and we emit on commit. Returns `Some(new)` once the
 /// edit finalises, `None` while interacting.
 #[cfg(feature = "v3")]
-fn command_dragvalue_u32(
+pub(super) fn command_dragvalue_u32(
     ui: &mut Ui,
     id: &str,
     project_value: u32,
@@ -99,6 +99,43 @@ fn command_dragvalue_u32(
     }
     if resp.changed() && shown != project_value {
         ui.memory_mut(|m| m.data.remove::<u32>(staged_id));
+        return Some(shown);
+    }
+    None
+}
+
+/// 003-T3.3 — `DragValue<f32>` companion. Same staged-memory pattern as
+/// [`command_dragvalue_u32`] but for floating-point values. Returns
+/// `Some(new)` once the edit finalises (tolerance 1e-6), `None` while
+/// interacting or when the value did not change.
+#[cfg(feature = "v3")]
+pub(super) fn command_dragvalue_f32(
+    ui: &mut egui::Ui,
+    id: &str,
+    project_value: f32,
+    range: std::ops::RangeInclusive<f32>,
+    suffix: &str,
+) -> Option<f32> {
+    let staged_id = ui.id().with("rmap_command_dragvalue_f32").with(id);
+    let staged: Option<f32> = ui.memory(|m| m.data.get_temp::<f32>(staged_id));
+    let mut shown = staged.unwrap_or(project_value);
+    let resp = ui.add(
+        egui::DragValue::new(&mut shown)
+            .range(range)
+            .suffix(suffix)
+            .speed(0.005),
+    );
+
+    if resp.drag_stopped() {
+        ui.memory_mut(|m| m.data.remove::<f32>(staged_id));
+        return ((shown - project_value).abs() > 1e-6).then_some(shown);
+    }
+    if resp.dragged() {
+        ui.memory_mut(|m| m.data.insert_temp(staged_id, shown));
+        return None;
+    }
+    if resp.changed() && (shown - project_value).abs() > 1e-6 {
+        ui.memory_mut(|m| m.data.remove::<f32>(staged_id));
         return Some(shown);
     }
     None
@@ -279,6 +316,21 @@ pub fn show(
     // Effects/Layers/Mapping/Scenes editors so an operator running v3
     // can still reach those controls while the proper inspector
     // (T3.3) and Advanced disclosure (T3.11) are in flight.
+
+    // 003-T3.3: selection-driven right-edge inspector. Appears when
+    // `scene.selected.is_some()`; rendered before the Advanced panel
+    // so it sits closer to the canvas. The Advanced panel claims the
+    // outermost right column when both are visible.
+    #[cfg(feature = "v3")]
+    if scene.selected.is_some() {
+        egui::SidePanel::right("rmap_inspector")
+            .resizable(false)
+            .exact_width(280.0)
+            .show_inside(ui, |ui| {
+                crate::windows::inspector::show(ui, project, st, scene);
+            });
+    }
+
     #[cfg(feature = "v3")]
     if st.advanced_open {
         egui::SidePanel::right("rmap_advanced")

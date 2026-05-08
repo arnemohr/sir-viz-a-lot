@@ -6,6 +6,8 @@ pub mod control_panel;
 #[cfg(feature = "v3")]
 pub mod file_dialogs;
 #[cfg(feature = "v3")]
+pub mod inspector;
+#[cfg(feature = "v3")]
 pub mod launcher;
 #[cfg(feature = "v3")]
 pub mod layer_strip;
