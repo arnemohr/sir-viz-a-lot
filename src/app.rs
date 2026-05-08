@@ -2671,8 +2671,17 @@ fn handle_editing_window_event(
                 // becomes Cmd-Z reversible. Mutation::needs_layer_rebuild()
                 // returns true for AddLayer, so we trigger rebuild after
                 // push (mirrors the pending_mutations drain path).
+                // 003-T2.12: surface confirmation + unsupported-type
+                // toasts so the drop has user-visible feedback alongside
+                // the trace logs (which the operator can't see during a
+                // live show).
                 if let Some(layer) = layer_from_dropped_path(&path, &state.project) {
                     let display_path = path.display().to_string();
+                    let basename = path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("layer")
+                        .to_string();
                     #[cfg(feature = "v3")]
                     {
                         let position = state.project.layers.len();
@@ -2681,6 +2690,15 @@ fn handle_editing_window_event(
                         emit_mutation_telemetry(&mut state.telemetry, &mutation);
                         state.undo_stack.push(mutation, &mut state.project);
                         rebuild_layers_for_state(state);
+                        state.toast_queue.push(crate::windows::toast::Toast::new(
+                            crate::windows::toast::ToastKind::Info,
+                            format!("Added {basename}"),
+                        ));
+                        tracing::info!(
+                            target: "rmap::ux",
+                            event = "layer_added_via_drop",
+                            path = %display_path,
+                        );
                     }
                     #[cfg(not(feature = "v3"))]
                     {
@@ -2697,6 +2715,11 @@ fn handle_editing_window_event(
                         path = %path.display(),
                         "dropped file has unsupported extension; skipping",
                     );
+                    #[cfg(feature = "v3")]
+                    state.toast_queue.push(crate::windows::toast::Toast::new(
+                        crate::windows::toast::ToastKind::Warn,
+                        "That file type isn't supported yet. Try a JPG, PNG, or SVG.",
+                    ));
                 }
             }
             WindowEvent::RedrawRequested => {

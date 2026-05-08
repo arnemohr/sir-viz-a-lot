@@ -514,24 +514,32 @@ fn show_scene_tab(
         egui::StrokeKind::Outside,
     );
 
-    // 003-T2.16 — empty-state hint. When the project carries no layers
-    // the scene texture renders solid black; overlay a pulsing dashed
-    // drop zone with the "drop a photo or SVG" copy so the canvas
-    // doesn't read as broken on a fresh "Start a new show" launch.
-    // The hint dismisses naturally the moment a layer is added: the
-    // next frame finds `layers.is_empty() == false` and skips the
-    // overlay.
+    // 003-T2.16 + T2.12 — empty-state and active-drag hints. When the
+    // project carries no layers the scene texture renders solid black,
+    // so we overlay a pulsing dashed drop zone with the "drop a photo
+    // or SVG" copy. When the OS reports a file dragged over the rmap
+    // window (`hovered_files` non-empty) we paint the same overlay
+    // even if layers are present — that way the operator gets visual
+    // confirmation that the canvas is the drop target before they
+    // release.
+    //
+    // The hint dismisses naturally the moment a layer is added or the
+    // drag ends: the next frame finds the predicate false and skips
+    // the overlay.
     //
     // Gated on `v3` because the `windows::primitives` module itself is
     // v3-only — the v2 default build still ships the bare scene tab.
     #[cfg(feature = "v3")]
-    if project.layers.is_empty() {
-        crate::windows::primitives::paint_drop_target(
-            &painter,
-            ui.ctx(),
-            inner,
-            "Drop a photo or SVG here to begin.",
-        );
+    {
+        let hovered_files = ui.ctx().input(|i| !i.raw.hovered_files.is_empty());
+        if project.layers.is_empty() || hovered_files {
+            crate::windows::primitives::paint_drop_target(
+                &painter,
+                ui.ctx(),
+                inner,
+                "Drop a photo or SVG here to begin.",
+            );
+        }
     }
 
     // Per-layer colored outlines for every enabled layer (selected gets a
