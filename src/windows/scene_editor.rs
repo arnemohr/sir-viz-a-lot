@@ -81,6 +81,15 @@ pub enum DragKind {
         start_scale: [f32; 2],
         start_rotate_deg: f32,
         mode: DragMode,
+        /// 003-T1.24 — pre-drag effects Vec snapshot, captured at
+        /// drag_started for v3's `SetLayerEffects` Reverse storage
+        /// (rule 2). `mutate_transform_effect` may append a default
+        /// `Effect::Transform` to layers that don't have one — a
+        /// per-field Reverse would leave a stray effect on undo.
+        /// T1.24 covers Translate; T1.25 / T1.26 extend to Scale
+        /// and Rotate.
+        #[cfg(feature = "v3")]
+        effects_snapshot: Vec<Effect>,
     },
     /// Mask polygon vertex move (M11). Captures the original normalized
     /// position so live drag is `start + delta_normalized`.
@@ -328,8 +337,176 @@ pub fn screen_to_normalized(pos: Pos2, preview_rect: egui::Rect) -> Option<[f32;
 ///   start a `DragSession` snapshot.
 /// - Drag while a layer is selected: set `transform.translate` =
 ///   `start_translate + (cursor_delta_normalized)`.
-/// - Mouse-up: clear `drag` (selection persists).
+/// - Mouse-up: clear `drag` (selection persists). Under v3, emits a
+///   `Mutation::SetLayerEffects` for Translate drags covering the full
+///   cumulative delta (T-003-T1.24).
 /// - Click outside any layer: clear selection.
+///
+/// Returns `Some(Mutation)` under v3 when a translate drag ends and a
+/// mutation should be pushed to the undo stack. Returns `None` in all
+/// other cases; in v2 builds (no undo machinery) always returns `None`.
+#[cfg(feature = "v3")]
+pub fn handle_scene_input(
+    response: &egui::Response,
+    project: &mut Project,
+    scene: &mut SceneEditorState,
+    preview_rect: egui::Rect,
+    pointer: Option<Pos2>,
+    modifiers: egui::Modifiers,
+) -> Option<crate::project::command::Mutation> {
+    let mut emitted: Option<crate::project::command::Mutation> = None;
+
+    if response.drag_started() {
+        if let Some(pos) = pointer {
+            scene.drag = None;
+            // Hit-test priority: mask vertices first (small handles, easy
+            // to miss), then layer body. Warp corners + source rect land
+            // in M11 future work.
+            if let Some((w_idx, v_idx)) = hit_mask_vertex(project, pos, preview_rect) {
+                let start_pos = project.warps[w_idx].mask_polygon[v_idx];
+                scene.selected = Some(Selection::MaskVertex {
+                    warp: w_idx,
+                    idx: v_idx,
+                });
+                scene.drag = Some(DragSession {
+                    start_screen: pos,
+                    kind: DragKind::MaskVertex {
+                        warp: w_idx,
+                        idx: v_idx,
+                        start_pos,
+                    },
+                });
+            } else if let Some(idx) = hit_layer(project, pos, preview_rect) {
+                let (translate, scale, rotate) = effective_static_transform(&project.layers[idx]);
+                let mode = if modifiers.shift {
+                    DragMode::Scale
+                } else if modifiers.alt {
+                    DragMode::Rotate
+                } else {
+                    DragMode::Translate
+                };
+                #[cfg(feature = "v3")]
+                let effects_snapshot = project.layers[idx].effects.clone();
+                scene.selected = Some(Selection::Layer(idx));
+                scene.drag = Some(DragSession {
+                    start_screen: pos,
+                    kind: DragKind::LayerTransform {
+                        start_translate: translate,
+                        start_scale: scale,
+                        start_rotate_deg: rotate,
+                        mode,
+                        #[cfg(feature = "v3")]
+                        effects_snapshot,
+                    },
+                });
+            } else {
+                scene.selected = None;
+            }
+        }
+    }
+
+    if response.dragged() {
+        if let (Some(pos), Some(drag)) = (pointer, scene.drag.as_ref()) {
+            let dx = (pos.x - drag.start_screen.x) / preview_rect.width().max(1.0);
+            let dy = (pos.y - drag.start_screen.y) / preview_rect.height().max(1.0);
+            match &drag.kind {
+                DragKind::LayerTransform {
+                    start_translate,
+                    start_scale,
+                    start_rotate_deg,
+                    mode,
+                    ..
+                } => {
+                    if let Some(Selection::Layer(idx)) = scene.selected {
+                        if let Some(layer) = project.layers.get_mut(idx) {
+                            // Mutate the layer's first Effect::Transform —
+                            // the field the M5 render pipeline actually reads.
+                            // LayerConfig.transform is currently unused at
+                            // render time; mutating it would just make drag
+                            // visually do nothing.
+                            match mode {
+                                DragMode::Translate => {
+                                    let new_t = [start_translate[0] + dx, start_translate[1] + dy];
+                                    mutate_transform_effect(layer, |t, _r, _sx, _sy| {
+                                        *t = new_t;
+                                    });
+                                }
+                                DragMode::Scale => {
+                                    let factor = (1.0 + (dx + dy)).max(0.05);
+                                    let new_sx = start_scale[0] * factor;
+                                    let new_sy = start_scale[1] * factor;
+                                    mutate_transform_effect(layer, |_t, _r, sx, sy| {
+                                        *sx = Modulator::Static(new_sx);
+                                        *sy = Modulator::Static(new_sy);
+                                    });
+                                }
+                                DragMode::Rotate => {
+                                    let new_rot = start_rotate_deg + dx * 360.0;
+                                    mutate_transform_effect(layer, |_t, r, _sx, _sy| {
+                                        *r = Modulator::Static(new_rot);
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+                DragKind::MaskVertex {
+                    warp,
+                    idx,
+                    start_pos,
+                } => {
+                    if let Some(w) = project.warps.get_mut(*warp) {
+                        if let Some(p) = w.mask_polygon.get_mut(*idx) {
+                            p[0] = (start_pos[0] + dx).clamp(0.0, 1.0);
+                            p[1] = (start_pos[1] + dy).clamp(0.0, 1.0);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if response.drag_stopped() {
+        // 003-T1.24 — emit a single SetLayerEffects covering the full
+        // cumulative translate delta. We must revert the live-drag mutation
+        // before emitting: `Mutation::SetLayerEffects::apply` debug_asserts
+        // that project state == old at apply time, and the drain runs
+        // `apply` in the same frame (which re-installs `new`), so no flash.
+        #[cfg(feature = "v3")]
+        if let Some(drag) = scene.drag.as_ref() {
+            if let DragKind::LayerTransform {
+                mode,
+                effects_snapshot,
+                ..
+            } = &drag.kind
+            {
+                if matches!(mode, DragMode::Translate) {
+                    if let Some(Selection::Layer(layer_idx)) = scene.selected {
+                        if let Some(layer) = project.layers.get_mut(layer_idx) {
+                            let old = effects_snapshot.clone();
+                            let new = layer.effects.clone();
+                            // Revert live-drag mutation so `apply` sees
+                            // project state == old (Reverse-storage rule 2).
+                            layer.effects = old.clone();
+                            emitted = Some(crate::project::command::Mutation::SetLayerEffects {
+                                layer_idx,
+                                new,
+                                old,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        scene.drag = None;
+    }
+
+    emitted
+}
+
+/// v2 version of `handle_scene_input` — same drag mechanics, no Mutation
+/// emission (no undo machinery in v2). Returns `()`.
+#[cfg(not(feature = "v3"))]
 pub fn handle_scene_input(
     response: &egui::Response,
     project: &mut Project,
@@ -341,9 +518,6 @@ pub fn handle_scene_input(
     if response.drag_started() {
         if let Some(pos) = pointer {
             scene.drag = None;
-            // Hit-test priority: mask vertices first (small handles, easy
-            // to miss), then layer body. Warp corners + source rect land
-            // in M11 future work.
             if let Some((w_idx, v_idx)) = hit_mask_vertex(project, pos, preview_rect) {
                 let start_pos = project.warps[w_idx].mask_polygon[v_idx];
                 scene.selected = Some(Selection::MaskVertex {
@@ -396,11 +570,6 @@ pub fn handle_scene_input(
                 } => {
                     if let Some(Selection::Layer(idx)) = scene.selected {
                         if let Some(layer) = project.layers.get_mut(idx) {
-                            // Mutate the layer's first Effect::Transform —
-                            // the field the M5 render pipeline actually reads.
-                            // LayerConfig.transform is currently unused at
-                            // render time; mutating it would just make drag
-                            // visually do nothing.
                             match mode {
                                 DragMode::Translate => {
                                     let new_t = [start_translate[0] + dx, start_translate[1] + dy];

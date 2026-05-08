@@ -248,7 +248,7 @@ pub fn show(
 
     egui::CentralPanel::default().show_inside(ui, |ui| {
         match st.tab {
-            ControlTab::Scene => show_scene_tab(ui, project, scene, inputs),
+            ControlTab::Scene => show_scene_tab(ui, project, st, scene, inputs),
             ControlTab::Effects => show_effects_tab(ui, project, st),
             ControlTab::Layers => {
                 if matches!(show_layers_tab(ui, project, st), ControlPanelAction::RebuildLayers) {
@@ -364,6 +364,7 @@ pub fn show(
 fn show_scene_tab(
     ui: &mut Ui,
     project: &mut Project,
+    #[cfg_attr(not(feature = "v3"), allow(unused_variables))] st: &mut ControlPanelState,
     scene: &mut SceneEditorState,
     inputs: &ControlPanelInputs,
 ) {
@@ -466,6 +467,15 @@ fn show_scene_tab(
             i.key_pressed(egui::Key::Escape),
         )
     });
+    #[cfg(feature = "v3")]
+    {
+        let emitted =
+            scene_editor::handle_scene_input(&resp, project, scene, inner, pointer, modifiers);
+        if let Some(m) = emitted {
+            st.pending_mutations.push(m);
+        }
+    }
+    #[cfg(not(feature = "v3"))]
     scene_editor::handle_scene_input(&resp, project, scene, inner, pointer, modifiers);
     if esc {
         scene.selected = None;

@@ -994,6 +994,14 @@ mod tests {
                 field: ModulatorField,
                 new: crate::modulators::Modulator,
             },
+            /// 003-T1.24 — drag-translate path: mirrors what
+            /// `mutate_transform_effect` does (append-then-mutate) and
+            /// emits a `SetLayerEffects` exactly as `handle_scene_input`
+            /// does at drag_stopped.
+            LayerEffectsDragTranslate {
+                dx: f32,
+                dy: f32,
+            },
         }
 
         fn to_mutation(kind: &MutationKind, project: &Project) -> Mutation {
@@ -1091,6 +1099,42 @@ mod tests {
                         project.set_gamma_mutation(project.gamma) // no-op fallback
                     } else {
                         project.set_modulator_mutation(0, *effect_idx, *field, new.clone())
+                    }
+                }
+                MutationKind::LayerEffectsDragTranslate { dx, dy } => {
+                    // Mirror the append-then-mutate pattern of
+                    // `mutate_transform_effect` + the drag-stopped emit in
+                    // `handle_scene_input` (T-003-T1.24).
+                    if project.layers.is_empty() {
+                        project.set_gamma_mutation(project.gamma) // no-op fallback
+                    } else {
+                        let old = project.layers[0].effects.clone();
+                        let mut new = old.clone();
+                        // Append a default Transform if the chain lacks one —
+                        // the same thing `mutate_transform_effect` does.
+                        if !new
+                            .iter()
+                            .any(|e| matches!(e, crate::effects::Effect::Transform { .. }))
+                        {
+                            new.push(crate::effects::Effect::Transform {
+                                translate: [0.0, 0.0],
+                                rotate_deg: crate::modulators::Modulator::Static(0.0),
+                                scale_x: crate::modulators::Modulator::Static(1.0),
+                                scale_y: crate::modulators::Modulator::Static(1.0),
+                            });
+                        }
+                        for e in new.iter_mut() {
+                            if let crate::effects::Effect::Transform { translate, .. } = e {
+                                translate[0] += dx;
+                                translate[1] += dy;
+                                break;
+                            }
+                        }
+                        Mutation::SetLayerEffects {
+                            layer_idx: 0,
+                            new,
+                            old,
+                        }
                     }
                 }
             }
@@ -1197,6 +1241,9 @@ mod tests {
                         new,
                     }
                 ),
+                // 003-T1.24 — drag-translate coverage: append-then-mutate path.
+                (-0.5_f32..=0.5, -0.5_f32..=0.5)
+                    .prop_map(|(dx, dy)| MutationKind::LayerEffectsDragTranslate { dx, dy }),
             ]
         }
 
