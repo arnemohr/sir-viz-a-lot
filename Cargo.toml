@@ -104,3 +104,10 @@ gpu-tests = []
 audio = ["dep:cpal", "dep:rustfft"]
 midi  = ["dep:midir"]
 osc   = ["dep:rosc"]
+
+# Spec 003 UI/UX overhaul (state machine, command pattern, undo,
+# project audit, launcher, canvas merge, ...). Off by default until
+# M3 ships; lets the v2 UI continue running on `main` builds while
+# v3 work ships behind the flag. Promoted to default-on at M3 per
+# the 003 task plan.
+v3 = []
