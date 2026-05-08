@@ -1,6 +1,7 @@
 //! Versioned project schema. Every optional field is `#[serde(default)]` so
 //! older saves keep loading after fields are added.
 
+use std::cell::Cell;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -156,14 +157,16 @@ pub struct Project {
     /// Side-channel state surfaced by [`migrate::migrate_v3_to_v4`] to the
     /// audit pass (T3.0d). `previous_warp_count > 1` triggers a one-shot
     /// `MultipleWarpsConsolidated` finding so the operator knows the
-    /// migration was lossy. `#[serde(skip)]` keeps it out of saved files.
+    /// migration was lossy. `#[serde(skip)]` keeps it out of saved files;
+    /// `Cell` lets the audit consume + clear without `&mut Project`.
     #[serde(skip, default)]
-    pub transient_audit_signals: TransientAuditSignals,
+    pub transient_audit_signals: Cell<TransientAuditSignals>,
 }
 
-/// Per-load signals from `migrate` to `audit`. Cleared by the audit pass
-/// once consumed so the toast / finding fires only once per session.
-#[derive(Debug, Clone, Default)]
+/// Per-load signals from `migrate` to `audit`. The audit calls
+/// [`Cell::take`] to consume + clear in one step so the
+/// `MultipleWarpsConsolidated` finding fires only once per session.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TransientAuditSignals {
     /// Number of `Project.warps` entries the v3 → v4 migration
     /// consolidated onto per-layer warps. `0` for v4-native projects;
@@ -187,7 +190,7 @@ impl Default for Project {
             brightness: 0.0,
             contrast: 1.0,
             crossfade_duration_s: 0.0,
-            transient_audit_signals: TransientAuditSignals::default(),
+            transient_audit_signals: Cell::new(TransientAuditSignals::default()),
         }
     }
 }

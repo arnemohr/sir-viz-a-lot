@@ -41,13 +41,17 @@ impl Project {
         })?;
         let value: serde_json::Value = serde_json::from_str(&text)?;
         let (value, outcome) = migrate::migrate(value)?;
-        let mut project: Project = serde_json::from_value(value)?;
+        let project: Project = serde_json::from_value(value)?;
         // T3.0a side-channel: T3.0d's audit pass reads
         // `previous_warp_count` to fire `MultipleWarpsConsolidated`
         // exactly once per session for v3 projects whose migration was
         // lossy. `transient_audit_signals` is `#[serde(skip)]` so it
         // never round-trips through save/load.
-        project.transient_audit_signals.previous_warp_count = outcome.previous_warp_count;
+        project
+            .transient_audit_signals
+            .set(schema::TransientAuditSignals {
+                previous_warp_count: outcome.previous_warp_count,
+            });
         Ok(project)
     }
 

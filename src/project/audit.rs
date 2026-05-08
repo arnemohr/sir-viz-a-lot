@@ -12,12 +12,17 @@
 //! - [`AuditKind::ZeroScale`] (T1.35) — `Effect::Transform.scale = [0, 0]`
 //!   collapses the layer to invisible; operator hits "play" and sees a
 //!   black wall. Headline failure mode caught during the original audit.
-//! - [`AuditKind::DegenerateWarp`] (T1.36, P1) — warp grid with rows < 2 /
-//!   cols < 2 / non-rectangular row lengths. The shader assumes 2D
-//!   bilinear interpolation; degenerate grids panic the GPU path.
-//! - [`AuditKind::MaskTooFew`] (T1.37, P1) — mask polygon with fewer than
-//!   3 vertices is silently dropped by the SDF baker; the operator may
-//!   have intended to keep it but lost vertices.
+//! - [`AuditKind::DegenerateLayerWarp`] (T1.36, P1) — layer's warp grid
+//!   with rows < 2 / cols < 2 / non-rectangular row lengths. The shader
+//!   assumes 2D bilinear interpolation; degenerate grids panic the GPU
+//!   path.
+//! - [`AuditKind::LayerMaskTooFew`] (T1.37, P1) — layer's mask polygon
+//!   with fewer than 3 vertices is silently dropped by the SDF baker;
+//!   the operator may have intended to keep it but lost vertices.
+//! - [`AuditKind::MultipleWarpsConsolidated`] (T3.0d) — fires once per
+//!   session for v3 projects whose `Project.warps` had > 1 entries; the
+//!   v4 migration could only copy one warp onto every layer, so the
+//!   operator must re-map per-layer.
 //! - [`AuditKind::MissingAsset`] (T1.38) — layer's asset path doesn't
 //!   exist on disk. `Severity::Critical`. Wedding-DJ "second laptop"
 //!   failover hits this every time without a relink autofix.
@@ -78,19 +83,31 @@ pub enum AuditKind {
         /// Index into `Project.layers`.
         layer_idx: usize,
     },
-    /// Warp at `warp_idx` has rows < 2, cols < 2, or non-rectangular
-    /// row lengths.
-    DegenerateWarp {
-        /// Index into `Project.layers`; the layers `warp` is the target.
-        warp_idx: usize,
+    /// Layer at `layer_idx` has a warp grid with rows < 2, cols < 2,
+    /// or non-rectangular row lengths.
+    DegenerateLayerWarp {
+        /// Index into `Project.layers`; the layer's `warp` is the target.
+        layer_idx: usize,
     },
-    /// Warp at `warp_idx` has a mask polygon with fewer than 3
+    /// Layer at `layer_idx` has a mask polygon with fewer than 3
     /// vertices; the SDF baker silently drops these.
-    MaskTooFew {
-        /// Index into `Project.layers`; the layers `warp` is the target.
-        warp_idx: usize,
+    LayerMaskTooFew {
+        /// Index into `Project.layers`; the layer's `warp` is the target.
+        layer_idx: usize,
         /// Number of vertices in the polygon (0, 1, or 2).
         vertex_count: usize,
+    },
+    /// v3 project had > 1 entries in `Project.warps`; the v4 migration
+    /// consolidated all of them onto each layer (each layer received a
+    /// copy of `warps[0]`). Fires exactly once per session — the
+    /// transient signal lives in
+    /// [`crate::project::schema::TransientAuditSignals`] and is
+    /// cleared on first audit.
+    MultipleWarpsConsolidated {
+        /// Number of warps the v3 project carried.
+        previous_warp_count: usize,
+        /// Number of layers the project carries (each got a copy).
+        layer_count: usize,
     },
     /// Layer at `layer_idx` references an asset path that doesn't
     /// exist on disk. `Severity::Critical`.
@@ -297,12 +314,8 @@ impl ProjectAudit {
         }
 
         // --- Per-layer warp checks (v4) ---
-        //
-        // `warp_idx` here indexes `Project.layers` — under v4 each
-        // layer owns its `WarpMesh`. The `AuditKind::DegenerateWarp` /
-        // `MaskTooFew` variants keep the `warp_idx` field name pending
-        // T3.0d's rename (`DegenerateLayerWarp { layer_idx }`).
-        for (warp_idx, layer) in project.layers.iter().enumerate() {
+
+        for (layer_idx, layer) in project.layers.iter().enumerate() {
             let warp = &layer.warp;
             // T1.36: degenerate grid — fewer than 2 vertex rows/columns, or
             // non-rectangular row lengths.
@@ -324,18 +337,18 @@ impl ProjectAudit {
                     mask_feather: warp.mask_feather,
                 };
                 findings.push(AuditFinding {
-                    kind: AuditKind::DegenerateWarp { warp_idx },
+                    kind: AuditKind::DegenerateLayerWarp { layer_idx },
                     severity: Severity::Warn,
                     message: format!(
                         "Layer {} warp has a degenerate grid (vertex rows={}, vertex cols={}, \
                          non-rectangular: {}). Reset to corner-pin.",
-                        warp_idx,
+                        layer_idx,
                         grid_vertex_rows,
                         grid_first_cols,
                         warp.grid.iter().any(|row| row.len() != grid_first_cols),
                     ),
                     autofix: Some(Mutation::ResetLayerWarpMesh {
-                        layer_idx: warp_idx,
+                        layer_idx,
                         new: new_mesh,
                         old: warp.clone(),
                     }),
@@ -347,23 +360,47 @@ impl ProjectAudit {
             let vertex_count = warp.mask_polygon.len();
             if vertex_count > 0 && vertex_count < 3 {
                 findings.push(AuditFinding {
-                    kind: AuditKind::MaskTooFew {
-                        warp_idx,
+                    kind: AuditKind::LayerMaskTooFew {
+                        layer_idx,
                         vertex_count,
                     },
                     severity: Severity::Info,
                     message: format!(
                         "Layer {} mask has {} vertex(es); SDF baker requires ≥ 3. \
                          Clear the mask or add vertices.",
-                        warp_idx, vertex_count,
+                        layer_idx, vertex_count,
                     ),
                     autofix: Some(Mutation::SetLayerMaskPolygon {
-                        layer_idx: warp_idx,
+                        layer_idx,
                         new: Vec::new(),
                         old: warp.mask_polygon.clone(),
                     }),
                 });
             }
+        }
+
+        // --- T3.0d: one-shot MultipleWarpsConsolidated ---
+        //
+        // Consume + clear `transient_audit_signals` so a second audit
+        // call in the same session (e.g. the operator hits "Re-run
+        // audit" from a debug menu) doesn't double-fire. Migrated v3
+        // projects with > 1 warps land here exactly once; v4-native
+        // projects always have `previous_warp_count == 0` and skip.
+        let signals = project.transient_audit_signals.take();
+        if signals.previous_warp_count > 1 {
+            findings.push(AuditFinding {
+                kind: AuditKind::MultipleWarpsConsolidated {
+                    previous_warp_count: signals.previous_warp_count,
+                    layer_count: project.layers.len(),
+                },
+                severity: Severity::Warn,
+                message: format!(
+                    "Project had {} warps but rmap now maps each layer individually. \
+                     Each layer was given a copy of the first warp; verify layer mapping looks right.",
+                    signals.previous_warp_count,
+                ),
+                autofix: None,
+            });
         }
 
         findings
@@ -522,7 +559,7 @@ mod tests {
         }
     }
 
-    /// 003-T1.36 — Warp with a non-rectangular grid triggers DegenerateWarp
+    /// 003-T1.36 — Warp with a non-rectangular grid triggers DegenerateLayerWarp
     /// with a ResetWarpMesh autofix.
     #[test]
     fn audit_degenerate_warp_emits_finding() {
@@ -533,10 +570,13 @@ mod tests {
         let findings = ProjectAudit::run(&p, &AuditEnv::default());
         let f = findings
             .iter()
-            .find(|f| matches!(f.kind, AuditKind::DegenerateWarp { .. }))
-            .expect("expected DegenerateWarp finding");
+            .find(|f| matches!(f.kind, AuditKind::DegenerateLayerWarp { .. }))
+            .expect("expected DegenerateLayerWarp finding");
         assert_eq!(f.severity, Severity::Warn);
-        assert!(f.autofix.is_some(), "DegenerateWarp should have an autofix");
+        assert!(
+            f.autofix.is_some(),
+            "DegenerateLayerWarp should have an autofix"
+        );
     }
 
     /// 003-T1.36 — Healthy corner-pin (rows=1, cols=1, 2×2 vertex grid)
@@ -548,12 +588,12 @@ mod tests {
         assert!(
             !findings
                 .iter()
-                .any(|f| matches!(f.kind, AuditKind::DegenerateWarp { .. })),
-            "healthy default warp should not flag DegenerateWarp",
+                .any(|f| matches!(f.kind, AuditKind::DegenerateLayerWarp { .. })),
+            "healthy default warp should not flag DegenerateLayerWarp",
         );
     }
 
-    /// 003-T1.37 — mask_polygon with 1 or 2 vertices triggers MaskTooFew.
+    /// 003-T1.37 — mask_polygon with 1 or 2 vertices triggers LayerMaskTooFew.
     /// 0-vertex polygon and ≥3 polygon do not.
     #[test]
     fn audit_mask_too_few_triggers_for_one_or_two_vertices() {
@@ -563,8 +603,8 @@ mod tests {
             let findings = ProjectAudit::run(&p, &AuditEnv::default());
             let f = findings
                 .iter()
-                .find(|f| matches!(f.kind, AuditKind::MaskTooFew { .. }))
-                .unwrap_or_else(|| panic!("expected MaskTooFew for {count}-vertex polygon"));
+                .find(|f| matches!(f.kind, AuditKind::LayerMaskTooFew { .. }))
+                .unwrap_or_else(|| panic!("expected LayerMaskTooFew for {count}-vertex polygon"));
             assert_eq!(f.severity, Severity::Info);
             assert!(f.autofix.is_some());
         }
@@ -576,8 +616,8 @@ mod tests {
             assert!(
                 !ProjectAudit::run(&p, &AuditEnv::default())
                     .iter()
-                    .any(|f| matches!(f.kind, AuditKind::MaskTooFew { .. })),
-                "empty polygon should not trigger MaskTooFew"
+                    .any(|f| matches!(f.kind, AuditKind::LayerMaskTooFew { .. })),
+                "empty polygon should not trigger LayerMaskTooFew"
             );
         }
 
@@ -588,8 +628,8 @@ mod tests {
             assert!(
                 !ProjectAudit::run(&p, &AuditEnv::default())
                     .iter()
-                    .any(|f| matches!(f.kind, AuditKind::MaskTooFew { .. })),
-                "3-vertex polygon should not trigger MaskTooFew"
+                    .any(|f| matches!(f.kind, AuditKind::LayerMaskTooFew { .. })),
+                "3-vertex polygon should not trigger LayerMaskTooFew"
             );
         }
     }
@@ -737,5 +777,74 @@ mod tests {
                 .any(|f| matches!(f.kind, AuditKind::SchemaTooNew { .. })),
             "current schema version should not trigger SchemaTooNew"
         );
+    }
+
+    /// 003-T3.0d — `MultipleWarpsConsolidated` fires exactly once per
+    /// session for a v3 project whose migration consolidated > 1
+    /// warps; never fires for v3 projects with ≤ 1 warp; never fires
+    /// for v4-native projects.
+    #[test]
+    fn audit_multiple_warps_consolidated_fires_once() {
+        let mut p = fresh_project();
+        p.transient_audit_signals
+            .set(crate::project::schema::TransientAuditSignals {
+                previous_warp_count: 3,
+            });
+        let env = AuditEnv::default();
+
+        // First call: emits the finding once.
+        let f1: Vec<_> = ProjectAudit::run(&p, &env)
+            .into_iter()
+            .filter(|f| matches!(f.kind, AuditKind::MultipleWarpsConsolidated { .. }))
+            .collect();
+        assert_eq!(
+            f1.len(),
+            1,
+            "MultipleWarpsConsolidated must fire exactly once per session"
+        );
+        assert_eq!(f1[0].severity, Severity::Warn);
+        assert!(f1[0].autofix.is_none());
+        if let AuditKind::MultipleWarpsConsolidated {
+            previous_warp_count,
+            layer_count,
+        } = f1[0].kind
+        {
+            assert_eq!(previous_warp_count, 3);
+            assert_eq!(layer_count, p.layers.len());
+        } else {
+            unreachable!();
+        }
+
+        // Second call on the same project: never re-fires (Cell was
+        // taken on the first call).
+        let f2: Vec<_> = ProjectAudit::run(&p, &env)
+            .into_iter()
+            .filter(|f| matches!(f.kind, AuditKind::MultipleWarpsConsolidated { .. }))
+            .collect();
+        assert!(
+            f2.is_empty(),
+            "MultipleWarpsConsolidated must not re-fire on a second audit"
+        );
+    }
+
+    /// 003-T3.0d — projects with ≤ 1 original warps never fire
+    /// MultipleWarpsConsolidated. Includes v4-native (count 0) and
+    /// the common single-warp v3 case (count 1).
+    #[test]
+    fn audit_multiple_warps_consolidated_skips_low_counts() {
+        for previous_warp_count in [0usize, 1] {
+            let mut p = fresh_project();
+            p.transient_audit_signals
+                .set(crate::project::schema::TransientAuditSignals {
+                    previous_warp_count,
+                });
+            let findings = ProjectAudit::run(&p, &AuditEnv::default());
+            assert!(
+                !findings
+                    .iter()
+                    .any(|f| matches!(f.kind, AuditKind::MultipleWarpsConsolidated { .. })),
+                "MultipleWarpsConsolidated must not fire for previous_warp_count={previous_warp_count}",
+            );
+        }
     }
 }
