@@ -411,23 +411,59 @@ fn show_scene_tab(
     if let Some(pos) = pointer_now {
         if resp.double_clicked() {
             if let Some((w_idx, after, point)) = scene_editor::hit_mask_edge(project, pos, inner) {
-                if let Some(w) = project.warps.get_mut(w_idx) {
-                    let insert_at = (after + 1).min(w.mask_polygon.len());
-                    w.mask_polygon.insert(insert_at, point);
-                    scene.selected = Some(scene_editor::Selection::MaskVertex {
-                        warp: w_idx,
-                        idx: insert_at,
-                    });
+                let insert_at = project
+                    .warps
+                    .get(w_idx)
+                    .map(|w| (after + 1).min(w.mask_polygon.len()));
+                if let Some(insert_at) = insert_at {
+                    #[cfg(feature = "v3")]
+                    {
+                        st.pending_mutations.push(
+                            crate::project::command::Mutation::AddMaskVertex {
+                                warp_idx: w_idx,
+                                position: insert_at,
+                                point,
+                            },
+                        );
+                        scene.selected = Some(scene_editor::Selection::MaskVertex {
+                            warp: w_idx,
+                            idx: insert_at,
+                        });
+                    }
+                    #[cfg(not(feature = "v3"))]
+                    if let Some(w) = project.warps.get_mut(w_idx) {
+                        w.mask_polygon.insert(insert_at, point);
+                        scene.selected = Some(scene_editor::Selection::MaskVertex {
+                            warp: w_idx,
+                            idx: insert_at,
+                        });
+                    }
                 }
             }
         }
         if resp.clicked() && ui.input(|i| i.modifiers.shift) {
             if let Some((w_idx, v_idx)) = scene_editor::hit_mask_vertex(project, pos, inner) {
-                if let Some(w) = project.warps.get_mut(w_idx) {
-                    if w.mask_polygon.len() > 3 {
-                        w.mask_polygon.remove(v_idx);
-                        scene.selected = None;
-                        scene.drag = None;
+                let len = project.warps.get(w_idx).map(|w| w.mask_polygon.len());
+                if let Some(len) = len {
+                    if len > 3 {
+                        // ≥3 guard preserved on both code paths.
+                        #[cfg(feature = "v3")]
+                        {
+                            st.pending_mutations.push(
+                                crate::project::command::Mutation::RemoveMaskVertex {
+                                    warp_idx: w_idx,
+                                    idx: v_idx,
+                                },
+                            );
+                            scene.selected = None;
+                            scene.drag = None;
+                        }
+                        #[cfg(not(feature = "v3"))]
+                        if let Some(w) = project.warps.get_mut(w_idx) {
+                            w.mask_polygon.remove(v_idx);
+                            scene.selected = None;
+                            scene.drag = None;
+                        }
                     }
                 }
             }

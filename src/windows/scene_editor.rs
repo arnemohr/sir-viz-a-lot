@@ -482,28 +482,55 @@ pub fn handle_scene_input(
         // unit test in `src/project/command.rs` proves this.
         #[cfg(feature = "v3")]
         if let Some(drag) = scene.drag.as_ref() {
-            if let DragKind::LayerTransform {
-                mode,
-                effects_snapshot,
-                ..
-            } = &drag.kind
-            {
-                if matches!(
+            match &drag.kind {
+                DragKind::LayerTransform {
                     mode,
-                    DragMode::Translate | DragMode::Scale | DragMode::Rotate
-                ) {
-                    if let Some(Selection::Layer(layer_idx)) = scene.selected {
-                        if let Some(layer) = project.layers.get_mut(layer_idx) {
-                            let old = effects_snapshot.clone();
-                            let new = layer.effects.clone();
-                            // Revert live-drag mutation so `apply` sees
-                            // project state == old (Reverse-storage rule 2).
-                            layer.effects = old.clone();
-                            emitted = Some(crate::project::command::Mutation::SetLayerEffects {
-                                layer_idx,
-                                new,
-                                old,
-                            });
+                    effects_snapshot,
+                    ..
+                } => {
+                    if matches!(
+                        mode,
+                        DragMode::Translate | DragMode::Scale | DragMode::Rotate
+                    ) {
+                        if let Some(Selection::Layer(layer_idx)) = scene.selected {
+                            if let Some(layer) = project.layers.get_mut(layer_idx) {
+                                let old = effects_snapshot.clone();
+                                let new = layer.effects.clone();
+                                // Revert live-drag mutation so `apply` sees
+                                // project state == old (Reverse-storage rule 2).
+                                layer.effects = old.clone();
+                                emitted =
+                                    Some(crate::project::command::Mutation::SetLayerEffects {
+                                        layer_idx,
+                                        new,
+                                        old,
+                                    });
+                            }
+                        }
+                    }
+                }
+                // 003-T1.27 — emit SetMaskVertex for the cumulative drag delta.
+                // Revert the live mutation before emission so `apply` sees
+                // project state == old (same Reverse-storage pattern as T1.24).
+                DragKind::MaskVertex {
+                    warp,
+                    idx,
+                    start_pos,
+                } => {
+                    if let Some(w) = project.warps.get_mut(*warp) {
+                        if let Some(p) = w.mask_polygon.get_mut(*idx) {
+                            let new = *p;
+                            let old = *start_pos;
+                            if (new[0] - old[0]).abs() > 1e-6 || (new[1] - old[1]).abs() > 1e-6 {
+                                // Revert live mutation; the drain re-applies `new`.
+                                *p = old;
+                                emitted = Some(crate::project::command::Mutation::SetMaskVertex {
+                                    warp_idx: *warp,
+                                    idx: *idx,
+                                    new,
+                                    old,
+                                });
+                            }
                         }
                     }
                 }

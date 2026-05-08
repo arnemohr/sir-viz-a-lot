@@ -305,6 +305,37 @@ pub enum Mutation {
         old: crate::modulators::Modulator,
     },
 
+    /// Insert a new vertex into `WarpMesh.mask_polygon` at `position`
+    /// (0..=polygon.len()). Reverse is `RemoveMaskVertex { warp_idx, idx: position }`.
+    AddMaskVertex {
+        /// Index into `Project.warps`.
+        warp_idx: usize,
+        /// Insertion index (0..=polygon.len()).
+        position: usize,
+        /// The vertex coordinates to insert (normalized output-space).
+        point: [f32; 2],
+    },
+    /// Remove the vertex at `idx` from `WarpMesh.mask_polygon`.
+    /// Reverse is `AddMaskVertex { warp_idx, position: idx, point: removed }`.
+    RemoveMaskVertex {
+        /// Index into `Project.warps`.
+        warp_idx: usize,
+        /// Index of the vertex to remove.
+        idx: usize,
+    },
+    /// Replace `WarpMesh.mask_polygon[idx]` with `new`. Reverse swaps
+    /// `new` and `old`. Like `SetGamma` but for a polygon vertex.
+    SetMaskVertex {
+        /// Index into `Project.warps`.
+        warp_idx: usize,
+        /// Index of the vertex inside `mask_polygon`.
+        idx: usize,
+        /// Value to write.
+        new: [f32; 2],
+        /// Pre-mutation value; `apply` `debug_assert!`s this matches the live state.
+        old: [f32; 2],
+    },
+
     /// Replace the entire project from a serde_json snapshot
     /// (Reverse rule 3: snapshot Reverse). T-003-T1.30 routes
     /// scene-recall and crossfade-tick through this variant.
@@ -599,6 +630,78 @@ impl Mutation {
                     old: new,
                 }
             }
+            Mutation::AddMaskVertex {
+                warp_idx,
+                position,
+                point,
+            } => {
+                let warp = project
+                    .warps
+                    .get_mut(warp_idx)
+                    .expect("AddMaskVertex: warp_idx out of range");
+                debug_assert!(
+                    position <= warp.mask_polygon.len(),
+                    "AddMaskVertex position out of range: position={}, len={}",
+                    position,
+                    warp.mask_polygon.len()
+                );
+                warp.mask_polygon.insert(position, point);
+                Mutation::RemoveMaskVertex {
+                    warp_idx,
+                    idx: position,
+                }
+            }
+            Mutation::RemoveMaskVertex { warp_idx, idx } => {
+                let warp = project
+                    .warps
+                    .get_mut(warp_idx)
+                    .expect("RemoveMaskVertex: warp_idx out of range");
+                debug_assert!(
+                    idx < warp.mask_polygon.len(),
+                    "RemoveMaskVertex idx out of range: idx={}, len={}",
+                    idx,
+                    warp.mask_polygon.len()
+                );
+                let point = warp.mask_polygon.remove(idx);
+                Mutation::AddMaskVertex {
+                    warp_idx,
+                    position: idx,
+                    point,
+                }
+            }
+            Mutation::SetMaskVertex {
+                warp_idx,
+                idx,
+                new,
+                old,
+            } => {
+                let warp = project
+                    .warps
+                    .get_mut(warp_idx)
+                    .expect("SetMaskVertex: warp_idx out of range");
+                debug_assert!(
+                    idx < warp.mask_polygon.len(),
+                    "SetMaskVertex idx out of range: idx={}, len={}",
+                    idx,
+                    warp.mask_polygon.len()
+                );
+                let cur = warp.mask_polygon[idx];
+                debug_assert!(
+                    (cur[0] - old[0]).abs() < 1e-6 && (cur[1] - old[1]).abs() < 1e-6,
+                    "SetMaskVertex stale Reverse: cur=[{}, {}], expected old=[{}, {}]",
+                    cur[0],
+                    cur[1],
+                    old[0],
+                    old[1]
+                );
+                warp.mask_polygon[idx] = new;
+                Mutation::SetMaskVertex {
+                    warp_idx,
+                    idx,
+                    new: old,
+                    old: new,
+                }
+            }
             Mutation::ApplyProjectSnapshot {
                 new,
                 old,
@@ -637,7 +740,10 @@ impl Mutation {
             | Mutation::SetModulator { .. }
             | Mutation::AddLayer { .. }
             | Mutation::RemoveLayer { .. }
-            | Mutation::SwapLayers { .. } => false,
+            | Mutation::SwapLayers { .. }
+            | Mutation::AddMaskVertex { .. }
+            | Mutation::RemoveMaskVertex { .. }
+            | Mutation::SetMaskVertex { .. } => false,
             Mutation::ApplyProjectSnapshot { non_undoable, .. } => *non_undoable,
         }
     }
@@ -796,6 +902,39 @@ impl Project {
         Mutation::SwapLayers { i, j }
     }
 
+    /// Build a `SetMaskVertex` mutation. Captures the current polygon vertex
+    /// as `old`. Panics if `warp_idx` or `idx` are out of range.
+    pub fn set_mask_vertex_mutation(&self, warp_idx: usize, idx: usize, new: [f32; 2]) -> Mutation {
+        let warp = &self.warps[warp_idx];
+        Mutation::SetMaskVertex {
+            warp_idx,
+            idx,
+            new,
+            old: warp.mask_polygon[idx],
+        }
+    }
+
+    /// Build an `AddMaskVertex` mutation. `position` is the insertion index
+    /// (0..=polygon.len()); the caller must ensure `warp_idx` is valid.
+    pub fn set_add_mask_vertex_mutation(
+        &self,
+        warp_idx: usize,
+        position: usize,
+        point: [f32; 2],
+    ) -> Mutation {
+        Mutation::AddMaskVertex {
+            warp_idx,
+            position,
+            point,
+        }
+    }
+
+    /// Build a `RemoveMaskVertex` mutation. `idx` must be a valid index into
+    /// `WarpMesh.mask_polygon` at the time of apply.
+    pub fn set_remove_mask_vertex_mutation(&self, warp_idx: usize, idx: usize) -> Mutation {
+        Mutation::RemoveMaskVertex { warp_idx, idx }
+    }
+
     /// Build a `SetLayerEffects` mutation. Captures the current effect chain
     /// as `old` for the Effects-Vec Reverse (rule 2). `new` is moved into
     /// the mutation; the caller will not be able to use it afterwards.
@@ -853,6 +992,12 @@ mod tests {
         let mut p: Project = serde_json::from_value(json).expect("project deserialise");
         if p.warps.is_empty() {
             p.warps.push(crate::project::schema::default_warp_mesh());
+        }
+        // Seed a 4-vertex mask polygon if absent so proptest can exercise
+        // mask vertex mutations under the ≥3 guard (RemoveMaskVertex requires
+        // len > 3 to fire; an empty polygon yields only fallback coverage).
+        if p.warps[0].mask_polygon.len() < 4 {
+            p.warps[0].mask_polygon = vec![[0.1, 0.1], [0.9, 0.1], [0.9, 0.9], [0.1, 0.9]];
         }
         if p.layers.is_empty() {
             use std::path::PathBuf;
@@ -1082,6 +1227,22 @@ mod tests {
             LayerEffectsDragRotate {
                 degrees: f32,
             },
+            /// 003-T1.27 — set a single mask polygon vertex.
+            SetMaskVertex {
+                idx_pick: u8,
+                x: f32,
+                y: f32,
+            },
+            /// 003-T1.27 — insert a new mask polygon vertex.
+            AddMaskVertex {
+                position_pick: u8,
+                x: f32,
+                y: f32,
+            },
+            /// 003-T1.27 — remove a mask polygon vertex (only when len > 3).
+            RemoveMaskVertex {
+                idx_pick: u8,
+            },
         }
 
         fn to_mutation(kind: &MutationKind, project: &Project) -> Mutation {
@@ -1250,6 +1411,46 @@ mod tests {
                         }
                     }
                 }
+                // 003-T1.27 — mask vertex mutations.
+                MutationKind::SetMaskVertex { idx_pick, x, y } => {
+                    if project.warps.is_empty() || project.warps[0].mask_polygon.is_empty() {
+                        project.set_gamma_mutation(project.gamma) // no-op fallback
+                    } else {
+                        let len = project.warps[0].mask_polygon.len();
+                        let idx = (*idx_pick as usize) % len;
+                        project.set_mask_vertex_mutation(
+                            0,
+                            idx,
+                            [x.clamp(0.0, 1.0), y.clamp(0.0, 1.0)],
+                        )
+                    }
+                }
+                MutationKind::AddMaskVertex {
+                    position_pick,
+                    x,
+                    y,
+                } => {
+                    if project.warps.is_empty() {
+                        project.set_gamma_mutation(project.gamma) // no-op fallback
+                    } else {
+                        let len = project.warps[0].mask_polygon.len();
+                        let position = (*position_pick as usize) % (len + 1);
+                        project.set_add_mask_vertex_mutation(
+                            0,
+                            position,
+                            [x.clamp(0.0, 1.0), y.clamp(0.0, 1.0)],
+                        )
+                    }
+                }
+                MutationKind::RemoveMaskVertex { idx_pick } => {
+                    if project.warps.is_empty() || project.warps[0].mask_polygon.len() <= 3 {
+                        project.set_gamma_mutation(project.gamma) // preserve ≥3 invariant
+                    } else {
+                        let len = project.warps[0].mask_polygon.len();
+                        let idx = (*idx_pick as usize) % len;
+                        project.set_remove_mask_vertex_mutation(0, idx)
+                    }
+                }
             }
         }
 
@@ -1361,6 +1562,17 @@ mod tests {
                 // distinct field (rotate_deg).
                 (-180.0_f32..=180.0)
                     .prop_map(|degrees| MutationKind::LayerEffectsDragRotate { degrees }),
+                // 003-T1.27 — mask vertex set/add/remove.
+                (any::<u8>(), 0.0_f32..=1.0, 0.0_f32..=1.0)
+                    .prop_map(|(idx_pick, x, y)| MutationKind::SetMaskVertex { idx_pick, x, y }),
+                (any::<u8>(), 0.0_f32..=1.0, 0.0_f32..=1.0).prop_map(|(position_pick, x, y)| {
+                    MutationKind::AddMaskVertex {
+                        position_pick,
+                        x,
+                        y,
+                    }
+                }),
+                any::<u8>().prop_map(|idx_pick| MutationKind::RemoveMaskVertex { idx_pick }),
             ]
         }
 
