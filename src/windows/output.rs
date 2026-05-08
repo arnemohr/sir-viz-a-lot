@@ -4,9 +4,9 @@
 
 use std::sync::Arc;
 
+use winit::dpi::LogicalSize;
 use winit::event_loop::ActiveEventLoop;
 use winit::monitor::MonitorHandle;
-use winit::dpi::LogicalSize;
 use winit::window::{Fullscreen, Window, WindowAttributes};
 
 use crate::render::RenderError;

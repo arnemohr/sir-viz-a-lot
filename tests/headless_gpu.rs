@@ -76,17 +76,15 @@ impl Headless {
         }))
         .map_err(|e| anyhow!("no compatible wgpu adapter for headless tests: {e}"))?;
 
-        let (device, queue) =
-            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-                label: Some("rmap headless test device"),
-                required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::downlevel_defaults()
-                    .using_resolution(adapter.limits()),
-                memory_hints: wgpu::MemoryHints::default(),
-                trace: wgpu::Trace::Off,
-                experimental_features: wgpu::ExperimentalFeatures::default(),
-            }))
-            .context("request_device for headless tests")?;
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("rmap headless test device"),
+            required_features: wgpu::Features::empty(),
+            required_limits: wgpu::Limits::downlevel_defaults().using_resolution(adapter.limits()),
+            memory_hints: wgpu::MemoryHints::default(),
+            trace: wgpu::Trace::Off,
+            experimental_features: wgpu::ExperimentalFeatures::default(),
+        }))
+        .context("request_device for headless tests")?;
 
         Ok(Self {
             instance,
@@ -140,7 +138,8 @@ impl Headless {
 
         // 3. Allocate a readback buffer with 256-byte row alignment.
         let unpadded_bytes_per_row = width * 4;
-        let padded_bytes_per_row = align_up(unpadded_bytes_per_row, wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
+        let padded_bytes_per_row =
+            align_up(unpadded_bytes_per_row, wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
         let buffer_size = (padded_bytes_per_row * height) as wgpu::BufferAddress;
 
         let readback = self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -235,8 +234,9 @@ pub fn assert_image_matches(got: &[u8], width: u32, height: u32, golden_path: &s
     );
 
     if std::env::var("UPDATE_GOLDEN").as_deref() == Ok("1") {
-        let img: ImageBuffer<Rgba<u8>, Vec<u8>> = ImageBuffer::from_raw(width, height, got.to_vec())
-            .expect("ImageBuffer::from_raw failed for actual bytes");
+        let img: ImageBuffer<Rgba<u8>, Vec<u8>> =
+            ImageBuffer::from_raw(width, height, got.to_vec())
+                .expect("ImageBuffer::from_raw failed for actual bytes");
         if let Some(parent) = Path::new(golden_path).parent() {
             std::fs::create_dir_all(parent).expect("create golden parent dir");
         }
@@ -289,13 +289,14 @@ pub fn assert_image_matches(got: &[u8], width: u32, height: u32, golden_path: &s
 
 fn write_actual(got: &[u8], width: u32, height: u32, golden_path: &str) {
     let actual_path = format!("{golden_path}.actual.png");
-    let img: ImageBuffer<Rgba<u8>, Vec<u8>> = match ImageBuffer::from_raw(width, height, got.to_vec()) {
-        Some(img) => img,
-        None => {
-            eprintln!("could not build ImageBuffer from actual bytes for {actual_path}");
-            return;
-        }
-    };
+    let img: ImageBuffer<Rgba<u8>, Vec<u8>> =
+        match ImageBuffer::from_raw(width, height, got.to_vec()) {
+            Some(img) => img,
+            None => {
+                eprintln!("could not build ImageBuffer from actual bytes for {actual_path}");
+                return;
+            }
+        };
     if let Some(parent) = Path::new(&actual_path).parent() {
         let _ = std::fs::create_dir_all(parent);
     }

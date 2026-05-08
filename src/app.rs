@@ -20,25 +20,25 @@ use crossbeam_channel::{Receiver, Sender};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::keyboard::{KeyCode, PhysicalKey};
 #[cfg(feature = "v3")]
 use winit::keyboard::ModifiersState;
+use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::monitor::MonitorHandle;
 use winit::window::WindowId;
 
 use crate::clock::Clock;
-use crate::controls::keyboard::KeyboardSource;
 use crate::controls::Command;
 use crate::controls::Source;
+use crate::controls::keyboard::KeyboardSource;
+use crate::effects::RenderCtx;
 use crate::effects::blur::BlurPipeline;
 use crate::effects::color::ColorPipeline;
 use crate::effects::registry::ExternalRegistry;
 use crate::effects::transform::TransformPipeline;
-use crate::effects::RenderCtx;
 use crate::error::{Result, RmapError};
 use crate::project::schema::{self, Project};
 use crate::project::{
-    interpolate, restore_scene, snapshot, snapshots_share_layer_topology, ProjectError,
+    ProjectError, interpolate, restore_scene, snapshot, snapshots_share_layer_topology,
 };
 use crate::render::compositor::Compositor;
 use crate::render::gamma::GammaPipeline;
@@ -54,7 +54,7 @@ use crate::svg_layer::worker::{LayerId, RasterDone, RasterJob, Worker};
 use crate::test_patterns::{TestPattern, TestPatternRenderer};
 use crate::windows::control::ControlWindow;
 use crate::windows::control_panel::{
-    show as control_panel_show, ControlPanelAction, ControlPanelInputs, ControlPanelState,
+    ControlPanelAction, ControlPanelInputs, ControlPanelState, show as control_panel_show,
 };
 use crate::windows::output::OutputWindow;
 
@@ -429,7 +429,10 @@ fn apply_command(state: &mut EditingState, event: Command) -> SideEffect {
         }
         Command::Blackout => {
             state.output.state.toggle_blackout();
-            tracing::info!(blackout = state.output.state.blackout, "blackout via source");
+            tracing::info!(
+                blackout = state.output.state.blackout,
+                "blackout via source"
+            );
             SideEffect::None
         }
         Command::Freeze => {
@@ -506,7 +509,9 @@ struct LayerState {
     texture_aspect: f32,
 }
 
-fn create_layer_uniform_buffers(device: &wgpu::Device) -> (
+fn create_layer_uniform_buffers(
+    device: &wgpu::Device,
+) -> (
     wgpu::Buffer,
     wgpu::Buffer,
     wgpu::Buffer,
@@ -662,7 +667,10 @@ fn load_project_for_startup(
             if is_rmap_project_file(path) {
                 let p = crate::project::Project::load(path)?;
                 Ok((p, Some(path.clone())))
-            } else if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("svg")) {
+            } else if path
+                .extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("svg"))
+            {
                 Ok((build_initial_project(Some(path.clone())), None))
             } else {
                 tracing::warn!(
@@ -817,10 +825,7 @@ fn init_inputs() -> InputsBundle {
 /// non-fatal (D-01 fallback) — operators can drive the projector
 /// from the keyboard alone if the secondary window can't open.
 /// Borrows `gpu` because [`init_output_window`] consumes it next.
-fn init_control_window(
-    event_loop: &ActiveEventLoop,
-    gpu: &GpuContext,
-) -> Option<ControlWindow> {
+fn init_control_window(event_loop: &ActiveEventLoop, gpu: &GpuContext) -> Option<ControlWindow> {
     match ControlWindow::new(event_loop, &gpu.instance, &gpu.adapter, &gpu.device) {
         Ok(c) => Some(c),
         Err(e) => {
@@ -911,8 +916,12 @@ fn init_running_app(
         output_bundle.output.config.height,
     );
     let inputs = init_inputs();
-    let render_graph =
-        init_render_graph(&output_bundle.renderer, &project, output_size, surface_format)?;
+    let render_graph = init_render_graph(
+        &output_bundle.renderer,
+        &project,
+        output_size,
+        surface_format,
+    )?;
     Ok(assemble_editing_state(
         control,
         output_bundle,
@@ -998,7 +1007,9 @@ fn register_scene_preview(state: &mut EditingState) {
 fn build_initial_project(svg_path: Option<PathBuf>) -> Project {
     let mut project = Project::default();
     if let Some(path) = svg_path.filter(|p| p.extension().is_some_and(|e| e == "svg")) {
-        project.layers.push(schema::layer_from_svg_path("layer0", path));
+        project
+            .layers
+            .push(schema::layer_from_svg_path("layer0", path));
     }
     if project.warps.is_empty() {
         project.warps.push(schema::default_warp_mesh());
@@ -1338,12 +1349,18 @@ fn render_m5_pipeline(
         // can change the warp count.
         let want = project.warps.len().max(1);
         if warps.len() != want {
-            warps.resize_with(want, || WarpRenderer::new(&renderer.gpu.device, surface_format));
+            warps.resize_with(want, || {
+                WarpRenderer::new(&renderer.gpu.device, surface_format)
+            });
         }
 
-        let mut encoder = renderer.gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("m5 offscreen encoder"),
-        });
+        let mut encoder =
+            renderer
+                .gpu
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("m5 offscreen encoder"),
+                });
 
         let mut composite_inputs: Vec<(&wgpu::TextureView, schema::BlendMode, f32, &wgpu::Buffer)> =
             Vec::with_capacity(project.layers.len());
@@ -1379,17 +1396,15 @@ fn render_m5_pipeline(
                     (id, *focal)
                 }
             };
-            let fit_data: [f32; 4] = [
-                mode_id as f32,
-                ls.texture_aspect,
-                focal[0],
-                focal[1],
-            ];
+            let fit_data: [f32; 4] = [mode_id as f32, ls.texture_aspect, focal[0], focal[1]];
             let mut fit_bytes = [0u8; 16];
             for (i, f) in fit_data.iter().enumerate() {
                 fit_bytes[i * 4..(i + 1) * 4].copy_from_slice(&f.to_le_bytes());
             }
-            renderer.gpu.queue.write_buffer(&ls.fit_uniform, 0, &fit_bytes);
+            renderer
+                .gpu
+                .queue
+                .write_buffer(&ls.fit_uniform, 0, &fit_bytes);
 
             ls.effect_pipeline.reset_for_layer_pass();
             {
@@ -1508,10 +1523,7 @@ fn render_m5_pipeline(
             // toggle is off, not the encoder itself, so present timing
             // stays unchanged.
             if overlay_enabled {
-                let lines = crate::render::overlay::build_overlay_lines(
-                    project,
-                    overlay_selected,
-                );
+                let lines = crate::render::overlay::build_overlay_lines(project, overlay_selected);
                 if !lines.is_empty() {
                     overlay.render(
                         &renderer.gpu.device,
@@ -1582,10 +1594,7 @@ fn handle_editing_window_event(
                 let mut panel_action = ControlPanelAction::None;
                 let inputs = ControlPanelInputs {
                     scene_texture: state.scene_texture_id,
-                    output_size: (
-                        state.output.config.width,
-                        state.output.config.height,
-                    ),
+                    output_size: (state.output.config.width, state.output.config.height),
                 };
                 if let Some(ctrl) = state.control.as_mut() {
                     let result = ctrl.render(device, queue, |ui| {
@@ -1617,8 +1626,7 @@ fn handle_editing_window_event(
                 let mut needs_rebuild_after_drain = false;
                 #[cfg(feature = "v3")]
                 {
-                    let pending =
-                        std::mem::take(&mut state.control_panel.pending_mutations);
+                    let pending = std::mem::take(&mut state.control_panel.pending_mutations);
                     for m in pending {
                         if m.needs_layer_rebuild() {
                             needs_rebuild_after_drain = true;
@@ -1627,7 +1635,8 @@ fn handle_editing_window_event(
                     }
                 }
                 match panel_action {
-                    ControlPanelAction::None => {
+                    ControlPanelAction::None =>
+                    {
                         #[cfg(feature = "v3")]
                         if needs_rebuild_after_drain {
                             rebuild_layers_for_state(state);
@@ -1637,10 +1646,7 @@ fn handle_editing_window_event(
                         rebuild_layers_for_state(state);
                     }
                     ControlPanelAction::SceneRecall(slot) => {
-                        if matches!(
-                            schedule_scene_recall(state, slot),
-                            RecallOutcome::Snapped
-                        ) {
+                        if matches!(schedule_scene_recall(state, slot), RecallOutcome::Snapped) {
                             rebuild_layers_for_state(state);
                         }
                     }
@@ -1748,10 +1754,7 @@ fn handle_editing_window_event(
         WindowEvent::RedrawRequested => {
             // Drain every registered source through one common dispatcher.
             // Order doesn't matter for v1 — each event is independent.
-            #[cfg_attr(
-                not(any(feature = "midi", feature = "osc")),
-                allow(unused_mut)
-            )]
+            #[cfg_attr(not(any(feature = "midi", feature = "osc")), allow(unused_mut))]
             let mut events: Vec<Command> = state.keyboard.poll();
             #[cfg(feature = "midi")]
             if let Some(midi) = state.midi.as_mut() {
@@ -1809,8 +1812,7 @@ fn handle_editing_window_event(
                             ) {
                                 Ok((tex, view, dims)) => {
                                     ls.layer.set_uploaded_texture(tex, view);
-                                    ls.texture_aspect =
-                                        dims.0.max(1) as f32 / dims.1.max(1) as f32;
+                                    ls.texture_aspect = dims.0.max(1) as f32 / dims.1.max(1) as f32;
                                     tracing::debug!(
                                         layer = i,
                                         path = %asset_path.display(),
@@ -1988,7 +1990,12 @@ impl ApplicationHandler for App {
             );
         }
 
-        if self.autostart && self.project.as_ref().is_some_and(|p| is_rmap_project_file(p)) {
+        if self.autostart
+            && self
+                .project
+                .as_ref()
+                .is_some_and(|p| is_rmap_project_file(p))
+        {
             tracing::info!(
                 monitor_index,
                 project_path = ?self.project,
@@ -2061,7 +2068,6 @@ impl ApplicationHandler for App {
         }
     }
 
-
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         // 003-T1.4: derive ControlFlow from AppState every loop tick.
         // Switching from Editing→Launcher (and back) flips Poll↔Wait
@@ -2119,10 +2125,7 @@ mod tests {
     #[test]
     fn render_init_failure_maps_to_failed() {
         let s = failed_state_for_render_init();
-        assert!(matches!(
-            s,
-            AppState::Failed(FailureKind::RenderInitFailed)
-        ));
+        assert!(matches!(s, AppState::Failed(FailureKind::RenderInitFailed)));
     }
 
     /// 003-T1.5: the macOS resume guard checks `is_running()`,
@@ -2188,10 +2191,7 @@ mod tests {
         // string in the `ProjectLoadFailed` payload.
         let err = ProjectError::Io {
             path: std::path::PathBuf::from("/missing.rmap.json"),
-            source: std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "no such file",
-            ),
+            source: std::io::Error::new(std::io::ErrorKind::NotFound, "no such file"),
         };
         let s = failed_state_for_project_load(&err);
         match s {

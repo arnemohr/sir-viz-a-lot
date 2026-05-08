@@ -54,7 +54,7 @@ pub fn current_band(idx: u8) -> f32 {
 mod cpal_impl {
     use super::*;
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-    use rustfft::{num_complex::Complex, FftPlanner};
+    use rustfft::{FftPlanner, num_complex::Complex};
     use std::thread;
 
     /// `AudioProvider` implementation backed by an `Arc<RwLock<[f32]>>` of
@@ -132,10 +132,7 @@ mod cpal_impl {
     /// FFT worker: drains the channel, accumulates samples up to a 1024
     /// window, runs `rustfft`, computes log-spaced band magnitudes,
     /// one-pole-smooths into the shared bands table.
-    fn run_worker(
-        rx: crossbeam_channel::Receiver<Vec<f32>>,
-        bands: Arc<RwLock<[f32; NUM_BANDS]>>,
-    ) {
+    fn run_worker(rx: crossbeam_channel::Receiver<Vec<f32>>, bands: Arc<RwLock<[f32; NUM_BANDS]>>) {
         let fft_size = 1024usize;
         let mut planner = FftPlanner::<f32>::new();
         let fft = planner.plan_fft_forward(fft_size);
@@ -195,7 +192,7 @@ mod cpal_impl {
 }
 
 #[cfg(feature = "audio")]
-pub use cpal_impl::{start_default, AudioCaptureGuard};
+pub use cpal_impl::{AudioCaptureGuard, start_default};
 // `CpalAudioProvider` is constructed inside `start_default` and erased into
 // the `Arc<dyn AudioProvider>` registered with `install`; no external caller
 // names the type, so there is no re-export.

@@ -186,11 +186,7 @@ where
 /// transform-shifted box as the "where the layer is on-screen" region.
 /// Modulator-animated Transform fields fall back to identity (see
 /// `effective_static_transform`) so drag-pick doesn't drift mid-music.
-pub fn hit_layer(
-    project: &Project,
-    pos_screen: Pos2,
-    preview_rect: egui::Rect,
-) -> Option<usize> {
+pub fn hit_layer(project: &Project, pos_screen: Pos2, preview_rect: egui::Rect) -> Option<usize> {
     let pos_norm = screen_to_normalized(pos_screen, preview_rect)?;
     for (idx, layer) in project.layers.iter().enumerate().rev() {
         if !layer.enabled {
@@ -298,9 +294,7 @@ pub fn hit_mask_edge(
             let a = to_screen(warp.mask_polygon[i]);
             let b = to_screen(warp.mask_polygon[(i + 1) % n]);
             let d = point_segment_distance(pos_screen, a, b);
-            if d <= MASK_EDGE_HIT_PX
-                && best.as_ref().map(|(bd, ..)| d < *bd).unwrap_or(true)
-            {
+            if d <= MASK_EDGE_HIT_PX && best.as_ref().map(|(bd, ..)| d < *bd).unwrap_or(true) {
                 best = Some((d, w_idx, i));
             }
         }
@@ -365,8 +359,7 @@ pub fn handle_scene_input(
                     },
                 });
             } else if let Some(idx) = hit_layer(project, pos, preview_rect) {
-                let (translate, scale, rotate) =
-                    effective_static_transform(&project.layers[idx]);
+                let (translate, scale, rotate) = effective_static_transform(&project.layers[idx]);
                 let mode = if modifiers.shift {
                     DragMode::Scale
                 } else if modifiers.alt {
@@ -410,10 +403,7 @@ pub fn handle_scene_input(
                             // visually do nothing.
                             match mode {
                                 DragMode::Translate => {
-                                    let new_t = [
-                                        start_translate[0] + dx,
-                                        start_translate[1] + dy,
-                                    ];
+                                    let new_t = [start_translate[0] + dx, start_translate[1] + dy];
                                     mutate_transform_effect(layer, |t, _r, _sx, _sy| {
                                         *t = new_t;
                                     });
@@ -422,22 +412,16 @@ pub fn handle_scene_input(
                                     let factor = (1.0 + (dx + dy)).max(0.05);
                                     let new_sx = start_scale[0] * factor;
                                     let new_sy = start_scale[1] * factor;
-                                    mutate_transform_effect(
-                                        layer,
-                                        |_t, _r, sx, sy| {
-                                            *sx = Modulator::Static(new_sx);
-                                            *sy = Modulator::Static(new_sy);
-                                        },
-                                    );
+                                    mutate_transform_effect(layer, |_t, _r, sx, sy| {
+                                        *sx = Modulator::Static(new_sx);
+                                        *sy = Modulator::Static(new_sy);
+                                    });
                                 }
                                 DragMode::Rotate => {
                                     let new_rot = start_rotate_deg + dx * 360.0;
-                                    mutate_transform_effect(
-                                        layer,
-                                        |_t, r, _sx, _sy| {
-                                            *r = Modulator::Static(new_rot);
-                                        },
-                                    );
+                                    mutate_transform_effect(layer, |_t, r, _sx, _sy| {
+                                        *r = Modulator::Static(new_rot);
+                                    });
                                 }
                             }
                         }
@@ -601,7 +585,7 @@ pub fn paint_mask_overlays(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::project::schema::{LayerConfig, LayerKind, Transform2D, BlendMode};
+    use crate::project::schema::{BlendMode, LayerConfig, LayerKind, Transform2D};
     use std::path::PathBuf;
 
     /// Build a layer whose Effect::Transform produces the given static
@@ -631,7 +615,9 @@ mod tests {
     #[test]
     fn hit_layer_center_full_frame() {
         let mut project = Project::default();
-        project.layers.push(dummy_layer("a", [0.0, 0.0], [1.0, 1.0]));
+        project
+            .layers
+            .push(dummy_layer("a", [0.0, 0.0], [1.0, 1.0]));
         let rect = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(100.0, 100.0));
         let pos = egui::pos2(50.0, 50.0);
         assert_eq!(hit_layer(&project, pos, rect), Some(0));
@@ -641,8 +627,12 @@ mod tests {
     #[test]
     fn hit_layer_top_of_stack_wins() {
         let mut project = Project::default();
-        project.layers.push(dummy_layer("bottom", [0.0, 0.0], [1.0, 1.0]));
-        project.layers.push(dummy_layer("top", [0.0, 0.0], [0.5, 0.5]));
+        project
+            .layers
+            .push(dummy_layer("bottom", [0.0, 0.0], [1.0, 1.0]));
+        project
+            .layers
+            .push(dummy_layer("top", [0.0, 0.0], [0.5, 0.5]));
         let rect = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(100.0, 100.0));
         // Center hits both; we should select the top layer.
         let pos = egui::pos2(50.0, 50.0);
@@ -657,7 +647,9 @@ mod tests {
         let mut project = Project::default();
         let mut top = dummy_layer("top", [0.0, 0.0], [1.0, 1.0]);
         top.enabled = false;
-        project.layers.push(dummy_layer("bottom", [0.0, 0.0], [1.0, 1.0]));
+        project
+            .layers
+            .push(dummy_layer("bottom", [0.0, 0.0], [1.0, 1.0]));
         project.layers.push(top);
         let rect = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(100.0, 100.0));
         assert_eq!(hit_layer(&project, egui::pos2(50.0, 50.0), rect), Some(0));

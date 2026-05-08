@@ -19,7 +19,7 @@
 //! decoder to emit `ParamSet { binding, value }` for CC; the channel
 //! and Source plumbing are already in place.
 
-use crossbeam_channel::{bounded, Receiver};
+use crossbeam_channel::{Receiver, bounded};
 use midir::{MidiInput, MidiInputConnection};
 
 use crate::controls::{Command, Source};

@@ -631,8 +631,11 @@ fn show_effects_tab(ui: &mut Ui, project: &mut Project, st: &mut ControlPanelSta
                 }
             }
         }
-        st.pending_mutations
-            .push(Mutation::SetLayerEffects { layer_idx, new, old });
+        st.pending_mutations.push(Mutation::SetLayerEffects {
+            layer_idx,
+            new,
+            old,
+        });
     }
 }
 

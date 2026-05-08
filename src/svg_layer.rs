@@ -350,11 +350,7 @@ impl SvgLayer {
     /// layer's GPU slot the same way `upload` would. The SVG-side raster
     /// cache key is invalidated so a later SVG reload (impossible for an
     /// Image layer; defensive) does not skip on a stale match.
-    pub(crate) fn set_uploaded_texture(
-        &mut self,
-        texture: wgpu::Texture,
-        view: wgpu::TextureView,
-    ) {
+    pub(crate) fn set_uploaded_texture(&mut self, texture: wgpu::Texture, view: wgpu::TextureView) {
         self.gpu_texture = Some(texture);
         self.gpu_texture_view = Some(view);
         self.gpu_uploaded_key = None;

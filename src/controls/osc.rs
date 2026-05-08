@@ -21,7 +21,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 
-use crossbeam_channel::{bounded, Receiver};
+use crossbeam_channel::{Receiver, bounded};
 use rosc::{OscMessage, OscPacket};
 
 use crate::controls::{Command, Source};
@@ -63,7 +63,10 @@ impl OscSource {
         let port = if port == 0 { DEFAULT_PORT } else { port };
         let socket = UdpSocket::bind(("0.0.0.0", port))?;
         socket.set_read_timeout(Some(std::time::Duration::from_millis(250)))?;
-        let local = socket.local_addr().map(|a| a.to_string()).unwrap_or_default();
+        let local = socket
+            .local_addr()
+            .map(|a| a.to_string())
+            .unwrap_or_default();
         tracing::info!(local = %local, "osc listening");
 
         let (tx, rx) = bounded::<Command>(QUEUE_DEPTH);
@@ -77,8 +80,9 @@ impl OscSource {
                 while !stop_for_thread.load(Ordering::Relaxed) {
                     let (size, _from) = match socket.recv_from(&mut buf) {
                         Ok(v) => v,
-                        Err(err) if err.kind() == std::io::ErrorKind::WouldBlock
-                            || err.kind() == std::io::ErrorKind::TimedOut =>
+                        Err(err)
+                            if err.kind() == std::io::ErrorKind::WouldBlock
+                                || err.kind() == std::io::ErrorKind::TimedOut =>
                         {
                             continue;
                         }

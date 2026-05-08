@@ -168,10 +168,7 @@ pub fn default_warp_mesh() -> WarpMesh {
     WarpMesh {
         rows: 1,
         cols: 1,
-        grid: vec![
-            vec![[0.0, 0.0], [1.0, 0.0]],
-            vec![[0.0, 1.0], [1.0, 1.0]],
-        ],
+        grid: vec![vec![[0.0, 0.0], [1.0, 0.0]], vec![[0.0, 1.0], [1.0, 1.0]]],
         source_rect: [0.0, 0.0, 1.0, 1.0],
         mask_polygon: Vec::new(),
         mask_feather: 0.02,
@@ -186,11 +183,7 @@ pub fn default_warp_mesh() -> WarpMesh {
 /// (T-M7-01) so existing customization isn't lost on resize. The
 /// schema's `rows`/`cols` are cells; the returned grid is
 /// `(rows+1) × (cols+1)` of normalized output-space points.
-pub fn resample_grid(
-    old: &[Vec<[f32; 2]>],
-    new_rows: u32,
-    new_cols: u32,
-) -> Vec<Vec<[f32; 2]>> {
+pub fn resample_grid(old: &[Vec<[f32; 2]>], new_rows: u32, new_cols: u32) -> Vec<Vec<[f32; 2]>> {
     let new_r = (new_rows as usize).max(1);
     let new_c = (new_cols as usize).max(1);
     if old.len() < 2 || old.iter().any(|row| row.len() != old[0].len()) || old[0].len() < 2 {
@@ -198,9 +191,8 @@ pub fn resample_grid(
     }
     let old_r = old.len() - 1;
     let old_c = old[0].len() - 1;
-    let lerp = |a: [f32; 2], b: [f32; 2], t: f32| {
-        [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]
-    };
+    let lerp =
+        |a: [f32; 2], b: [f32; 2], t: f32| [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
     let mut out = Vec::with_capacity(new_r + 1);
     for r in 0..=new_r {
         let fy = r as f32 / new_r as f32 * old_r as f32;

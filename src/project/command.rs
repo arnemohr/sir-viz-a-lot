@@ -903,9 +903,8 @@ mod tests {
                 Just(MutationKind::AddLayer),
                 Just(MutationKind::RemoveLayer),
                 Just(MutationKind::SwapLayers),
-                (-1.0_f32..=1.0, -1.0_f32..=1.0).prop_map(|(x, y)| {
-                    MutationKind::LayerEffectsTransformTranslate { x, y }
-                }),
+                (-1.0_f32..=1.0, -1.0_f32..=1.0)
+                    .prop_map(|(x, y)| { MutationKind::LayerEffectsTransformTranslate { x, y } }),
             ]
         }
 

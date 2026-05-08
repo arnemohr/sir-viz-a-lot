@@ -34,12 +34,7 @@ pub struct OverlayVertex {
 }
 
 fn verts_as_bytes(v: &[OverlayVertex]) -> &[u8] {
-    unsafe {
-        std::slice::from_raw_parts(
-            v.as_ptr().cast::<u8>(),
-            std::mem::size_of_val(v),
-        )
-    }
+    unsafe { std::slice::from_raw_parts(v.as_ptr().cast::<u8>(), std::mem::size_of_val(v)) }
 }
 
 /// One line segment in clip space (NDC, +X right, +Y up, range [-1, 1]).
@@ -187,22 +182,37 @@ impl OverlayPipeline {
             let nx_px = -dy / len * t;
             let ny_px = dx / len * t;
             let to_clip = |p: (f32, f32)| -> [f32; 2] {
-                [
-                    (p.0 * inv_w) * 2.0 - 1.0,
-                    1.0 - (p.1 * inv_h) * 2.0,
-                ]
+                [(p.0 * inv_w) * 2.0 - 1.0, 1.0 - (p.1 * inv_h) * 2.0]
             };
             let p0 = to_clip((a_px.0 + nx_px, a_px.1 + ny_px));
             let p1 = to_clip((a_px.0 - nx_px, a_px.1 - ny_px));
             let p2 = to_clip((b_px.0 + nx_px, b_px.1 + ny_px));
             let p3 = to_clip((b_px.0 - nx_px, b_px.1 - ny_px));
             // Two triangles: (p0, p1, p2) and (p2, p1, p3)
-            verts.push(OverlayVertex { pos_clip: p0, color: line.color });
-            verts.push(OverlayVertex { pos_clip: p1, color: line.color });
-            verts.push(OverlayVertex { pos_clip: p2, color: line.color });
-            verts.push(OverlayVertex { pos_clip: p2, color: line.color });
-            verts.push(OverlayVertex { pos_clip: p1, color: line.color });
-            verts.push(OverlayVertex { pos_clip: p3, color: line.color });
+            verts.push(OverlayVertex {
+                pos_clip: p0,
+                color: line.color,
+            });
+            verts.push(OverlayVertex {
+                pos_clip: p1,
+                color: line.color,
+            });
+            verts.push(OverlayVertex {
+                pos_clip: p2,
+                color: line.color,
+            });
+            verts.push(OverlayVertex {
+                pos_clip: p2,
+                color: line.color,
+            });
+            verts.push(OverlayVertex {
+                pos_clip: p1,
+                color: line.color,
+            });
+            verts.push(OverlayVertex {
+                pos_clip: p3,
+                color: line.color,
+            });
         }
 
         if verts.len() > self.vertex_capacity {
@@ -367,10 +377,7 @@ fn warp_source_to_surface(p_src: [f32; 2], warps: &[WarpMesh]) -> [f32; 2] {
 /// vertex shader runs (unit quad → scale → rotate → translate*2 with
 /// y-flipped to match the schema's y-down convention). Mask polygons
 /// are stored in normalized output-space already; just convert to clip.
-pub fn build_overlay_lines(
-    project: &Project,
-    selected_layer: Option<usize>,
-) -> Vec<OverlayLine> {
+pub fn build_overlay_lines(project: &Project, selected_layer: Option<usize>) -> Vec<OverlayLine> {
     let mut lines = Vec::new();
 
     // Per-layer outlines: project the four edges through the same warp

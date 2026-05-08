@@ -14,12 +14,7 @@ struct WarpVertex {
 }
 
 fn verts_as_bytes(v: &[WarpVertex]) -> &[u8] {
-    unsafe {
-        std::slice::from_raw_parts(
-            v.as_ptr().cast::<u8>(),
-            std::mem::size_of_val(v),
-        )
-    }
+    unsafe { std::slice::from_raw_parts(v.as_ptr().cast::<u8>(), std::mem::size_of_val(v)) }
 }
 
 /// Solve 8×8 linear system (augmented column last).
@@ -144,8 +139,10 @@ fn build_warp_vertices(mesh: &WarpMesh, sub: u32) -> (Vec<WarpVertex>, Vec<u32>)
             let s10 = Vec2::new(u1, v0);
             let s01 = Vec2::new(u0, v1);
             let s11 = Vec2::new(u1, v1);
-            let src_uv =
-                (1.0 - tx) * (1.0 - ty) * s00 + tx * (1.0 - ty) * s10 + (1.0 - tx) * ty * s01 + tx * ty * s11;
+            let src_uv = (1.0 - tx) * (1.0 - ty) * s00
+                + tx * (1.0 - ty) * s10
+                + (1.0 - tx) * ty * s01
+                + tx * ty * s11;
 
             let clip = clip_from_normalized_output(dst_xy);
             vertices.push(WarpVertex {
@@ -162,7 +159,9 @@ fn build_warp_vertices(mesh: &WarpMesh, sub: u32) -> (Vec<WarpVertex>, Vec<u32>)
             let i1 = i0 + 1;
             let i2 = i0 + stride + 1;
             let i3 = i0 + stride;
-            indices.extend_from_slice(&[i0 as u32, i1 as u32, i3 as u32, i1 as u32, i2 as u32, i3 as u32]);
+            indices.extend_from_slice(&[
+                i0 as u32, i1 as u32, i3 as u32, i1 as u32, i2 as u32, i3 as u32,
+            ]);
         }
     }
 
@@ -346,7 +345,12 @@ impl WarpRenderer {
         std::hash::Hasher::finish(&h)
     }
 
-    pub fn sync_mesh_and_mask(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, mesh: &WarpMesh) {
+    pub fn sync_mesh_and_mask(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        mesh: &WarpMesh,
+    ) {
         let geo_h = Self::mesh_geometry_hash(mesh);
         if geo_h != self.last_mesh_hash {
             self.last_mesh_hash = geo_h;
@@ -471,7 +475,11 @@ impl WarpRenderer {
     }
 }
 
-fn upload_mesh(device: &wgpu::Device, v: &[WarpVertex], idx: &[u32]) -> (wgpu::Buffer, wgpu::Buffer, u32) {
+fn upload_mesh(
+    device: &wgpu::Device,
+    v: &[WarpVertex],
+    idx: &[u32],
+) -> (wgpu::Buffer, wgpu::Buffer, u32) {
     let vb = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("warp vb"),
         contents: verts_as_bytes(v),
@@ -488,7 +496,15 @@ fn upload_mesh(device: &wgpu::Device, v: &[WarpVertex], idx: &[u32]) -> (wgpu::B
     (vb, ib, idx.len() as u32)
 }
 
-fn empty_mesh_and_dummy_sdf(device: &wgpu::Device) -> (wgpu::Buffer, wgpu::Buffer, u32, wgpu::Texture, wgpu::TextureView) {
+fn empty_mesh_and_dummy_sdf(
+    device: &wgpu::Device,
+) -> (
+    wgpu::Buffer,
+    wgpu::Buffer,
+    u32,
+    wgpu::Texture,
+    wgpu::TextureView,
+) {
     let mesh = crate::project::schema::default_warp_mesh();
     let (v, idx) = build_warp_vertices(&mesh, 1);
     let (vb, ib, ic) = upload_mesh(device, &v, &idx);

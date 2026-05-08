@@ -141,11 +141,7 @@ pub fn restore_scene(
 /// out by the caller — interpolating across them is well-defined here
 /// (mid-point snap) but produces visible jolts that defeat the point of
 /// a fade.
-pub fn interpolate(
-    a: &serde_json::Value,
-    b: &serde_json::Value,
-    t: f32,
-) -> serde_json::Value {
+pub fn interpolate(a: &serde_json::Value, b: &serde_json::Value, t: f32) -> serde_json::Value {
     use serde_json::Value::{Array, Number, Object};
     let t = t.clamp(0.0, 1.0);
     match (a, b) {
@@ -242,10 +238,7 @@ mod tests {
     #[test]
     fn project_round_trip() {
         let dir = std::env::temp_dir();
-        let path = dir.join(format!(
-            "rmap_round_trip_{}.rmap.json",
-            std::process::id()
-        ));
+        let path = dir.join(format!("rmap_round_trip_{}.rmap.json", std::process::id()));
 
         let mut original = Project::default();
         original.output_monitor_index = 2;
@@ -302,10 +295,7 @@ mod tests {
         p.warps.push(WarpMesh {
             rows: 1,
             cols: 1,
-            grid: vec![
-                vec![[0.1, 0.0], [0.9, 0.05]],
-                vec![[0.0, 1.0], [1.0, 1.0]],
-            ],
+            grid: vec![vec![[0.1, 0.0], [0.9, 0.05]], vec![[0.0, 1.0], [1.0, 1.0]]],
             source_rect: [0.0, 0.0, 1.0, 1.0],
             mask_polygon: vec![[0.2, 0.2], [0.8, 0.2], [0.8, 0.8]],
             mask_feather: 0.1,

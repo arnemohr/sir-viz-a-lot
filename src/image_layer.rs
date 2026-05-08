@@ -31,12 +31,8 @@ pub fn upload_image_rgba8(
     queue: &wgpu::Queue,
     path: &Path,
 ) -> Result<(wgpu::Texture, wgpu::TextureView, (u32, u32)), RmapError> {
-    let img = image::open(path).map_err(|e| {
-        RmapError::Other(format!(
-            "failed to decode image {}: {e}",
-            path.display()
-        ))
-    })?;
+    let img = image::open(path)
+        .map_err(|e| RmapError::Other(format!("failed to decode image {}: {e}", path.display())))?;
 
     let (mut width, mut height) = (img.width(), img.height());
     // Aspect-preserving downscale to MAX_DIM if needed.

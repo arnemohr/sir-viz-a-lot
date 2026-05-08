@@ -19,12 +19,7 @@ const CIRCLE_SAMPLES: usize = 24;
 /// portrait onto a window" preset — operator drag-aligns to the actual
 /// window opening.
 pub fn window_rectangle() -> Vec<[f32; 2]> {
-    vec![
-        [0.35, 0.1],
-        [0.65, 0.1],
-        [0.65, 0.85],
-        [0.35, 0.85],
-    ]
+    vec![[0.35, 0.1], [0.65, 0.1], [0.65, 0.85], [0.35, 0.85]]
 }
 
 /// Bottom-aligned arch: rectangle + half-circle on top. ~13-vertex
@@ -63,12 +58,7 @@ pub fn circle_spotlight() -> Vec<[f32; 2]> {
 /// Centered square, ~40% wide. The "block out a no-project area"
 /// preset — operator drag-edits to overlap a curtain, fixture, etc.
 pub fn void_block() -> Vec<[f32; 2]> {
-    vec![
-        [0.3, 0.3],
-        [0.7, 0.3],
-        [0.7, 0.7],
-        [0.3, 0.7],
-    ]
+    vec![[0.3, 0.3], [0.7, 0.3], [0.7, 0.7], [0.3, 0.7]]
 }
 
 /// All four templates by `(name, builder)` so the UI can iterate without
