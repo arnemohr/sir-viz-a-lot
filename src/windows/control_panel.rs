@@ -1,6 +1,8 @@
 //! egui control panel: effects per layer, layer order, warp corners, scenes, gamma.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(not(feature = "v3"))]
+use std::path::PathBuf;
 
 use egui::Ui;
 use serde::Deserialize;
@@ -775,56 +777,110 @@ fn show_layers_tab(
 ) -> ControlPanelAction {
     let mut action = ControlPanelAction::None;
 
-    ui.label("Add an SVG as a new compositor layer (bottom list order = draw order).");
-    ui.horizontal(|ui| {
-        let edit = egui::TextEdit::singleline(&mut st.new_layer_path_input)
-            .desired_width(280.0)
-            .hint_text("/absolute/or/relative/path.svg");
-        let resp = ui.add(edit);
-        if resp.changed() {
-            st.add_layer_error.clear();
-        }
-        if ui.button("Add layer").clicked() {
-            let trimmed = st.new_layer_path_input.trim();
-            if trimmed.is_empty() {
-                st.add_layer_error = "Enter path to an SVG file.".into();
-            } else {
-                let p = PathBuf::from(trimmed);
-                let ext_ok = p.extension().is_some_and(|e| e.eq_ignore_ascii_case("svg"));
-                if !p.exists() {
-                    st.add_layer_error = "Path does not exist.".into();
-                } else if !p.is_file() {
-                    st.add_layer_error = "Path is not a file.".into();
-                } else if !ext_ok {
-                    st.add_layer_error = "File must have extension .svg.".into();
-                } else if let Ok(canonical) = p.canonicalize() {
-                    let id = unique_layer_id(project);
-                    let new_layer = schema::layer_from_svg_path(id, canonical);
-                    #[cfg(feature = "v3")]
-                    {
-                        let position = project.layers.len();
-                        // Point at the to-be-inserted layer; rebuild_layers_for_state
-                        // will clamp after the mutation applies.
-                        st.selected_layer = position;
-                        st.pending_mutations.push(Mutation::AddLayer {
-                            layer: new_layer,
-                            position,
-                        });
-                    }
-                    #[cfg(not(feature = "v3"))]
-                    {
-                        project.layers.push(new_layer);
-                        st.selected_layer = project.layers.len() - 1;
-                    }
+    // 003-T2.14 — native "+ Add image" button. Sits above the typed-path
+    // field so the operator's eye lands on the picker first; the typed
+    // path stays available behind the v3-keep-typed-path opt-out and is
+    // removed entirely in T-003-T2.15.
+    #[cfg(feature = "v3")]
+    if ui
+        .button("+ Add image")
+        .on_hover_text("Pick a JPG, PNG, or SVG to add as a new layer")
+        .clicked()
+    {
+        if let Some(picked) = crate::windows::file_dialogs::pick_image_to_add() {
+            // Same extension policy as the drop handler: SVG → svg
+            // layer, raster → image layer, anything else falls through
+            // to a friendly inline error. The picker's filter already
+            // restricts choices to JPG/PNG/SVG, but operators can
+            // switch the filter to "All files" in the native panel,
+            // so we still validate.
+            let ext = picked
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|s| s.to_ascii_lowercase());
+            let id = unique_layer_id(project);
+            let layer = match ext.as_deref() {
+                Some("svg") => Some(crate::project::schema::layer_from_svg_path(
+                    id,
+                    picked.clone(),
+                )),
+                Some("png") | Some("jpg") | Some("jpeg") => Some(
+                    crate::project::schema::layer_from_image_path(id, picked.clone()),
+                ),
+                _ => None,
+            };
+            match layer {
+                Some(new_layer) => {
+                    let position = project.layers.len();
+                    st.selected_layer = position;
+                    st.pending_mutations.push(Mutation::AddLayer {
+                        layer: new_layer,
+                        position,
+                    });
                     st.new_layer_path_input.clear();
                     st.add_layer_error.clear();
                     action = ControlPanelAction::RebuildLayers;
-                } else {
-                    st.add_layer_error = "Could not resolve path.".into();
+                    tracing::info!(
+                        target: "rmap::ux",
+                        event = "layer_added_via_picker",
+                        path = %picked.display(),
+                    );
+                }
+                None => {
+                    st.add_layer_error =
+                        "That file type isn't supported yet. Try a JPG, PNG, or SVG.".into();
                 }
             }
         }
-    });
+    }
+
+    // 003-T2.15 — typed-path "Add layer" field is removed under v3
+    // now that drag-drop (T2.12) and the "+ Add image" picker (T2.14)
+    // both work and are easier to reach. The v2 default build still
+    // ships the typed path while v3 stabilises; both branches share
+    // the `add_layer_error` field so the picker's "unsupported file"
+    // message renders below either flow.
+    #[cfg(not(feature = "v3"))]
+    {
+        ui.label("Add an SVG as a new compositor layer (bottom list order = draw order).");
+        ui.horizontal(|ui| {
+            let edit = egui::TextEdit::singleline(&mut st.new_layer_path_input)
+                .desired_width(280.0)
+                .hint_text("/absolute/or/relative/path.svg");
+            let resp = ui.add(edit);
+            if resp.changed() {
+                st.add_layer_error.clear();
+            }
+            if ui.button("Add layer").clicked() {
+                let trimmed = st.new_layer_path_input.trim();
+                if trimmed.is_empty() {
+                    st.add_layer_error = "Enter path to an SVG file.".into();
+                } else {
+                    let p = PathBuf::from(trimmed);
+                    let ext_ok = p.extension().is_some_and(|e| e.eq_ignore_ascii_case("svg"));
+                    if !p.exists() {
+                        st.add_layer_error = "Path does not exist.".into();
+                    } else if !p.is_file() {
+                        st.add_layer_error = "Path is not a file.".into();
+                    } else if !ext_ok {
+                        st.add_layer_error = "File must have extension .svg.".into();
+                    } else if let Ok(canonical) = p.canonicalize() {
+                        let id = unique_layer_id(project);
+                        let new_layer = schema::layer_from_svg_path(id, canonical);
+                        project.layers.push(new_layer);
+                        st.selected_layer = project.layers.len() - 1;
+                        st.new_layer_path_input.clear();
+                        st.add_layer_error.clear();
+                        action = ControlPanelAction::RebuildLayers;
+                    } else {
+                        st.add_layer_error = "Could not resolve path.".into();
+                    }
+                }
+            }
+        });
+    }
+    #[cfg(feature = "v3")]
+    ui.label("Drop a JPG, PNG, or SVG onto the canvas, or use + Add image above. Order in this list = draw order, top to bottom.");
     if !st.add_layer_error.is_empty() {
         ui.colored_label(egui::Color32::from_rgb(220, 120, 100), &st.add_layer_error);
     }
