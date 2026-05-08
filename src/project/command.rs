@@ -54,6 +54,8 @@
 
 #![deny(missing_docs)]
 
+use std::path::PathBuf;
+
 use crate::project::schema::{BlendMode, LayerConfig, Project};
 
 /// 003-T1.22 — addressing key for a single `Modulator` slot inside a
@@ -285,6 +287,30 @@ pub enum Mutation {
         i: usize,
         /// Second swap index.
         j: usize,
+    },
+
+    /// 003-T2.24 — repoint a layer's asset path to a new location on
+    /// disk. Used by the missing-media relink toast: the audit's
+    /// `MissingAsset` finding offers a "Find this file…" action; on
+    /// successful pick, this mutation rewrites the layer's
+    /// `LayerKind::Image.path` (or `LayerKind::Svg.svg_path`) to the
+    /// picked path. Reverse swaps `new` ↔ `old`.
+    ///
+    /// Both paths are stored alongside the layer index so the proptest
+    /// round-trip (Reverse rule 3 — snapshot Reverse — is overkill
+    /// here; only one field changes, so per-field Reverse is correct
+    /// and minimal). `needs_layer_rebuild() == true` so the
+    /// renderer's `state.layers` Vec re-uploads the new texture.
+    RelinkAssetPath {
+        /// Index into `Project.layers`.
+        layer_idx: usize,
+        /// Replacement asset path (typically absolute, picked via
+        /// `rfd::FileDialog`).
+        new_path: PathBuf,
+        /// Pre-mutation asset path. Capturing it makes the Reverse
+        /// hand-rollable without re-reading the project state at
+        /// undo time.
+        old_path: PathBuf,
     },
 
     /// Replace the modulator at `(layer_idx, effect_idx, field)` with `new`,
@@ -650,6 +676,39 @@ impl Mutation {
                 project.layers.swap(i, j);
                 Mutation::SwapLayers { i, j }
             }
+            Mutation::RelinkAssetPath {
+                layer_idx,
+                new_path,
+                old_path,
+            } => {
+                let layer = project
+                    .layers
+                    .get_mut(layer_idx)
+                    .expect("RelinkAssetPath: layer_idx out of range");
+                // Stale-Reverse check: if the on-record `old_path`
+                // doesn't match the layer's current path, undo would
+                // restore something else. The proptest-safe choice is
+                // to debug_assert and let the test harness surface the
+                // mismatch; release builds proceed with the rewrite.
+                debug_assert_eq!(
+                    layer.kind.asset_path(),
+                    old_path.as_path(),
+                    "RelinkAssetPath: stale old_path for layer_idx={layer_idx}",
+                );
+                match &mut layer.kind {
+                    crate::project::schema::LayerKind::Image { path, .. } => {
+                        *path = new_path.clone();
+                    }
+                    crate::project::schema::LayerKind::Svg { svg_path } => {
+                        *svg_path = new_path.clone();
+                    }
+                }
+                Mutation::RelinkAssetPath {
+                    layer_idx,
+                    new_path: old_path,
+                    old_path: new_path,
+                }
+            }
             Mutation::SetModulator {
                 layer_idx,
                 effect_idx,
@@ -864,7 +923,8 @@ impl Mutation {
             | Mutation::ResetWarpMesh { .. }
             | Mutation::SetMaskPolygon { .. }
             | Mutation::SetProjectScenes { .. }
-            | Mutation::SetOutputMonitorIndex { .. } => false,
+            | Mutation::SetOutputMonitorIndex { .. }
+            | Mutation::RelinkAssetPath { .. } => false,
             Mutation::ApplyProjectSnapshot { non_undoable, .. } => *non_undoable,
         }
     }
@@ -888,7 +948,8 @@ impl Mutation {
         match self {
             Mutation::AddLayer { .. }
             | Mutation::RemoveLayer { .. }
-            | Mutation::SwapLayers { .. } => true,
+            | Mutation::SwapLayers { .. }
+            | Mutation::RelinkAssetPath { .. } => true,
             Mutation::ApplyProjectSnapshot { non_undoable, .. } => !non_undoable,
             _ => false,
         }
@@ -1197,6 +1258,36 @@ mod tests {
         let _ = reverse.apply(&mut p);
         let after = serde_json::to_value(&p).unwrap();
         assert_eq!(before, after, "round-trip should be byte-equal");
+    }
+
+    /// 003-T2.24 — `RelinkAssetPath` round-trip restores the original
+    /// asset path byte-equal when applied + reversed. The fresh
+    /// project's seeded layer is `LayerKind::Svg { svg_path: ... }`
+    /// (Cargo.toml as the standin asset); we point it at a different
+    /// path, then undo via the returned Reverse, and assert the
+    /// pre-mutation project serialises identically.
+    #[test]
+    fn relink_asset_path_round_trips() {
+        let mut p = fresh_project();
+        let before = serde_json::to_value(&p).unwrap();
+        let original = p.layers[0].kind.asset_path().to_path_buf();
+
+        let new_path = std::path::PathBuf::from("/some/other/place.svg");
+        let mutation = Mutation::RelinkAssetPath {
+            layer_idx: 0,
+            new_path: new_path.clone(),
+            old_path: original.clone(),
+        };
+        let reverse = mutation.apply(&mut p);
+        assert_eq!(
+            p.layers[0].kind.asset_path(),
+            new_path.as_path(),
+            "apply should rewrite svg_path",
+        );
+
+        let _ = reverse.apply(&mut p);
+        let after = serde_json::to_value(&p).unwrap();
+        assert_eq!(before, after, "Reverse should restore byte-equal project",);
     }
 
     /// Stale Reverse storage triggers `debug_assert!` in test

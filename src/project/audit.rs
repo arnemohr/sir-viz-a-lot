@@ -264,19 +264,34 @@ impl ProjectAudit {
                 _ => asset_path.to_path_buf(),
             };
             if !resolved.exists() {
+                // 003-T2.24 — downgraded from Critical to Warn so the
+                // project still opens. A Critical here would route to
+                // AppState::Failed, leaving no path to the relink
+                // toast. The new flow surfaces a Warn toast with a
+                // "Find this file…" action that emits
+                // `Command::OpenRelinkPicker` and then
+                // `Mutation::RelinkAssetPath`. The layer still won't
+                // render until relinked, but the operator stays in the
+                // editor and can fix it without quitting.
                 findings.push(AuditFinding {
                     kind: AuditKind::MissingAsset {
                         layer_idx,
                         path: asset_path.to_path_buf(),
                     },
-                    severity: Severity::Critical,
+                    severity: Severity::Warn,
                     message: format!(
-                        "Layer {} references missing asset: {}. Move the file back to that \
-                         path or relink the layer.",
-                        layer.id,
-                        asset_path.display(),
+                        "Can't find {}. Find this file or remove the layer.",
+                        asset_path
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or_else(|| asset_path.to_str().unwrap_or("missing asset")),
                     ),
-                    autofix: None, // Relink flow is T2.24; T1.38 ships without autofix.
+                    // The autofix slot stays None because the
+                    // replacement path comes from a file picker, not
+                    // from project state. The relink action is wired
+                    // at the toast-push site (app.rs) which has access
+                    // to both the layer index and the original path.
+                    autofix: None,
                 });
             }
         }
@@ -582,8 +597,10 @@ mod tests {
     }
 
     /// 003-T1.38 — Layer pointing at a missing path triggers Critical
-    /// MissingAsset; an existing file does not. Autofix is None for now
-    /// (T2.24 adds the relink flow).
+    /// MissingAsset; an existing file does not. The relink flow
+    /// (T2.24) wires the autofix at the toast-action layer, not via
+    /// the AuditFinding.autofix field — the replacement path comes
+    /// from a file picker, not from project state.
     #[test]
     fn audit_missing_asset_relink_path() {
         let mut p = fresh_project();
@@ -596,10 +613,13 @@ mod tests {
             .iter()
             .find(|f| matches!(f.kind, AuditKind::MissingAsset { .. }))
             .expect("expected MissingAsset");
-        assert_eq!(f.severity, Severity::Critical);
+        // 003-T2.24 — downgraded from Critical so the project still
+        // opens; the relink toast in apply_launch_command surfaces
+        // the "Find this file…" action.
+        assert_eq!(f.severity, Severity::Warn);
         assert!(
             f.autofix.is_none(),
-            "MissingAsset autofix is T2.24 territory"
+            "MissingAsset autofix lives at the toast-action layer (T2.24)"
         );
 
         // Sanity: an existing file does not trigger MissingAsset.

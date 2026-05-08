@@ -66,6 +66,48 @@ pub fn pick_open_project() -> Option<PathBuf> {
         .pick_file()
 }
 
+/// 003-T2.24 — relink a missing asset by picking its new on-disk
+/// location.
+///
+/// `missing_path` is the path the project carried (which doesn't
+/// exist anymore); we use it to:
+///
+/// - prefill the dialog title with the basename so the operator knows
+///   which asset they're replacing ("Find sky.jpg");
+/// - filter to the original extension only — relinking a JPG layer
+///   should not let the operator point it at a SVG (a separate
+///   add-layer flow handles that);
+/// - prefill the suggested directory to the project file's parent
+///   when one is supplied. Most missing-media cases are "asset moved
+///   with project to a new folder", so starting in that dir saves a
+///   click.
+///
+/// Returns `None` on cancel.
+#[allow(dead_code)] // Wired by T-003-T2.24 (Find this file… toast action).
+pub fn pick_relink_replacement(missing_path: &Path, project_dir: Option<&Path>) -> Option<PathBuf> {
+    let basename = missing_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("missing file");
+    let ext = missing_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_ascii_lowercase());
+
+    let mut dialog = FileDialog::new().set_title(format!("Find {basename}"));
+    if let Some(dir) = project_dir {
+        dialog = dialog.set_directory(dir);
+    }
+    if let Some(e) = ext.as_deref() {
+        // Filter scoped to the original extension. A JPG-layer relink
+        // points at a JPG, not a PNG — extension drift would change
+        // the LayerKind variant, which is a different operation
+        // (delete-and-add).
+        dialog = dialog.add_filter(format!("{} files", e.to_uppercase()), &[e]);
+    }
+    dialog.pick_file()
+}
+
 /// Append `.rmap.json` to `path` unless it already ends in that
 /// suffix. Pulled out so the suffix policy stays consistent across
 /// callers and is unit-testable without an OS dialog.

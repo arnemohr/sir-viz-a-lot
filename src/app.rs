@@ -687,6 +687,65 @@ fn apply_command(state: &mut EditingState, event: Command) -> SideEffect {
             );
             SideEffect::None
         }
+        // 003-T2.24 — operator clicked "Find this file…" on a missing-
+        // media toast. Run an `rfd::FileDialog` filtered to the
+        // original asset's extension; on a successful pick, push a
+        // `Mutation::RelinkAssetPath` through the undo stack so Cmd-Z
+        // reverts the relink. The picker blocks the egui frame for
+        // the duration of the modal — acceptable for a one-shot relink
+        // action; documented in the helper's module doc.
+        #[cfg(feature = "v3")]
+        Command::OpenRelinkPicker {
+            layer_idx,
+            missing_path,
+        } => {
+            // Sanity: layer_idx must still resolve. The audit and the
+            // toast click can be separated by undo / redo activity that
+            // shifts indices; a stale index here is dropped silently
+            // rather than panicking.
+            let Some(layer) = state.project.layers.get(layer_idx) else {
+                tracing::warn!(
+                    layer_idx,
+                    "OpenRelinkPicker: layer_idx no longer in range; dropping",
+                );
+                return SideEffect::None;
+            };
+            let project_dir = state
+                .project_file_path
+                .as_deref()
+                .and_then(|p| p.parent())
+                .map(std::path::Path::to_path_buf);
+            let old_path = layer.kind.asset_path().to_path_buf();
+            let Some(new_path) = crate::windows::file_dialogs::pick_relink_replacement(
+                &missing_path,
+                project_dir.as_deref(),
+            ) else {
+                tracing::info!(
+                    target: "rmap::ux",
+                    event = "relink_cancelled",
+                    layer_idx,
+                );
+                return SideEffect::None;
+            };
+            tracing::info!(
+                target: "rmap::ux",
+                event = "relink_picked",
+                layer_idx,
+                old = %old_path.display(),
+                new = %new_path.display(),
+            );
+            let mutation = crate::project::command::Mutation::RelinkAssetPath {
+                layer_idx,
+                new_path,
+                old_path,
+            };
+            state.undo_stack.push(mutation, &mut state.project);
+            // RelinkAssetPath::needs_layer_rebuild() == true so we
+            // tell the event loop to refresh GPU layer state and the
+            // editor will re-run the file-watcher / image-loader path
+            // on the new path.
+            SideEffect::RebuildLayers
+        }
     }
 }
 
@@ -1497,9 +1556,23 @@ fn apply_launch_command(
                     event = "project_audit_warned",
                     severity = ?finding.severity,
                 );
-                running
-                    .toast_queue
-                    .push(crate::windows::toast::Toast::new(kind, finding.message));
+                let mut toast = crate::windows::toast::Toast::new(kind, finding.message.clone());
+                // 003-T2.24 — MissingAsset findings carry a "Find this
+                // file…" action that emits Command::OpenRelinkPicker.
+                // The handler in apply_command runs the file picker and
+                // emits Mutation::RelinkAssetPath via the undo stack.
+                if let crate::project::audit::AuditKind::MissingAsset { layer_idx, path } =
+                    &finding.kind
+                {
+                    toast = toast.with_action(crate::windows::toast::ToastAction {
+                        label: "Find this file…".into(),
+                        command: crate::controls::Command::OpenRelinkPicker {
+                            layer_idx: *layer_idx,
+                            missing_path: path.clone(),
+                        },
+                    });
+                }
+                running.toast_queue.push(toast);
             }
             tracing::info!(target: "rmap::ux", event = "session_start");
             AppState::Editing(running)
@@ -2772,6 +2845,8 @@ fn handle_editing_window_event(
                 }
                 #[cfg(feature = "v3")]
                 let mut undo_rebuild_after_render = false;
+                #[cfg(feature = "v3")]
+                let mut toast_command: Option<Command> = None;
                 if let Some(ctrl) = state.control.as_mut() {
                     let result = ctrl.render(device, queue, |ui| {
                         panel_action = control_panel_show(
@@ -2819,14 +2894,15 @@ fn handle_editing_window_event(
                         // canvas top-right after the control panel so it
                         // overlays on top. The Area widget anchors to
                         // ctx, not to the local Ui.
+                        // 003-T2.24 — capture the toast strip's emitted
+                        // Command (e.g. "Find this file…" → OpenRelinkPicker)
+                        // so it can be dispatched once the control window
+                        // borrow is released. We can't call apply_command
+                        // here because it also takes &mut state.
                         #[cfg(feature = "v3")]
                         {
-                            let _ = crate::windows::toast::toast_strip(ui, &mut state.toast_queue);
-                            // Toast action buttons (T1.43 AC#2) are deferred
-                            // to Phase 2 — see the comment in the resumed
-                            // handler. For now the returned Command is
-                            // dropped (no audit action toasts ship a
-                            // command).
+                            toast_command =
+                                crate::windows::toast::toast_strip(ui, &mut state.toast_queue);
                         }
                     });
                     if let Err(e) = result {
@@ -2836,6 +2912,19 @@ fn handle_editing_window_event(
                 #[cfg(feature = "v3")]
                 if undo_rebuild_after_render {
                     rebuild_layers_for_state(state);
+                }
+                // 003-T2.24 — dispatch any Command emitted by a toast
+                // action click now that the control-window borrow is
+                // released. Today the only producer is
+                // OpenRelinkPicker; the picker blocks the main thread
+                // for the dialog's duration, which is why we run it
+                // here rather than during the egui closure.
+                #[cfg(feature = "v3")]
+                if let Some(cmd) = toast_command {
+                    let side = apply_command(state, cmd);
+                    if matches!(side, SideEffect::RebuildLayers) {
+                        rebuild_layers_for_state(state);
+                    }
                 }
                 // 003-T1.18: drain Mutations emitted by the control
                 // panel's `command_*` helpers and route each through

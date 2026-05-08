@@ -64,6 +64,20 @@ pub enum Command {
         monitor: usize,
         windowed: bool,
     },
+    /// 003-T2.24 — operator clicked "Find this file…" on a missing-
+    /// media toast. The handler in `apply_command` runs an
+    /// `rfd::FileDialog` filtered to the original asset's extension
+    /// and, on a successful pick, emits a `Mutation::RelinkAssetPath`
+    /// via the undo stack so the relink is Cmd-Z reversible.
+    ///
+    /// `missing_path` is captured from the audit finding so the dialog
+    /// can prefill its title and filter to the extension the operator
+    /// is replacing.
+    #[cfg(feature = "v3")]
+    OpenRelinkPicker {
+        layer_idx: usize,
+        missing_path: std::path::PathBuf,
+    },
 }
 
 /// A pluggable input. v1 ships [`KeyboardSource`] (T-M4-09); v1.5
