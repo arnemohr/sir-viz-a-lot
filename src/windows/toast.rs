@@ -191,6 +191,138 @@ impl ToastQueue {
     }
 }
 
+/// 003-T1.42 — render the toast queue as a top-right strip on the
+/// canvas. Returns `Some(Command)` if the operator clicked a toast's
+/// action button this frame; the caller dispatches via `apply_command`.
+///
+/// Visual treatment:
+/// - Severity color: blue-grey for Info, amber for Warn, red for Error.
+/// - Soft fade-in over the first 200 ms after `created_at`.
+/// - Soft fade-out over the last 400 ms before TTL (sticky Error toasts
+///   skip the fade-out — they stay opaque until dismissed).
+/// - "x" dismiss button on every toast.
+/// - Optional action button with the toast's `ToastAction.label`.
+///
+/// Caps at `DEFAULT_VISIBLE_CAP` toasts. The render side is the only
+/// place that decides this — `ToastQueue` itself accepts unlimited
+/// pushes so audit drivers don't have to think about it.
+pub fn toast_strip(ui: &mut egui::Ui, queue: &mut ToastQueue) -> Option<Command> {
+    if queue.is_empty() {
+        return None;
+    }
+    let mut emitted: Option<Command> = None;
+    let mut dismiss_idx: Option<usize> = None;
+
+    // egui's right-to-left layout in the top-right corner stacks toasts
+    // newest-on-top. iter_visible already yields newest-first.
+    let now = Instant::now();
+    let visible: Vec<(usize, &Toast)> = queue
+        .toasts
+        .iter()
+        .enumerate()
+        .rev()
+        .take(DEFAULT_VISIBLE_CAP)
+        .collect();
+
+    egui::Area::new(egui::Id::new("rmap_toast_strip"))
+        .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-12.0, 12.0))
+        .order(egui::Order::Foreground)
+        .show(ui.ctx(), |ui| {
+            ui.with_layout(egui::Layout::top_down(egui::Align::Max), |ui| {
+                for (idx, toast) in visible {
+                    let alpha = toast_alpha(toast, now);
+                    let (fill, stroke_color) = toast_palette(toast.kind, alpha);
+                    let frame = egui::Frame::default()
+                        .fill(fill)
+                        .stroke(egui::Stroke::new(1.0, stroke_color))
+                        .corner_radius(egui::CornerRadius::same(4))
+                        .inner_margin(egui::Margin::symmetric(10, 8))
+                        .outer_margin(egui::Margin {
+                            top: 0,
+                            bottom: 6,
+                            left: 0,
+                            right: 0,
+                        });
+                    frame.show(ui, |ui| {
+                        ui.set_max_width(360.0);
+                        ui.horizontal(|ui| {
+                            // Message + optional action button.
+                            ui.vertical(|ui| {
+                                ui.colored_label(
+                                    egui::Color32::from_rgba_unmultiplied(
+                                        240,
+                                        240,
+                                        245,
+                                        (alpha * 255.0) as u8,
+                                    ),
+                                    &toast.message,
+                                );
+                                if let Some(action) = &toast.action {
+                                    if ui.small_button(&action.label).clicked() {
+                                        emitted = Some(action.command.clone());
+                                        dismiss_idx = Some(idx);
+                                    }
+                                }
+                            });
+                            if ui.small_button("✕").clicked() {
+                                dismiss_idx = Some(idx);
+                            }
+                        });
+                    });
+                }
+            });
+        });
+
+    if let Some(idx) = dismiss_idx {
+        queue.dismiss(idx);
+    }
+    emitted
+}
+
+/// Compute per-toast alpha based on TTL phase:
+/// - 0..200 ms after creation → fade in 0.0 → 1.0.
+/// - between fade-in and fade-out window → 1.0.
+/// - last 400 ms before expiry → fade out 1.0 → 0.0.
+/// - sticky toasts (no TTL) skip fade-out, always opaque after fade-in.
+fn toast_alpha(toast: &Toast, now: Instant) -> f32 {
+    let age = now.duration_since(toast.created_at);
+    let fade_in = std::time::Duration::from_millis(200);
+    let fade_out = std::time::Duration::from_millis(400);
+    let in_alpha = if age < fade_in {
+        age.as_secs_f32() / fade_in.as_secs_f32()
+    } else {
+        1.0
+    };
+    let out_alpha = match toast.ttl {
+        None => 1.0,
+        Some(ttl) if age >= ttl => 0.0,
+        Some(ttl) if ttl - age < fade_out => (ttl - age).as_secs_f32() / fade_out.as_secs_f32(),
+        Some(_) => 1.0,
+    };
+    in_alpha.min(out_alpha).clamp(0.0, 1.0)
+}
+
+/// Severity → (fill color, stroke color) at the given alpha. Wedding-
+/// scale dark theme: muted backgrounds, high-contrast outlines.
+fn toast_palette(kind: ToastKind, alpha: f32) -> (egui::Color32, egui::Color32) {
+    let a = (alpha * 220.0) as u8;
+    let stroke_a = (alpha * 200.0) as u8;
+    match kind {
+        ToastKind::Info => (
+            egui::Color32::from_rgba_unmultiplied(40, 50, 65, a),
+            egui::Color32::from_rgba_unmultiplied(100, 150, 220, stroke_a),
+        ),
+        ToastKind::Warn => (
+            egui::Color32::from_rgba_unmultiplied(70, 55, 30, a),
+            egui::Color32::from_rgba_unmultiplied(220, 175, 80, stroke_a),
+        ),
+        ToastKind::Error => (
+            egui::Color32::from_rgba_unmultiplied(70, 35, 35, a),
+            egui::Color32::from_rgba_unmultiplied(220, 100, 100, stroke_a),
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -281,6 +413,37 @@ mod tests {
         // Out-of-range no-op.
         q.dismiss(99);
         assert_eq!(q.len(), 2);
+    }
+
+    /// 003-T1.42 — `toast_alpha` curve check. Fades in over the
+    /// first 200 ms, holds at 1.0, fades out over the last 400 ms
+    /// of TTL. Sticky toasts (no TTL) never fade out.
+    #[test]
+    fn toast_alpha_fades_in_and_out() {
+        let mut t = Toast::info("hello");
+        // Force a 1 s TTL so the fade-out window is observable.
+        t.ttl = Some(Duration::from_secs(1));
+        // At creation: fade-in just starting → 0.0.
+        assert!(toast_alpha(&t, t.created_at) < 0.05);
+        // 100 ms in: half-fade → ~0.5.
+        let mid_in = t.created_at + Duration::from_millis(100);
+        let a = toast_alpha(&t, mid_in);
+        assert!((0.4..=0.6).contains(&a), "expected ~0.5, got {a}");
+        // 500 ms in: fade-in done, before fade-out → 1.0.
+        let plateau = t.created_at + Duration::from_millis(500);
+        assert!((toast_alpha(&t, plateau) - 1.0).abs() < 1e-3);
+        // 800 ms in: 200 ms left, half through fade-out → ~0.5.
+        let mid_out = t.created_at + Duration::from_millis(800);
+        let a = toast_alpha(&t, mid_out);
+        assert!((0.4..=0.6).contains(&a), "expected ~0.5 fade-out, got {a}");
+        // Past TTL: 0.0.
+        let dead = t.created_at + Duration::from_millis(1100);
+        assert!(toast_alpha(&t, dead) < 0.05);
+
+        // Sticky: never fades out.
+        let sticky = Toast::error("blocking");
+        let later = sticky.created_at + Duration::from_secs(60);
+        assert!((toast_alpha(&sticky, later) - 1.0).abs() < 1e-3);
     }
 
     /// `Toast::with_action` attaches a click action. Verifies the
