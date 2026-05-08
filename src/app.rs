@@ -843,6 +843,12 @@ fn init_output_window(
     })
 }
 
+/// 003-T1.12: orchestrator. Calls the five extractors
+/// (`init_gpu` → `init_control_window` → `init_output_window`
+/// → `init_inputs` → `init_render_graph`) and assembles the
+/// `EditingState`. T-003-T2.1 will reuse the same extractors
+/// from the launcher's `AppState::Launcher → AppState::Editing`
+/// transition.
 fn init_running_app(
     event_loop: &ActiveEventLoop,
     monitor: Option<MonitorHandle>,
@@ -851,92 +857,77 @@ fn init_running_app(
     output_windowed: bool,
 ) -> Result<EditingState> {
     let gpu = init_gpu()?;
-
-    // 003-T1.8/T1.9: the control window is opened *before* the
-    // output bundle is built because `init_output_window` consumes
-    // `gpu` (Renderer takes ownership). Reordering is behaviour-
-    // identical — winit doesn't actually present either window
-    // until its first redraw later in the loop.
+    // ControlWindow first — it borrows gpu; init_output_window
+    // consumes gpu next when handing it to Renderer.
     let control = init_control_window(event_loop, &gpu);
+    let output_bundle = init_output_window(event_loop, monitor, gpu, output_windowed)?;
+    let surface_format = output_bundle.output.config.format;
+    let output_size = (
+        output_bundle.output.config.width,
+        output_bundle.output.config.height,
+    );
+    let inputs = init_inputs();
+    let render_graph =
+        init_render_graph(&output_bundle.renderer, &project, output_size, surface_format)?;
+    Ok(assemble_editing_state(
+        control,
+        output_bundle,
+        inputs,
+        render_graph,
+        project,
+        project_file_path,
+    ))
+}
 
-    let OutputBundle {
-        output,
-        renderer,
-        test_patterns,
-        color_pipeline,
-        blur_pipeline,
-        transform_pipeline,
-        sleep_assertion,
-    } = init_output_window(event_loop, monitor, gpu, output_windowed)?;
-    let surface_format = output.config.format;
-
-    // 003-T1.10: keyboard + cfg-gated audio/MIDI/OSC sources.
-    let InputsBundle {
-        keyboard,
-        #[cfg(feature = "audio")]
-        audio_capture,
-        #[cfg(feature = "midi")]
-        midi,
-        #[cfg(feature = "osc")]
-        osc,
-    } = init_inputs();
-
+/// 003-T1.12: assemble `EditingState` from the four sub-bundles.
+/// Pure data shuffle — no fallible operations, no I/O.
+fn assemble_editing_state(
+    control: Option<ControlWindow>,
+    output: OutputBundle,
+    inputs: InputsBundle,
+    graph: RenderGraph,
+    project: Project,
+    project_file_path: Option<PathBuf>,
+) -> EditingState {
     let mut control_panel = ControlPanelState::default();
     if let Some(ref p) = project_file_path {
         control_panel.project_save_path = p.display().to_string();
     }
 
-    // 003-T1.11: build the per-projector render graph.
-    let RenderGraph {
-        svg_pipeline,
-        compositor,
-        warps,
-        gamma,
-        overlay,
-        warp_rt,
-        warp_rt_view,
-        layers,
-    } = init_render_graph(
-        &renderer,
-        &project,
-        (output.config.width, output.config.height),
-        surface_format,
-    )?;
-
-    Ok(EditingState {
-        output,
+    EditingState {
+        output: output.output,
         control,
-        renderer,
-        test_patterns,
+        renderer: output.renderer,
+        test_patterns: output.test_patterns,
         project,
-        layers,
-        svg_pipeline,
-        compositor,
-        warps,
-        gamma,
-        overlay,
-        warp_rt,
-        warp_rt_view,
+        layers: graph.layers,
+        svg_pipeline: graph.svg_pipeline,
+        compositor: graph.compositor,
+        warps: graph.warps,
+        gamma: graph.gamma,
+        overlay: graph.overlay,
+        warp_rt: graph.warp_rt,
+        warp_rt_view: graph.warp_rt_view,
         control_panel,
         clock: Clock::new(),
-        keyboard,
-        color_pipeline,
-        blur_pipeline,
-        transform_pipeline,
+        keyboard: inputs.keyboard,
+        color_pipeline: output.color_pipeline,
+        blur_pipeline: output.blur_pipeline,
+        transform_pipeline: output.transform_pipeline,
         external_registry: ExternalRegistry::new(),
         #[cfg(feature = "audio")]
-        _audio_capture: audio_capture,
+        _audio_capture: inputs.audio_capture,
         #[cfg(feature = "midi")]
-        midi,
+        midi: inputs.midi,
         #[cfg(feature = "osc")]
-        osc,
-        _sleep_assertion: sleep_assertion,
+        osc: inputs.osc,
+        _sleep_assertion: output.sleep_assertion,
         project_file_path,
         crossfade: None,
         scene_texture_id: None,
         control_redraw_skip: false,
         scene_editor: crate::windows::scene_editor::SceneEditorState::default(),
-    })
+    }
 }
 
 /// Register `state.warp_rt_view` with the control window's egui renderer
