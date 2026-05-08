@@ -7,9 +7,100 @@ use serde::Deserialize;
 
 use crate::effects::Effect;
 use crate::modulators::Modulator;
+#[cfg(feature = "v3")]
+use crate::project::command::Mutation;
 use crate::project::schema::{self, BlendMode, Project, Scene};
 use crate::project::snapshot;
 use crate::windows::scene_editor::{self, SceneEditorState};
+
+/// 003-T1.18 — live-preview slider that emits a `Mutation` on
+/// drag-stop instead of binding directly to a project field.
+///
+/// The slider operates on a per-widget staged copy of the value,
+/// kept in egui's transient memory keyed by `id`. While the user
+/// drags, only the staged copy moves; the project field stays at
+/// `project_value`. On `drag_stopped()` (or a text-edit / scroll
+/// commit), the helper returns `Some(new)` if the value changed —
+/// the caller builds the corresponding `Mutation` and pushes it
+/// through `UndoStack::push`. Returns `None` while still
+/// interacting or when nothing changed.
+///
+/// `id` must be unique per slider on screen; pass a literal like
+/// `"gamma"`. Egui derives the actual widget id from the parent
+/// `Ui` plus this string.
+#[cfg(feature = "v3")]
+fn command_slider(
+    ui: &mut Ui,
+    id: &str,
+    label: &str,
+    project_value: f32,
+    range: std::ops::RangeInclusive<f32>,
+) -> Option<f32> {
+    let staged_id = ui.id().with("rmap_command_slider").with(id);
+    let staged: Option<f32> = ui.memory(|m| m.data.get_temp::<f32>(staged_id));
+    let mut shown = staged.unwrap_or(project_value);
+    let resp = ui.add(egui::Slider::new(&mut shown, range).text(label));
+
+    if resp.drag_stopped() {
+        ui.memory_mut(|m| m.data.remove::<f32>(staged_id));
+        return ((shown - project_value).abs() > 1e-6).then_some(shown);
+    }
+    if resp.dragged() {
+        ui.memory_mut(|m| m.data.insert_temp(staged_id, shown));
+        return None;
+    }
+    if resp.changed() && (shown - project_value).abs() > 1e-6 {
+        // Text-edit / scroll-wheel path: no drag start/stop, fire once.
+        ui.memory_mut(|m| m.data.remove::<f32>(staged_id));
+        return Some(shown);
+    }
+    None
+}
+
+/// 003-T1.18 — checkbox companion to [`command_slider`]. Boolean
+/// toggles have no drag, so the helper just emits on `changed()`.
+#[cfg(feature = "v3")]
+fn command_checkbox(ui: &mut Ui, label: &str, project_value: bool) -> Option<bool> {
+    let mut shown = project_value;
+    let resp = ui.checkbox(&mut shown, label);
+    if resp.changed() && shown != project_value {
+        Some(shown)
+    } else {
+        None
+    }
+}
+
+/// 003-T1.18 — `DragValue<u32>` companion. Same staging idea as
+/// [`command_slider`]: the project value stays put while the user
+/// drags, and we emit on commit. Returns `Some(new)` once the
+/// edit finalises, `None` while interacting.
+#[cfg(feature = "v3")]
+fn command_dragvalue_u32(
+    ui: &mut Ui,
+    id: &str,
+    project_value: u32,
+    range: std::ops::RangeInclusive<u32>,
+    prefix: &str,
+) -> Option<u32> {
+    let staged_id = ui.id().with("rmap_command_dragvalue_u32").with(id);
+    let staged: Option<u32> = ui.memory(|m| m.data.get_temp::<u32>(staged_id));
+    let mut shown = staged.unwrap_or(project_value);
+    let resp = ui.add(egui::DragValue::new(&mut shown).range(range).prefix(prefix));
+
+    if resp.drag_stopped() {
+        ui.memory_mut(|m| m.data.remove::<u32>(staged_id));
+        return (shown != project_value).then_some(shown);
+    }
+    if resp.dragged() {
+        ui.memory_mut(|m| m.data.insert_temp(staged_id, shown));
+        return None;
+    }
+    if resp.changed() && shown != project_value {
+        ui.memory_mut(|m| m.data.remove::<u32>(staged_id));
+        return Some(shown);
+    }
+    None
+}
 
 /// One named effect-chain bundle authored as JSON in `assets/presets/`.
 ///
@@ -88,6 +179,13 @@ impl Default for ControlTab {
 pub struct ControlPanelState {
     pub tab: ControlTab,
     pub selected_layer: usize,
+    /// 003-T1.18 — `Mutation`s emitted by `command_*` helpers during
+    /// the current `show()` call. The app drains this after the
+    /// frame and routes each entry through `EditingState.undo_stack`
+    /// so every always-visible binding becomes Cmd-Z reversible.
+    /// v2 builds carry no undo machinery; the field is gated.
+    #[cfg(feature = "v3")]
+    pub pending_mutations: Vec<Mutation>,
     /// Buffer for the Layers tab "add layer" path field.
     pub new_layer_path_input: String,
     pub add_layer_error: String,
@@ -157,8 +255,8 @@ pub fn show(
                     action = ControlPanelAction::RebuildLayers;
                 }
             }
-            ControlTab::Mapping => show_mapping_tab(ui, project),
-            ControlTab::Scenes => action = show_scenes_tab(ui, project),
+            ControlTab::Mapping => show_mapping_tab(ui, project, st),
+            ControlTab::Scenes => action = show_scenes_tab(ui, project, st),
         }
 
         ui.add_space(8.0);
@@ -197,7 +295,19 @@ pub fn show(
                 if !st.project_save_message.is_empty() {
                     ui.label(&st.project_save_message);
                 }
-                ui.checkbox(&mut project.output_windowed, "Windowed output");
+                #[cfg(feature = "v3")]
+                {
+                    if let Some(new) =
+                        command_checkbox(ui, "Windowed output", project.output_windowed)
+                    {
+                        st.pending_mutations
+                            .push(project.set_output_windowed_mutation(new));
+                    }
+                }
+                #[cfg(not(feature = "v3"))]
+                {
+                    ui.checkbox(&mut project.output_windowed, "Windowed output");
+                }
                 ui.label(
                     "When saved in the project: opens a 1280×720 window on the output monitor instead of fullscreen. Restart rmap to apply.",
                 );
@@ -207,9 +317,41 @@ pub fn show(
         egui::CollapsingHeader::new("Master (gamma)")
             .default_open(true)
             .show(ui, |ui| {
-                ui.add(egui::Slider::new(&mut project.gamma, 0.2..=4.0).text("gamma"));
-                ui.add(egui::Slider::new(&mut project.brightness, -1.0..=1.0).text("brightness"));
-                ui.add(egui::Slider::new(&mut project.contrast, 0.0..=4.0).text("contrast"));
+                #[cfg(feature = "v3")]
+                {
+                    if let Some(new) =
+                        command_slider(ui, "gamma", "gamma", project.gamma, 0.2..=4.0)
+                    {
+                        st.pending_mutations
+                            .push(project.set_gamma_mutation(new));
+                    }
+                    if let Some(new) = command_slider(
+                        ui,
+                        "brightness",
+                        "brightness",
+                        project.brightness,
+                        -1.0..=1.0,
+                    ) {
+                        st.pending_mutations
+                            .push(project.set_brightness_mutation(new));
+                    }
+                    if let Some(new) = command_slider(
+                        ui,
+                        "contrast",
+                        "contrast",
+                        project.contrast,
+                        0.0..=4.0,
+                    ) {
+                        st.pending_mutations
+                            .push(project.set_contrast_mutation(new));
+                    }
+                }
+                #[cfg(not(feature = "v3"))]
+                {
+                    ui.add(egui::Slider::new(&mut project.gamma, 0.2..=4.0).text("gamma"));
+                    ui.add(egui::Slider::new(&mut project.brightness, -1.0..=1.0).text("brightness"));
+                    ui.add(egui::Slider::new(&mut project.contrast, 0.0..=4.0).text("contrast"));
+                }
             });
     });
 
@@ -588,7 +730,11 @@ fn blend_label(m: BlendMode) -> &'static str {
     }
 }
 
-fn show_mapping_tab(ui: &mut Ui, project: &mut Project) {
+fn show_mapping_tab(
+    ui: &mut Ui,
+    project: &mut Project,
+    #[cfg_attr(not(feature = "v3"), allow(unused_variables))] st: &mut ControlPanelState,
+) {
     let Some(w) = project.warps.get_mut(0) else {
         ui.label("No warp mesh — add `warps` in project.");
         return;
@@ -608,24 +754,50 @@ fn show_mapping_tab(ui: &mut Ui, project: &mut Project) {
     // the operator's existing customisation survives a resize (T-M7-01).
     ui.horizontal(|ui| {
         ui.label("mesh");
-        let mut new_rows = w.rows.max(1);
-        let mut new_cols = w.cols.max(1);
-        let r_resp = ui.add(
-            egui::DragValue::new(&mut new_rows)
-                .range(1..=8u32)
-                .prefix("rows "),
-        );
-        let c_resp = ui.add(
-            egui::DragValue::new(&mut new_cols)
-                .range(1..=8u32)
-                .prefix("cols "),
-        );
-        let changed = (r_resp.changed() || c_resp.changed())
-            && (new_rows != w.rows || new_cols != w.cols);
-        if changed {
-            w.grid = schema::resample_grid(&w.grid, new_rows, new_cols);
-            w.rows = new_rows;
-            w.cols = new_cols;
+        #[cfg(feature = "v3")]
+        {
+            let new_rows_opt =
+                command_dragvalue_u32(ui, "warp_rows", w.rows.max(1), 1..=8u32, "rows ");
+            let new_cols_opt =
+                command_dragvalue_u32(ui, "warp_cols", w.cols.max(1), 1..=8u32, "cols ");
+            if new_rows_opt.is_some() || new_cols_opt.is_some() {
+                let new_rows = new_rows_opt.unwrap_or(w.rows).max(1);
+                let new_cols = new_cols_opt.unwrap_or(w.cols).max(1);
+                if new_rows != w.rows || new_cols != w.cols {
+                    let new_grid = schema::resample_grid(&w.grid, new_rows, new_cols);
+                    st.pending_mutations.push(Mutation::SetWarpDimensions {
+                        warp_idx: 0,
+                        new_rows,
+                        new_cols,
+                        new_grid,
+                        old_rows: w.rows,
+                        old_cols: w.cols,
+                        old_grid: w.grid.clone(),
+                    });
+                }
+            }
+        }
+        #[cfg(not(feature = "v3"))]
+        {
+            let mut new_rows = w.rows.max(1);
+            let mut new_cols = w.cols.max(1);
+            let r_resp = ui.add(
+                egui::DragValue::new(&mut new_rows)
+                    .range(1..=8u32)
+                    .prefix("rows "),
+            );
+            let c_resp = ui.add(
+                egui::DragValue::new(&mut new_cols)
+                    .range(1..=8u32)
+                    .prefix("cols "),
+            );
+            let changed = (r_resp.changed() || c_resp.changed())
+                && (new_rows != w.rows || new_cols != w.cols);
+            if changed {
+                w.grid = schema::resample_grid(&w.grid, new_rows, new_cols);
+                w.rows = new_rows;
+                w.cols = new_cols;
+            }
         }
         ui.label(format!("({} × {} cells)", w.rows, w.cols));
     });
@@ -773,7 +945,22 @@ fn show_mapping_tab(ui: &mut Ui, project: &mut Project) {
         ui.label(format!("grid: {}×{}", rows, cols));
     });
 
-    ui.add(egui::Slider::new(&mut w.mask_feather, 0.0..=0.25).text("mask feather"));
+    #[cfg(feature = "v3")]
+    {
+        if let Some(new) =
+            command_slider(ui, "mask_feather", "mask feather", w.mask_feather, 0.0..=0.25)
+        {
+            st.pending_mutations.push(Mutation::SetWarpMaskFeather {
+                warp_idx: 0,
+                new,
+                old: w.mask_feather,
+            });
+        }
+    }
+    #[cfg(not(feature = "v3"))]
+    {
+        ui.add(egui::Slider::new(&mut w.mask_feather, 0.0..=0.25).text("mask feather"));
+    }
 
     // T-M12-02 + T-M12-03: zone-template dropdown + clear button.
     // The Scene-tab preview lets the operator drag the resulting
@@ -801,13 +988,33 @@ fn show_mapping_tab(ui: &mut Ui, project: &mut Project) {
     ));
 }
 
-fn show_scenes_tab(ui: &mut Ui, project: &mut Project) -> ControlPanelAction {
+fn show_scenes_tab(
+    ui: &mut Ui,
+    project: &mut Project,
+    #[cfg_attr(not(feature = "v3"), allow(unused_variables))] st: &mut ControlPanelState,
+) -> ControlPanelAction {
     let mut action = ControlPanelAction::None;
     ui.label("Slots 1–9 (keyboard recall). Save captures the full project state.");
-    ui.add(
-        egui::Slider::new(&mut project.crossfade_duration_s, 0.0..=5.0)
-            .text("crossfade duration (s)"),
-    );
+    #[cfg(feature = "v3")]
+    {
+        if let Some(new) = command_slider(
+            ui,
+            "crossfade_duration_s",
+            "crossfade duration (s)",
+            project.crossfade_duration_s,
+            0.0..=5.0,
+        ) {
+            st.pending_mutations
+                .push(project.set_crossfade_duration_s_mutation(new));
+        }
+    }
+    #[cfg(not(feature = "v3"))]
+    {
+        ui.add(
+            egui::Slider::new(&mut project.crossfade_duration_s, 0.0..=5.0)
+                .text("crossfade duration (s)"),
+        );
+    }
     ui.label(
         "Crossfade only fires when both scenes share the same layer paths in the same order; structural changes snap instantly.",
     );

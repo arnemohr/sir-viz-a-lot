@@ -93,6 +93,53 @@ pub enum Mutation {
         /// Pre-mutation value.
         old: f32,
     },
+    /// Replace `Project.crossfade_duration_s`. Same shape as `SetGamma`.
+    SetCrossfadeDurationS {
+        /// Value to write.
+        new: f32,
+        /// Pre-mutation value.
+        old: f32,
+    },
+    /// Replace `Project.output_windowed`. Boolean toggle.
+    SetOutputWindowed {
+        /// Value to write.
+        new: bool,
+        /// Pre-mutation value.
+        old: bool,
+    },
+    /// Replace `WarpMesh.mask_feather` for the warp at `warp_idx`.
+    SetWarpMaskFeather {
+        /// Index into `Project.warps`.
+        warp_idx: usize,
+        /// Value to write.
+        new: f32,
+        /// Pre-mutation value.
+        old: f32,
+    },
+    /// Replace `WarpMesh.rows`/`cols`/`grid` for the warp at `warp_idx`.
+    /// Editing rows or cols bilinear-resamples the grid (the existing
+    /// T-M7-01 helper); the resample is lossy, so this variant follows
+    /// Reverse rule 3 — the `old_grid` snapshot lets undo restore the
+    /// pre-mutation grid byte-equally instead of attempting a reverse-
+    /// resample.
+    SetWarpDimensions {
+        /// Index into `Project.warps`.
+        warp_idx: usize,
+        /// Cell-row count to write.
+        new_rows: u32,
+        /// Cell-column count to write.
+        new_cols: u32,
+        /// Resampled grid to install (caller pre-computes via
+        /// [`crate::project::schema::resample_grid`] so this can be a
+        /// snapshot Reverse without per-step bookkeeping).
+        new_grid: Vec<Vec<[f32; 2]>>,
+        /// Pre-mutation rows.
+        old_rows: u32,
+        /// Pre-mutation cols.
+        old_cols: u32,
+        /// Pre-mutation grid (full snapshot — see Reverse rule 3).
+        old_grid: Vec<Vec<[f32; 2]>>,
+    },
 
     /// Replace the entire project from a serde_json snapshot
     /// (Reverse rule 3: snapshot Reverse). T-003-T1.30 routes
@@ -149,6 +196,89 @@ impl Mutation {
                 project.contrast = new;
                 Mutation::SetContrast { new: old, old: new }
             }
+            Mutation::SetCrossfadeDurationS { new, old } => {
+                debug_assert!(
+                    (project.crossfade_duration_s - old).abs() < 1e-6,
+                    "SetCrossfadeDurationS stale Reverse: project.crossfade_duration_s={}, expected old={}",
+                    project.crossfade_duration_s,
+                    old
+                );
+                project.crossfade_duration_s = new;
+                Mutation::SetCrossfadeDurationS { new: old, old: new }
+            }
+            Mutation::SetOutputWindowed { new, old } => {
+                debug_assert!(
+                    project.output_windowed == old,
+                    "SetOutputWindowed stale Reverse: project.output_windowed={}, expected old={}",
+                    project.output_windowed,
+                    old
+                );
+                project.output_windowed = new;
+                Mutation::SetOutputWindowed { new: old, old: new }
+            }
+            Mutation::SetWarpMaskFeather { warp_idx, new, old } => {
+                let warp = project
+                    .warps
+                    .get_mut(warp_idx)
+                    .expect("SetWarpMaskFeather: warp_idx out of range");
+                debug_assert!(
+                    (warp.mask_feather - old).abs() < 1e-6,
+                    "SetWarpMaskFeather stale Reverse: warp.mask_feather={}, expected old={}",
+                    warp.mask_feather,
+                    old
+                );
+                warp.mask_feather = new;
+                Mutation::SetWarpMaskFeather {
+                    warp_idx,
+                    new: old,
+                    old: new,
+                }
+            }
+            Mutation::SetWarpDimensions {
+                warp_idx,
+                new_rows,
+                new_cols,
+                new_grid,
+                old_rows,
+                old_cols,
+                old_grid,
+            } => {
+                let warp = project
+                    .warps
+                    .get_mut(warp_idx)
+                    .expect("SetWarpDimensions: warp_idx out of range");
+                // Snapshot Reverse: only assert the scalar dimensions
+                // match. The grid is restored byte-equally via the
+                // stored snapshot, so any drift surfaces in the
+                // proptest round-trip rather than per-mutation.
+                debug_assert!(
+                    warp.rows == old_rows && warp.cols == old_cols,
+                    "SetWarpDimensions stale Reverse: warp dims=({}, {}), expected old=({}, {})",
+                    warp.rows,
+                    warp.cols,
+                    old_rows,
+                    old_cols
+                );
+                // Standard swap (rule 3 snapshot variant): the Reverse
+                // restores `old_grid` and tracks the just-installed
+                // `new_grid` as its own pre-apply state. Cloning
+                // `new_grid` keeps both halves owned so the Reverse
+                // round-trips without referencing `warp.grid` after
+                // the in-place write.
+                let post_grid = new_grid;
+                warp.grid = post_grid.clone();
+                warp.rows = new_rows;
+                warp.cols = new_cols;
+                Mutation::SetWarpDimensions {
+                    warp_idx,
+                    new_rows: old_rows,
+                    new_cols: old_cols,
+                    new_grid: old_grid,
+                    old_rows: new_rows,
+                    old_cols: new_cols,
+                    old_grid: post_grid,
+                }
+            }
             Mutation::ApplyProjectSnapshot {
                 new,
                 old,
@@ -175,7 +305,11 @@ impl Mutation {
         match self {
             Mutation::SetGamma { .. }
             | Mutation::SetBrightness { .. }
-            | Mutation::SetContrast { .. } => false,
+            | Mutation::SetContrast { .. }
+            | Mutation::SetCrossfadeDurationS { .. }
+            | Mutation::SetOutputWindowed { .. }
+            | Mutation::SetWarpMaskFeather { .. }
+            | Mutation::SetWarpDimensions { .. } => false,
             Mutation::ApplyProjectSnapshot { non_undoable, .. } => *non_undoable,
         }
     }
@@ -211,6 +345,58 @@ impl Project {
         Mutation::SetContrast {
             new,
             old: self.contrast,
+        }
+    }
+
+    /// Build a `SetCrossfadeDurationS` mutation.
+    pub fn set_crossfade_duration_s_mutation(&self, new: f32) -> Mutation {
+        Mutation::SetCrossfadeDurationS {
+            new,
+            old: self.crossfade_duration_s,
+        }
+    }
+
+    /// Build a `SetOutputWindowed` mutation.
+    pub fn set_output_windowed_mutation(&self, new: bool) -> Mutation {
+        Mutation::SetOutputWindowed {
+            new,
+            old: self.output_windowed,
+        }
+    }
+
+    /// Build a `SetWarpMaskFeather` mutation. Panics if `warp_idx` is
+    /// out of range — call sites should guard with `project.warps.get`
+    /// first; the helper is intentionally not optional so the contract
+    /// stays unambiguous.
+    pub fn set_warp_mask_feather_mutation(&self, warp_idx: usize, new: f32) -> Mutation {
+        let warp = &self.warps[warp_idx];
+        Mutation::SetWarpMaskFeather {
+            warp_idx,
+            new,
+            old: warp.mask_feather,
+        }
+    }
+
+    /// Build a `SetWarpDimensions` mutation. The new grid is computed
+    /// here via [`crate::project::schema::resample_grid`] so callers
+    /// don't have to reason about the lossy resample — they just pass
+    /// the new cell counts.
+    pub fn set_warp_dimensions_mutation(
+        &self,
+        warp_idx: usize,
+        new_rows: u32,
+        new_cols: u32,
+    ) -> Mutation {
+        let warp = &self.warps[warp_idx];
+        let new_grid = crate::project::schema::resample_grid(&warp.grid, new_rows, new_cols);
+        Mutation::SetWarpDimensions {
+            warp_idx,
+            new_rows,
+            new_cols,
+            new_grid,
+            old_rows: warp.rows,
+            old_cols: warp.cols,
+            old_grid: warp.grid.clone(),
         }
     }
 }
@@ -294,6 +480,10 @@ mod tests {
             Gamma(f32),
             Brightness(f32),
             Contrast(f32),
+            CrossfadeDurationS(f32),
+            OutputWindowed(bool),
+            WarpMaskFeather(f32),
+            WarpDimensions { rows: u32, cols: u32 },
             Snapshot,
         }
 
@@ -302,6 +492,14 @@ mod tests {
                 MutationKind::Gamma(v) => project.set_gamma_mutation(*v),
                 MutationKind::Brightness(v) => project.set_brightness_mutation(*v),
                 MutationKind::Contrast(v) => project.set_contrast_mutation(*v),
+                MutationKind::CrossfadeDurationS(v) => {
+                    project.set_crossfade_duration_s_mutation(*v)
+                }
+                MutationKind::OutputWindowed(v) => project.set_output_windowed_mutation(*v),
+                MutationKind::WarpMaskFeather(v) => project.set_warp_mask_feather_mutation(0, *v),
+                MutationKind::WarpDimensions { rows, cols } => {
+                    project.set_warp_dimensions_mutation(0, *rows, *cols)
+                }
                 MutationKind::Snapshot => {
                     // Build a snapshot mutation against the
                     // project's current state, with `new` flipping
@@ -326,6 +524,11 @@ mod tests {
                 (0.2_f32..=4.0).prop_map(MutationKind::Gamma),
                 (-1.0_f32..=1.0).prop_map(MutationKind::Brightness),
                 (0.0_f32..=4.0).prop_map(MutationKind::Contrast),
+                (0.0_f32..=5.0).prop_map(MutationKind::CrossfadeDurationS),
+                any::<bool>().prop_map(MutationKind::OutputWindowed),
+                (0.0_f32..=0.25).prop_map(MutationKind::WarpMaskFeather),
+                (1u32..=8, 1u32..=8)
+                    .prop_map(|(rows, cols)| MutationKind::WarpDimensions { rows, cols }),
                 Just(MutationKind::Snapshot),
             ]
         }

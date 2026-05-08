@@ -21,6 +21,8 @@ use winit::application::ApplicationHandler;
 use winit::event::{ElementState, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
+#[cfg(feature = "v3")]
+use winit::keyboard::ModifiersState;
 use winit::monitor::MonitorHandle;
 use winit::window::WindowId;
 
@@ -279,11 +281,17 @@ struct EditingState {
     scene_editor: crate::windows::scene_editor::SceneEditorState,
     /// 003-T1.16: Undo / Redo history. T-003-T1.18+ migrations
     /// route their mutations through `undo_stack.push(...)`;
-    /// Cmd-Z / Cmd-Shift-Z (T-003-T1.* future) call
+    /// Cmd-Z / Cmd-Shift-Z keyboard handlers call
     /// `undo_stack.undo(...)` / `redo(...)`.
     #[cfg(feature = "v3")]
-    #[allow(dead_code)] // T-003-T1.18+ wires push call sites.
     undo_stack: crate::project::undo::UndoStack,
+    /// 003-T1.18: most-recent keyboard modifier state, snapshotted on
+    /// `WindowEvent::ModifiersChanged`. winit fires the modifier
+    /// change separately from the key press, so we cache the state
+    /// and consult it inside the `KeyboardInput` arm to detect chords
+    /// like Cmd-Z (super+Z on macOS, ctrl+Z on Linux/Windows).
+    #[cfg(feature = "v3")]
+    modifiers: ModifiersState,
 }
 
 /// One scene-to-scene fade, scheduled by `Command::SceneRecall` when
@@ -965,6 +973,8 @@ fn assemble_editing_state(
         scene_editor: crate::windows::scene_editor::SceneEditorState::default(),
         #[cfg(feature = "v3")]
         undo_stack: crate::project::undo::UndoStack::new(),
+        #[cfg(feature = "v3")]
+        modifiers: ModifiersState::empty(),
     }
 }
 
@@ -1591,6 +1601,19 @@ fn handle_editing_window_event(
                         tracing::warn!(?e, "control window render error");
                     }
                 }
+                // 003-T1.18: drain Mutations emitted by the control
+                // panel's `command_*` helpers and route each through
+                // the undo stack. Disjoint borrows of `pending_mutations`
+                // / `undo_stack` / `project` keep the borrow checker
+                // happy without intermediate locals.
+                #[cfg(feature = "v3")]
+                {
+                    let pending =
+                        std::mem::take(&mut state.control_panel.pending_mutations);
+                    for m in pending {
+                        state.undo_stack.push(m, &mut state.project);
+                    }
+                }
                 match panel_action {
                     ControlPanelAction::None => {}
                     ControlPanelAction::RebuildLayers => {
@@ -1619,6 +1642,10 @@ fn handle_editing_window_event(
     match event {
         WindowEvent::CloseRequested => {
             event_loop.exit();
+        }
+        #[cfg(feature = "v3")]
+        WindowEvent::ModifiersChanged(mods) => {
+            state.modifiers = mods.state();
         }
         WindowEvent::KeyboardInput {
             event: key_event, ..
@@ -1652,6 +1679,33 @@ fn handle_editing_window_event(
                         overlay = state.output.state.show_editor_overlay,
                         "editor overlay toggled",
                     );
+                }
+                #[cfg(feature = "v3")]
+                PhysicalKey::Code(KeyCode::KeyZ) => {
+                    // 003-T1.18: Cmd-Z / Ctrl-Z = undo, +Shift = redo.
+                    // macOS uses super (Cmd); Linux / Windows use ctrl.
+                    // Accept either so the binding feels native on each
+                    // platform without a runtime branch.
+                    //
+                    // No `rebuild_layers_for_state` call here: every
+                    // T1.18 mutation (gamma / brightness / contrast /
+                    // crossfade / output_windowed / mask_feather /
+                    // warp dims) operates on project fields the
+                    // renderer reads each frame — a GPU rebuild would
+                    // be wasted work. T-003-T1.20 introduces
+                    // layer-topology mutations and will route their
+                    // post-undo side-effects per-mutation rather than
+                    // unconditionally here.
+                    let mods = state.modifiers;
+                    if mods.super_key() || mods.control_key() {
+                        if mods.shift_key() {
+                            let did = state.undo_stack.redo(&mut state.project);
+                            tracing::info!(did, "redo");
+                        } else {
+                            let did = state.undo_stack.undo(&mut state.project);
+                            tracing::info!(did, "undo");
+                        }
+                    }
                 }
                 _ => {}
             }
