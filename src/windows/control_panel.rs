@@ -530,6 +530,11 @@ fn show_scene_tab(
     scene: &mut SceneEditorState,
     inputs: &ControlPanelInputs,
 ) {
+    // 003-T3.8 — v3: per-mode instruction banner replaces the static v2 label.
+    // v2: keep the original verbose hint unchanged.
+    #[cfg(feature = "v3")]
+    scene_editor::mode_banner(ui, scene);
+    #[cfg(not(feature = "v3"))]
     ui.label(
         "Live preview. Click a layer to select; drag to move; Shift-drag to scale; Alt-drag to rotate. Drag a mask vertex to move; double-click an edge to insert; Shift-click a vertex to delete. Drop SVG / PNG / JPG to add a layer.",
     );
@@ -582,6 +587,13 @@ fn show_scene_tab(
     );
     let outer = resp.rect;
     let inner = egui::Rect::from_center_size(outer.center(), egui::vec2(w, h));
+
+    // 003-T3.9 — mode-aware cursor: only set while the pointer is inside
+    // the scene preview rect so leaving the canvas restores the OS default.
+    #[cfg(feature = "v3")]
+    if resp.hovered() {
+        ui.output_mut(|out| out.cursor_icon = scene_editor::cursor_for_mode(scene.mode));
+    }
 
     // T-M11-03: double-click on a mask edge inserts a new vertex at the
     // click point, between the two endpoints. T-M11-04: shift-click on a

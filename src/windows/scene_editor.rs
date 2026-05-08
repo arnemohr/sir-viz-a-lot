@@ -823,6 +823,68 @@ pub fn handle_scene_input(
     }
 }
 
+// ── T3.8 / T3.9 ─────────────────────────────────────────────────────────────
+
+/// 003-T3.8 — pure text helper for the mode banner. Extracted so it is
+/// unit-testable without an egui context.
+///
+/// `has_layer_selected` is `true` when any `Selection` variant is set
+/// (every variant carries a layer index, so `is_some()` is the correct
+/// test — see `paint_warp_grid_overlay`'s gate logic).
+///
+/// v3-only: v2 builds have no `EditMode`, so this helper is gated below
+/// the `mode_banner` fn itself.
+#[cfg(feature = "v3")]
+pub fn mode_banner_copy(mode: EditMode, has_layer_selected: bool) -> &'static str {
+    match mode {
+        EditMode::Layer => "Drag to move. Shift-drag to scale. Alt-drag to rotate.",
+        EditMode::Warp => {
+            if has_layer_selected {
+                "Drag the corners to fit the wall."
+            } else {
+                "Select a layer first."
+            }
+        }
+        EditMode::Mask => {
+            if has_layer_selected {
+                "Drag a vertex. Double-click an edge to insert. Shift-click to delete."
+            } else {
+                "Select a layer first."
+            }
+        }
+        EditMode::Inspect => "Click anything to inspect.",
+    }
+}
+
+/// 003-T3.8 — thin instruction strip at the top of the canvas.
+///
+/// Renders a single low-contrast label with guidance text that varies by
+/// `scene.mode`. No border; small font; grey text so it doesn't compete
+/// with the canvas content. v3-only — v2 has its own static instruction
+/// label in `show_scene_tab`.
+#[cfg(feature = "v3")]
+pub fn mode_banner(ui: &mut egui::Ui, scene: &SceneEditorState) {
+    let has_selection = scene.selected.is_some();
+    let copy = mode_banner_copy(scene.mode, has_selection);
+    ui.label(
+        egui::RichText::new(copy)
+            .small()
+            .color(egui::Color32::from_gray(140)),
+    );
+}
+
+/// 003-T3.9 — map the current `EditMode` to the cursor icon that reflects
+/// the user's pending action. Pure helper — easy to test without a GPU.
+#[cfg_attr(not(feature = "v3"), allow(dead_code))]
+pub fn cursor_for_mode(mode: EditMode) -> egui::CursorIcon {
+    match mode {
+        EditMode::Layer => egui::CursorIcon::Default,
+        EditMode::Warp => egui::CursorIcon::Crosshair,
+        EditMode::Mask => egui::CursorIcon::Cell,
+        EditMode::Inspect => egui::CursorIcon::Default,
+    }
+}
+
 /// Distinct, deterministic per-layer outline color. Cycles through an
 /// 8-entry palette by layer index. The palette is hand-picked for high
 /// contrast against typical projection content (mid-grey to dark
@@ -1151,6 +1213,59 @@ mod tests {
         assert!((n[1] - 0.5).abs() < 1e-4);
         // Outside the rect returns None.
         assert!(screen_to_normalized(egui::pos2(0.0, 0.0), rect).is_none());
+    }
+
+    // --- 003-T3.8: mode_banner_copy tests ---
+
+    /// Warp mode with no layer selected must return "Select a layer first."
+    #[cfg(feature = "v3")]
+    #[test]
+    fn mode_banner_copy_warp_no_layer_returns_select_first() {
+        assert_eq!(
+            super::mode_banner_copy(EditMode::Warp, false),
+            "Select a layer first."
+        );
+    }
+
+    /// Warp mode with a layer selected must return the drag instruction.
+    #[cfg(feature = "v3")]
+    #[test]
+    fn mode_banner_copy_warp_with_layer_returns_drag_instruction() {
+        assert_eq!(
+            super::mode_banner_copy(EditMode::Warp, true),
+            "Drag the corners to fit the wall."
+        );
+    }
+
+    /// Mask mode with no layer selected must also return "Select a layer first."
+    #[cfg(feature = "v3")]
+    #[test]
+    fn mode_banner_copy_mask_no_layer_returns_select_first() {
+        assert_eq!(
+            super::mode_banner_copy(EditMode::Mask, false),
+            "Select a layer first."
+        );
+    }
+
+    // --- 003-T3.9: cursor_for_mode tests ---
+
+    /// Exhaustive 4-arm check of the EditMode → CursorIcon mapping.
+    #[test]
+    fn cursor_for_mode_maps_correctly() {
+        use egui::CursorIcon;
+        let cases = [
+            (EditMode::Layer, CursorIcon::Default),
+            (EditMode::Warp, CursorIcon::Crosshair),
+            (EditMode::Mask, CursorIcon::Cell),
+            (EditMode::Inspect, CursorIcon::Default),
+        ];
+        for (mode, expected) in cases {
+            assert_eq!(
+                super::cursor_for_mode(mode),
+                expected,
+                "cursor_for_mode({mode:?}) should be {expected:?}"
+            );
+        }
     }
 
     // --- 003-T3.7: EditMode tests ---
