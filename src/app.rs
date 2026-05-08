@@ -1289,6 +1289,340 @@ fn render_m5_pipeline(
     })
 }
 
+/// Handle a winit `WindowEvent` while the app is in `Editing` or
+/// `GoLive`. Pulled out of `App::window_event` (003-T1.3) so the
+/// top-level handler is a thin `match` on `AppState`. The body is
+/// identical to the v1 / v2 path; only the dispatch changed.
+fn handle_editing_window_event(
+    state: &mut EditingState,
+    event_loop: &ActiveEventLoop,
+    window_id: WindowId,
+    event: WindowEvent,
+) {
+    // T-M4-14: handle events for the egui control window first. If the
+    // event belongs to the control window, handle it and return — do NOT
+    // fall through to the output-window arms below.
+    if state.control.as_ref().is_some_and(|c| c.id() == window_id) {
+        let ctrl = state.control.as_mut().unwrap();
+        let _ = ctrl.on_window_event(&event);
+        match event {
+            WindowEvent::Resized(new_size) => {
+                ctrl.resize(&state.renderer.gpu.device, new_size);
+            }
+            WindowEvent::CloseRequested => {
+                // Drop the control window without exiting the app.
+                state.control = None;
+            }
+            WindowEvent::DroppedFile(path) => {
+                // T-M8-05: extension routes to LayerKind. SVG → existing
+                // worker path; JPG/PNG → image_layer upload path. Bad
+                // extensions warn-and-skip.
+                if let Some(layer) = layer_from_dropped_path(&path, &state.project) {
+                    state.project.layers.push(layer);
+                    rebuild_layers_for_state(state);
+                    tracing::info!(
+                        path = %path.display(),
+                        count = state.project.layers.len(),
+                        "layer added via drop",
+                    );
+                } else {
+                    tracing::warn!(
+                        path = %path.display(),
+                        "dropped file has unsupported extension; skipping",
+                    );
+                }
+            }
+            WindowEvent::RedrawRequested => {
+                let device = &state.renderer.gpu.device;
+                let queue = &state.renderer.gpu.queue;
+                let mut panel_action = ControlPanelAction::None;
+                let inputs = ControlPanelInputs {
+                    scene_texture: state.scene_texture_id,
+                    output_size: (
+                        state.output.config.width,
+                        state.output.config.height,
+                    ),
+                };
+                if let Some(ctrl) = state.control.as_mut() {
+                    let result = ctrl.render(device, queue, |ui| {
+                        panel_action = control_panel_show(
+                            ui,
+                            &mut state.project,
+                            &mut state.control_panel,
+                            &mut state.scene_editor,
+                            &inputs,
+                        );
+                    });
+                    if let Err(e) = result {
+                        tracing::warn!(?e, "control window render error");
+                    }
+                }
+                match panel_action {
+                    ControlPanelAction::None => {}
+                    ControlPanelAction::RebuildLayers => {
+                        rebuild_layers_for_state(state);
+                    }
+                    ControlPanelAction::SceneRecall(slot) => {
+                        if matches!(
+                            schedule_scene_recall(state, slot),
+                            RecallOutcome::Snapped
+                        ) {
+                            rebuild_layers_for_state(state);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        return;
+    }
+
+    // Guard: only act on events for the output window from here down.
+    if window_id != state.output.window.id() {
+        return;
+    }
+
+    match event {
+        WindowEvent::CloseRequested => {
+            event_loop.exit();
+        }
+        WindowEvent::KeyboardInput {
+            event: key_event, ..
+        } if key_event.state == ElementState::Pressed => {
+            // Use `physical_key` so the bindings are layout-
+            // independent: a French-AZERTY operator still hits the
+            // same physical keys for Blackout / Freeze / cycle Test
+            // Pattern. Letter keys arrive as `Key::Character` (not
+            // `Named`), so logical-key matching is not reliable for
+            // single letters across layouts.
+            match key_event.physical_key {
+                PhysicalKey::Code(KeyCode::Escape) => event_loop.exit(),
+                PhysicalKey::Code(KeyCode::KeyB) => {
+                    state.output.state.toggle_blackout();
+                    tracing::info!(blackout = state.output.state.blackout, "blackout toggled");
+                }
+                PhysicalKey::Code(KeyCode::KeyF) => {
+                    state.output.state.toggle_freeze();
+                    tracing::info!(freeze = state.output.state.freeze, "freeze toggled");
+                }
+                PhysicalKey::Code(KeyCode::KeyT) => {
+                    state.output.state.cycle_test_pattern();
+                    tracing::info!(
+                        pattern = state.output.state.test_pattern.label(),
+                        "test pattern"
+                    );
+                }
+                PhysicalKey::Code(KeyCode::KeyO) => {
+                    state.output.state.toggle_editor_overlay();
+                    tracing::info!(
+                        overlay = state.output.state.show_editor_overlay,
+                        "editor overlay toggled",
+                    );
+                }
+                _ => {}
+            }
+            // T-M4-10: buffer every pressed event into KeyboardSource for
+            // the source-based control path. Unmapped keys (Escape, T, …)
+            // are silently dropped inside push_winit_key.
+            state.keyboard.push_winit_key(key_event.physical_key);
+        }
+        WindowEvent::Resized(new_size) => {
+            state.output.config.width = new_size.width.max(1);
+            state.output.config.height = new_size.height.max(1);
+            state.output.recreate_surface(&state.renderer.gpu.device);
+            resize_m5_gpu(state);
+            // warp_rt was recreated; the egui scene preview's
+            // TextureId now points to a freed view. Re-register so
+            // the Scene tab keeps painting after resize (T-M9-01).
+            register_scene_preview(state);
+        }
+        WindowEvent::RedrawRequested => {
+            // Drain every registered source through one common dispatcher.
+            // Order doesn't matter for v1 — each event is independent.
+            #[cfg_attr(
+                not(any(feature = "midi", feature = "osc")),
+                allow(unused_mut)
+            )]
+            let mut events: Vec<ControlEvent> = state.keyboard.poll();
+            #[cfg(feature = "midi")]
+            if let Some(midi) = state.midi.as_mut() {
+                events.extend(crate::controls::Source::poll(midi));
+            }
+            #[cfg(feature = "osc")]
+            if let Some(osc) = state.osc.as_mut() {
+                events.extend(crate::controls::Source::poll(osc));
+            }
+            for e in events {
+                dispatch_control_event(state, e);
+            }
+
+            for (i, ls) in state.layers.iter_mut().enumerate() {
+                while let Ok(_event) = ls.watch_rx.try_recv() {
+                    ls.generation = ls.generation.wrapping_add(1);
+                    let kind = &state.project.layers[i].kind;
+                    let asset_path = kind.asset_path().to_path_buf();
+                    let layer_id = ls.layer_id;
+                    let generation = ls.generation;
+                    match kind {
+                        schema::LayerKind::Svg { .. } => {
+                            let size = (state.output.config.width, state.output.config.height);
+                            let _ = ls.job_tx.send(RasterJob {
+                                layer_id,
+                                path: asset_path,
+                                size,
+                                generation,
+                            });
+                            tracing::debug!(
+                                generation = ls.generation,
+                                layer = i,
+                                "svg watcher fired; enqueued raster job"
+                            );
+                        }
+                        schema::LayerKind::Image { .. } => {
+                            // Image hot-reload: synchronous re-upload, no
+                            // worker round-trip. Failure leaves the previous
+                            // texture in place — operator sees stale frame
+                            // rather than a black layer mid-show.
+                            match crate::image_layer::upload_image_rgba8(
+                                &state.renderer.gpu.device,
+                                &state.renderer.gpu.queue,
+                                &asset_path,
+                            ) {
+                                Ok((tex, view, dims)) => {
+                                    ls.layer.set_uploaded_texture(tex, view);
+                                    ls.texture_aspect =
+                                        dims.0.max(1) as f32 / dims.1.max(1) as f32;
+                                    tracing::debug!(
+                                        layer = i,
+                                        path = %asset_path.display(),
+                                        "image hot-reloaded",
+                                    );
+                                }
+                                Err(err) => tracing::warn!(
+                                    layer = i,
+                                    ?err,
+                                    "image hot-reload failed; previous texture retained",
+                                ),
+                            }
+                        }
+                    }
+                }
+                while let Ok(done) = ls.result_rx.try_recv() {
+                    if done.layer_id != ls.layer_id || done.generation != ls.generation {
+                        tracing::debug!(
+                            done_gen = done.generation,
+                            current_gen = ls.generation,
+                            "stale raster result dropped",
+                        );
+                        continue;
+                    }
+                    ls.layer.generation = done.generation;
+                    if let Err(e) = ls.layer.upload(
+                        &state.renderer.gpu.device,
+                        &state.renderer.gpu.queue,
+                        &done.pixmap,
+                    ) {
+                        tracing::warn!(?e, "svg gpu upload failed");
+                    } else {
+                        tracing::debug!(generation = done.generation, "svg uploaded to gpu");
+                    }
+                }
+            }
+
+            // T-M7-04: tick the in-flight scene crossfade. Topology was
+            // already verified at scheduling time so neither endpoint
+            // changes layer count or paths — no `rebuild_layers` needed
+            // mid-fade. Numeric fields blend via `interpolate`; categorical
+            // fields snap at `t = 0.5`.
+            if let Some(cf) = state.crossfade.as_ref() {
+                let elapsed = cf.started_at.elapsed().as_secs_f32();
+                let t = (elapsed / cf.duration_s.max(1e-3)).clamp(0.0, 1.0);
+                let interp = interpolate(&cf.from, &cf.to, t);
+                if let Err(err) = restore_scene(&mut state.project, &interp) {
+                    tracing::warn!(?err, "crossfade tick restore failed; aborting fade");
+                    state.crossfade = None;
+                } else if t >= 1.0 {
+                    state.crossfade = None;
+                }
+            }
+
+            // Render-order priority per spec §3.6 / T-M2-09:
+            // blackout > freeze > test_pattern > svg > normal.
+            // Blackout wins over freeze: if the operator hits B
+            // while frozen, the projector goes black immediately
+            // rather than continuing to show the frozen frame.
+            let result = if state.output.state.blackout {
+                render_blackout(&state.renderer, &state.output)
+            } else if state.output.state.freeze {
+                // Freeze: skip rendering entirely. The window keeps
+                // showing its last presented frame because we
+                // never call `frame.present()` again. Pragmatic M2
+                // implementation; a perfect "freeze" would copy
+                // and re-present the last framebuffer every frame.
+                Ok(())
+            } else if state.output.state.test_pattern != TestPattern::None {
+                render_test_pattern(
+                    &state.renderer,
+                    &state.output,
+                    &state.test_patterns,
+                    state.output.state.test_pattern,
+                )
+            } else if !state.project.layers.is_empty() {
+                let surface_format = state.output.config.format;
+                let overlay_selected = match state.scene_editor.selected {
+                    Some(crate::windows::scene_editor::Selection::Layer(i)) => Some(i),
+                    _ => None,
+                };
+                render_m5_pipeline(
+                    &state.renderer,
+                    &state.output,
+                    &state.project,
+                    &mut state.layers,
+                    &state.svg_pipeline,
+                    &state.compositor,
+                    &mut state.warps,
+                    &state.gamma,
+                    &mut state.overlay,
+                    overlay_selected,
+                    state.output.state.show_editor_overlay,
+                    &state.warp_rt_view,
+                    &state.color_pipeline,
+                    &state.blur_pipeline,
+                    &state.transform_pipeline,
+                    &state.external_registry,
+                    surface_format,
+                    &state.clock,
+                )
+            } else {
+                state.renderer.render_frame(&state.output)
+            };
+            match result {
+                Ok(()) => {}
+                Err(RenderError::SurfaceLost) => {
+                    tracing::warn!("surface lost; recreating");
+                    state.output.recreate_surface(&state.renderer.gpu.device);
+                }
+                Err(RenderError::SurfaceOutdated) => {
+                    tracing::warn!("surface outdated; recreating");
+                    state.output.recreate_surface(&state.renderer.gpu.device);
+                }
+                Err(RenderError::SurfaceSuboptimal) => {
+                    tracing::warn!("surface suboptimal; recreating");
+                    state.output.recreate_surface(&state.renderer.gpu.device);
+                }
+                Err(RenderError::RenderPanic { message }) => {
+                    tracing::error!(%message, "renderer panicked; recovered");
+                    crate::windows::control::error_overlay(&message);
+                }
+                Err(e) => {
+                    tracing::error!(?e, "render error");
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.state.is_running() {
@@ -1375,337 +1709,31 @@ impl ApplicationHandler for App {
         window_id: WindowId,
         event: WindowEvent,
     ) {
-        // T-003-T1.3 will fold this into a `match` on `AppState`.
-        // For T1.1 we route every event through the `Editing` /
-        // `GoLive` payload via the transitional helper so behaviour is
-        // identical to the prior `Option<RunningApp>` path.
-        let Some(state) = self.state.editing_mut() else {
-            return;
-        };
-
-        // T-M4-14: handle events for the egui control window first. If the
-        // event belongs to the control window, handle it and return — do NOT
-        // fall through to the output-window arms below.
-        if state.control.as_ref().is_some_and(|c| c.id() == window_id) {
-            let ctrl = state.control.as_mut().unwrap();
-            let _ = ctrl.on_window_event(&event);
-            match event {
-                WindowEvent::Resized(new_size) => {
-                    ctrl.resize(&state.renderer.gpu.device, new_size);
-                }
-                WindowEvent::CloseRequested => {
-                    // Drop the control window without exiting the app.
-                    state.control = None;
-                }
-                WindowEvent::DroppedFile(path) => {
-                    // T-M8-05: extension routes to LayerKind. SVG → existing
-                    // worker path; JPG/PNG → image_layer upload path. Bad
-                    // extensions warn-and-skip.
-                    if let Some(layer) = layer_from_dropped_path(&path, &state.project) {
-                        state.project.layers.push(layer);
-                        rebuild_layers_for_state(state);
-                        tracing::info!(
-                            path = %path.display(),
-                            count = state.project.layers.len(),
-                            "layer added via drop",
-                        );
-                    } else {
-                        tracing::warn!(
-                            path = %path.display(),
-                            "dropped file has unsupported extension; skipping",
-                        );
-                    }
-                }
-                WindowEvent::RedrawRequested => {
-                    let device = &state.renderer.gpu.device;
-                    let queue = &state.renderer.gpu.queue;
-                    let mut panel_action = ControlPanelAction::None;
-                    let inputs = ControlPanelInputs {
-                        scene_texture: state.scene_texture_id,
-                        output_size: (
-                            state.output.config.width,
-                            state.output.config.height,
-                        ),
-                    };
-                    if let Some(ctrl) = state.control.as_mut() {
-                        let result = ctrl.render(device, queue, |ui| {
-                            panel_action = control_panel_show(
-                                ui,
-                                &mut state.project,
-                                &mut state.control_panel,
-                                &mut state.scene_editor,
-                                &inputs,
-                            );
-                        });
-                        if let Err(e) = result {
-                            tracing::warn!(?e, "control window render error");
-                        }
-                    }
-                    match panel_action {
-                        ControlPanelAction::None => {}
-                        ControlPanelAction::RebuildLayers => {
-                            rebuild_layers_for_state(state);
-                        }
-                        ControlPanelAction::SceneRecall(slot) => {
-                            if matches!(
-                                schedule_scene_recall(state, slot),
-                                RecallOutcome::Snapped
-                            ) {
-                                rebuild_layers_for_state(state);
-                            }
-                        }
-                    }
-                }
-                _ => {}
-            }
-            return;
-        }
-
-        // Guard: only act on events for the output window from here down.
-        if window_id != state.output.window.id() {
-            return;
-        }
-
-        match event {
-            WindowEvent::CloseRequested => {
-                event_loop.exit();
-            }
-            WindowEvent::KeyboardInput {
-                event: key_event, ..
-            } if key_event.state == ElementState::Pressed => {
-                // Use `physical_key` so the bindings are layout-
-                // independent: a French-AZERTY operator still hits the
-                // same physical keys for Blackout / Freeze / cycle Test
-                // Pattern. Letter keys arrive as `Key::Character` (not
-                // `Named`), so logical-key matching is not reliable for
-                // single letters across layouts.
-                match key_event.physical_key {
-                    PhysicalKey::Code(KeyCode::Escape) => event_loop.exit(),
-                    PhysicalKey::Code(KeyCode::KeyB) => {
-                        state.output.state.toggle_blackout();
-                        tracing::info!(blackout = state.output.state.blackout, "blackout toggled");
-                    }
-                    PhysicalKey::Code(KeyCode::KeyF) => {
-                        state.output.state.toggle_freeze();
-                        tracing::info!(freeze = state.output.state.freeze, "freeze toggled");
-                    }
-                    PhysicalKey::Code(KeyCode::KeyT) => {
-                        state.output.state.cycle_test_pattern();
-                        tracing::info!(
-                            pattern = state.output.state.test_pattern.label(),
-                            "test pattern"
-                        );
-                    }
-                    PhysicalKey::Code(KeyCode::KeyO) => {
-                        state.output.state.toggle_editor_overlay();
-                        tracing::info!(
-                            overlay = state.output.state.show_editor_overlay,
-                            "editor overlay toggled",
-                        );
-                    }
-                    _ => {}
-                }
-                // T-M4-10: buffer every pressed event into KeyboardSource for
-                // the source-based control path. Unmapped keys (Escape, T, …)
-                // are silently dropped inside push_winit_key.
-                state.keyboard.push_winit_key(key_event.physical_key);
-            }
-            WindowEvent::Resized(new_size) => {
-                state.output.config.width = new_size.width.max(1);
-                state.output.config.height = new_size.height.max(1);
-                state.output.recreate_surface(&state.renderer.gpu.device);
-                resize_m5_gpu(state);
-                // warp_rt was recreated; the egui scene preview's
-                // TextureId now points to a freed view. Re-register so
-                // the Scene tab keeps painting after resize (T-M9-01).
-                register_scene_preview(state);
-            }
-            WindowEvent::RedrawRequested => {
-                // Drain every registered source through one common dispatcher.
-                // Order doesn't matter for v1 — each event is independent.
-                #[cfg_attr(
-                    not(any(feature = "midi", feature = "osc")),
-                    allow(unused_mut)
-                )]
-                let mut events: Vec<ControlEvent> = state.keyboard.poll();
-                #[cfg(feature = "midi")]
-                if let Some(midi) = state.midi.as_mut() {
-                    events.extend(crate::controls::Source::poll(midi));
-                }
-                #[cfg(feature = "osc")]
-                if let Some(osc) = state.osc.as_mut() {
-                    events.extend(crate::controls::Source::poll(osc));
-                }
-                for e in events {
-                    dispatch_control_event(state, e);
-                }
-
-                for (i, ls) in state.layers.iter_mut().enumerate() {
-                    while let Ok(_event) = ls.watch_rx.try_recv() {
-                        ls.generation = ls.generation.wrapping_add(1);
-                        let kind = &state.project.layers[i].kind;
-                        let asset_path = kind.asset_path().to_path_buf();
-                        let layer_id = ls.layer_id;
-                        let generation = ls.generation;
-                        match kind {
-                            schema::LayerKind::Svg { .. } => {
-                                let size = (state.output.config.width, state.output.config.height);
-                                let _ = ls.job_tx.send(RasterJob {
-                                    layer_id,
-                                    path: asset_path,
-                                    size,
-                                    generation,
-                                });
-                                tracing::debug!(
-                                    generation = ls.generation,
-                                    layer = i,
-                                    "svg watcher fired; enqueued raster job"
-                                );
-                            }
-                            schema::LayerKind::Image { .. } => {
-                                // Image hot-reload: synchronous re-upload, no
-                                // worker round-trip. Failure leaves the previous
-                                // texture in place — operator sees stale frame
-                                // rather than a black layer mid-show.
-                                match crate::image_layer::upload_image_rgba8(
-                                    &state.renderer.gpu.device,
-                                    &state.renderer.gpu.queue,
-                                    &asset_path,
-                                ) {
-                                    Ok((tex, view, dims)) => {
-                                        ls.layer.set_uploaded_texture(tex, view);
-                                        ls.texture_aspect =
-                                            dims.0.max(1) as f32 / dims.1.max(1) as f32;
-                                        tracing::debug!(
-                                            layer = i,
-                                            path = %asset_path.display(),
-                                            "image hot-reloaded",
-                                        );
-                                    }
-                                    Err(err) => tracing::warn!(
-                                        layer = i,
-                                        ?err,
-                                        "image hot-reload failed; previous texture retained",
-                                    ),
-                                }
-                            }
-                        }
-                    }
-                    while let Ok(done) = ls.result_rx.try_recv() {
-                        if done.layer_id != ls.layer_id || done.generation != ls.generation {
-                            tracing::debug!(
-                                done_gen = done.generation,
-                                current_gen = ls.generation,
-                                "stale raster result dropped",
-                            );
-                            continue;
-                        }
-                        ls.layer.generation = done.generation;
-                        if let Err(e) = ls.layer.upload(
-                            &state.renderer.gpu.device,
-                            &state.renderer.gpu.queue,
-                            &done.pixmap,
-                        ) {
-                            tracing::warn!(?e, "svg gpu upload failed");
-                        } else {
-                            tracing::debug!(generation = done.generation, "svg uploaded to gpu");
-                        }
-                    }
-                }
-
-                // T-M7-04: tick the in-flight scene crossfade. Topology was
-                // already verified at scheduling time so neither endpoint
-                // changes layer count or paths — no `rebuild_layers` needed
-                // mid-fade. Numeric fields blend via `interpolate`; categorical
-                // fields snap at `t = 0.5`.
-                if let Some(cf) = state.crossfade.as_ref() {
-                    let elapsed = cf.started_at.elapsed().as_secs_f32();
-                    let t = (elapsed / cf.duration_s.max(1e-3)).clamp(0.0, 1.0);
-                    let interp = interpolate(&cf.from, &cf.to, t);
-                    if let Err(err) = restore_scene(&mut state.project, &interp) {
-                        tracing::warn!(?err, "crossfade tick restore failed; aborting fade");
-                        state.crossfade = None;
-                    } else if t >= 1.0 {
-                        state.crossfade = None;
-                    }
-                }
-
-                // Render-order priority per spec §3.6 / T-M2-09:
-                // blackout > freeze > test_pattern > svg > normal.
-                // Blackout wins over freeze: if the operator hits B
-                // while frozen, the projector goes black immediately
-                // rather than continuing to show the frozen frame.
-                let result = if state.output.state.blackout {
-                    render_blackout(&state.renderer, &state.output)
-                } else if state.output.state.freeze {
-                    // Freeze: skip rendering entirely. The window keeps
-                    // showing its last presented frame because we
-                    // never call `frame.present()` again. Pragmatic M2
-                    // implementation; a perfect "freeze" would copy
-                    // and re-present the last framebuffer every frame.
-                    Ok(())
-                } else if state.output.state.test_pattern != TestPattern::None {
-                    render_test_pattern(
-                        &state.renderer,
-                        &state.output,
-                        &state.test_patterns,
-                        state.output.state.test_pattern,
-                    )
-                } else if !state.project.layers.is_empty() {
-                    let surface_format = state.output.config.format;
-                    let overlay_selected = match state.scene_editor.selected {
-                        Some(crate::windows::scene_editor::Selection::Layer(i)) => Some(i),
-                        _ => None,
-                    };
-                    render_m5_pipeline(
-                        &state.renderer,
-                        &state.output,
-                        &state.project,
-                        &mut state.layers,
-                        &state.svg_pipeline,
-                        &state.compositor,
-                        &mut state.warps,
-                        &state.gamma,
-                        &mut state.overlay,
-                        overlay_selected,
-                        state.output.state.show_editor_overlay,
-                        &state.warp_rt_view,
-                        &state.color_pipeline,
-                        &state.blur_pipeline,
-                        &state.transform_pipeline,
-                        &state.external_registry,
-                        surface_format,
-                        &state.clock,
-                    )
-                } else {
-                    state.renderer.render_frame(&state.output)
-                };
-                match result {
-                    Ok(()) => {}
-                    Err(RenderError::SurfaceLost) => {
-                        tracing::warn!("surface lost; recreating");
-                        state.output.recreate_surface(&state.renderer.gpu.device);
-                    }
-                    Err(RenderError::SurfaceOutdated) => {
-                        tracing::warn!("surface outdated; recreating");
-                        state.output.recreate_surface(&state.renderer.gpu.device);
-                    }
-                    Err(RenderError::SurfaceSuboptimal) => {
-                        tracing::warn!("surface suboptimal; recreating");
-                        state.output.recreate_surface(&state.renderer.gpu.device);
-                    }
-                    Err(RenderError::RenderPanic { message }) => {
-                        tracing::error!(%message, "renderer panicked; recovered");
-                        crate::windows::control::error_overlay(&message);
-                    }
-                    Err(e) => {
-                        tracing::error!(?e, "render error");
-                    }
+        // 003-T1.3: dispatch on AppState. The `Editing` / `GoLive`
+        // payload runs the full pre-existing handler unchanged; other
+        // states ignore most events but honor `CloseRequested` so the
+        // user can quit during boot, launcher, or failure screens.
+        match &mut self.state {
+            AppState::Booting | AppState::Failed(_) => {
+                if matches!(event, WindowEvent::CloseRequested) {
+                    event_loop.exit();
                 }
             }
-            _ => {}
+            AppState::Launcher(_) => {
+                // 003-T2.1+ wires the launcher's own egui dispatch
+                // here. For now the launcher state is unreachable
+                // (no constructor path yet); honor close so the
+                // window can be shut down regardless.
+                if matches!(event, WindowEvent::CloseRequested) {
+                    event_loop.exit();
+                }
+            }
+            AppState::Editing(state) | AppState::GoLive(state) => {
+                handle_editing_window_event(state, event_loop, window_id, event);
+            }
         }
     }
+
 
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
         if let Some(state) = self.state.editing_mut() {
