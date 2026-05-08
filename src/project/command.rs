@@ -54,7 +54,7 @@
 
 #![deny(missing_docs)]
 
-use crate::project::schema::Project;
+use crate::project::schema::{BlendMode, Project};
 
 /// 003-T1.14 — typed project mutations.
 ///
@@ -139,6 +139,35 @@ pub enum Mutation {
         old_cols: u32,
         /// Pre-mutation grid (full snapshot — see Reverse rule 3).
         old_grid: Vec<Vec<[f32; 2]>>,
+    },
+
+    /// Replace `LayerConfig.opacity` for the layer at `layer_idx`.
+    SetLayerOpacity {
+        /// Index into `Project.layers`.
+        layer_idx: usize,
+        /// Value to write.
+        new: f32,
+        /// Pre-mutation value.
+        old: f32,
+    },
+    /// Replace `LayerConfig.enabled` for the layer at `layer_idx`.
+    SetLayerEnabled {
+        /// Index into `Project.layers`.
+        layer_idx: usize,
+        /// Value to write.
+        new: bool,
+        /// Pre-mutation value.
+        old: bool,
+    },
+    /// Replace `LayerConfig.blend_mode` for the layer at `layer_idx`.
+    /// Whole-enum Reverse (rule 1): stores the full old `BlendMode` value.
+    SetLayerBlendMode {
+        /// Index into `Project.layers`.
+        layer_idx: usize,
+        /// Value to write.
+        new: BlendMode,
+        /// Pre-mutation value (full enum — Reverse rule 1).
+        old: BlendMode,
     },
 
     /// Replace the entire project from a serde_json snapshot
@@ -279,6 +308,72 @@ impl Mutation {
                     old_grid: post_grid,
                 }
             }
+            Mutation::SetLayerOpacity {
+                layer_idx,
+                new,
+                old,
+            } => {
+                let layer = project
+                    .layers
+                    .get_mut(layer_idx)
+                    .expect("SetLayerOpacity: layer_idx out of range");
+                debug_assert!(
+                    (layer.opacity - old).abs() < 1e-6,
+                    "SetLayerOpacity stale Reverse: layer.opacity={}, expected old={}",
+                    layer.opacity,
+                    old
+                );
+                layer.opacity = new;
+                Mutation::SetLayerOpacity {
+                    layer_idx,
+                    new: old,
+                    old: new,
+                }
+            }
+            Mutation::SetLayerEnabled {
+                layer_idx,
+                new,
+                old,
+            } => {
+                let layer = project
+                    .layers
+                    .get_mut(layer_idx)
+                    .expect("SetLayerEnabled: layer_idx out of range");
+                debug_assert!(
+                    layer.enabled == old,
+                    "SetLayerEnabled stale Reverse: layer.enabled={}, expected old={}",
+                    layer.enabled,
+                    old
+                );
+                layer.enabled = new;
+                Mutation::SetLayerEnabled {
+                    layer_idx,
+                    new: old,
+                    old: new,
+                }
+            }
+            Mutation::SetLayerBlendMode {
+                layer_idx,
+                new,
+                old,
+            } => {
+                let layer = project
+                    .layers
+                    .get_mut(layer_idx)
+                    .expect("SetLayerBlendMode: layer_idx out of range");
+                debug_assert!(
+                    layer.blend_mode == old,
+                    "SetLayerBlendMode stale Reverse: layer.blend_mode={:?}, expected old={:?}",
+                    layer.blend_mode,
+                    old
+                );
+                layer.blend_mode = new;
+                Mutation::SetLayerBlendMode {
+                    layer_idx,
+                    new: old,
+                    old: new,
+                }
+            }
             Mutation::ApplyProjectSnapshot {
                 new,
                 old,
@@ -309,7 +404,10 @@ impl Mutation {
             | Mutation::SetCrossfadeDurationS { .. }
             | Mutation::SetOutputWindowed { .. }
             | Mutation::SetWarpMaskFeather { .. }
-            | Mutation::SetWarpDimensions { .. } => false,
+            | Mutation::SetWarpDimensions { .. }
+            | Mutation::SetLayerOpacity { .. }
+            | Mutation::SetLayerEnabled { .. }
+            | Mutation::SetLayerBlendMode { .. } => false,
             Mutation::ApplyProjectSnapshot { non_undoable, .. } => *non_undoable,
         }
     }
@@ -399,6 +497,40 @@ impl Project {
             old_grid: warp.grid.clone(),
         }
     }
+
+    /// Build a `SetLayerOpacity` mutation. Panics if `layer_idx` is
+    /// out of range.
+    pub fn set_layer_opacity_mutation(&self, layer_idx: usize, new: f32) -> Mutation {
+        let layer = &self.layers[layer_idx];
+        Mutation::SetLayerOpacity {
+            layer_idx,
+            new,
+            old: layer.opacity,
+        }
+    }
+
+    /// Build a `SetLayerEnabled` mutation. Panics if `layer_idx` is
+    /// out of range.
+    pub fn set_layer_enabled_mutation(&self, layer_idx: usize, new: bool) -> Mutation {
+        let layer = &self.layers[layer_idx];
+        Mutation::SetLayerEnabled {
+            layer_idx,
+            new,
+            old: layer.enabled,
+        }
+    }
+
+    /// Build a `SetLayerBlendMode` mutation. Whole-enum Reverse (rule 1):
+    /// captures the full old `BlendMode` value. Panics if `layer_idx` is
+    /// out of range.
+    pub fn set_layer_blend_mode_mutation(&self, layer_idx: usize, new: BlendMode) -> Mutation {
+        let layer = &self.layers[layer_idx];
+        Mutation::SetLayerBlendMode {
+            layer_idx,
+            new,
+            old: layer.blend_mode,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -414,6 +546,13 @@ mod tests {
         let mut p: Project = serde_json::from_value(json).expect("project deserialise");
         if p.warps.is_empty() {
             p.warps.push(crate::project::schema::default_warp_mesh());
+        }
+        if p.layers.is_empty() {
+            use std::path::PathBuf;
+            p.layers.push(crate::project::schema::layer_from_svg_path(
+                "test_layer",
+                PathBuf::from("/tmp/rmap_test.svg"),
+            ));
         }
         p
     }
@@ -471,6 +610,7 @@ mod tests {
     /// automatically.
     mod proptest_round_trip {
         use super::*;
+        use crate::project::schema::BlendMode;
         use crate::project::undo::UndoStack;
         use proptest::prelude::*;
 
@@ -485,6 +625,9 @@ mod tests {
             WarpMaskFeather(f32),
             WarpDimensions { rows: u32, cols: u32 },
             Snapshot,
+            LayerOpacity(f32),
+            LayerEnabled(bool),
+            LayerBlendMode(BlendMode),
         }
 
         fn to_mutation(kind: &MutationKind, project: &Project) -> Mutation {
@@ -514,7 +657,19 @@ mod tests {
                         non_undoable: false,
                     }
                 }
+                MutationKind::LayerOpacity(v) => project.set_layer_opacity_mutation(0, *v),
+                MutationKind::LayerEnabled(v) => project.set_layer_enabled_mutation(0, *v),
+                MutationKind::LayerBlendMode(v) => project.set_layer_blend_mode_mutation(0, *v),
             }
+        }
+
+        fn arb_blend_mode() -> impl Strategy<Value = BlendMode> {
+            prop_oneof![
+                Just(BlendMode::Normal),
+                Just(BlendMode::Add),
+                Just(BlendMode::Multiply),
+                Just(BlendMode::Screen),
+            ]
         }
 
         fn arb_mutation_kind() -> impl Strategy<Value = MutationKind> {
@@ -530,6 +685,9 @@ mod tests {
                 (1u32..=8, 1u32..=8)
                     .prop_map(|(rows, cols)| MutationKind::WarpDimensions { rows, cols }),
                 Just(MutationKind::Snapshot),
+                (0.0_f32..=1.0).prop_map(MutationKind::LayerOpacity),
+                any::<bool>().prop_map(MutationKind::LayerEnabled),
+                arb_blend_mode().prop_map(MutationKind::LayerBlendMode),
             ]
         }
 

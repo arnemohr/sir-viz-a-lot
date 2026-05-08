@@ -372,11 +372,7 @@ fn show_scene_tab(
     );
     if let Some(scene_editor::Selection::Layer(idx)) = scene.selected {
         if let Some(layer) = project.layers.get(idx) {
-            ui.label(format!(
-                "selected: layer {} ({})",
-                idx,
-                layer.id
-            ));
+            ui.label(format!("selected: layer {} ({})", idx, layer.id));
         }
     }
     ui.add_space(4.0);
@@ -413,9 +409,7 @@ fn show_scene_tab(
     let pointer_now = ui.input(|i| i.pointer.hover_pos());
     if let Some(pos) = pointer_now {
         if resp.double_clicked() {
-            if let Some((w_idx, after, point)) =
-                scene_editor::hit_mask_edge(project, pos, inner)
-            {
+            if let Some((w_idx, after, point)) = scene_editor::hit_mask_edge(project, pos, inner) {
                 if let Some(w) = project.warps.get_mut(w_idx) {
                     let insert_at = (after + 1).min(w.mask_polygon.len());
                     w.mask_polygon.insert(insert_at, point);
@@ -438,7 +432,11 @@ fn show_scene_tab(
             }
         }
     }
-    painter.rect_filled(outer, egui::CornerRadius::ZERO, egui::Color32::from_rgb(8, 9, 12));
+    painter.rect_filled(
+        outer,
+        egui::CornerRadius::ZERO,
+        egui::Color32::from_rgb(8, 9, 12),
+    );
     painter.image(
         tex_id,
         inner,
@@ -532,7 +530,9 @@ fn show_effects_tab(ui: &mut Ui, project: &mut Project, st: &mut ControlPanelSta
         st.presets = load_presets_from_disk();
         st.presets_loaded = true;
     }
-    st.selected_layer = st.selected_layer.min(project.layers.len().saturating_sub(1));
+    st.selected_layer = st
+        .selected_layer
+        .min(project.layers.len().saturating_sub(1));
     ui.label(
         "Sliders apply to the selected layer only; each layer has its own effect chain. Warp, gamma, and master brightness/contrast run after all layers are composited.",
     );
@@ -609,7 +609,11 @@ fn unique_layer_id(project: &Project) -> String {
     }
 }
 
-fn show_layers_tab(ui: &mut Ui, project: &mut Project, st: &mut ControlPanelState) -> ControlPanelAction {
+fn show_layers_tab(
+    ui: &mut Ui,
+    project: &mut Project,
+    st: &mut ControlPanelState,
+) -> ControlPanelAction {
     let mut action = ControlPanelAction::None;
 
     ui.label("Add an SVG as a new compositor layer (bottom list order = draw order).");
@@ -627,9 +631,7 @@ fn show_layers_tab(ui: &mut Ui, project: &mut Project, st: &mut ControlPanelStat
                 st.add_layer_error = "Enter path to an SVG file.".into();
             } else {
                 let p = PathBuf::from(trimmed);
-                let ext_ok = p
-                    .extension()
-                    .is_some_and(|e| e.eq_ignore_ascii_case("svg"));
+                let ext_ok = p.extension().is_some_and(|e| e.eq_ignore_ascii_case("svg"));
                 if !p.exists() {
                     st.add_layer_error = "Path does not exist.".into();
                 } else if !p.is_file() {
@@ -664,29 +666,89 @@ fn show_layers_tab(ui: &mut Ui, project: &mut Project, st: &mut ControlPanelStat
     for (i, layer) in project.layers.iter_mut().enumerate() {
         ui.group(|ui| {
             ui.horizontal(|ui| {
-                ui.checkbox(&mut layer.enabled, &format!("{}", layer.id));
+                #[cfg(feature = "v3")]
+                {
+                    if let Some(new) = command_checkbox(ui, &layer.id, layer.enabled) {
+                        st.pending_mutations.push(Mutation::SetLayerEnabled {
+                            layer_idx: i,
+                            new,
+                            old: layer.enabled,
+                        });
+                    }
+                }
+                #[cfg(not(feature = "v3"))]
+                {
+                    ui.checkbox(&mut layer.enabled, &format!("{}", layer.id));
+                }
                 ui.label(layer.kind.asset_path().display().to_string());
             });
             ui.horizontal(|ui| {
                 ui.label("blend");
-                egui::ComboBox::from_id_salt(("blend", i))
-                    .selected_text(blend_label(layer.blend_mode))
-                    .show_ui(ui, |ui| {
-                        for mode in [
-                            BlendMode::Normal,
-                            BlendMode::Add,
-                            BlendMode::Multiply,
-                            BlendMode::Screen,
-                        ] {
-                            if ui
-                                .selectable_label(layer.blend_mode == mode, blend_label(mode))
-                                .clicked()
-                            {
-                                layer.blend_mode = mode;
+                #[cfg(feature = "v3")]
+                {
+                    let current_mode = layer.blend_mode;
+                    let mut staged: Option<BlendMode> = None;
+                    egui::ComboBox::from_id_salt(("blend", i))
+                        .selected_text(blend_label(current_mode))
+                        .show_ui(ui, |ui| {
+                            for mode in [
+                                BlendMode::Normal,
+                                BlendMode::Add,
+                                BlendMode::Multiply,
+                                BlendMode::Screen,
+                            ] {
+                                if ui
+                                    .selectable_label(current_mode == mode, blend_label(mode))
+                                    .clicked()
+                                {
+                                    staged = Some(mode);
+                                }
                             }
+                        });
+                    if let Some(new) = staged {
+                        if new != current_mode {
+                            st.pending_mutations.push(Mutation::SetLayerBlendMode {
+                                layer_idx: i,
+                                new,
+                                old: current_mode,
+                            });
                         }
-                    });
-                ui.add(egui::Slider::new(&mut layer.opacity, 0.0..=1.0).text("opacity"));
+                    }
+                    if let Some(new) = command_slider(
+                        ui,
+                        &format!("opacity_{i}"),
+                        "opacity",
+                        layer.opacity,
+                        0.0..=1.0,
+                    ) {
+                        st.pending_mutations.push(Mutation::SetLayerOpacity {
+                            layer_idx: i,
+                            new,
+                            old: layer.opacity,
+                        });
+                    }
+                }
+                #[cfg(not(feature = "v3"))]
+                {
+                    egui::ComboBox::from_id_salt(("blend", i))
+                        .selected_text(blend_label(layer.blend_mode))
+                        .show_ui(ui, |ui| {
+                            for mode in [
+                                BlendMode::Normal,
+                                BlendMode::Add,
+                                BlendMode::Multiply,
+                                BlendMode::Screen,
+                            ] {
+                                if ui
+                                    .selectable_label(layer.blend_mode == mode, blend_label(mode))
+                                    .clicked()
+                                {
+                                    layer.blend_mode = mode;
+                                }
+                            }
+                        });
+                    ui.add(egui::Slider::new(&mut layer.opacity, 0.0..=1.0).text("opacity"));
+                }
             });
             ui.horizontal(|ui| {
                 if ui.button("↑").clicked() && i > 0 {
@@ -805,8 +867,7 @@ fn show_mapping_tab(
     // 16:9 thumbnail of the output framebuffer area. The canvas itself stands in for
     // the framebuffer (we don't have a cross-window snapshot in v1 — see T-M5-08 notes).
     let canvas_size = egui::vec2(480.0, 270.0);
-    let (canvas_resp, painter) =
-        ui.allocate_painter(canvas_size, egui::Sense::hover());
+    let (canvas_resp, painter) = ui.allocate_painter(canvas_size, egui::Sense::hover());
     let canvas_rect = canvas_resp.rect;
 
     // Background placeholder: dark fill + checker pattern + border + axis labels.
@@ -824,10 +885,8 @@ fn show_mapping_tab(
             if (cx + cy) % 2 == 0 {
                 continue;
             }
-            let p0 = canvas_rect.left_top()
-                + egui::vec2(cx as f32 * cw, cy as f32 * ch);
-            let r = egui::Rect::from_min_size(p0, egui::vec2(cw, ch))
-                .intersect(canvas_rect);
+            let p0 = canvas_rect.left_top() + egui::vec2(cx as f32 * cw, cy as f32 * ch);
+            let r = egui::Rect::from_min_size(p0, egui::vec2(cw, ch)).intersect(canvas_rect);
             painter.rect_filled(
                 r,
                 egui::CornerRadius::ZERO,
@@ -866,8 +925,7 @@ fn show_mapping_tab(
 
     // Helper: normalized [0,1]^2 -> screen position inside canvas_rect.
     let to_screen = |g: [f32; 2]| -> egui::Pos2 {
-        canvas_rect.left_top()
-            + egui::vec2(g[0] * canvas_rect.width(), g[1] * canvas_rect.height())
+        canvas_rect.left_top() + egui::vec2(g[0] * canvas_rect.width(), g[1] * canvas_rect.height())
     };
 
     // Mesh edges (low-contrast).
@@ -905,10 +963,8 @@ fn show_mapping_tab(
             if resp.dragged() {
                 let delta = resp.drag_delta();
                 if canvas_w > 0.0 && canvas_h > 0.0 {
-                    w.grid[r][c][0] =
-                        (w.grid[r][c][0] + delta.x / canvas_w).clamp(0.0, 1.0);
-                    w.grid[r][c][1] =
-                        (w.grid[r][c][1] + delta.y / canvas_h).clamp(0.0, 1.0);
+                    w.grid[r][c][0] = (w.grid[r][c][0] + delta.x / canvas_w).clamp(0.0, 1.0);
+                    w.grid[r][c][1] = (w.grid[r][c][1] + delta.y / canvas_h).clamp(0.0, 1.0);
                 }
             }
 
@@ -947,9 +1003,13 @@ fn show_mapping_tab(
 
     #[cfg(feature = "v3")]
     {
-        if let Some(new) =
-            command_slider(ui, "mask_feather", "mask feather", w.mask_feather, 0.0..=0.25)
-        {
+        if let Some(new) = command_slider(
+            ui,
+            "mask_feather",
+            "mask feather",
+            w.mask_feather,
+            0.0..=0.25,
+        ) {
             st.pending_mutations.push(Mutation::SetWarpMaskFeather {
                 warp_idx: 0,
                 new,
@@ -1104,7 +1164,9 @@ fn show_effect(ui: &mut Ui, idx: usize, effect: &mut Effect) {
             // time when no ExternalPass is registered under `id`.
             ui.label(format!("id: {id}"));
             ui.label("params (JSON, edited via project file):");
-            ui.label(serde_json::to_string_pretty(params).unwrap_or_else(|_| "<unprintable>".into()));
+            ui.label(
+                serde_json::to_string_pretty(params).unwrap_or_else(|_| "<unprintable>".into()),
+            );
         }
     }
 }
@@ -1174,9 +1236,7 @@ fn modulator_slider(
             ui.add(egui::DragValue::new(band).range(0..=7u8).prefix("band "));
             ui.add(egui::Slider::new(amp, 0.0..=span).text("amp"));
             ui.add(egui::Slider::new(offset, range.clone()).text("offset"));
-            ui.label(
-                "(audio: requires --features audio at build; reads live FFT bands)",
-            );
+            ui.label("(audio: requires --features audio at build; reads live FFT bands)");
         }
     }
     ui.add_space(2.0);
