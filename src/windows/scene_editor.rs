@@ -30,6 +30,33 @@ const MASK_HANDLE_DRAW_PX: f32 = 5.5;
 /// Distance to a mask edge that counts as "double-click on this edge"
 /// for the insert-vertex gesture (M11).
 const MASK_EDGE_HIT_PX: f32 = 7.0;
+/// 003-T3.10 — pixel radius (in canvas-screen space) for the warp-
+/// corner snap to one of the four framebuffer corners. Holding Shift
+/// at drag-end bypasses the snap.
+#[cfg_attr(not(feature = "v3"), allow(dead_code))]
+const WARP_SNAP_RADIUS_PX: f32 = 10.0;
+/// The four framebuffer corners a warp grid vertex can snap to.
+#[cfg_attr(not(feature = "v3"), allow(dead_code))]
+const FRAMEBUFFER_CORNERS: [[f32; 2]; 4] = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+
+/// 003-T3.10 — return the closest framebuffer corner if `pos` is
+/// within `WARP_SNAP_RADIUS_PX` (measured in screen pixels). `None`
+/// otherwise. Used by the drag-end branch to decide whether to snap
+/// the corner to integer coordinates.
+#[cfg_attr(not(feature = "v3"), allow(dead_code))]
+pub fn snap_corner_target(pos: [f32; 2], preview_rect: egui::Rect) -> Option<[f32; 2]> {
+    let r2 = WARP_SNAP_RADIUS_PX * WARP_SNAP_RADIUS_PX;
+    let mut best: Option<(f32, [f32; 2])> = None;
+    for corner in FRAMEBUFFER_CORNERS.iter() {
+        let dx = (pos[0] - corner[0]) * preview_rect.width();
+        let dy = (pos[1] - corner[1]) * preview_rect.height();
+        let d2 = dx * dx + dy * dy;
+        if d2 <= r2 && best.as_ref().map(|(b, _)| d2 < *b).unwrap_or(true) {
+            best = Some((d2, *corner));
+        }
+    }
+    best.map(|(_, c)| c)
+}
 
 /// What the operator currently has selected in the Scene preview. Single-
 /// select for v2; multi-select is deferred. The non-Layer variants land
@@ -669,6 +696,11 @@ pub fn handle_scene_input(
                 // MaskVertex above (rule-3 snapshot Reverse): revert
                 // the live mutation, then return the Mutation so the
                 // app's drain re-applies it via undo_stack.push.
+                //
+                // 003-T3.10 — when the released position is within
+                // WARP_SNAP_RADIUS_PX of a framebuffer corner, snap to
+                // integer coords. Holding Shift bypasses the snap (the
+                // operator wants pixel-precise placement).
                 DragKind::WarpCorner {
                     layer_idx,
                     r,
@@ -678,7 +710,12 @@ pub fn handle_scene_input(
                     if let Some(layer) = project.layers.get_mut(*layer_idx) {
                         if let Some(row) = layer.warp.grid.get_mut(*r) {
                             if let Some(p) = row.get_mut(*c) {
-                                let new = *p;
+                                let mut new = *p;
+                                if !modifiers.shift {
+                                    if let Some(snap) = snap_corner_target(new, preview_rect) {
+                                        new = snap;
+                                    }
+                                }
                                 let old = *start_pos;
                                 if (new[0] - old[0]).abs() > 1e-6 || (new[1] - old[1]).abs() > 1e-6
                                 {
@@ -1044,6 +1081,53 @@ pub fn paint_warp_grid_overlay(
     }
 }
 
+/// 003-T3.10 — paint a faint magnetic-zone indicator at each
+/// framebuffer corner while a warp-corner drag is live and the
+/// dragged corner is within `WARP_SNAP_RADIUS_PX` of one of them. A
+/// no-op when the drag isn't a `WarpCorner` or no corner is in range.
+#[cfg_attr(not(feature = "v3"), allow(dead_code))]
+pub fn paint_warp_snap_indicator(
+    project: &Project,
+    scene: &SceneEditorState,
+    painter: &egui::Painter,
+    inner: egui::Rect,
+) {
+    let Some(drag) = scene.drag.as_ref() else {
+        return;
+    };
+    let DragKind::WarpCorner {
+        layer_idx, r, c, ..
+    } = &drag.kind
+    else {
+        return;
+    };
+    let Some(layer) = project.layers.get(*layer_idx) else {
+        return;
+    };
+    let Some(row) = layer.warp.grid.get(*r) else {
+        return;
+    };
+    let Some(p) = row.get(*c) else {
+        return;
+    };
+    let Some(target) = snap_corner_target(*p, inner) else {
+        return;
+    };
+    let to_screen = |n: [f32; 2]| {
+        egui::pos2(
+            inner.left() + n[0] * inner.width(),
+            inner.top() + n[1] * inner.height(),
+        )
+    };
+    let center = to_screen(target);
+    painter.circle(
+        center,
+        WARP_SNAP_RADIUS_PX,
+        egui::Color32::from_rgba_premultiplied(255, 230, 110, 50),
+        egui::Stroke::new(1.5, egui::Color32::from_rgb(255, 230, 110)),
+    );
+}
+
 /// Paint mask polygon overlays for every warp inside `inner` (the
 /// preview rect). Edges + vertex handles are drawn after the texture
 /// so they sit on top of the live image.
@@ -1248,6 +1332,37 @@ mod tests {
     }
 
     // --- 003-T3.9: cursor_for_mode tests ---
+
+    /// 003-T3.10 — releasing a corner at one of the four framebuffer
+    /// corners snaps; releasing far away does not. The snap radius is
+    /// in screen pixels, so the same normalized delta snaps on a small
+    /// preview but not on a large one (or vice versa).
+    #[test]
+    fn snap_corner_target_picks_nearest_framebuffer_corner() {
+        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1000.0, 1000.0));
+        // 0.005 normalized × 1000 px = 5 px, well within 10 px radius.
+        assert_eq!(
+            super::snap_corner_target([0.005, 0.005], rect),
+            Some([0.0, 0.0]),
+            "near top-left should snap to (0, 0)"
+        );
+        assert_eq!(
+            super::snap_corner_target([0.995, 0.005], rect),
+            Some([1.0, 0.0]),
+            "near top-right should snap to (1, 0)"
+        );
+        assert_eq!(
+            super::snap_corner_target([0.5, 0.5], rect),
+            None,
+            "centre is far from every corner"
+        );
+        // 0.05 normalized × 1000 px = 50 px, outside the 10 px radius.
+        assert_eq!(
+            super::snap_corner_target([0.05, 0.05], rect),
+            None,
+            "50 px from top-left is outside the snap radius"
+        );
+    }
 
     /// Exhaustive 4-arm check of the EditMode → CursorIcon mapping.
     #[test]

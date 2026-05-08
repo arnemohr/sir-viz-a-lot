@@ -725,6 +725,9 @@ fn show_scene_tab(
         if let Some(idx) = warp_layer {
             scene_editor::paint_warp_grid_overlay(project, idx, scene, &painter, inner);
         }
+        // 003-T3.10 — show a faint magnetic-zone indicator while a
+        // corner is being dragged near a framebuffer edge.
+        scene_editor::paint_warp_snap_indicator(project, scene, &painter, inner);
     }
 
     // Route click + drag through the scene editor. Pointer pos is in
