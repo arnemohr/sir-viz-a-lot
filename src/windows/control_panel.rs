@@ -1127,10 +1127,30 @@ fn show_mapping_tab(
     ui.add_space(6.0);
     ui.horizontal(|ui| {
         if ui.button("Reset to identity").clicked() {
-            // Identity 1×1 corner pin: full output rect [0,0]..[1,1].
-            w.rows = 1;
-            w.cols = 1;
-            w.grid = vec![vec![[0.0, 0.0], [1.0, 0.0]], vec![[0.0, 1.0], [1.0, 1.0]]];
+            #[cfg(feature = "v3")]
+            {
+                // Full-snapshot Reverse (ResetWarpMesh rule 3): capture the
+                // entire pre-reset WarpMesh so undo restores mask_polygon /
+                // mask_feather / source_rect unchanged even though Reset only
+                // writes rows / cols / grid.
+                let old = w.clone();
+                let mut new_mesh = old.clone();
+                new_mesh.rows = 1;
+                new_mesh.cols = 1;
+                new_mesh.grid = vec![vec![[0.0, 0.0], [1.0, 0.0]], vec![[0.0, 1.0], [1.0, 1.0]]];
+                st.pending_mutations.push(Mutation::ResetWarpMesh {
+                    warp_idx: 0,
+                    new: new_mesh,
+                    old,
+                });
+            }
+            #[cfg(not(feature = "v3"))]
+            {
+                // Identity 1×1 corner pin: full output rect [0,0]..[1,1].
+                w.rows = 1;
+                w.cols = 1;
+                w.grid = vec![vec![[0.0, 0.0], [1.0, 0.0]], vec![[0.0, 1.0], [1.0, 1.0]]];
+            }
         }
         ui.label(format!("grid: {}×{}", rows, cols));
     });
@@ -1164,11 +1184,33 @@ fn show_mapping_tab(
         ui.label("Zone:");
         for (name, build) in crate::project::zone_templates::all_templates() {
             if ui.button(name).clicked() {
-                w.mask_polygon = build();
+                #[cfg(feature = "v3")]
+                {
+                    st.pending_mutations.push(Mutation::SetMaskPolygon {
+                        warp_idx: 0,
+                        new: build(),
+                        old: w.mask_polygon.clone(),
+                    });
+                }
+                #[cfg(not(feature = "v3"))]
+                {
+                    w.mask_polygon = build();
+                }
             }
         }
         if ui.button("clear mask").clicked() {
-            w.mask_polygon.clear();
+            #[cfg(feature = "v3")]
+            {
+                st.pending_mutations.push(Mutation::SetMaskPolygon {
+                    warp_idx: 0,
+                    new: Vec::new(),
+                    old: w.mask_polygon.clone(),
+                });
+            }
+            #[cfg(not(feature = "v3"))]
+            {
+                w.mask_polygon.clear();
+            }
         }
     });
     ui.label(format!(

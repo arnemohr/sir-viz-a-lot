@@ -305,6 +305,33 @@ pub enum Mutation {
         old: crate::modulators::Modulator,
     },
 
+    /// Replace the entire `WarpMesh` at `warp_idx` (rule 3 snapshot
+    /// Reverse). Used by the Mapping tab's "Reset to identity" button so
+    /// undo restores the full pre-reset mesh — including `mask_polygon`,
+    /// `mask_feather`, and `source_rect` even though Reset only currently
+    /// writes `rows`, `cols`, and `grid`. The full-snapshot shape
+    /// future-proofs against Reset growing to touch more fields.
+    ResetWarpMesh {
+        /// Index into `Project.warps`.
+        warp_idx: usize,
+        /// Full `WarpMesh` to install.
+        new: crate::project::schema::WarpMesh,
+        /// Pre-mutation `WarpMesh` snapshot.
+        old: crate::project::schema::WarpMesh,
+    },
+    /// Replace `WarpMesh.mask_polygon` for the warp at `warp_idx`.
+    /// Both sides are full polygon snapshots (whole-Vec Reverse). Used
+    /// by the Mapping tab's zone-template buttons and the "clear mask"
+    /// button.
+    SetMaskPolygon {
+        /// Index into `Project.warps`.
+        warp_idx: usize,
+        /// Polygon to install.
+        new: Vec<[f32; 2]>,
+        /// Pre-mutation polygon snapshot.
+        old: Vec<[f32; 2]>,
+    },
+
     /// Insert a new vertex into `WarpMesh.mask_polygon` at `position`
     /// (0..=polygon.len()). Reverse is `RemoveMaskVertex { warp_idx, idx: position }`.
     AddMaskVertex {
@@ -630,6 +657,50 @@ impl Mutation {
                     old: new,
                 }
             }
+            Mutation::ResetWarpMesh { warp_idx, new, old } => {
+                let warp = project
+                    .warps
+                    .get_mut(warp_idx)
+                    .expect("ResetWarpMesh: warp_idx out of range");
+                // Snapshot Reverse: cheap-assert that the carried `old`
+                // describes the live state by comparing rows/cols (the
+                // only scalars Reset touches today). The proptest catches
+                // deeper drift.
+                debug_assert!(
+                    warp.rows == old.rows && warp.cols == old.cols,
+                    "ResetWarpMesh stale Reverse: warp dims=({}, {}), expected old=({}, {})",
+                    warp.rows,
+                    warp.cols,
+                    old.rows,
+                    old.cols
+                );
+                let post = new;
+                *warp = post.clone();
+                Mutation::ResetWarpMesh {
+                    warp_idx,
+                    new: old,
+                    old: post,
+                }
+            }
+            Mutation::SetMaskPolygon { warp_idx, new, old } => {
+                let warp = project
+                    .warps
+                    .get_mut(warp_idx)
+                    .expect("SetMaskPolygon: warp_idx out of range");
+                debug_assert!(
+                    warp.mask_polygon.len() == old.len(),
+                    "SetMaskPolygon stale Reverse: mask_polygon.len()={}, expected old.len()={}",
+                    warp.mask_polygon.len(),
+                    old.len()
+                );
+                let post = new;
+                warp.mask_polygon = post.clone();
+                Mutation::SetMaskPolygon {
+                    warp_idx,
+                    new: old,
+                    old: post,
+                }
+            }
             Mutation::AddMaskVertex {
                 warp_idx,
                 position,
@@ -743,7 +814,9 @@ impl Mutation {
             | Mutation::SwapLayers { .. }
             | Mutation::AddMaskVertex { .. }
             | Mutation::RemoveMaskVertex { .. }
-            | Mutation::SetMaskVertex { .. } => false,
+            | Mutation::SetMaskVertex { .. }
+            | Mutation::ResetWarpMesh { .. }
+            | Mutation::SetMaskPolygon { .. } => false,
             Mutation::ApplyProjectSnapshot { non_undoable, .. } => *non_undoable,
         }
     }
@@ -933,6 +1006,28 @@ impl Project {
     /// `WarpMesh.mask_polygon` at the time of apply.
     pub fn set_remove_mask_vertex_mutation(&self, warp_idx: usize, idx: usize) -> Mutation {
         Mutation::RemoveMaskVertex { warp_idx, idx }
+    }
+
+    /// Build a `ResetWarpMesh` mutation. Captures the current warp mesh
+    /// as `old` (full snapshot Reverse — rule 3). `new` is the full
+    /// `WarpMesh` to install; typically the caller constructs the
+    /// identity mesh and passes it here. Panics if `warp_idx` is out
+    /// of range.
+    pub fn set_reset_warp_mesh_mutation(
+        &self,
+        warp_idx: usize,
+        new: crate::project::schema::WarpMesh,
+    ) -> Mutation {
+        let old = self.warps[warp_idx].clone();
+        Mutation::ResetWarpMesh { warp_idx, new, old }
+    }
+
+    /// Build a `SetMaskPolygon` mutation. Captures the current
+    /// `mask_polygon` as `old` (whole-Vec Reverse). Panics if
+    /// `warp_idx` is out of range.
+    pub fn set_mask_polygon_mutation(&self, warp_idx: usize, new: Vec<[f32; 2]>) -> Mutation {
+        let old = self.warps[warp_idx].mask_polygon.clone();
+        Mutation::SetMaskPolygon { warp_idx, new, old }
     }
 
     /// Build a `SetLayerEffects` mutation. Captures the current effect chain
@@ -1243,6 +1338,16 @@ mod tests {
             RemoveMaskVertex {
                 idx_pick: u8,
             },
+            /// 003-T1.28 — reset the warp mesh to a synthetic identity mesh.
+            ResetWarpMesh {
+                rows: u32,
+                cols: u32,
+            },
+            /// 003-T1.28 — replace the entire mask polygon (covers both
+            /// zone-template apply and clear-mask).
+            SetMaskPolygon {
+                vertices: Vec<[f32; 2]>,
+            },
         }
 
         fn to_mutation(kind: &MutationKind, project: &Project) -> Mutation {
@@ -1451,6 +1556,45 @@ mod tests {
                         project.set_remove_mask_vertex_mutation(0, idx)
                     }
                 }
+                // 003-T1.28 — reset warp mesh and set mask polygon.
+                MutationKind::ResetWarpMesh { rows, cols } => {
+                    if project.warps.is_empty() {
+                        project.set_gamma_mutation(project.gamma) // no-op fallback
+                    } else {
+                        // Build a valid (rows+1)×(cols+1) vertex grid for the
+                        // given cell counts (same convention as default_warp_mesh).
+                        let mut new_mesh = project.warps[0].clone();
+                        new_mesh.rows = *rows;
+                        new_mesh.cols = *cols;
+                        new_mesh.grid = (0..=*rows as usize)
+                            .map(|r| {
+                                (0..=*cols as usize)
+                                    .map(|c| {
+                                        let u = if *cols == 0 {
+                                            0.0
+                                        } else {
+                                            c as f32 / *cols as f32
+                                        };
+                                        let v = if *rows == 0 {
+                                            0.0
+                                        } else {
+                                            r as f32 / *rows as f32
+                                        };
+                                        [u, v]
+                                    })
+                                    .collect()
+                            })
+                            .collect();
+                        project.set_reset_warp_mesh_mutation(0, new_mesh)
+                    }
+                }
+                MutationKind::SetMaskPolygon { vertices } => {
+                    if project.warps.is_empty() {
+                        project.set_gamma_mutation(project.gamma) // no-op fallback
+                    } else {
+                        project.set_mask_polygon_mutation(0, vertices.clone())
+                    }
+                }
             }
         }
 
@@ -1573,6 +1717,15 @@ mod tests {
                     }
                 }),
                 any::<u8>().prop_map(|idx_pick| MutationKind::RemoveMaskVertex { idx_pick }),
+                // 003-T1.28 — reset warp mesh coverage.
+                (1u32..=4, 1u32..=4)
+                    .prop_map(|(rows, cols)| MutationKind::ResetWarpMesh { rows, cols }),
+                // 003-T1.28 — set mask polygon coverage (includes empty for clear-mask).
+                proptest::collection::vec(
+                    (0.0_f32..=1.0, 0.0_f32..=1.0).prop_map(|(x, y)| [x, y]),
+                    0..6,
+                )
+                .prop_map(|vertices| MutationKind::SetMaskPolygon { vertices }),
             ]
         }
 
