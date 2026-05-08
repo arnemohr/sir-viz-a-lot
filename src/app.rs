@@ -23,6 +23,10 @@ pub mod prefs;
 // directory-resolution helpers the recents listing reads from.
 #[cfg(feature = "v3")]
 pub mod projects_dir;
+// 003-T2.10 — recent-projects scanner for the launcher's "Open recent"
+// sub-list; reads `~/Documents/rmap/`.
+#[cfg(feature = "v3")]
+pub mod recents;
 
 use std::path::PathBuf;
 
@@ -246,28 +250,15 @@ struct LauncherState {
     /// `prefs.last_used_projector_uuid` to preselect the projector
     /// dropdown; T-003-T2.4 reads only the first-launch flag.
     prefs: prefs::UserPrefs,
-    /// 003-T2.4 + T2.10 — recent-projects listing loaded from
-    /// `~/Documents/rmap/`. Phase-2 default-empty until T2.10 ships
-    /// the directory scan; the launcher's "Open recent" button is
-    /// disabled while this Vec is empty.
-    recents: Vec<RecentProject>,
-}
-
-/// 003-T2.4 + T2.10 — minimal record for a project file the launcher's
-/// "Open recent" sub-list shows. T-003-T2.10 populates this from a
-/// scan of `~/Documents/rmap/`; for T2.4 the launcher just consumes
-/// `recents.is_empty()` to gate the recent-show button.
-#[cfg(feature = "v3")]
-#[allow(dead_code)] // Fields read by T-003-T2.10's recent-projects panel.
-#[derive(Debug, Clone)]
-struct RecentProject {
-    path: PathBuf,
-    /// Filename suffix without `.rmap.json` — what the operator sees
-    /// in the picker.
-    label: String,
-    /// Last-modified timestamp from `std::fs::metadata`. Sorts the
-    /// listing newest-first.
-    modified: std::time::SystemTime,
+    /// 003-T2.10 — recent-projects listing loaded from
+    /// `~/Documents/rmap/` on launcher mount. The launcher's "Open
+    /// recent" button is disabled while this Vec is empty.
+    recents: Vec<crate::app::recents::RecentProject>,
+    /// 003-T2.10 — toggled by the "Open recent" button to show /
+    /// hide the in-launcher recents picker. Lives on `LauncherState`
+    /// instead of egui's per-id memory because the click handler also
+    /// needs to know the toggle state to flip it.
+    recents_open: bool,
 }
 
 /// Non-v3 build keeps the legacy zero-sized stub so the `AppState`
@@ -1363,6 +1354,7 @@ fn apply_launch_command(
         projects_bootstrap: _,
         prefs: _,
         recents: _,
+        recents_open: _,
     } = launcher;
     drop(launcher_window); // close the launcher surface before opening the editor
 
@@ -1442,9 +1434,15 @@ fn init_launcher(event_loop: &ActiveEventLoop) -> Result<LauncherState> {
     // 003-T2.18 + T2.4 — load operator prefs so the launcher can
     // suppress the "Recommended" badge on subsequent launches.
     let prefs = prefs::UserPrefs::load();
-    // T-003-T2.10 ships the recents scan; for T2.4 we keep the listing
-    // empty so the "Open recent" button starts disabled.
-    let recents = Vec::new();
+    // 003-T2.10 — scan ~/Documents/rmap/ for *.rmap.json files. Falls
+    // back to an empty listing if the bootstrap couldn't resolve a
+    // path or the directory is unreadable. The launcher's "Open
+    // recent" button is disabled while the Vec is empty.
+    let recents = bootstrap
+        .path
+        .as_deref()
+        .map(crate::app::recents::scan)
+        .unwrap_or_default();
     Ok(LauncherState {
         launcher,
         gpu,
@@ -1452,6 +1450,7 @@ fn init_launcher(event_loop: &ActiveEventLoop) -> Result<LauncherState> {
         projects_bootstrap: bootstrap,
         prefs,
         recents,
+        recents_open: false,
     })
 }
 
@@ -1473,12 +1472,17 @@ fn launcher_render(state: &mut LauncherState) -> Option<LauncherAction> {
     // needs to read alongside the &mut self.launcher.render call. Rust's
     // borrow checker tracks disjoint fields, so this is safe — the
     // closure only touches `prefs` / `recents` via these immutable
-    // refs, never via `state`.
+    // refs and `recents_open` via a mutable ref, never via `state`
+    // directly.
     let device = &state.gpu.device;
     let queue = &state.gpu.queue;
     let prefs = &state.prefs;
     let recents = &state.recents;
+    let recents_open = &mut state.recents_open;
     let mut action: Option<LauncherAction> = None;
+    // Snapshot `now` once outside the closure so each entry's relative
+    // date reads consistently within a single frame.
+    let now = std::time::SystemTime::now();
 
     let render_result = state.launcher.render(device, queue, |ui| {
         egui::CentralPanel::default().show_inside(ui, |panel_ui| {
@@ -1516,15 +1520,41 @@ fn launcher_render(state: &mut LauncherState) -> Option<LauncherAction> {
                 center_ui.add_space(10.0);
 
                 // 2. Open a recent show — disabled when no recents.
+                //    003-T2.10 — toggles the inline recents picker.
                 let recent_enabled = !recents.is_empty();
+                let recent_label = if *recents_open {
+                    "Hide recent shows"
+                } else {
+                    "Open a recent show"
+                };
                 let recent_resp =
-                    center_ui.add_enabled(recent_enabled, egui::Button::new("Open a recent show"));
+                    center_ui.add_enabled(recent_enabled, egui::Button::new(recent_label));
                 if recent_enabled && recent_resp.clicked() {
-                    // T-003-T2.10 paints the recents popover and emits
-                    // ProjectSource::RecentPath from the click handler.
-                    // For T2.4 we simply log; the action is fired in
-                    // T2.10.
-                    tracing::debug!("launcher: 'Open recent' clicked (T-003-T2.10 wires picker)");
+                    *recents_open = !*recents_open;
+                }
+                if recent_enabled && *recents_open {
+                    // Inline list rather than a floating popup so we
+                    // don't fight egui's z-order machinery; click on
+                    // a stale entry (file deleted between scan and
+                    // click — acceptance #4) routes through the same
+                    // LauncherAction::Launch dispatch as any other
+                    // pick, and the load failure surfaces as an
+                    // AppState::Failed transition with the file's
+                    // ProjectError message.
+                    egui::Frame::group(center_ui.style()).show(center_ui, |inner| {
+                        inner.set_min_width(280.0);
+                        for entry in recents.iter() {
+                            let date = crate::app::recents::relative_date(entry.modified, now);
+                            let label = egui::RichText::new(format!("{}  ·  {date}", entry.label));
+                            if inner.button(label).clicked() {
+                                action = Some(LauncherAction::Launch {
+                                    project: ProjectSource::RecentPath(entry.path.clone()),
+                                    monitor: 0,
+                                    windowed: true,
+                                });
+                            }
+                        }
+                    });
                 }
                 center_ui.add_space(10.0);
 
