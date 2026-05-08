@@ -472,6 +472,7 @@ pub fn handle_scene_input(
         // before emitting: `Mutation::SetLayerEffects::apply` debug_asserts
         // that project state == old at apply time, and the drain runs
         // `apply` in the same frame (which re-installs `new`), so no flash.
+        // 003-T1.25 — Scale (shift-drag) follows the same pattern.
         #[cfg(feature = "v3")]
         if let Some(drag) = scene.drag.as_ref() {
             if let DragKind::LayerTransform {
@@ -480,7 +481,7 @@ pub fn handle_scene_input(
                 ..
             } = &drag.kind
             {
-                if matches!(mode, DragMode::Translate) {
+                if matches!(mode, DragMode::Translate | DragMode::Scale) {
                     if let Some(Selection::Layer(layer_idx)) = scene.selected {
                         if let Some(layer) = project.layers.get_mut(layer_idx) {
                             let old = effects_snapshot.clone();
