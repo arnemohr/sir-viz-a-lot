@@ -1540,6 +1540,19 @@ fn launcher_render(state: &mut LauncherState) -> Option<LauncherAction> {
                     .add_sized(button_size, egui::Button::new(demo_text))
                     .clicked()
                 {
+                    // 003-T2.9 — telemetry: demo button click. The
+                    // later command_launch event (emitted in
+                    // apply_launch_command) carries source = "demo"
+                    // for the launch side; this earlier event marks
+                    // the operator's first-impression decision so the
+                    // Plan §11.7 funnel can measure launcher-open →
+                    // demo-clicked → first-pixel without conflating
+                    // the click with the launch.
+                    tracing::info!(
+                        target: "rmap::ux",
+                        event = "demo_clicked",
+                        demo = "window-glow",
+                    );
                     action = Some(LauncherAction::Launch {
                         project: ProjectSource::Demo("window-glow"),
                         monitor: 0,
