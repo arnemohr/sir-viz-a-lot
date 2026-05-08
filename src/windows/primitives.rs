@@ -11,7 +11,7 @@
 //! pulse curve, the dash spacing, the colour palette — without a
 //! cross-tab grep to keep them in sync.
 
-use egui::{Align2, Color32, FontId, Pos2, Rect, Response, Sense, Stroke, Ui};
+use egui::{Align2, Color32, Context, FontId, Painter, Pos2, Rect, Response, Sense, Stroke, Ui};
 
 /// 003-T2.11 — paint a dashed-border drop zone with a centred label.
 ///
@@ -37,8 +37,19 @@ use egui::{Align2, Color32, FontId, Pos2, Rect, Response, Sense, Stroke, Ui};
 #[allow(dead_code)] // Wired by T-003-T2.12 (drop visual) + T-003-T2.16 (empty-state).
 pub fn drop_target(ui: &mut Ui, rect: Rect, label: &str) -> Response {
     let response = ui.allocate_rect(rect, Sense::hover());
+    let painter = ui.painter_at(rect);
+    paint_drop_target(&painter, ui.ctx(), rect, label);
+    response
+}
 
-    let ctx = ui.ctx();
+/// Overlay variant of [`drop_target`] for callers that already own the
+/// rect they want to paint into (e.g. T-003-T2.16's empty-state hint
+/// drawn on top of the existing scene-preview painter). Skips the
+/// `allocate_rect` step so the surrounding `Ui` cursor is undisturbed
+/// and the visual lands on top of whatever else has been painted in
+/// `rect`.
+#[allow(dead_code)] // Wired by T-003-T2.16 (canvas empty-state).
+pub fn paint_drop_target(painter: &Painter, ctx: &Context, rect: Rect, label: &str) {
     let hovering_files = ctx.input(|i| !i.raw.hovered_files.is_empty());
     let pulse = pulse_phase(ctx.input(|i| i.time));
     let intensity = if hovering_files {
@@ -50,12 +61,11 @@ pub fn drop_target(ui: &mut Ui, rect: Rect, label: &str) -> Response {
         0.45 + 0.20 * pulse
     };
 
-    let painter = ui.painter_at(rect);
     let alpha = (255.0 * intensity).clamp(0.0, 255.0) as u8;
     let stroke_color = Color32::from_white_alpha(alpha);
     let stroke_width = 1.5 + 1.5 * intensity;
 
-    paint_dashed_rect(&painter, rect, stroke_width, stroke_color);
+    paint_dashed_rect(painter, rect, stroke_width, stroke_color);
 
     painter.text(
         rect.center(),
@@ -66,7 +76,6 @@ pub fn drop_target(ui: &mut Ui, rect: Rect, label: &str) -> Response {
     );
 
     ctx.request_repaint();
-    response
 }
 
 /// Pulse curve mapped to `[0.0, 1.0]`. A 1.5 s period reads as

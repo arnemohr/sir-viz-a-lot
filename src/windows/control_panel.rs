@@ -487,6 +487,26 @@ fn show_scene_tab(
         egui::StrokeKind::Outside,
     );
 
+    // 003-T2.16 — empty-state hint. When the project carries no layers
+    // the scene texture renders solid black; overlay a pulsing dashed
+    // drop zone with the "drop a photo or SVG" copy so the canvas
+    // doesn't read as broken on a fresh "Start a new show" launch.
+    // The hint dismisses naturally the moment a layer is added: the
+    // next frame finds `layers.is_empty() == false` and skips the
+    // overlay.
+    //
+    // Gated on `v3` because the `windows::primitives` module itself is
+    // v3-only — the v2 default build still ships the bare scene tab.
+    #[cfg(feature = "v3")]
+    if project.layers.is_empty() {
+        crate::windows::primitives::paint_drop_target(
+            &painter,
+            ui.ctx(),
+            inner,
+            "Drop a photo or SVG here to begin.",
+        );
+    }
+
     // Per-layer colored outlines for every enabled layer (selected gets a
     // thicker stroke, same color). Painted before mask overlays so the
     // mask handles sit on top.
