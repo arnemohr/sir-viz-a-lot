@@ -15,6 +15,23 @@ pub mod param;
 
 use crate::controls::param::SourceRef;
 
+/// 003-T2.3 — where the launcher should pull the project from when the
+/// operator clicks one of the start buttons.
+///
+/// The variant set mirrors the three launcher buttons defined in
+/// `T-003-T2.4`: a blank canvas (Empty), a recently-opened project from
+/// `~/Documents/rmap/` (RecentPath), or a bundled demo (Demo). The
+/// `Demo` payload is a stable identifier — currently only `"window-glow"`
+/// — that maps to a path under `assets/demos/` resolved at launch time
+/// by `resolve_project_source` (see `src/app.rs`).
+#[cfg(feature = "v3")]
+#[derive(Debug, Clone)]
+pub enum ProjectSource {
+    Empty,
+    RecentPath(std::path::PathBuf),
+    Demo(&'static str),
+}
+
 /// Operator-driven event coming from any registered [`Source`].
 #[derive(Debug, Clone)]
 pub enum Command {
@@ -32,6 +49,20 @@ pub enum Command {
     ParamSet {
         binding: SourceRef,
         value: f32,
+    },
+    /// 003-T2.3 — launcher → editor transition. Dispatched from
+    /// `LauncherState`, not from `EditingState`, so it does not flow
+    /// through the per-frame `apply_command(&mut EditingState, …)`
+    /// path; see `apply_launch_command` in `src/app.rs`.
+    ///
+    /// Treated as `non_undoable` (the operator cannot Cmd-Z back to
+    /// the launcher) — the variant is recorded in telemetry but never
+    /// pushed onto the undo stack.
+    #[cfg(feature = "v3")]
+    Launch {
+        project: ProjectSource,
+        monitor: usize,
+        windowed: bool,
     },
 }
 

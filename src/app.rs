@@ -567,6 +567,19 @@ fn apply_command(state: &mut EditingState, event: Command) -> SideEffect {
             // Reserved for Param::Bound resolution (v1.5+); v1 has no consumer.
             SideEffect::None
         }
+        // 003-T2.3 — Command::Launch is launcher-side and is dispatched
+        // through `apply_launch_command` before any `EditingState` exists.
+        // Reaching this arm would mean a keyboard / MIDI / OSC source
+        // produced a Launch event after the editor session started; that
+        // is a logic error (no source emits it) but we drop it rather
+        // than panic — the show keeps running.
+        #[cfg(feature = "v3")]
+        Command::Launch { .. } => {
+            tracing::warn!(
+                "Command::Launch received in EditingState; dropped (launcher dispatch path)",
+            );
+            SideEffect::None
+        }
     }
 }
 
@@ -1018,9 +1031,9 @@ fn init_output_window(
 /// 003-T1.12: orchestrator. Calls the five extractors
 /// (`init_gpu` → `init_control_window` → `init_output_window`
 /// → `init_inputs` → `init_render_graph`) and assembles the
-/// `EditingState`. T-003-T2.1 will reuse the same extractors
-/// from the launcher's `AppState::Launcher → AppState::Editing`
-/// transition.
+/// `EditingState`. T-003-T2.3 reuses these extractors from the
+/// launcher's `AppState::Launcher → AppState::Editing` transition
+/// via [`init_running_app_with_resources`].
 fn init_running_app(
     event_loop: &ActiveEventLoop,
     monitor: Option<MonitorHandle>,
@@ -1029,6 +1042,41 @@ fn init_running_app(
     output_windowed: bool,
 ) -> Result<EditingState> {
     let gpu = init_gpu()?;
+    let inputs = init_inputs();
+    init_running_app_with_resources(
+        event_loop,
+        monitor,
+        project,
+        project_file_path,
+        output_windowed,
+        gpu,
+        inputs,
+    )
+}
+
+/// 003-T2.3: same as [`init_running_app`] but reuses a `GpuContext`
+/// and `InputsBundle` brought up earlier (typically by the launcher
+/// in [`init_launcher`]). Skipping a second wgpu adapter / device
+/// bring-up matters for two reasons:
+///
+/// 1. **Show-day reliability** — re-requesting an adapter mid-session
+///    can return a different GPU on multi-GPU laptops, breaking shared
+///    GPU resources.
+/// 2. **Input source continuity** — `cpal`/`midir`/`rosc` re-init can
+///    momentarily drop captured frames or unsubscribe MIDI ports.
+///
+/// `gpu` is consumed (handed to `Renderer::new` inside
+/// [`init_output_window`]); `inputs` is moved into the new
+/// `EditingState`.
+fn init_running_app_with_resources(
+    event_loop: &ActiveEventLoop,
+    monitor: Option<MonitorHandle>,
+    project: Project,
+    project_file_path: Option<PathBuf>,
+    output_windowed: bool,
+    gpu: GpuContext,
+    inputs: InputsBundle,
+) -> Result<EditingState> {
     // ControlWindow first — it borrows gpu; init_output_window
     // consumes gpu next when handing it to Renderer.
     let control = init_control_window(event_loop, &gpu);
@@ -1038,7 +1086,6 @@ fn init_running_app(
         output_bundle.output.config.width,
         output_bundle.output.config.height,
     );
-    let inputs = init_inputs();
     let render_graph = init_render_graph(
         &output_bundle.renderer,
         &project,
@@ -1114,6 +1161,194 @@ fn assemble_editing_state(
     }
 }
 
+/// 003-T2.3: resolve a [`crate::controls::ProjectSource`] into the
+/// loaded project (and its file path, if any).
+///
+/// - `Empty` → an empty project, no file path.
+/// - `RecentPath(p)` → `Project::load(p)` (returns the file's path so
+///   subsequent Save lands in place).
+/// - `Demo(name)` → resolve `assets/demos/{name}.rmap.json` relative to
+///   the binary's working directory and load it. T-003-T2.8 ships the
+///   `window-glow` bundle; until that lands, missing-asset failures
+///   surface as a `ProjectError`.
+///
+/// Pulled out of `apply_launch_command` so the load step is testable
+/// without bringing up wgpu / winit (T2.3 acceptance criterion 4 verifies
+/// the per-source resolution paths).
+#[cfg(feature = "v3")]
+fn resolve_project_source(
+    source: &crate::controls::ProjectSource,
+) -> std::result::Result<(Project, Option<PathBuf>), ProjectError> {
+    use crate::controls::ProjectSource;
+    match source {
+        ProjectSource::Empty => Ok((build_initial_project(None), None)),
+        ProjectSource::RecentPath(path) => {
+            let p = crate::project::Project::load(path)?;
+            Ok((p, Some(path.clone())))
+        }
+        ProjectSource::Demo(name) => {
+            // Demo bundle path resolution: T-003-T2.8 documents the
+            // `cargo run` (CWD = repo root) vs packaged `.app` (CWD =
+            // arbitrary) split and ships per-platform handling. Today
+            // we resolve relative to CWD only; the packaged-bundle path
+            // is added in T2.8 alongside the demo asset itself.
+            let path = PathBuf::from(format!("assets/demos/{name}.rmap.json"));
+            let p = crate::project::Project::load(&path)?;
+            Ok((p, Some(path)))
+        }
+    }
+}
+
+/// 003-T2.3: launcher → editor transition outcome. Returned from
+/// `handle_launcher_window_event` so the caller (which owns the full
+/// `AppState`) can perform the move-out of `LauncherState` and the
+/// state replacement in one place.
+///
+/// `T-003-T2.4` populates the variant payload from the click handler
+/// on each of the three launcher start buttons. The infrastructure
+/// here is reachable from a unit test today (see `apply_launch_command`
+/// and `resolve_project_source`).
+#[cfg(feature = "v3")]
+#[derive(Debug, Clone)]
+#[allow(dead_code)] // Constructed by T-003-T2.4 button click handlers.
+enum LauncherAction {
+    Launch {
+        project: crate::controls::ProjectSource,
+        monitor: usize,
+        windowed: bool,
+    },
+}
+
+/// 003-T2.3: take ownership of `LauncherState` and produce the
+/// matching `AppState`:
+///
+/// - On success → `AppState::Editing(EditingState)` with the same GPU
+///   and input sources the launcher was already holding.
+/// - On project-load failure → `AppState::Failed(ProjectLoadFailed)`.
+/// - On Critical audit findings → `AppState::Failed(ProjectAuditCritical)`.
+/// - On render init failure → `AppState::Failed(RenderInitFailed)`.
+///
+/// The launcher window inside `LauncherState` drops here; the operator
+/// sees a brief blank flash before the editor windows open. Keeping the
+/// launcher window hidden across the transition is feasible (`window.set_visible(false)`)
+/// but adds lifecycle complexity for no user-visible benefit on the
+/// happy path — `T-003-T2.6` stretches this once the test pattern
+/// reuses surface creation.
+///
+/// Telemetry: a single `command_launch` event lands at `target =
+/// "rmap::ux"` regardless of source variant, with the project source
+/// type as a label so the daily JSON sink (T1.47) can disambiguate
+/// without leaking project paths.
+#[cfg(feature = "v3")]
+fn apply_launch_command(
+    event_loop: &ActiveEventLoop,
+    launcher: LauncherState,
+    action: LauncherAction,
+) -> AppState {
+    let LauncherAction::Launch {
+        project: source,
+        monitor: monitor_idx,
+        windowed,
+    } = action;
+
+    let source_label: &'static str = match &source {
+        crate::controls::ProjectSource::Empty => "empty",
+        crate::controls::ProjectSource::RecentPath(_) => "recent",
+        crate::controls::ProjectSource::Demo(_) => "demo",
+    };
+    tracing::info!(
+        target: "rmap::ux",
+        event = "command_launch",
+        source = source_label,
+        monitor = monitor_idx,
+        windowed,
+    );
+
+    let (project, project_file_path) = match resolve_project_source(&source) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!(?e, ?source, "launcher: project load failed");
+            return failed_state_for_project_load(&e);
+        }
+    };
+
+    // Audit gate — same policy as `App::resumed`: Critical findings
+    // route to Failed; Info / Warn become toasts on the new
+    // EditingState below.
+    let audit_findings = {
+        let env = crate::project::audit::AuditEnv {
+            monitor_count: event_loop.available_monitors().count() as u32,
+        };
+        crate::project::audit::ProjectAudit::run(&project, &env)
+    };
+    let critical: Vec<_> = audit_findings
+        .iter()
+        .filter(|f| f.severity == crate::project::audit::Severity::Critical)
+        .cloned()
+        .collect();
+    if !critical.is_empty() {
+        tracing::error!(
+            count = critical.len(),
+            "launcher project audit emitted Critical findings; routing to Failed",
+        );
+        for f in &critical {
+            tracing::error!(message = %f.message, "critical audit finding");
+        }
+        return failed_state_for_audit_critical(critical);
+    }
+
+    let monitor = event_loop.available_monitors().nth(monitor_idx);
+    if monitor.is_none() {
+        tracing::warn!(
+            requested = monitor_idx,
+            available = event_loop.available_monitors().count(),
+            "launcher: requested monitor index out of range; using platform default",
+        );
+    }
+
+    let LauncherState {
+        launcher: launcher_window,
+        gpu,
+        inputs,
+    } = launcher;
+    drop(launcher_window); // close the launcher surface before opening the editor
+
+    match init_running_app_with_resources(
+        event_loop,
+        monitor,
+        project,
+        project_file_path,
+        windowed,
+        gpu,
+        inputs,
+    ) {
+        Ok(mut running) => {
+            register_scene_preview(&mut running);
+            for finding in audit_findings {
+                let kind = match finding.severity {
+                    crate::project::audit::Severity::Info => crate::windows::toast::ToastKind::Info,
+                    crate::project::audit::Severity::Warn => crate::windows::toast::ToastKind::Warn,
+                    crate::project::audit::Severity::Critical => continue,
+                };
+                tracing::info!(
+                    target: "rmap::ux",
+                    event = "project_audit_warned",
+                    severity = ?finding.severity,
+                );
+                running
+                    .toast_queue
+                    .push(crate::windows::toast::Toast::new(kind, finding.message));
+            }
+            tracing::info!(target: "rmap::ux", event = "session_start");
+            AppState::Editing(running)
+        }
+        Err(e) => {
+            tracing::error!(?e, "launcher → editor render init failed");
+            failed_state_for_render_init()
+        }
+    }
+}
+
 /// 003-T2.2: bring up the launcher window state. Reuses
 /// [`init_gpu`] and [`init_inputs`] so the eventual
 /// `Launcher → Editing` transition (T-003-T2.3) can move them into
@@ -1150,55 +1385,74 @@ fn init_launcher(event_loop: &ActiveEventLoop) -> Result<LauncherState> {
 }
 
 /// 003-T2.2: render one launcher frame with the placeholder body.
+/// Returns the [`LauncherAction`] (if any) the operator triggered
+/// during the frame — `T-003-T2.4` populates the variant from the
+/// three start-button click handlers; today's placeholder body
+/// simply leaves it `None`.
+///
 /// Extracted so the window-event arm stays focused on event
-/// dispatch; T-003-T2.4 swaps the closure body for the three start
-/// buttons + projector picker.
+/// dispatch; the closure passed to `LauncherWindow::render` captures
+/// `&mut action` so the click handlers can write into it without
+/// threading the value through the egui callback's return type.
 #[cfg(feature = "v3")]
-fn launcher_render(state: &mut LauncherState) {
+fn launcher_render(state: &mut LauncherState) -> Option<LauncherAction> {
     let device = &state.gpu.device;
     let queue = &state.gpu.queue;
-    if let Err(err) = state.launcher.render(device, queue, |ui| {
+    let mut action: Option<LauncherAction> = None;
+    let render_result = state.launcher.render(device, queue, |ui| {
         egui::CentralPanel::default().show_inside(ui, |panel_ui| {
             panel_ui.label("Launcher coming soon.");
+            // T-003-T2.4 paints the three start buttons here; click
+            // handlers set `action`. Touching the binding keeps the
+            // closure's capture-by-mut shape stable across that change
+            // (without it the borrow checker can rebuild the closure
+            // signature once the body is non-trivial).
+            let _ = &mut action;
         });
-    }) {
+    });
+    if let Err(err) = render_result {
         tracing::error!(?err, "launcher render frame failed");
     }
+    action
 }
 
 /// 003-T2.2: dispatch a winit window event to the launcher window.
 /// Mirrors `handle_editing_window_event` but for the much smaller
 /// launcher state (no project, no render graph, no keyboard chord
-/// handling). CloseRequested exits the event loop; Resized
-/// reconfigures the surface; RedrawRequested paints one frame; any
-/// other event is forwarded to egui-winit, which may set the
-/// `repaint` hint to ask for a follow-up paint.
+/// handling).
+///
+/// Returns `Some(LauncherAction)` when the operator clicked a start
+/// button this frame (T-003-T2.4 populates the launcher_render
+/// closure to do that); `None` otherwise. The caller — `App::window_event` —
+/// owns the move-out of `LauncherState` and the `AppState` swap, so
+/// the action is bubbled up rather than acted on here.
 #[cfg(feature = "v3")]
 fn handle_launcher_window_event(
     state: &mut LauncherState,
     event_loop: &ActiveEventLoop,
     window_id: WindowId,
     event: WindowEvent,
-) {
+) -> Option<LauncherAction> {
     if window_id != state.launcher.id() {
-        return;
+        return None;
     }
     let resp = state.launcher.on_window_event(&event);
     match event {
         WindowEvent::CloseRequested => {
             event_loop.exit();
+            None
         }
         WindowEvent::Resized(new_size) => {
             state.launcher.resize(&state.gpu.device, new_size);
             state.launcher.request_redraw();
+            None
         }
-        WindowEvent::RedrawRequested => {
-            launcher_render(state);
-        }
+        WindowEvent::RedrawRequested => launcher_render(state),
         _ => {
             if resp.repaint {
                 state.launcher.request_redraw();
             }
+            None
         }
     }
 }
@@ -2514,6 +2768,24 @@ impl ApplicationHandler for App {
         window_id: WindowId,
         event: WindowEvent,
     ) {
+        // 003-T2.3: handle the Launcher arm first because a click on a
+        // start button needs to mem::replace `self.state`. Doing the swap
+        // inside the match arm below is a borrow-checker fight (the arm
+        // already holds a mutable borrow of `self.state`); short-circuiting
+        // here keeps the launcher transition self-contained.
+        #[cfg(feature = "v3")]
+        if let AppState::Launcher(launcher_state) = &mut self.state {
+            let action = handle_launcher_window_event(launcher_state, event_loop, window_id, event);
+            if let Some(action) = action {
+                let prev = std::mem::replace(&mut self.state, AppState::Booting);
+                let AppState::Launcher(launcher) = prev else {
+                    unreachable!("variant matched on the same line above");
+                };
+                self.state = apply_launch_command(event_loop, launcher, action);
+            }
+            return;
+        }
+
         // 003-T1.3: dispatch on AppState. The `Editing` / `GoLive`
         // payload runs the full pre-existing handler unchanged; other
         // states ignore most events but honor `CloseRequested` so the
@@ -2524,22 +2796,14 @@ impl ApplicationHandler for App {
                     event_loop.exit();
                 }
             }
-            AppState::Launcher(state) => {
-                // 003-T2.2 — forward to the launcher's egui dispatch.
-                //
-                // On v3 the variant carries a populated state (see
-                // `init_launcher`); on the non-v3 build it is the
-                // legacy unit struct and the constructor path is
-                // unreachable, so we keep the same minimal CloseRequested
-                // → exit behaviour the T1.3 stub had.
-                #[cfg(feature = "v3")]
-                handle_launcher_window_event(state, event_loop, window_id, event);
+            AppState::Launcher(_) => {
+                // v3 short-circuited above; this arm only runs on the
+                // non-v3 build, where `LauncherState` is the legacy unit
+                // struct and the constructor path is unreachable. Honor
+                // CloseRequested so the window can still be shut down.
                 #[cfg(not(feature = "v3"))]
-                {
-                    let _ = state;
-                    if matches!(event, WindowEvent::CloseRequested) {
-                        event_loop.exit();
-                    }
+                if matches!(event, WindowEvent::CloseRequested) {
+                    event_loop.exit();
                 }
             }
             AppState::Editing(state) | AppState::GoLive(state) => {
@@ -2756,6 +3020,74 @@ mod tests {
             }
             _ => panic!("expected AppState::Failed(ProjectLoadFailed)"),
         }
+    }
+
+    /// 003-T2.3 — `ProjectSource::Empty` resolves to a fresh blank
+    /// project with no associated file path (Save As… picks the
+    /// destination later).
+    #[cfg(feature = "v3")]
+    #[test]
+    fn resolve_project_source_empty_yields_blank_project() {
+        use crate::controls::ProjectSource;
+        let (project, path) = resolve_project_source(&ProjectSource::Empty)
+            .expect("Empty source should never fail to load");
+        assert!(path.is_none(), "Empty has no project file path");
+        assert!(
+            project.layers.is_empty(),
+            "build_initial_project(None) starts with no layers"
+        );
+    }
+
+    /// 003-T2.3 — `ProjectSource::RecentPath` round-trips through
+    /// `Project::load`. We round-trip a freshly-saved blank project
+    /// through a tempfile so the test does not depend on any fixture
+    /// shipped with the repo.
+    #[cfg(feature = "v3")]
+    #[test]
+    fn resolve_project_source_recent_path_round_trips() {
+        use crate::controls::ProjectSource;
+        let dir = std::env::temp_dir().join(format!(
+            "rmap_t2_3_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("recent.rmap.json");
+        let blank = build_initial_project(None);
+        crate::project::Project::save(&blank, &path).expect("save fixture");
+
+        let (loaded, returned_path) =
+            resolve_project_source(&ProjectSource::RecentPath(path.clone()))
+                .expect("recent project loads");
+        assert_eq!(returned_path.as_deref(), Some(path.as_path()));
+        assert_eq!(loaded.layers.len(), blank.layers.len());
+
+        // Cleanup; ignore failures so a leaked temp file does not break
+        // an otherwise-passing CI run.
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    /// 003-T2.3 — `ProjectSource::Demo` resolves a bundle path under
+    /// `assets/demos/`. Until T-003-T2.8 ships the bundle, the load
+    /// surfaces a `ProjectError` rather than panicking; this test
+    /// asserts the graceful-failure shape so future bundle wiring does
+    /// not silently regress to a panic.
+    #[cfg(feature = "v3")]
+    #[test]
+    fn resolve_project_source_demo_fails_gracefully_when_bundle_missing() {
+        use crate::controls::ProjectSource;
+        // A name that will never exist on disk; verifies the error path.
+        // (`window-glow` may exist after T2.8 — pick something else so
+        // this test stays meaningful.)
+        let result = resolve_project_source(&ProjectSource::Demo("definitely-not-a-demo"));
+        assert!(
+            result.is_err(),
+            "missing demo bundle must surface as a ProjectError, not a panic"
+        );
     }
 
     /// 003-T1.44 acceptance criterion 1: Critical audit findings must
