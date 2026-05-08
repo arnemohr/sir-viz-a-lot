@@ -1,6 +1,8 @@
 //! winit `ApplicationHandler`-driven window management. The output window
 //! lives on the projector; the control window lives on the primary display.
 
+#[cfg(feature = "v3")]
+pub mod advanced;
 pub mod control;
 pub mod control_panel;
 #[cfg(feature = "v3")]

@@ -14,7 +14,6 @@
 
 use egui::Ui;
 
-use crate::effects::Effect;
 use crate::modulators::Modulator;
 use crate::project::command::Mutation;
 use crate::project::schema::Project;

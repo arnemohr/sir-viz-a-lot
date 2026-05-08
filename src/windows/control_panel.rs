@@ -11,7 +11,14 @@ use crate::effects::Effect;
 use crate::modulators::Modulator;
 #[cfg(feature = "v3")]
 use crate::project::command::{ModulatorField, Mutation};
-use crate::project::schema::{self, BlendMode, Project, Scene};
+use crate::project::schema::Project;
+// BlendMode + Scene + schema module only needed in v2 tab functions.
+#[cfg(not(feature = "v3"))]
+use crate::project::schema;
+#[cfg(not(feature = "v3"))]
+use crate::project::schema::{BlendMode, Scene};
+// snapshot only needed in v2 Scenes tab.
+#[cfg(not(feature = "v3"))]
 use crate::project::snapshot;
 use crate::windows::scene_editor::{self, SceneEditorState};
 
@@ -229,8 +236,11 @@ pub struct ControlPanelState {
     /// v2 builds carry no undo machinery; the field is gated.
     #[cfg(feature = "v3")]
     pub pending_mutations: Vec<Mutation>,
-    /// Buffer for the Layers tab "add layer" path field.
+    /// Buffer for the Layers tab "add layer" path field (v2 only; T2.14+ uses
+    /// a native picker under v3 but the field is kept for API compatibility).
+    #[cfg_attr(feature = "v3", allow(dead_code))]
     pub new_layer_path_input: String,
+    #[cfg_attr(feature = "v3", allow(dead_code))]
     pub add_layer_error: String,
     /// Target path for **Save** in the Project file panel (`*.rmap.json`).
     pub project_save_path: String,
@@ -253,10 +263,16 @@ pub struct ControlPanelState {
 pub enum ControlPanelAction {
     None,
     /// Reload GPU layer runtime from `project.layers` paths.
+    // Under v3, layer adds route through advanced.rs / layer_strip; under v2
+    // show_layers_tab returns this variant. Allow dead_code lint under v3.
+    #[cfg_attr(feature = "v3", allow(dead_code))]
     RebuildLayers,
     /// Operator clicked "recall" on a scene slot. App routes through the same
     /// scheduling logic as the keyboard hotkey so crossfade
     /// (`Project::crossfade_duration_s`) is honored from the UI too.
+    // Under v3, scene recall is keyboard-driven; the v2 Scenes tab returns this
+    // variant.  Allow dead_code lint under v3.
+    #[cfg_attr(feature = "v3", allow(dead_code))]
     SceneRecall(usize),
     /// 003-T3.4: toolbar Undo button clicked. App drains through `undo_stack.undo`.
     #[cfg(feature = "v3")]
@@ -346,42 +362,28 @@ pub fn show(
             });
     }
 
+    // 003-T3.11: structured Advanced disclosure panel replacing the T3.1
+    // temporary stack.  Content migrated: T3.12 (Master), T3.13 (Modulator
+    // picker), T3.14 (effect chain), T3.15 (Mapping), T3.16 (blend mode),
+    // T3.17 (External JSON gating).  T3.18 persistence via egui id_sources.
     #[cfg(feature = "v3")]
     if st.advanced_open {
         egui::SidePanel::right("rmap_advanced")
             .resizable(true)
-            .default_width(420.0)
+            .default_width(360.0)
             .show_inside(ui, |ui| {
+                // Esc closes the panel.
+                if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    st.advanced_open = false;
+                    return;
+                }
                 ui.heading("Advanced");
-                ui.label("Effects / Layers / Mapping / Scenes — T3.11+ rearranges this.");
                 ui.separator();
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    egui::CollapsingHeader::new("Layers")
-                        .default_open(true)
-                        .show(ui, |ui| {
-                            if matches!(
-                                show_layers_tab(ui, project, st),
-                                ControlPanelAction::RebuildLayers
-                            ) {
-                                action = ControlPanelAction::RebuildLayers;
-                            }
-                        });
-                    egui::CollapsingHeader::new("Effects")
-                        .default_open(false)
-                        .show(ui, |ui| show_effects_tab(ui, project, st));
-                    egui::CollapsingHeader::new("Mapping")
-                        .default_open(false)
-                        .show(ui, |ui| show_mapping_tab(ui, project, st));
-                    egui::CollapsingHeader::new("Scenes")
-                        .default_open(false)
-                        .show(ui, |ui| {
-                            if let ControlPanelAction::SceneRecall(idx) =
-                                show_scenes_tab(ui, project, st)
-                            {
-                                action = ControlPanelAction::SceneRecall(idx);
-                            }
-                        });
-                });
+                let act = crate::windows::advanced::show(ui, project, st, scene);
+                match act {
+                    ControlPanelAction::None => {}
+                    _ => action = act,
+                }
             });
     }
 
@@ -421,100 +423,61 @@ pub fn show(
             ControlTab::Scenes => action = show_scenes_tab(ui, project, st),
         }
 
-        ui.add_space(8.0);
-        egui::CollapsingHeader::new("Project file")
-            .default_open(false)
-            .show(ui, |ui| {
-                ui.label("Save / load JSON projects (*.rmap.json). Layer SVG paths are stored as-is.");
-                ui.horizontal(|ui| {
-                    let edit = egui::TextEdit::singleline(&mut st.project_save_path)
-                        .desired_width(340.0)
-                        .hint_text("my_show.rmap.json");
-                    let resp = ui.add(edit);
-                    if resp.changed() {
-                        st.project_save_message.clear();
-                    }
-                    if ui.button("Save").clicked() {
-                        let trim = st.project_save_path.trim();
-                        if trim.is_empty() {
-                            st.project_save_message = "Enter a path ending in .rmap.json".into();
-                        } else if !trim.ends_with(".rmap.json") {
-                            st.project_save_message =
-                                "Filename should end with .rmap.json".into();
-                        } else {
-                            match project.save(Path::new(trim)) {
-                                Ok(()) => {
-                                    st.project_save_message =
-                                        format!("Saved to {}", trim);
-                                }
-                                Err(e) => {
-                                    st.project_save_message = format!("Save failed: {e}");
+        // 003-T3.12 / T3.11: under v3 these blocks move into
+        // Advanced (Master section + Project section). v2 keeps them here.
+        #[cfg(not(feature = "v3"))]
+        {
+            ui.add_space(8.0);
+            egui::CollapsingHeader::new("Project file")
+                .default_open(false)
+                .show(ui, |ui| {
+                    ui.label("Save / load JSON projects (*.rmap.json). Layer SVG paths are stored as-is.");
+                    ui.horizontal(|ui| {
+                        let edit = egui::TextEdit::singleline(&mut st.project_save_path)
+                            .desired_width(340.0)
+                            .hint_text("my_show.rmap.json");
+                        let resp = ui.add(edit);
+                        if resp.changed() {
+                            st.project_save_message.clear();
+                        }
+                        if ui.button("Save").clicked() {
+                            let trim = st.project_save_path.trim();
+                            if trim.is_empty() {
+                                st.project_save_message = "Enter a path ending in .rmap.json".into();
+                            } else if !trim.ends_with(".rmap.json") {
+                                st.project_save_message =
+                                    "Filename should end with .rmap.json".into();
+                            } else {
+                                match project.save(Path::new(trim)) {
+                                    Ok(()) => {
+                                        st.project_save_message =
+                                            format!("Saved to {}", trim);
+                                    }
+                                    Err(e) => {
+                                        st.project_save_message = format!("Save failed: {e}");
+                                    }
                                 }
                             }
                         }
+                    });
+                    if !st.project_save_message.is_empty() {
+                        ui.label(&st.project_save_message);
                     }
-                });
-                if !st.project_save_message.is_empty() {
-                    ui.label(&st.project_save_message);
-                }
-                #[cfg(feature = "v3")]
-                {
-                    if let Some(new) =
-                        command_checkbox(ui, "Windowed output", project.output_windowed)
-                    {
-                        st.pending_mutations
-                            .push(project.set_output_windowed_mutation(new));
-                    }
-                }
-                #[cfg(not(feature = "v3"))]
-                {
                     ui.checkbox(&mut project.output_windowed, "Windowed output");
-                }
-                ui.label(
-                    "When saved in the project: opens a 1280×720 window on the output monitor instead of fullscreen. Restart rmap to apply.",
-                );
-            });
+                    ui.label(
+                        "When saved in the project: opens a 1280×720 window on the output monitor instead of fullscreen. Restart rmap to apply.",
+                    );
+                });
 
-        ui.add_space(8.0);
-        egui::CollapsingHeader::new("Master (gamma)")
-            .default_open(true)
-            .show(ui, |ui| {
-                #[cfg(feature = "v3")]
-                {
-                    if let Some(new) =
-                        command_slider(ui, "gamma", "gamma", project.gamma, 0.2..=4.0)
-                    {
-                        st.pending_mutations
-                            .push(project.set_gamma_mutation(new));
-                    }
-                    if let Some(new) = command_slider(
-                        ui,
-                        "brightness",
-                        "brightness",
-                        project.brightness,
-                        -1.0..=1.0,
-                    ) {
-                        st.pending_mutations
-                            .push(project.set_brightness_mutation(new));
-                    }
-                    if let Some(new) = command_slider(
-                        ui,
-                        "contrast",
-                        "contrast",
-                        project.contrast,
-                        0.0..=4.0,
-                    ) {
-                        st.pending_mutations
-                            .push(project.set_contrast_mutation(new));
-                    }
-                }
-                #[cfg(not(feature = "v3"))]
-                {
+            ui.add_space(8.0);
+            egui::CollapsingHeader::new("Master (gamma)")
+                .default_open(true)
+                .show(ui, |ui| {
                     ui.add(egui::Slider::new(&mut project.gamma, 0.2..=4.0).text("gamma"));
                     ui.add(egui::Slider::new(&mut project.brightness, -1.0..=1.0).text("brightness"));
                     ui.add(egui::Slider::new(&mut project.contrast, 0.0..=4.0).text("contrast"));
-                }
-            });
+                });
+        }
     });
 
     action
@@ -804,6 +767,9 @@ fn show_scene_tab(
     }
 }
 
+// T3.14: under v3 the effect chain lives in advanced::show. The v2
+// Effects tab retains this function; v3 gating prevents "dead code" lint.
+#[cfg(not(feature = "v3"))]
 fn show_effects_tab(ui: &mut Ui, project: &mut Project, st: &mut ControlPanelState) {
     if project.layers.is_empty() {
         ui.label("No layers — open an SVG as the first argument.");
@@ -897,13 +863,14 @@ fn show_effects_tab(ui: &mut Ui, project: &mut Project, st: &mut ControlPanelSta
             .show(ui, |ui| {
                 #[cfg(feature = "v3")]
                 {
-                    if let Some(change) = show_effect(ui, idx, effect) {
+                    if let Some(change) = show_effect(ui, idx, effect, true) {
                         staged_changes.push((idx, change));
                     }
                 }
                 #[cfg(not(feature = "v3"))]
                 {
-                    let _ = show_effect(ui, idx, effect);
+                    // v2 has no Advanced panel; always show JSON for External.
+                    let _ = show_effect(ui, idx, effect, true);
                 }
             });
     }
@@ -949,6 +916,8 @@ fn show_effects_tab(ui: &mut Ui, project: &mut Project, st: &mut ControlPanelSta
     }
 }
 
+// unique_layer_id is called only from show_layers_tab, which is v2-only.
+#[cfg(not(feature = "v3"))]
 fn unique_layer_id(project: &Project) -> String {
     let mut n = project.layers.len();
     loop {
@@ -960,6 +929,8 @@ fn unique_layer_id(project: &Project) -> String {
     }
 }
 
+// T3.2: under v3 the layer list lives in the layer_strip. v2 keeps this tab.
+#[cfg(not(feature = "v3"))]
 fn show_layers_tab(
     ui: &mut Ui,
     project: &mut Project,
@@ -1217,6 +1188,8 @@ fn show_layers_tab(
     action
 }
 
+// T3.16: blend_label is called in show_layers_tab (v2-only now).
+#[cfg(not(feature = "v3"))]
 fn blend_label(m: BlendMode) -> &'static str {
     match m {
         BlendMode::Normal => "Normal",
@@ -1226,11 +1199,10 @@ fn blend_label(m: BlendMode) -> &'static str {
     }
 }
 
-fn show_mapping_tab(
-    ui: &mut Ui,
-    project: &mut Project,
-    #[cfg_attr(not(feature = "v3"), allow(unused_variables))] st: &mut ControlPanelState,
-) {
+// T3.6 will delete show_mapping_tab when T3.11 (Advanced) has fully replaced
+// its destinations. Until then it is kept for the v2 Mapping tab only.
+#[cfg(not(feature = "v3"))]
+fn show_mapping_tab(ui: &mut Ui, project: &mut Project, st: &mut ControlPanelState) {
     // v4: warp lives on the first layer. The legacy v2 Mapping tab is
     // pre-T3.6 deletion; until T3.6 ships the inspector replacement,
     // this path keeps editing layer 0's warp.
@@ -1528,6 +1500,9 @@ fn show_mapping_tab(
     ));
 }
 
+// Scene slot UI lives in the v2 Scenes tab. Under v3 scenes are recalled
+// via keyboard; a future task will surface this UI elsewhere.
+#[cfg(not(feature = "v3"))]
 fn show_scenes_tab(
     ui: &mut Ui,
     project: &mut Project,
@@ -1616,7 +1591,7 @@ fn show_scenes_tab(
     action
 }
 
-fn effect_label(e: &Effect) -> &'static str {
+pub(super) fn effect_label(e: &Effect) -> &'static str {
     match e {
         Effect::Color { .. } => "Color",
         Effect::Tint { .. } => "Tint",
@@ -1639,7 +1614,7 @@ fn effect_label(e: &Effect) -> &'static str {
 /// is not Copy). Existing move semantics are unaffected — push/destructure uses moves.
 #[allow(dead_code)] // populated only under the v3 feature
 #[derive(Debug, Clone)]
-enum EffectChange {
+pub(super) enum EffectChange {
     /// `Effect::Transform.translate[0]` set to `new`.
     TransformTranslateX(f32),
     /// `Effect::Transform.translate[1]` set to `new`.
@@ -1658,7 +1633,12 @@ enum EffectChange {
     },
 }
 
-fn show_effect(ui: &mut Ui, idx: usize, effect: &mut Effect) -> Option<EffectChange> {
+pub(super) fn show_effect(
+    ui: &mut Ui,
+    idx: usize,
+    effect: &mut Effect,
+    inside_advanced: bool,
+) -> Option<EffectChange> {
     // `mut` is required under v3 (assignment inside cfg block); lint disagrees
     // in non-v3 builds where the write sites are compiled out.
     #[allow(unused_mut)]
@@ -1834,14 +1814,21 @@ fn show_effect(ui: &mut Ui, idx: usize, effect: &mut Effect) -> Option<EffectCha
             }
         }
         Effect::External { id, params } => {
-            // Extension hook: no rich UI in v1. Display the registered id and
-            // let advanced users edit `params` as raw JSON. Skipped at render
-            // time when no ExternalPass is registered under `id`.
+            // T3.17: raw JSON only inside Advanced. v2 callers always pass
+            // `inside_advanced = true` (v2 has no Advanced concept, so the
+            // Effects tab keeps showing JSON).  Under v3, `show_effect` is
+            // only called from `advanced::show_effect_chain`, so `inside_advanced`
+            // is always true there too.  The flag guards a future surface that
+            // might call `show_effect` outside Advanced.
             ui.label(format!("id: {id}"));
-            ui.label("params (JSON, edited via project file):");
-            ui.label(
-                serde_json::to_string_pretty(params).unwrap_or_else(|_| "<unprintable>".into()),
-            );
+            if inside_advanced {
+                ui.label("params (JSON, edited via project file):");
+                ui.label(
+                    serde_json::to_string_pretty(params).unwrap_or_else(|_| "<unprintable>".into()),
+                );
+            } else {
+                ui.label("This effect is configured in the project file.");
+            }
         }
     }
     change
