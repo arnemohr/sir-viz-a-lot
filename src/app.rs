@@ -1606,16 +1606,33 @@ fn handle_editing_window_event(
                 // the undo stack. Disjoint borrows of `pending_mutations`
                 // / `undo_stack` / `project` keep the borrow checker
                 // happy without intermediate locals.
+                //
+                // 003-T1.20: layer-topology mutations (AddLayer /
+                // RemoveLayer / SwapLayers) invalidate `state.layers`,
+                // so we OR a per-mutation rebuild flag with the
+                // existing panel_action signal — and the if-else
+                // structure below avoids a double rebuild when both
+                // sources demand one.
+                #[cfg(feature = "v3")]
+                let mut needs_rebuild_after_drain = false;
                 #[cfg(feature = "v3")]
                 {
                     let pending =
                         std::mem::take(&mut state.control_panel.pending_mutations);
                     for m in pending {
+                        if m.needs_layer_rebuild() {
+                            needs_rebuild_after_drain = true;
+                        }
                         state.undo_stack.push(m, &mut state.project);
                     }
                 }
                 match panel_action {
-                    ControlPanelAction::None => {}
+                    ControlPanelAction::None => {
+                        #[cfg(feature = "v3")]
+                        if needs_rebuild_after_drain {
+                            rebuild_layers_for_state(state);
+                        }
+                    }
                     ControlPanelAction::RebuildLayers => {
                         rebuild_layers_for_state(state);
                     }
@@ -1687,23 +1704,27 @@ fn handle_editing_window_event(
                     // Accept either so the binding feels native on each
                     // platform without a runtime branch.
                     //
-                    // No `rebuild_layers_for_state` call here: every
-                    // T1.18 mutation (gamma / brightness / contrast /
-                    // crossfade / output_windowed / mask_feather /
-                    // warp dims) operates on project fields the
-                    // renderer reads each frame — a GPU rebuild would
-                    // be wasted work. T-003-T1.20 introduces
-                    // layer-topology mutations and will route their
-                    // post-undo side-effects per-mutation rather than
-                    // unconditionally here.
+                    // 003-T1.20: undo / redo now return Option<bool>
+                    // where Some(true) means the mutation invalidated
+                    // `state.layers` (layer-topology change). Field-edit
+                    // mutations (Some(false)) skip the rebuild because
+                    // the renderer reads project fields each frame.
                     let mods = state.modifiers;
                     if mods.super_key() || mods.control_key() {
                         if mods.shift_key() {
-                            let did = state.undo_stack.redo(&mut state.project);
+                            let outcome = state.undo_stack.redo(&mut state.project);
+                            let did = outcome.is_some();
                             tracing::info!(did, "redo");
+                            if matches!(outcome, Some(true)) {
+                                rebuild_layers_for_state(state);
+                            }
                         } else {
-                            let did = state.undo_stack.undo(&mut state.project);
+                            let outcome = state.undo_stack.undo(&mut state.project);
+                            let did = outcome.is_some();
                             tracing::info!(did, "undo");
+                            if matches!(outcome, Some(true)) {
+                                rebuild_layers_for_state(state);
+                            }
                         }
                     }
                 }

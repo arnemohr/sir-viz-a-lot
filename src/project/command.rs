@@ -54,7 +54,7 @@
 
 #![deny(missing_docs)]
 
-use crate::project::schema::{BlendMode, Project};
+use crate::project::schema::{BlendMode, LayerConfig, Project};
 
 /// 003-T1.14 — typed project mutations.
 ///
@@ -168,6 +168,29 @@ pub enum Mutation {
         new: BlendMode,
         /// Pre-mutation value (full enum — Reverse rule 1).
         old: BlendMode,
+    },
+
+    /// Insert `layer` at `position`. Reverse is `RemoveLayer { idx: position }`.
+    /// The whole `LayerConfig` is stored — covers Reverse rule 1 (LayerKind
+    /// enum) automatically.
+    AddLayer {
+        /// The layer to insert.
+        layer: LayerConfig,
+        /// Insertion index (0..=project.layers.len()).
+        position: usize,
+    },
+    /// Remove the layer at `idx`. Reverse is `AddLayer { layer, position: idx }`
+    /// where `layer` is captured during apply via `Vec::remove`.
+    RemoveLayer {
+        /// Index into `Project.layers`.
+        idx: usize,
+    },
+    /// Swap the layers at `i` and `j`. Self-reverse.
+    SwapLayers {
+        /// First swap index.
+        i: usize,
+        /// Second swap index.
+        j: usize,
     },
 
     /// Replace the entire project from a serde_json snapshot
@@ -374,6 +397,40 @@ impl Mutation {
                     old: new,
                 }
             }
+            Mutation::AddLayer { layer, position } => {
+                debug_assert!(
+                    position <= project.layers.len(),
+                    "AddLayer position out of range: position={}, len={}",
+                    position,
+                    project.layers.len()
+                );
+                project.layers.insert(position, layer);
+                Mutation::RemoveLayer { idx: position }
+            }
+            Mutation::RemoveLayer { idx } => {
+                debug_assert!(
+                    idx < project.layers.len(),
+                    "RemoveLayer idx out of range: idx={}, len={}",
+                    idx,
+                    project.layers.len()
+                );
+                let layer = project.layers.remove(idx);
+                Mutation::AddLayer {
+                    layer,
+                    position: idx,
+                }
+            }
+            Mutation::SwapLayers { i, j } => {
+                debug_assert!(
+                    i < project.layers.len() && j < project.layers.len(),
+                    "SwapLayers index out of range: i={}, j={}, len={}",
+                    i,
+                    j,
+                    project.layers.len()
+                );
+                project.layers.swap(i, j);
+                Mutation::SwapLayers { i, j }
+            }
             Mutation::ApplyProjectSnapshot {
                 new,
                 old,
@@ -407,9 +464,27 @@ impl Mutation {
             | Mutation::SetWarpDimensions { .. }
             | Mutation::SetLayerOpacity { .. }
             | Mutation::SetLayerEnabled { .. }
-            | Mutation::SetLayerBlendMode { .. } => false,
+            | Mutation::SetLayerBlendMode { .. }
+            | Mutation::AddLayer { .. }
+            | Mutation::RemoveLayer { .. }
+            | Mutation::SwapLayers { .. } => false,
             Mutation::ApplyProjectSnapshot { non_undoable, .. } => *non_undoable,
         }
+    }
+
+    /// Whether the renderer's per-layer GPU state is invalidated by this
+    /// mutation. Layer-topology mutations (AddLayer / RemoveLayer / SwapLayers)
+    /// invalidate the `state.layers` Vec; field-edit mutations don't —
+    /// they touch project fields the renderer reads each frame.
+    ///
+    /// The app's undo / redo dispatch and the pending-mutation drain inspect
+    /// this flag to decide whether to call `rebuild_layers_for_state` after
+    /// the mutation lands.
+    pub fn needs_layer_rebuild(&self) -> bool {
+        matches!(
+            self,
+            Mutation::AddLayer { .. } | Mutation::RemoveLayer { .. } | Mutation::SwapLayers { .. }
+        )
     }
 }
 
@@ -531,6 +606,25 @@ impl Project {
             old: layer.blend_mode,
         }
     }
+
+    /// Build an `AddLayer` mutation. Caller-supplied `position` is the
+    /// insertion index (clamped at apply time). `layer` is moved into the
+    /// mutation; the caller will not be able to use it afterwards.
+    pub fn set_add_layer_mutation(&self, layer: LayerConfig, position: usize) -> Mutation {
+        Mutation::AddLayer { layer, position }
+    }
+
+    /// Build a `RemoveLayer` mutation. `idx` must be a valid index into
+    /// `Project.layers` at the time of apply.
+    pub fn set_remove_layer_mutation(&self, idx: usize) -> Mutation {
+        Mutation::RemoveLayer { idx }
+    }
+
+    /// Build a `SwapLayers` mutation. `i` and `j` must both be valid indices
+    /// at the time of apply.
+    pub fn set_swap_layers_mutation(&self, i: usize, j: usize) -> Mutation {
+        Mutation::SwapLayers { i, j }
+    }
 }
 
 #[cfg(test)]
@@ -628,6 +722,9 @@ mod tests {
             LayerOpacity(f32),
             LayerEnabled(bool),
             LayerBlendMode(BlendMode),
+            AddLayer,
+            RemoveLayer,
+            SwapLayers,
         }
 
         fn to_mutation(kind: &MutationKind, project: &Project) -> Mutation {
@@ -657,9 +754,50 @@ mod tests {
                         non_undoable: false,
                     }
                 }
-                MutationKind::LayerOpacity(v) => project.set_layer_opacity_mutation(0, *v),
-                MutationKind::LayerEnabled(v) => project.set_layer_enabled_mutation(0, *v),
-                MutationKind::LayerBlendMode(v) => project.set_layer_blend_mode_mutation(0, *v),
+                MutationKind::LayerOpacity(v) => {
+                    if project.layers.is_empty() {
+                        project.set_gamma_mutation(project.gamma) // no-op fallback
+                    } else {
+                        project.set_layer_opacity_mutation(0, *v)
+                    }
+                }
+                MutationKind::LayerEnabled(v) => {
+                    if project.layers.is_empty() {
+                        project.set_gamma_mutation(project.gamma) // no-op fallback
+                    } else {
+                        project.set_layer_enabled_mutation(0, *v)
+                    }
+                }
+                MutationKind::LayerBlendMode(v) => {
+                    if project.layers.is_empty() {
+                        project.set_gamma_mutation(project.gamma) // no-op fallback
+                    } else {
+                        project.set_layer_blend_mode_mutation(0, *v)
+                    }
+                }
+                MutationKind::AddLayer => {
+                    use std::path::PathBuf;
+                    let id = format!("test_layer_{}", project.layers.len());
+                    let layer = crate::project::schema::layer_from_svg_path(
+                        id,
+                        PathBuf::from("/tmp/rmap_test.svg"),
+                    );
+                    project.set_add_layer_mutation(layer, project.layers.len())
+                }
+                MutationKind::RemoveLayer => {
+                    if project.layers.is_empty() {
+                        project.set_gamma_mutation(project.gamma) // no-op fallback
+                    } else {
+                        project.set_remove_layer_mutation(0)
+                    }
+                }
+                MutationKind::SwapLayers => {
+                    if project.layers.len() < 2 {
+                        project.set_gamma_mutation(project.gamma) // no-op fallback
+                    } else {
+                        project.set_swap_layers_mutation(0, 1)
+                    }
+                }
             }
         }
 
@@ -688,6 +826,9 @@ mod tests {
                 (0.0_f32..=1.0).prop_map(MutationKind::LayerOpacity),
                 any::<bool>().prop_map(MutationKind::LayerEnabled),
                 arb_blend_mode().prop_map(MutationKind::LayerBlendMode),
+                Just(MutationKind::AddLayer),
+                Just(MutationKind::RemoveLayer),
+                Just(MutationKind::SwapLayers),
             ]
         }
 
@@ -706,7 +847,7 @@ mod tests {
                     let m = to_mutation(kind, &p);
                     stack.push(m, &mut p);
                 }
-                while stack.undo(&mut p) {}
+                while stack.undo(&mut p).is_some() {}
                 let after = serde_json::to_value(&p).unwrap();
                 prop_assert_eq!(before, after);
             }

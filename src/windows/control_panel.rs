@@ -640,10 +640,23 @@ fn show_layers_tab(
                     st.add_layer_error = "File must have extension .svg.".into();
                 } else if let Ok(canonical) = p.canonicalize() {
                     let id = unique_layer_id(project);
-                    project
-                        .layers
-                        .push(schema::layer_from_svg_path(id, canonical));
-                    st.selected_layer = project.layers.len() - 1;
+                    let new_layer = schema::layer_from_svg_path(id, canonical);
+                    #[cfg(feature = "v3")]
+                    {
+                        let position = project.layers.len();
+                        // Point at the to-be-inserted layer; rebuild_layers_for_state
+                        // will clamp after the mutation applies.
+                        st.selected_layer = position;
+                        st.pending_mutations.push(Mutation::AddLayer {
+                            layer: new_layer,
+                            position,
+                        });
+                    }
+                    #[cfg(not(feature = "v3"))]
+                    {
+                        project.layers.push(new_layer);
+                        st.selected_layer = project.layers.len() - 1;
+                    }
                     st.new_layer_path_input.clear();
                     st.add_layer_error.clear();
                     action = ControlPanelAction::RebuildLayers;
@@ -762,7 +775,15 @@ fn show_layers_tab(
     }
 
     if let Some(i) = swap_up {
-        project.layers.swap(i, i - 1);
+        #[cfg(feature = "v3")]
+        {
+            st.pending_mutations
+                .push(Mutation::SwapLayers { i, j: i - 1 });
+        }
+        #[cfg(not(feature = "v3"))]
+        {
+            project.layers.swap(i, i - 1);
+        }
         if st.selected_layer == i {
             st.selected_layer = i - 1;
         } else if st.selected_layer == i - 1 {
@@ -771,7 +792,15 @@ fn show_layers_tab(
         action = ControlPanelAction::RebuildLayers;
     }
     if let Some(i) = swap_down {
-        project.layers.swap(i, i + 1);
+        #[cfg(feature = "v3")]
+        {
+            st.pending_mutations
+                .push(Mutation::SwapLayers { i, j: i + 1 });
+        }
+        #[cfg(not(feature = "v3"))]
+        {
+            project.layers.swap(i, i + 1);
+        }
         if st.selected_layer == i {
             st.selected_layer = i + 1;
         } else if st.selected_layer == i + 1 {

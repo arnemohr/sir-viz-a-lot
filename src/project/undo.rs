@@ -19,7 +19,7 @@
 
 #![deny(missing_docs)]
 #![allow(dead_code)] // T-003-T1.16+ wires call sites; the stack is
-                    // foundational scaffolding that lands in T1.15.
+// foundational scaffolding that lands in T1.15.
 
 use std::collections::VecDeque;
 
@@ -67,25 +67,28 @@ impl UndoStack {
 
     /// Pop one entry off the undo deque, apply it (which restores
     /// the prior state), push the resulting Reverse onto the
-    /// redo deque. Returns `true` if anything was undone.
-    pub fn undo(&mut self, project: &mut Project) -> bool {
-        let Some(reverse) = self.undo.pop_back() else {
-            return false;
-        };
+    /// redo deque. Returns `Some(needs_rebuild)` if anything was
+    /// undone, where the bool indicates whether the renderer's
+    /// per-layer GPU state must be rebuilt. Returns `None` if the
+    /// stack was empty.
+    pub fn undo(&mut self, project: &mut Project) -> Option<bool> {
+        let reverse = self.undo.pop_back()?;
         let redo_entry = reverse.apply(project);
+        let needs_rebuild = redo_entry.needs_layer_rebuild();
         self.redo.push_back(redo_entry);
-        true
+        Some(needs_rebuild)
     }
 
     /// Symmetric to `undo`: pop one entry off the redo deque,
-    /// apply it, push the result onto the undo deque.
-    pub fn redo(&mut self, project: &mut Project) -> bool {
-        let Some(redo_entry) = self.redo.pop_back() else {
-            return false;
-        };
+    /// apply it, push the result onto the undo deque. Returns
+    /// `Some(needs_rebuild)` if anything was redone, `None` if
+    /// the redo stack was empty.
+    pub fn redo(&mut self, project: &mut Project) -> Option<bool> {
+        let redo_entry = self.redo.pop_back()?;
         let undo_entry = redo_entry.apply(project);
+        let needs_rebuild = undo_entry.needs_layer_rebuild();
         self.undo.push_back(undo_entry);
-        true
+        Some(needs_rebuild)
     }
 
     /// Number of mutations available to undo.
@@ -149,7 +152,7 @@ mod tests {
         stack.push(p.set_gamma_mutation(1.5), &mut p);
         stack.push(p.set_gamma_mutation(2.0), &mut p);
         let undid = stack.undo(&mut p);
-        assert!(undid);
+        assert!(undid.is_some());
         assert_eq!(stack.len(), 1);
         assert_eq!(stack.redo_len(), 1);
         assert!((p.gamma - 1.5).abs() < 1e-6);
@@ -163,7 +166,7 @@ mod tests {
         stack.push(p.set_gamma_mutation(2.5), &mut p);
         stack.undo(&mut p);
         let redid = stack.redo(&mut p);
-        assert!(redid);
+        assert!(redid.is_some());
         assert_eq!(stack.len(), 1);
         assert_eq!(stack.redo_len(), 0);
         assert!((p.gamma - 2.5).abs() < 1e-6);
@@ -199,13 +202,13 @@ mod tests {
         assert_eq!(stack.len(), UNDO_HISTORY_CAP);
     }
 
-    /// `undo` on an empty stack returns `false` and is harmless.
+    /// `undo` on an empty stack returns `None` and is harmless.
     #[test]
-    fn undo_on_empty_returns_false() {
+    fn undo_on_empty_returns_none() {
         let mut stack = UndoStack::new();
         let mut p = fresh_project();
         let did = stack.undo(&mut p);
-        assert!(!did);
+        assert!(did.is_none());
     }
 
     /// Apply N mutations + undo all of them returns the project
@@ -221,7 +224,7 @@ mod tests {
         stack.push(p.set_brightness_mutation(0.4), &mut p);
         stack.push(p.set_contrast_mutation(1.2), &mut p);
 
-        while stack.undo(&mut p) {}
+        while stack.undo(&mut p).is_some() {}
         let after = serde_json::to_value(&p).unwrap();
         assert_eq!(before, after);
     }
