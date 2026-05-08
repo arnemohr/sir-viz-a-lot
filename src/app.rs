@@ -1421,15 +1421,43 @@ fn apply_launch_command(
         gpu,
         inputs,
         projects_bootstrap: _,
-        prefs: _,
+        mut prefs,
         recents: _,
         recents_open: _,
-        monitors: _,
+        monitors,
         selected_monitor: _,
         test_session: _,
         last_error: _,
     } = launcher;
     drop(launcher_window); // close the launcher surface before opening the editor
+
+    // 003-T2.20 — persist the chosen projector so the next launcher
+    // mount can preselect it. We take `stable_id` from the monitor
+    // snapshot the launcher had on click, not the live event-loop list
+    // — picking the latter would race against a hot-plug between click
+    // and persistence.
+    //
+    // Also flip `first_launch_completed`: the demo button's
+    // "Recommended" badge is a one-shot nudge, suppressed once the
+    // operator has launched anything (T-003-T2.4).
+    let new_stable_id = monitors.get(monitor_idx).and_then(|m| m.stable_id.clone());
+    let mut prefs_changed = false;
+    if !prefs.first_launch_completed {
+        prefs.first_launch_completed = true;
+        prefs_changed = true;
+    }
+    if prefs.last_used_projector_uuid != new_stable_id {
+        prefs.last_used_projector_uuid = new_stable_id;
+        prefs_changed = true;
+    }
+    if prefs_changed {
+        if let Err(err) = prefs.save() {
+            tracing::warn!(
+                ?err,
+                "launcher: failed to persist user prefs; last-used projector + first-launch flag will not survive a relaunch",
+            );
+        }
+    }
 
     match init_running_app_with_resources(
         event_loop,

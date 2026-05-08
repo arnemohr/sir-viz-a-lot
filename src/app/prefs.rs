@@ -70,7 +70,6 @@ impl UserPrefs {
     /// All four cases produce a `UserPrefs::default()` rather than a
     /// panic so the launcher always opens regardless of the prefs
     /// state.
-    #[allow(dead_code)] // Wired by T-003-T2.20 (launcher mount loads prefs).
     pub fn load() -> Self {
         let Some(path) = canonical_path() else {
             tracing::warn!("UserPrefs::load: cannot resolve preferences path; using defaults",);
@@ -114,7 +113,6 @@ impl UserPrefs {
     /// directories as needed; writes atomically via tempfile + rename.
     /// I/O errors propagate so the caller can surface a toast (T-003-T2.19
     /// owns the user-facing failure message for filesystem trouble).
-    #[allow(dead_code)] // Wired by T-003-T2.20 (last-used-projector save site).
     pub fn save(&self) -> std::io::Result<()> {
         let Some(path) = canonical_path() else {
             tracing::warn!("UserPrefs::save: cannot resolve preferences path; not saving");
