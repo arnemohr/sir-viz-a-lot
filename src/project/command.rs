@@ -270,4 +270,108 @@ mod tests {
         assert!(!p.set_brightness_mutation(0.0).is_non_undoable());
         assert!(!p.set_contrast_mutation(1.0).is_non_undoable());
     }
+
+    /// 003-T1.17 — property-based test for the Reverse-storage
+    /// invariant (Risk R11 mitigation).
+    ///
+    /// For any sequence of `Mutation` applications, undoing them
+    /// all must return the project to byte-equal serde_json. This
+    /// is the runtime contract that lets future contributors
+    /// migrate UI sites (T-003-T1.18+) without manually verifying
+    /// Reverse correctness.
+    ///
+    /// Adding a new Mutation variant: extend `MutationKind` and
+    /// the `to_mutation` match. The harness picks it up
+    /// automatically.
+    mod proptest_round_trip {
+        use super::*;
+        use crate::project::undo::UndoStack;
+        use proptest::prelude::*;
+
+        /// Categories of mutation the harness generates.
+        #[derive(Clone, Debug)]
+        enum MutationKind {
+            Gamma(f32),
+            Brightness(f32),
+            Contrast(f32),
+            Snapshot,
+        }
+
+        fn to_mutation(kind: &MutationKind, project: &Project) -> Mutation {
+            match kind {
+                MutationKind::Gamma(v) => project.set_gamma_mutation(*v),
+                MutationKind::Brightness(v) => project.set_brightness_mutation(*v),
+                MutationKind::Contrast(v) => project.set_contrast_mutation(*v),
+                MutationKind::Snapshot => {
+                    // Build a snapshot mutation against the
+                    // project's current state, with `new` flipping
+                    // gamma so the mutation is observable.
+                    let old = serde_json::to_value(project).unwrap();
+                    let mut next = project.clone();
+                    next.gamma += 0.1;
+                    let new = serde_json::to_value(&next).unwrap();
+                    Mutation::ApplyProjectSnapshot {
+                        new,
+                        old,
+                        non_undoable: false,
+                    }
+                }
+            }
+        }
+
+        fn arb_mutation_kind() -> impl Strategy<Value = MutationKind> {
+            // Float ranges match the existing slider widgets so
+            // debug_assert!s stay well-defined (no NaN).
+            prop_oneof![
+                (0.2_f32..=4.0).prop_map(MutationKind::Gamma),
+                (-1.0_f32..=1.0).prop_map(MutationKind::Brightness),
+                (0.0_f32..=4.0).prop_map(MutationKind::Contrast),
+                Just(MutationKind::Snapshot),
+            ]
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(256))]
+
+            /// Apply N → undo N → byte-equal to start.
+            #[test]
+            fn apply_then_undo_round_trips(
+                kinds in proptest::collection::vec(arb_mutation_kind(), 0..50),
+            ) {
+                let mut p = fresh_project();
+                let before = serde_json::to_value(&p).unwrap();
+                let mut stack = UndoStack::new();
+                for kind in &kinds {
+                    let m = to_mutation(kind, &p);
+                    stack.push(m, &mut p);
+                }
+                while stack.undo(&mut p) {}
+                let after = serde_json::to_value(&p).unwrap();
+                prop_assert_eq!(before, after);
+            }
+
+            /// Apply N → undo all → redo all → equal to post-apply.
+            #[test]
+            fn undo_redo_round_trips(
+                kinds in proptest::collection::vec(arb_mutation_kind(), 0..50),
+            ) {
+                let mut p = fresh_project();
+                let mut stack = UndoStack::new();
+                for kind in &kinds {
+                    let m = to_mutation(kind, &p);
+                    stack.push(m, &mut p);
+                }
+                let after_apply = serde_json::to_value(&p).unwrap();
+                let undo_count = stack.len();
+                for _ in 0..undo_count {
+                    stack.undo(&mut p);
+                }
+                for _ in 0..undo_count {
+                    stack.redo(&mut p);
+                }
+                let after_redo = serde_json::to_value(&p).unwrap();
+                prop_assert_eq!(after_apply, after_redo);
+            }
+        }
+    }
 }

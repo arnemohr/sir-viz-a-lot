@@ -84,6 +84,11 @@ objc2-io-kit     = "0.3"
 [build-dependencies]
 naga = { version = "29", features = ["wgsl-in"] }
 
+[dev-dependencies]
+# 003-T1.17: property-based testing for the Mutation Reverse-
+# storage invariant. Test-only — does not touch release builds.
+proptest = "1"
+
 # Show-day binary: longer compile, smaller artifact, no panic-unwind machinery.
 # The renderer still uses `catch_unwind` for in-frame recovery before any
 # eventual abort path is taken.

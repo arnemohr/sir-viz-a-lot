@@ -66,7 +66,7 @@ Phase 1 unblocks every later phase. M1 is the gate.
 | ✅ T1.14 | Reverse-storage type machinery | RUST | L (justified) | T1.13 |
 | ✅ T1.15 | `UndoStack<C>` with `non_undoable` | RUST | M | T1.14 |
 | ✅ T1.16 | Central `apply_command` function | RUST | S | T1.14 |
-| T1.17 | Proptest harness on `Command::Noop` | RUST | M | T1.15, T1.16 |
+| ✅ T1.17 | Proptest harness on `Command::Noop` | RUST | M | T1.15, T1.16 |
 | T1.18 | Migrate always-visible bindings batch | RUST | M | T1.17 |
 | T1.19 | Migrate per-layer Layers tab bindings | RUST | M | T1.17 |
 | T1.20 | Migrate Layers tab buttons | RUST | M | T1.17 |
