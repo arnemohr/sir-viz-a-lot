@@ -5,3 +5,5 @@ pub mod control;
 pub mod control_panel;
 pub mod output;
 pub mod scene_editor;
+#[cfg(feature = "v3")]
+pub mod toast;
