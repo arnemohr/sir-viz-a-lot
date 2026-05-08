@@ -454,6 +454,18 @@ struct EditingState {
     /// the undo stack, then skip subsequent occurrences.
     #[cfg(feature = "v3")]
     telemetry: SessionTelemetry,
+    /// 003-T2.17: timestamp of editor construction. Drives the
+    /// "Connecting to projector…" dot animation in `show_scene_tab`
+    /// while the scene texture is still being registered, and the
+    /// once-per-session warn toast that escalates after 5 s if the
+    /// preview never lands.
+    #[cfg(feature = "v3")]
+    session_started_at: std::time::Instant,
+    /// 003-T2.17: latch for the "Couldn't reach the projector" toast
+    /// so the escalation fires at most once per session even if the
+    /// preview never registers (e.g. `--monitor 99`).
+    #[cfg(feature = "v3")]
+    connecting_toast_emitted: bool,
 }
 
 /// 003-T1.45 — once-per-session "first X" guards for the Plan §11.7
@@ -1264,6 +1276,10 @@ fn assemble_editing_state(
         toast_queue: crate::windows::toast::ToastQueue::new(),
         #[cfg(feature = "v3")]
         telemetry: SessionTelemetry::default(),
+        #[cfg(feature = "v3")]
+        session_started_at: std::time::Instant::now(),
+        #[cfg(feature = "v3")]
+        connecting_toast_emitted: false,
     }
 }
 
@@ -2690,6 +2706,8 @@ fn handle_editing_window_event(
                 let inputs = ControlPanelInputs {
                     scene_texture: state.scene_texture_id,
                     output_size: (state.output.config.width, state.output.config.height),
+                    #[cfg(feature = "v3")]
+                    session_age: state.session_started_at.elapsed(),
                 };
                 // 003-T1.42 follow-up: drain expired toasts once per frame
                 // before render. Sticky Error toasts survive; auto-expiring
@@ -2697,6 +2715,36 @@ fn handle_editing_window_event(
                 #[cfg(feature = "v3")]
                 {
                     state.toast_queue.drain_expired();
+                }
+                // 003-T2.17 — escalate the "Connecting to projector…"
+                // copy to a sticky error toast if the scene texture
+                // hasn't registered after 5 s. That window covers cold
+                // wgpu init on every machine we've measured; anything
+                // longer is a real failure (e.g. `--monitor 99` or a
+                // surface-creation crash) and the operator deserves a
+                // visible signal rather than a silent placeholder.
+                // Latched via `connecting_toast_emitted` so the toast
+                // fires at most once per session even if the preview
+                // never lands.
+                #[cfg(feature = "v3")]
+                {
+                    const CONNECTING_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+                    if state.scene_texture_id.is_none()
+                        && !state.connecting_toast_emitted
+                        && state.session_started_at.elapsed() >= CONNECTING_GRACE
+                    {
+                        state.connecting_toast_emitted = true;
+                        tracing::warn!(
+                            target: "rmap::ux",
+                            event = "connecting_to_projector_timeout",
+                            "scene preview never registered within {}s grace window",
+                            CONNECTING_GRACE.as_secs(),
+                        );
+                        state.toast_queue.push(crate::windows::toast::Toast::new(
+                            crate::windows::toast::ToastKind::Error,
+                            "Couldn't reach the projector. Try a different one from the launcher next time.",
+                        ));
+                    }
                 }
                 #[cfg(feature = "v3")]
                 let mut undo_rebuild_after_render = false;

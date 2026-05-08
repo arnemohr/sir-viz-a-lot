@@ -222,6 +222,13 @@ pub struct ControlPanelInputs {
     /// Output framebuffer dimensions, used to compute the preview's aspect
     /// (T-M9-02). `(0, 0)` is treated as 16:9 fallback.
     pub output_size: (u32, u32),
+    /// 003-T2.17: time elapsed since the editor began constructing, used
+    /// by `show_scene_tab` to animate the "Connecting to projector…"
+    /// dot pattern while `scene_texture` is `None`. `None` for v2 builds
+    /// (the connecting copy is v3-only); the v2 default still shows the
+    /// dev-log line so existing log-scraping habits don't silently break.
+    #[cfg(feature = "v3")]
+    pub session_age: std::time::Duration,
 }
 
 /// Render the control panel. Mutates `project` in place.
@@ -378,6 +385,24 @@ fn show_scene_tab(
     }
     ui.add_space(4.0);
     let Some(tex_id) = inputs.scene_texture else {
+        // 003-T2.17 — friendly transition copy with animated dots while
+        // the output surface and scene-texture registration race the
+        // first paint. The egui repaint cadence drives the dot count
+        // off `session_age`, so the copy reads as breathing rather
+        // than spinning. The 5 s escalation toast lives in app.rs
+        // where the toast queue is owned (see `connecting_toast_emitted`).
+        #[cfg(feature = "v3")]
+        {
+            let dots = match inputs.session_age.as_millis() / 400 % 4 {
+                0 => "",
+                1 => ".",
+                2 => "..",
+                _ => "...",
+            };
+            ui.label(format!("Connecting to projector{dots}"));
+            ui.ctx().request_repaint();
+        }
+        #[cfg(not(feature = "v3"))]
         ui.label("(scene preview not yet registered — output window not initialized)");
         return;
     };
