@@ -700,6 +700,20 @@ fn show_scene_tab(
     // mask handles sit on top.
     scene_editor::paint_layer_outlines(project, scene, &painter, inner);
     scene_editor::paint_mask_overlays(project, scene, &painter, inner);
+    // 003-T3.5 — paint the selected layer's warp grid only when the
+    // operator is in Warp mode. Other layers' grids stay hidden so the
+    // canvas tracks the operator's per-layer focus.
+    #[cfg(feature = "v3")]
+    if scene.mode == scene_editor::EditMode::Warp {
+        let warp_layer = match scene.selected {
+            Some(scene_editor::Selection::Layer(idx)) => Some(idx),
+            Some(scene_editor::Selection::WarpCorner { warp, .. }) => Some(warp),
+            _ => None,
+        };
+        if let Some(idx) = warp_layer {
+            scene_editor::paint_warp_grid_overlay(project, idx, scene, &painter, inner);
+        }
+    }
 
     // Route click + drag through the scene editor. Pointer pos is in
     // egui screen space; the editor converts to inner-rect-relative

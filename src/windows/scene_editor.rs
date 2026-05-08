@@ -98,6 +98,16 @@ pub enum DragKind {
         idx: usize,
         start_pos: [f32; 2],
     },
+    /// 003-T3.5 — warp corner move. `layer_idx` indexes
+    /// `Project.layers`; `r`/`c` index `LayerConfig.warp.grid`.
+    /// `start_pos` is the pre-drag normalized output-space position so
+    /// the live drag is `start + delta_normalized`.
+    WarpCorner {
+        layer_idx: usize,
+        r: usize,
+        c: usize,
+        start_pos: [f32; 2],
+    },
 }
 
 /// 003-T3.7: canvas interaction mode. Each non-`Inspect` mode is
@@ -336,6 +346,45 @@ pub fn hit_mask_edge(
     Some((w_idx, after, to_norm(pos_screen)))
 }
 
+/// 003-T3.5 — hit-test screen-space `pos` against the warp grid
+/// vertices of `layer_idx`'s warp. Returns `(r, c)` of the closest
+/// vertex within `MASK_HANDLE_HIT_PX`. Caller should only invoke when
+/// `EditMode::Warp` is active and a layer is selected — this is the
+/// per-layer-clarity contract from T3.5's spec.
+#[cfg_attr(not(feature = "v3"), allow(dead_code))]
+pub fn hit_warp_corner(
+    project: &Project,
+    layer_idx: usize,
+    pos_screen: Pos2,
+    preview_rect: egui::Rect,
+) -> Option<(usize, usize)> {
+    if !preview_rect.contains(pos_screen) {
+        return None;
+    }
+    let layer = project.layers.get(layer_idx)?;
+    let warp = &layer.warp;
+    let to_screen = |n: [f32; 2]| -> Pos2 {
+        egui::pos2(
+            preview_rect.left() + n[0] * preview_rect.width(),
+            preview_rect.top() + n[1] * preview_rect.height(),
+        )
+    };
+    let r2 = MASK_HANDLE_HIT_PX * MASK_HANDLE_HIT_PX;
+    let mut best: Option<(f32, usize, usize)> = None;
+    for (r, row) in warp.grid.iter().enumerate() {
+        for (c, p) in row.iter().enumerate() {
+            let s = to_screen(*p);
+            let dx = pos_screen.x - s.x;
+            let dy = pos_screen.y - s.y;
+            let d = dx * dx + dy * dy;
+            if d <= r2 && best.as_ref().map(|(bd, ..)| d < *bd).unwrap_or(true) {
+                best = Some((d, r, c));
+            }
+        }
+    }
+    best.map(|(_, r, c)| (r, c))
+}
+
 /// Convert a screen pos inside `preview_rect` to normalized [0, 1]
 /// output-space. Returns `None` when `pos` is outside the rect.
 pub fn screen_to_normalized(pos: Pos2, preview_rect: egui::Rect) -> Option<[f32; 2]> {
@@ -383,10 +432,46 @@ pub fn handle_scene_input(
     if response.drag_started() {
         if let Some(pos) = pointer {
             scene.drag = None;
-            // Hit-test priority: mask vertices first (small handles, easy
-            // to miss), then layer body. Warp corners + source rect land
-            // in M11 future work.
-            if let Some((w_idx, v_idx)) = hit_mask_vertex(project, pos, preview_rect) {
+            // 003-T3.5 — Warp mode: only the *selected layer's* corners
+            // are hit-testable. The N-other-layers' grids are not
+            // painted and not interactive while in Warp mode (per-layer-
+            // clarity goal). Layer-body / mask hit tests still fire as
+            // a fallback when no corner is hit, so the operator can
+            // re-select another layer mid-Warp.
+            let warp_layer_idx = if scene.mode == EditMode::Warp {
+                if let Some(Selection::Layer(idx)) = scene.selected {
+                    Some(idx)
+                } else if let Some(Selection::WarpCorner { warp, .. }) = scene.selected {
+                    Some(warp)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            let warp_hit = warp_layer_idx.and_then(|idx| {
+                hit_warp_corner(project, idx, pos, preview_rect).map(|rc| (idx, rc))
+            });
+
+            // Hit-test priority: warp corners (Warp mode + selected
+            // layer) → mask vertices → layer body.
+            if let Some((layer_idx, (r, c))) = warp_hit {
+                let start_pos = project.layers[layer_idx].warp.grid[r][c];
+                scene.selected = Some(Selection::WarpCorner {
+                    warp: layer_idx,
+                    r,
+                    c,
+                });
+                scene.drag = Some(DragSession {
+                    start_screen: pos,
+                    kind: DragKind::WarpCorner {
+                        layer_idx,
+                        r,
+                        c,
+                        start_pos,
+                    },
+                });
+            } else if let Some((w_idx, v_idx)) = hit_mask_vertex(project, pos, preview_rect) {
                 let start_pos = project.layers[w_idx].warp.mask_polygon[v_idx];
                 scene.mode = EditMode::Mask;
                 scene.selected = Some(Selection::MaskVertex {
@@ -487,6 +572,25 @@ pub fn handle_scene_input(
                         }
                     }
                 }
+                DragKind::WarpCorner {
+                    layer_idx,
+                    r,
+                    c,
+                    start_pos,
+                } => {
+                    if let Some(layer) = project.layers.get_mut(*layer_idx) {
+                        if let Some(row) = layer.warp.grid.get_mut(*r) {
+                            if let Some(p) = row.get_mut(*c) {
+                                // Warp corners may sit outside [0, 1]
+                                // intentionally (oversized projection
+                                // surfaces); leave the drag delta
+                                // unclamped.
+                                p[0] = start_pos[0] + dx;
+                                p[1] = start_pos[1] + dy;
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -556,6 +660,39 @@ pub fn handle_scene_input(
                                         new,
                                         old,
                                     });
+                            }
+                        }
+                    }
+                }
+                // 003-T3.5 — emit SetLayerWarpCorner for the cumulative
+                // corner-drag delta. Same Reverse-storage pattern as
+                // MaskVertex above (rule-3 snapshot Reverse): revert
+                // the live mutation, then return the Mutation so the
+                // app's drain re-applies it via undo_stack.push.
+                DragKind::WarpCorner {
+                    layer_idx,
+                    r,
+                    c,
+                    start_pos,
+                } => {
+                    if let Some(layer) = project.layers.get_mut(*layer_idx) {
+                        if let Some(row) = layer.warp.grid.get_mut(*r) {
+                            if let Some(p) = row.get_mut(*c) {
+                                let new = *p;
+                                let old = *start_pos;
+                                if (new[0] - old[0]).abs() > 1e-6 || (new[1] - old[1]).abs() > 1e-6
+                                {
+                                    *p = old;
+                                    emitted = Some(
+                                        crate::project::command::Mutation::SetLayerWarpCorner {
+                                            layer_idx: *layer_idx,
+                                            r: *r,
+                                            c: *c,
+                                            new,
+                                            old,
+                                        },
+                                    );
+                                }
                             }
                         }
                     }
@@ -673,6 +810,10 @@ pub fn handle_scene_input(
                         }
                     }
                 }
+                // 003-T3.5 — corner drag is v3-only (gated by EditMode);
+                // v2 has no entry path so the variant is unreachable
+                // here, but the match must stay exhaustive.
+                DragKind::WarpCorner { .. } => {}
             }
         }
     }
@@ -763,6 +904,81 @@ pub fn paint_layer_outlines(
             egui::FontId::proportional(11.0),
             color,
         );
+    }
+}
+
+/// 003-T3.5 — paint the *selected layer's* warp grid as a faint mesh
+/// with a handle dot at every grid intersection. Other layers'
+/// grids are intentionally not drawn so the canvas stays scoped to
+/// the layer the operator is editing.
+///
+/// Caller wires this **only** when `scene.mode == EditMode::Warp`
+/// and `scene.selected` is `Selection::Layer(idx)` or
+/// `Selection::WarpCorner { warp: idx, .. }`.
+#[cfg_attr(not(feature = "v3"), allow(dead_code))]
+pub fn paint_warp_grid_overlay(
+    project: &Project,
+    layer_idx: usize,
+    scene: &SceneEditorState,
+    painter: &egui::Painter,
+    inner: egui::Rect,
+) {
+    let Some(layer) = project.layers.get(layer_idx) else {
+        return;
+    };
+    let warp = &layer.warp;
+    let to_screen = |n: [f32; 2]| {
+        egui::pos2(
+            inner.left() + n[0] * inner.width(),
+            inner.top() + n[1] * inner.height(),
+        )
+    };
+    let mesh_stroke = egui::Stroke::new(
+        1.0,
+        egui::Color32::from_rgba_premultiplied(160, 200, 255, 90),
+    );
+    // Horizontal grid lines: one per vertex row.
+    for row in warp.grid.iter() {
+        for pair in row.windows(2) {
+            let a = to_screen(pair[0]);
+            let b = to_screen(pair[1]);
+            painter.line_segment([a, b], mesh_stroke);
+        }
+    }
+    // Vertical grid lines: walk columns.
+    let cols = warp.grid.first().map(|r| r.len()).unwrap_or(0);
+    for c in 0..cols {
+        for r in 0..warp.grid.len().saturating_sub(1) {
+            if warp.grid[r].len() <= c || warp.grid[r + 1].len() <= c {
+                continue;
+            }
+            let a = to_screen(warp.grid[r][c]);
+            let b = to_screen(warp.grid[r + 1][c]);
+            painter.line_segment([a, b], mesh_stroke);
+        }
+    }
+    // Handle dots at every intersection.
+    for (r, row) in warp.grid.iter().enumerate() {
+        for (c, p) in row.iter().enumerate() {
+            let center = to_screen(*p);
+            let is_selected = matches!(
+                scene.selected,
+                Some(Selection::WarpCorner { warp, r: sr, c: sc })
+                    if warp == layer_idx && sr == r && sc == c
+            );
+            let (fill, stroke) = if is_selected {
+                (
+                    egui::Color32::from_rgb(255, 230, 110),
+                    egui::Stroke::new(2.0, egui::Color32::WHITE),
+                )
+            } else {
+                (
+                    egui::Color32::from_rgb(120, 180, 240),
+                    egui::Stroke::new(1.0, egui::Color32::from_rgb(40, 40, 40)),
+                )
+            };
+            painter.circle(center, MASK_HANDLE_DRAW_PX, fill, stroke);
+        }
     }
 }
 
