@@ -259,6 +259,20 @@ struct LauncherState {
     /// instead of egui's per-id memory because the click handler also
     /// needs to know the toggle state to flip it.
     recents_open: bool,
+    /// 003-T2.5 — cached enumeration of attached monitors, refreshed
+    /// every launcher frame from `event_loop.available_monitors()`.
+    /// Refreshing per frame is the spec's "drop to live update on next
+    /// launcher render" fallback for hot-plug detection — winit's
+    /// `MonitorAttached` / `MonitorRemoved` are flaky on macOS, and
+    /// the launcher's `ControlFlow::Wait` means we'd miss them anyway
+    /// between user-input events.
+    monitors: Vec<crate::monitors::MonitorInfo>,
+    /// 003-T2.5 — operator's currently-selected projector index in
+    /// `event_loop.available_monitors()` order. Initialised on launcher
+    /// mount via [`default_monitor_for_launcher`] and updated from the
+    /// dropdown click handler. Threads into `Command::Launch.monitor`
+    /// when the operator clicks any start button.
+    selected_monitor: usize,
 }
 
 /// Non-v3 build keeps the legacy zero-sized stub so the `AppState`
@@ -1355,6 +1369,8 @@ fn apply_launch_command(
         prefs: _,
         recents: _,
         recents_open: _,
+        monitors: _,
+        selected_monitor: _,
     } = launcher;
     drop(launcher_window); // close the launcher surface before opening the editor
 
@@ -1407,6 +1423,47 @@ fn apply_launch_command(
 /// Failure here is fatal in the same sense as `init_running_app`'s
 /// render-init failure: without a GPU the app has nothing to draw,
 /// so the caller routes to `AppState::Failed` and exits.
+/// 003-T2.5 — choose which projector the launcher's dropdown should
+/// preselect on first paint. Decision order:
+///
+/// 1. **Last-used projector**, looked up by stable id (T-003-T2.20
+///    will populate `prefs.last_used_projector_uuid`; until then the
+///    branch is a no-op for new operators).
+/// 2. **Non-primary display** — the typical projector / external
+///    display layout.
+/// 3. **Display 0** — the always-safe fallback when only one display
+///    is attached.
+///
+/// Returns the index into `monitors` (which mirrors
+/// `event_loop.available_monitors()` order). Always in-range.
+#[cfg(feature = "v3")]
+fn default_monitor_for_launcher(
+    monitors: &[crate::monitors::MonitorInfo],
+    prefs: &prefs::UserPrefs,
+    event_loop: &ActiveEventLoop,
+) -> usize {
+    if monitors.is_empty() {
+        return 0;
+    }
+    if let Some(target_id) = prefs.last_used_projector_uuid.as_deref() {
+        if let Some(idx) = monitors
+            .iter()
+            .position(|m| m.stable_id.as_deref() == Some(target_id))
+        {
+            return idx;
+        }
+    }
+    let primary = event_loop.primary_monitor();
+    if let Some(primary) = primary {
+        if let Some(idx) = event_loop.available_monitors().position(|m| m != primary) {
+            if idx < monitors.len() {
+                return idx;
+            }
+        }
+    }
+    0
+}
+
 #[cfg(feature = "v3")]
 fn init_launcher(event_loop: &ActiveEventLoop) -> Result<LauncherState> {
     let gpu = init_gpu()?;
@@ -1443,6 +1500,11 @@ fn init_launcher(event_loop: &ActiveEventLoop) -> Result<LauncherState> {
         .as_deref()
         .map(crate::app::recents::scan)
         .unwrap_or_default();
+    // 003-T2.5 — enumerate monitors once on mount; the per-frame
+    // refresh in launcher_render keeps the dropdown live across
+    // hot-plug.
+    let monitors = crate::monitors::list(event_loop);
+    let selected_monitor = default_monitor_for_launcher(&monitors, &prefs, event_loop);
     Ok(LauncherState {
         launcher,
         gpu,
@@ -1451,6 +1513,8 @@ fn init_launcher(event_loop: &ActiveEventLoop) -> Result<LauncherState> {
         prefs,
         recents,
         recents_open: false,
+        monitors,
+        selected_monitor,
     })
 }
 
@@ -1465,20 +1529,36 @@ fn init_launcher(event_loop: &ActiveEventLoop) -> Result<LauncherState> {
 /// `&mut action` so the click handlers can write into it without
 /// threading the value through the egui callback's return type.
 #[cfg(feature = "v3")]
-fn launcher_render(state: &mut LauncherState) -> Option<LauncherAction> {
+fn launcher_render(
+    state: &mut LauncherState,
+    event_loop: &ActiveEventLoop,
+) -> Option<LauncherAction> {
     use crate::controls::ProjectSource;
+
+    // 003-T2.5 — refresh the cached monitor list every frame so a
+    // hot-plug surfaces in the dropdown within one paint. Cheap (the
+    // enumeration is a small Vec<MonitorInfo> over a handful of
+    // displays). Clamp `selected_monitor` against the new length so
+    // unplugging the previously-selected display falls back gracefully.
+    state.monitors = crate::monitors::list(event_loop);
+    if state.selected_monitor >= state.monitors.len() {
+        state.selected_monitor =
+            default_monitor_for_launcher(&state.monitors, &state.prefs, event_loop);
+    }
 
     // Split-borrow against the LauncherState fields the egui closure
     // needs to read alongside the &mut self.launcher.render call. Rust's
     // borrow checker tracks disjoint fields, so this is safe — the
-    // closure only touches `prefs` / `recents` via these immutable
-    // refs and `recents_open` via a mutable ref, never via `state`
-    // directly.
+    // closure only touches `prefs` / `recents` / `monitors` via these
+    // immutable refs and `recents_open` / `selected_monitor` via
+    // mutable refs, never via `state` directly.
     let device = &state.gpu.device;
     let queue = &state.gpu.queue;
     let prefs = &state.prefs;
     let recents = &state.recents;
     let recents_open = &mut state.recents_open;
+    let monitors = &state.monitors;
+    let selected_monitor = &mut state.selected_monitor;
     let mut action: Option<LauncherAction> = None;
     // Snapshot `now` once outside the closure so each entry's relative
     // date reads consistently within a single frame.
@@ -1510,10 +1590,7 @@ fn launcher_render(state: &mut LauncherState) -> Option<LauncherAction> {
                 {
                     action = Some(LauncherAction::Launch {
                         project: ProjectSource::Empty,
-                        // T-003-T2.5 will replace this with the
-                        // operator's selection; today the editor's
-                        // post-launch monitor picker is the fallback.
-                        monitor: 0,
+                        monitor: *selected_monitor,
                         windowed: true,
                     });
                 }
@@ -1549,7 +1626,7 @@ fn launcher_render(state: &mut LauncherState) -> Option<LauncherAction> {
                             if inner.button(label).clicked() {
                                 action = Some(LauncherAction::Launch {
                                     project: ProjectSource::RecentPath(entry.path.clone()),
-                                    monitor: 0,
+                                    monitor: *selected_monitor,
                                     windowed: true,
                                 });
                             }
@@ -1585,9 +1662,39 @@ fn launcher_render(state: &mut LauncherState) -> Option<LauncherAction> {
                     );
                     action = Some(LauncherAction::Launch {
                         project: ProjectSource::Demo("window-glow"),
-                        monitor: 0,
+                        monitor: *selected_monitor,
                         windowed: true,
                     });
+                }
+
+                // 003-T2.5 — projector picker. Sits below the start
+                // buttons so the operator can scan it once they've
+                // chosen what to launch. ComboBox surfaces the
+                // human-readable name from `MonitorInfo.name` (which
+                // T-003-T2.7 populates from NSScreen::localizedName
+                // on macOS).
+                center_ui.add_space(20.0);
+                if monitors.is_empty() {
+                    // No monitors reported — extremely rare, but the
+                    // dropdown would be empty. Surface a static hint
+                    // so the operator isn't staring at a phantom
+                    // dropdown.
+                    center_ui.weak("No displays detected");
+                } else if monitors.len() == 1 {
+                    // Single-display fallback per acceptance #3 —
+                    // dropdown collapses to a static label rather
+                    // than a one-option ComboBox.
+                    center_ui.label(format!("Projector: {}", monitors[0].name));
+                } else {
+                    let current_idx = (*selected_monitor).min(monitors.len() - 1);
+                    let current_name = monitors[current_idx].name.as_str();
+                    egui::ComboBox::from_label("Projector")
+                        .selected_text(current_name)
+                        .show_ui(center_ui, |combo| {
+                            for (idx, m) in monitors.iter().enumerate() {
+                                combo.selectable_value(selected_monitor, idx, &m.name);
+                            }
+                        });
                 }
             });
         });
@@ -1629,7 +1736,7 @@ fn handle_launcher_window_event(
             state.launcher.request_redraw();
             None
         }
-        WindowEvent::RedrawRequested => launcher_render(state),
+        WindowEvent::RedrawRequested => launcher_render(state, event_loop),
         _ => {
             if resp.repaint {
                 state.launcher.request_redraw();
