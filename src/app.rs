@@ -1745,6 +1745,13 @@ fn handle_editing_window_event(
                     scene_texture: state.scene_texture_id,
                     output_size: (state.output.config.width, state.output.config.height),
                 };
+                // 003-T1.42 follow-up: drain expired toasts once per frame
+                // before render. Sticky Error toasts survive; auto-expiring
+                // Info / Warn drop off after their TTL.
+                #[cfg(feature = "v3")]
+                {
+                    state.toast_queue.drain_expired();
+                }
                 if let Some(ctrl) = state.control.as_mut() {
                     let result = ctrl.render(device, queue, |ui| {
                         panel_action = control_panel_show(
@@ -1754,6 +1761,19 @@ fn handle_editing_window_event(
                             &mut state.scene_editor,
                             &inputs,
                         );
+                        // 003-T1.42 — render the toast strip in the
+                        // canvas top-right after the control panel so it
+                        // overlays on top. The Area widget anchors to
+                        // ctx, not to the local Ui.
+                        #[cfg(feature = "v3")]
+                        {
+                            let _ = crate::windows::toast::toast_strip(ui, &mut state.toast_queue);
+                            // Toast action buttons (T1.43 AC#2) are deferred
+                            // to Phase 2 — see the comment in the resumed
+                            // handler. For now the returned Command is
+                            // dropped (no audit action toasts ship a
+                            // command).
+                        }
                     });
                     if let Err(e) = result {
                         tracing::warn!(?e, "control window render error");
