@@ -20,6 +20,8 @@ pub mod output;
 pub mod primitives;
 pub mod scene_editor;
 #[cfg(feature = "v3")]
+pub mod show_day_strip;
+#[cfg(feature = "v3")]
 pub mod toast;
 #[cfg(feature = "v3")]
 pub mod toolbar;

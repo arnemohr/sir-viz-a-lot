@@ -2831,6 +2831,21 @@ fn handle_editing_window_event(
                     can_undo: state.undo_stack.can_undo(),
                     #[cfg(feature = "v3")]
                     can_redo: state.undo_stack.can_redo(),
+                    // 003-T3.23: snapshot of the four output-state flags.
+                    // Reading directly from output.state so the UI gets the
+                    // most recent frame's values without an extra indirection.
+                    #[cfg(feature = "v3")]
+                    output_state_snapshot: {
+                        use crate::test_patterns::TestPattern;
+                        use crate::windows::show_day_strip::OutputStateSnapshot;
+                        OutputStateSnapshot {
+                            blackout: state.output.state.blackout,
+                            freeze: state.output.state.freeze,
+                            test_pattern_active: state.output.state.test_pattern
+                                != TestPattern::None,
+                            overlay_on: state.output.state.show_editor_overlay,
+                        }
+                    },
                 };
                 // 003-T1.42 follow-up: drain expired toasts once per frame
                 // before render. Sticky Error toasts survive; auto-expiring
@@ -3011,6 +3026,17 @@ fn handle_editing_window_event(
                             tracing::info!(target: "rmap::ux", event = "redo_invoked");
                         }
                         if matches!(outcome, Some(true)) {
+                            rebuild_layers_for_state(state);
+                        }
+                    }
+                    // 003-T3.23: show-day strip button pressed. Route through
+                    // apply_command so telemetry is unified with the keyboard
+                    // hotkey path. B/F/T/O all return SideEffect::None, but
+                    // match the result in case a future command needs rebuild.
+                    #[cfg(feature = "v3")]
+                    ControlPanelAction::EmitCommand(cmd) => {
+                        let side = apply_command(state, cmd);
+                        if matches!(side, SideEffect::RebuildLayers) {
                             rebuild_layers_for_state(state);
                         }
                     }

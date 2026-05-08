@@ -280,6 +280,11 @@ pub enum ControlPanelAction {
     /// 003-T3.4: toolbar Redo button clicked. App drains through `undo_stack.redo`.
     #[cfg(feature = "v3")]
     RequestRedo,
+    /// 003-T3.23: show-day strip button clicked. App routes through
+    /// `apply_command` so telemetry sees one canonical event regardless
+    /// of whether the action came from the keyboard or this button.
+    #[cfg(feature = "v3")]
+    EmitCommand(crate::controls::Command),
 }
 
 /// Per-frame inputs from the App into the control panel render. Bundled so the
@@ -308,6 +313,11 @@ pub struct ControlPanelInputs {
     /// Redo toolbar button when nothing has been undone yet.
     #[cfg(feature = "v3")]
     pub can_redo: bool,
+    /// 003-T3.23: snapshot of the four output-state booleans the show-day
+    /// strip reads. Populated from `state.output.state` at the call site in
+    /// `app.rs` so the UI never borrows `EditingState` directly.
+    #[cfg(feature = "v3")]
+    pub output_state_snapshot: crate::windows::show_day_strip::OutputStateSnapshot,
 }
 
 /// Render the control panel. Mutates `project` in place.
@@ -396,6 +406,21 @@ pub fn show(
         .exact_width(88.0)
         .show_inside(ui, |ui| {
             crate::windows::layer_strip::show(ui, project, st, scene);
+        });
+
+    // 003-T3.23–T3.25: show-day strip at the bottom of the canvas.
+    // Claimed before the CentralPanel so the panel layout reserves
+    // the bottom edge. Visible in both Editing and GoLive — both
+    // AppState arms hit this code path (see app.rs:3593).
+    #[cfg(feature = "v3")]
+    egui::TopBottomPanel::bottom("rmap_show_day_strip")
+        .resizable(false)
+        .show_inside(ui, |ui| {
+            if let Some(cmd) =
+                crate::windows::show_day_strip::show(ui, &inputs.output_state_snapshot)
+            {
+                action = ControlPanelAction::EmitCommand(cmd);
+            }
         });
 
     egui::CentralPanel::default().show_inside(ui, |ui| {
