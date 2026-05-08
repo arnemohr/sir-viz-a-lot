@@ -2677,6 +2677,7 @@ fn handle_editing_window_event(
                 // live show).
                 if let Some(layer) = layer_from_dropped_path(&path, &state.project) {
                     let display_path = path.display().to_string();
+                    #[cfg_attr(not(feature = "v3"), allow(unused_variables))]
                     let basename = path
                         .file_name()
                         .and_then(|n| n.to_str())
