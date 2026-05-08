@@ -1268,13 +1268,32 @@ fn show_scenes_tab(
         ui.horizontal(|ui| {
             ui.label(format!("{}", slot + 1));
             if ui.button("save").clicked() {
-                while project.scenes.len() <= slot {
-                    project.scenes.push(Scene {
-                        name: format!("scene{}", project.scenes.len() + 1),
-                        snapshot: serde_json::json!({}),
-                    });
+                #[cfg(feature = "v3")]
+                {
+                    // Build the post-save scenes Vec without writing to project,
+                    // then push as a SetProjectScenes mutation so undo can
+                    // restore the slot list (including any placeholder additions).
+                    let mut new = project.scenes.clone();
+                    while new.len() <= slot {
+                        new.push(Scene {
+                            name: format!("scene{}", new.len() + 1),
+                            snapshot: serde_json::json!({}),
+                        });
+                    }
+                    new[slot].snapshot = snapshot(project);
+                    st.pending_mutations
+                        .push(project.set_project_scenes_mutation(new));
                 }
-                project.scenes[slot].snapshot = snapshot(project);
+                #[cfg(not(feature = "v3"))]
+                {
+                    while project.scenes.len() <= slot {
+                        project.scenes.push(Scene {
+                            name: format!("scene{}", project.scenes.len() + 1),
+                            snapshot: serde_json::json!({}),
+                        });
+                    }
+                    project.scenes[slot].snapshot = snapshot(project);
+                }
             }
             // Tell apart "recall is no-op because the slot was never
             // saved" from "recall fired but I missed the visual change."

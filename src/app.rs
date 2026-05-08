@@ -36,10 +36,10 @@ use crate::effects::color::ColorPipeline;
 use crate::effects::registry::ExternalRegistry;
 use crate::effects::transform::TransformPipeline;
 use crate::error::{Result, RmapError};
+#[cfg(not(feature = "v3"))]
+use crate::project::restore_scene;
 use crate::project::schema::{self, Project};
-use crate::project::{
-    ProjectError, interpolate, restore_scene, snapshot, snapshots_share_layer_topology,
-};
+use crate::project::{ProjectError, interpolate, snapshot, snapshots_share_layer_topology};
 use crate::render::compositor::Compositor;
 use crate::render::gamma::GammaPipeline;
 use crate::render::overlay::OverlayPipeline;
@@ -318,6 +318,9 @@ enum RecallOutcome {
     /// Caller should rebuild GPU layer state.
     Snapped,
     /// Snap path failed inside `restore`. Project unchanged.
+    /// Only reachable on the non-v3 path; v3 routes through
+    /// `Mutation::ApplyProjectSnapshot` which silences restore errors.
+    #[cfg(not(feature = "v3"))]
     Failed,
 }
 
@@ -334,6 +337,22 @@ fn schedule_scene_recall(state: &mut EditingState, slot: usize) -> RecallOutcome
     let dur = state.project.crossfade_duration_s.max(0.0);
     let same_topology = snapshots_share_layer_topology(&cur, &target);
     if dur < 1e-3 || !same_topology {
+        #[cfg(feature = "v3")]
+        {
+            // Route through Mutation::ApplyProjectSnapshot so the recall is
+            // undoable via Cmd-Z. Topology was already checked above; the
+            // snapshot is well-formed at this point so we trust apply to
+            // succeed (errors are silenced inside the apply arm).
+            let mutation = crate::project::command::Mutation::ApplyProjectSnapshot {
+                new: target,
+                old: cur,
+                non_undoable: false,
+            };
+            state.undo_stack.push(mutation, &mut state.project);
+            state.crossfade = None;
+            RecallOutcome::Snapped
+        }
+        #[cfg(not(feature = "v3"))]
         match restore_scene(&mut state.project, &target) {
             Ok(()) => {
                 state.crossfade = None;
@@ -1855,14 +1874,34 @@ fn handle_editing_window_event(
             // changes layer count or paths — no `rebuild_layers` needed
             // mid-fade. Numeric fields blend via `interpolate`; categorical
             // fields snap at `t = 0.5`.
-            if let Some(cf) = state.crossfade.as_ref() {
+            if let Some((interp, t)) = state.crossfade.as_ref().map(|cf| {
                 let elapsed = cf.started_at.elapsed().as_secs_f32();
                 let t = (elapsed / cf.duration_s.max(1e-3)).clamp(0.0, 1.0);
-                let interp = interpolate(&cf.from, &cf.to, t);
+                (interpolate(&cf.from, &cf.to, t), t)
+            }) {
+                // Borrow of state.crossfade dropped here; safe to mutate project.
+                #[cfg(feature = "v3")]
+                {
+                    // Route through Mutation::ApplyProjectSnapshot with
+                    // non_undoable: true so the tick never enters the undo stack
+                    // (crossfades fire ~60×/s and would overwhelm the cap).
+                    // Errors are silenced inside the apply arm; topology was
+                    // already verified at scheduling time so a well-formed
+                    // interp snapshot is guaranteed.
+                    let cur = snapshot(&state.project);
+                    let mutation = crate::project::command::Mutation::ApplyProjectSnapshot {
+                        new: interp,
+                        old: cur,
+                        non_undoable: true,
+                    };
+                    state.undo_stack.push(mutation, &mut state.project);
+                }
+                #[cfg(not(feature = "v3"))]
                 if let Err(err) = restore_scene(&mut state.project, &interp) {
                     tracing::warn!(?err, "crossfade tick restore failed; aborting fade");
                     state.crossfade = None;
-                } else if t >= 1.0 {
+                }
+                if t >= 1.0 {
                     state.crossfade = None;
                 }
             }

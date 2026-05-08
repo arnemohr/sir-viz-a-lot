@@ -363,6 +363,18 @@ pub enum Mutation {
         old: [f32; 2],
     },
 
+    /// Replace `Project.scenes` wholesale (whole-Vec snapshot Reverse).
+    /// Used by the Scenes-tab "save" button: saving captures the current
+    /// project state into a slot, possibly extending the Vec with placeholder
+    /// scenes; the Reverse restores the entire pre-save Vec — including any
+    /// placeholder additions, so undo cleanly removes them.
+    SetProjectScenes {
+        /// Replacement scenes Vec.
+        new: Vec<crate::project::schema::Scene>,
+        /// Pre-mutation scenes Vec.
+        old: Vec<crate::project::schema::Scene>,
+    },
+
     /// Replace the entire project from a serde_json snapshot
     /// (Reverse rule 3: snapshot Reverse). T-003-T1.30 routes
     /// scene-recall and crossfade-tick through this variant.
@@ -773,6 +785,20 @@ impl Mutation {
                     old: new,
                 }
             }
+            Mutation::SetProjectScenes { new, old } => {
+                debug_assert!(
+                    project.scenes.len() == old.len(),
+                    "SetProjectScenes stale Reverse: scenes.len()={}, expected old.len()={}",
+                    project.scenes.len(),
+                    old.len()
+                );
+                let post = new;
+                project.scenes = post.clone();
+                Mutation::SetProjectScenes {
+                    new: old,
+                    old: post,
+                }
+            }
             Mutation::ApplyProjectSnapshot {
                 new,
                 old,
@@ -816,7 +842,8 @@ impl Mutation {
             | Mutation::RemoveMaskVertex { .. }
             | Mutation::SetMaskVertex { .. }
             | Mutation::ResetWarpMesh { .. }
-            | Mutation::SetMaskPolygon { .. } => false,
+            | Mutation::SetMaskPolygon { .. }
+            | Mutation::SetProjectScenes { .. } => false,
             Mutation::ApplyProjectSnapshot { non_undoable, .. } => *non_undoable,
         }
     }
@@ -826,14 +853,24 @@ impl Mutation {
     /// invalidate the `state.layers` Vec; field-edit mutations don't —
     /// they touch project fields the renderer reads each frame.
     ///
+    /// `ApplyProjectSnapshot { non_undoable: false }` (user-triggered scene
+    /// recall) can change layer topology (it's taken precisely on topology
+    /// mismatch or zero-duration recall), so it returns `true`. The
+    /// `non_undoable: true` crossfade-tick variant never changes topology —
+    /// topology compatibility is verified at scheduling time — so it stays
+    /// `false`.
+    ///
     /// The app's undo / redo dispatch and the pending-mutation drain inspect
     /// this flag to decide whether to call `rebuild_layers_for_state` after
     /// the mutation lands.
     pub fn needs_layer_rebuild(&self) -> bool {
-        matches!(
-            self,
-            Mutation::AddLayer { .. } | Mutation::RemoveLayer { .. } | Mutation::SwapLayers { .. }
-        )
+        match self {
+            Mutation::AddLayer { .. }
+            | Mutation::RemoveLayer { .. }
+            | Mutation::SwapLayers { .. } => true,
+            Mutation::ApplyProjectSnapshot { non_undoable, .. } => !non_undoable,
+            _ => false,
+        }
     }
 }
 
@@ -1028,6 +1065,17 @@ impl Project {
     pub fn set_mask_polygon_mutation(&self, warp_idx: usize, new: Vec<[f32; 2]>) -> Mutation {
         let old = self.warps[warp_idx].mask_polygon.clone();
         Mutation::SetMaskPolygon { warp_idx, new, old }
+    }
+
+    /// Build a `SetProjectScenes` mutation (whole-Vec Reverse). Captures the
+    /// current `project.scenes` as `old`; `new` is the replacement Vec to
+    /// install (e.g. after a slot save or placeholder extension). The Reverse
+    /// restores the entire pre-save Vec byte-equally on undo.
+    pub fn set_project_scenes_mutation(&self, new: Vec<crate::project::schema::Scene>) -> Mutation {
+        Mutation::SetProjectScenes {
+            new,
+            old: self.scenes.clone(),
+        }
     }
 
     /// Build a `SetLayerEffects` mutation. Captures the current effect chain
@@ -1258,6 +1306,85 @@ mod tests {
         assert!(!p.set_gamma_mutation(1.0).is_non_undoable());
         assert!(!p.set_brightness_mutation(0.0).is_non_undoable());
         assert!(!p.set_contrast_mutation(1.0).is_non_undoable());
+    }
+
+    /// 003-T1.30 — canonical project-snapshot Reverse smoke test.
+    ///
+    /// Save scene to slot 0, modify project (e.g. change gamma), recall slot 0
+    /// via `ApplyProjectSnapshot { non_undoable: false }`, then undo via
+    /// `UndoStack` — project must be byte-equal to the pre-recall state.
+    /// Exercises Reverse rule 3 end-to-end through the `SetProjectScenes` /
+    /// `ApplyProjectSnapshot` interaction.
+    #[test]
+    fn snapshot_reverse_smoke_save_modify_recall_undo() {
+        use crate::project::undo::UndoStack;
+        let mut p = fresh_project();
+        let mut stack = UndoStack::new();
+
+        // 1. Save current state to slot 0.
+        let mut new_scenes = p.scenes.clone();
+        new_scenes.push(crate::project::schema::Scene {
+            name: "scene1".into(),
+            snapshot: crate::project::snapshot(&p),
+        });
+        stack.push(p.set_project_scenes_mutation(new_scenes), &mut p);
+
+        // 2. Modify project (gamma).
+        stack.push(p.set_gamma_mutation(2.5), &mut p);
+
+        // 3. Capture pre-recall state.
+        let pre_recall = serde_json::to_value(&p).unwrap();
+
+        // 4. Recall slot 0 via ApplyProjectSnapshot { non_undoable: false }.
+        let target = p.scenes[0].snapshot.clone();
+        let cur = serde_json::to_value(&p).unwrap();
+        let recall = Mutation::ApplyProjectSnapshot {
+            new: target,
+            old: cur,
+            non_undoable: false,
+        };
+        stack.push(recall, &mut p);
+
+        // 5. Undo the recall.
+        let undid = stack.undo(&mut p);
+        assert!(undid.is_some(), "undo of recall should succeed");
+
+        // 6. Project must be byte-equal to pre-recall state.
+        let after = serde_json::to_value(&p).unwrap();
+        assert_eq!(
+            pre_recall, after,
+            "undo of recall must restore pre-recall state"
+        );
+    }
+
+    /// 003-T1.30 — crossfade tick non_undoable invariant.
+    ///
+    /// Crossfade ticks fire ~60×/s; if they polluted the undo stack a 5-second
+    /// crossfade would consume the entire 200-entry cap. Push N (60)
+    /// `ApplyProjectSnapshot` mutations with `non_undoable: true` through
+    /// `UndoStack::push` and assert `stack.len() == 0` — i.e. N pushes do NOT
+    /// grow the undo stack.
+    #[test]
+    fn crossfade_undo_excluded_from_stack() {
+        use crate::project::undo::UndoStack;
+        let mut p = fresh_project();
+        let mut stack = UndoStack::new();
+
+        let snap = serde_json::to_value(&p).unwrap();
+        for _ in 0..60 {
+            let m = Mutation::ApplyProjectSnapshot {
+                new: snap.clone(),
+                old: snap.clone(),
+                non_undoable: true,
+            };
+            stack.push(m, &mut p);
+        }
+
+        assert_eq!(
+            stack.len(),
+            0,
+            "non_undoable crossfade ticks must not enter the undo stack"
+        );
     }
 
     /// 003-T1.17 — property-based test for the Reverse-storage
