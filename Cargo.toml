@@ -57,7 +57,7 @@ serde_json = "1"
 
 # Logging — daily rolling file appender lives behind tracing-appender
 tracing            = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tracing-appender   = "0.2"
 
 # Errors — typed at boundaries, contextual at top-level
@@ -88,6 +88,15 @@ naga = { version = "29", features = ["wgsl-in"] }
 # 003-T1.17: property-based testing for the Mutation Reverse-
 # storage invariant. Test-only — does not touch release builds.
 proptest = "1"
+
+# Dev runtime: optimize dependencies but keep workspace code at -O0 for
+# fast incremental compiles + debuggable symbols. wgpu / egui at opt=0
+# are unusable for live iteration (single-digit fps); opt=1 for deps
+# closes the gap without slowing the inner edit-recompile loop. First
+# cold build is slower (deps compile with optimization once, then
+# cached); every subsequent build benefits.
+[profile.dev.package."*"]
+opt-level = 1
 
 # Show-day binary: longer compile, smaller artifact, no panic-unwind machinery.
 # The renderer still uses `catch_unwind` for in-frame recovery before any

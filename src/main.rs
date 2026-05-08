@@ -15,6 +15,8 @@ mod project;
 mod render;
 mod show_day;
 mod svg_layer;
+#[cfg(feature = "v3")]
+mod telemetry;
 mod test_patterns;
 mod windows;
 
@@ -89,7 +91,7 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn init_tracing() -> tracing_appender::non_blocking::WorkerGuard {
+fn init_tracing() -> Vec<tracing_appender::non_blocking::WorkerGuard> {
     use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
     let filter = EnvFilter::try_from_default_env()
@@ -118,20 +120,40 @@ fn init_tracing() -> tracing_appender::non_blocking::WorkerGuard {
         }
     };
 
-    let (file_writer, guard) = if let Some(ref dir) = log_dir {
+    let (file_writer, file_guard) = if let Some(ref dir) = log_dir {
         let file_appender = tracing_appender::rolling::daily(dir, "rmap.log");
         tracing_appender::non_blocking(file_appender)
     } else {
         tracing_appender::non_blocking(std::io::stderr())
     };
 
-    tracing_subscriber::registry()
+    // 003-T1.47 — UX-metrics JSON sink. Filtered to target = "rmap::ux"
+    // so only the privacy-reviewed Plan §11.7 telemetry events land in
+    // ux_metrics_<date>.json. Returns None if the log dir is missing —
+    // we keep the main subscriber pipeline running either way.
+    #[cfg(feature = "v3")]
+    let (ux_layer, ux_guard) = match log_dir.as_ref() {
+        Some(dir) => match crate::telemetry::ux_metrics_layer(dir) {
+            Some((layer, guard)) => (Some(layer), Some(guard)),
+            None => (None, None),
+        },
+        None => (None, None),
+    };
+
+    let registry = tracing_subscriber::registry()
         .with(filter)
         .with(fmt::layer())
-        .with(fmt::layer().with_writer(file_writer).with_ansi(false))
-        .init();
+        .with(fmt::layer().with_writer(file_writer).with_ansi(false));
+    #[cfg(feature = "v3")]
+    let registry = registry.with(ux_layer);
+    registry.init();
 
     tracing::info!(?log_dir, "logging initialized");
 
-    guard
+    let mut guards = vec![file_guard];
+    #[cfg(feature = "v3")]
+    if let Some(g) = ux_guard {
+        guards.push(g);
+    }
+    guards
 }
