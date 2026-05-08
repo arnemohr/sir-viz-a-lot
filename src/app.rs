@@ -240,6 +240,34 @@ struct LauncherState {
     /// T-003-T2.10's recents listing.
     #[allow(dead_code)]
     projects_bootstrap: crate::app::projects_dir::BootstrapOutcome,
+    /// 003-T2.4 + T2.18 — operator preferences loaded once on launcher
+    /// mount. The "Recommended" badge on the demo button is suppressed
+    /// when `prefs.first_launch_completed` is `true`. T-003-T2.20 reads
+    /// `prefs.last_used_projector_uuid` to preselect the projector
+    /// dropdown; T-003-T2.4 reads only the first-launch flag.
+    prefs: prefs::UserPrefs,
+    /// 003-T2.4 + T2.10 — recent-projects listing loaded from
+    /// `~/Documents/rmap/`. Phase-2 default-empty until T2.10 ships
+    /// the directory scan; the launcher's "Open recent" button is
+    /// disabled while this Vec is empty.
+    recents: Vec<RecentProject>,
+}
+
+/// 003-T2.4 + T2.10 — minimal record for a project file the launcher's
+/// "Open recent" sub-list shows. T-003-T2.10 populates this from a
+/// scan of `~/Documents/rmap/`; for T2.4 the launcher just consumes
+/// `recents.is_empty()` to gate the recent-show button.
+#[cfg(feature = "v3")]
+#[allow(dead_code)] // Fields read by T-003-T2.10's recent-projects panel.
+#[derive(Debug, Clone)]
+struct RecentProject {
+    path: PathBuf,
+    /// Filename suffix without `.rmap.json` — what the operator sees
+    /// in the picker.
+    label: String,
+    /// Last-modified timestamp from `std::fs::metadata`. Sorts the
+    /// listing newest-first.
+    modified: std::time::SystemTime,
 }
 
 /// Non-v3 build keeps the legacy zero-sized stub so the `AppState`
@@ -1333,6 +1361,8 @@ fn apply_launch_command(
         gpu,
         inputs,
         projects_bootstrap: _,
+        prefs: _,
+        recents: _,
     } = launcher;
     drop(launcher_window); // close the launcher surface before opening the editor
 
@@ -1409,11 +1439,19 @@ fn init_launcher(event_loop: &ActiveEventLoop) -> Result<LauncherState> {
     if let Some(warning) = bootstrap.warning.as_deref() {
         tracing::warn!(warning, "launcher: projects-dir bootstrap warning");
     }
+    // 003-T2.18 + T2.4 — load operator prefs so the launcher can
+    // suppress the "Recommended" badge on subsequent launches.
+    let prefs = prefs::UserPrefs::load();
+    // T-003-T2.10 ships the recents scan; for T2.4 we keep the listing
+    // empty so the "Open recent" button starts disabled.
+    let recents = Vec::new();
     Ok(LauncherState {
         launcher,
         gpu,
         inputs,
         projects_bootstrap: bootstrap,
+        prefs,
+        recents,
     })
 }
 
@@ -1429,18 +1467,86 @@ fn init_launcher(event_loop: &ActiveEventLoop) -> Result<LauncherState> {
 /// threading the value through the egui callback's return type.
 #[cfg(feature = "v3")]
 fn launcher_render(state: &mut LauncherState) -> Option<LauncherAction> {
+    use crate::controls::ProjectSource;
+
+    // Split-borrow against the LauncherState fields the egui closure
+    // needs to read alongside the &mut self.launcher.render call. Rust's
+    // borrow checker tracks disjoint fields, so this is safe — the
+    // closure only touches `prefs` / `recents` via these immutable
+    // refs, never via `state`.
     let device = &state.gpu.device;
     let queue = &state.gpu.queue;
+    let prefs = &state.prefs;
+    let recents = &state.recents;
     let mut action: Option<LauncherAction> = None;
+
     let render_result = state.launcher.render(device, queue, |ui| {
         egui::CentralPanel::default().show_inside(ui, |panel_ui| {
-            panel_ui.label("Launcher coming soon.");
-            // T-003-T2.4 paints the three start buttons here; click
-            // handlers set `action`. Touching the binding keeps the
-            // closure's capture-by-mut shape stable across that change
-            // (without it the borrow checker can rebuild the closure
-            // signature once the body is non-trivial).
-            let _ = &mut action;
+            panel_ui.add_space(32.0);
+            panel_ui.vertical_centered(|center_ui| {
+                center_ui.heading("rmap");
+                center_ui.add_space(4.0);
+                center_ui.weak("Projection mapping for live shows.");
+                center_ui.add_space(28.0);
+
+                // Button stack — matched widths for visual rhythm. The
+                // T-003-T2.5 projector picker lands below this stack
+                // once it ships; for T2.4 we leave the spot empty so
+                // the layout doesn't reflow when T2.5 adds it.
+                let button_size = egui::vec2(280.0, 44.0);
+
+                // 1. Start a new show — always enabled. Drives
+                //    T-003-T2.22's blank-canvas path: emits
+                //    Command::Launch with ProjectSource::Empty so the
+                //    editor opens an empty canvas with the T-003-T2.16
+                //    drop hint visible.
+                if center_ui
+                    .add_sized(button_size, egui::Button::new("Start a new show"))
+                    .clicked()
+                {
+                    action = Some(LauncherAction::Launch {
+                        project: ProjectSource::Empty,
+                        // T-003-T2.5 will replace this with the
+                        // operator's selection; today the editor's
+                        // post-launch monitor picker is the fallback.
+                        monitor: 0,
+                        windowed: true,
+                    });
+                }
+                center_ui.add_space(10.0);
+
+                // 2. Open a recent show — disabled when no recents.
+                let recent_enabled = !recents.is_empty();
+                let recent_resp =
+                    center_ui.add_enabled(recent_enabled, egui::Button::new("Open a recent show"));
+                if recent_enabled && recent_resp.clicked() {
+                    // T-003-T2.10 paints the recents popover and emits
+                    // ProjectSource::RecentPath from the click handler.
+                    // For T2.4 we simply log; the action is fired in
+                    // T2.10.
+                    tracing::debug!("launcher: 'Open recent' clicked (T-003-T2.10 wires picker)");
+                }
+                center_ui.add_space(10.0);
+
+                // 3. Try a demo — Recommended badge while
+                //    `prefs.first_launch_completed` is false.
+                let badge = !prefs.first_launch_completed;
+                let demo_text = if badge {
+                    egui::RichText::new("★  Try a demo  (Recommended)").strong()
+                } else {
+                    egui::RichText::new("Try a demo")
+                };
+                if center_ui
+                    .add_sized(button_size, egui::Button::new(demo_text))
+                    .clicked()
+                {
+                    action = Some(LauncherAction::Launch {
+                        project: ProjectSource::Demo("window-glow"),
+                        monitor: 0,
+                        windowed: true,
+                    });
+                }
+            });
         });
     });
     if let Err(err) = render_result {
