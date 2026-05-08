@@ -1,7 +1,7 @@
 //! MIDI input via `midir`, gated on `feature = "midi"` (T-M7-05).
 //!
 //! Architecture: every available `MidiInput` port is opened on startup;
-//! each `midir` callback decodes a single message into a [`ControlEvent`]
+//! each `midir` callback decodes a single message into a [`Command`]
 //! and pushes onto a bounded crossbeam channel. The [`MidiSource::poll`]
 //! impl drains the channel each frame, alongside `KeyboardSource` and
 //! the OSC source (T-M7-06).
@@ -22,7 +22,7 @@
 use crossbeam_channel::{bounded, Receiver};
 use midir::{MidiInput, MidiInputConnection};
 
-use crate::controls::{ControlEvent, Source};
+use crate::controls::{Command, Source};
 
 const QUEUE_DEPTH: usize = 256;
 
@@ -31,7 +31,7 @@ const QUEUE_DEPTH: usize = 256;
 /// cleanly (each callback's closure references the channel sender by
 /// clone; once the connections drop, the senders go too).
 pub struct MidiSource {
-    rx: Receiver<ControlEvent>,
+    rx: Receiver<Command>,
     // Read at Drop only.
     #[allow(dead_code)]
     connections: Vec<MidiInputConnection<()>>,
@@ -42,7 +42,7 @@ impl MidiSource {
     /// Returns Err only when `MidiInput::new` itself fails (bad backend);
     /// an empty port list is Ok with `connections.is_empty()`.
     pub fn start_all() -> anyhow::Result<Self> {
-        let (tx, rx) = bounded::<ControlEvent>(QUEUE_DEPTH);
+        let (tx, rx) = bounded::<Command>(QUEUE_DEPTH);
         let mut connections = Vec::new();
 
         // First pass to enumerate; each `connect` consumes its `MidiInput`,
@@ -79,10 +79,10 @@ impl MidiSource {
     }
 }
 
-/// Decode a raw MIDI message into a `ControlEvent`. Returns `None` for
+/// Decode a raw MIDI message into a `Command`. Returns `None` for
 /// every message that doesn't match the v1 mapping table — keeps the
 /// channel free of noise that the dispatch loop would just discard.
-fn decode(msg: &[u8]) -> Option<ControlEvent> {
+fn decode(msg: &[u8]) -> Option<Command> {
     if msg.len() < 3 {
         return None;
     }
@@ -95,16 +95,16 @@ fn decode(msg: &[u8]) -> Option<ControlEvent> {
         return None;
     }
     match msg[1] {
-        60 => Some(ControlEvent::TapTempo),
-        n if (61..=69).contains(&n) => Some(ControlEvent::SceneRecall((n - 61) as usize)),
-        70 => Some(ControlEvent::Blackout),
-        71 => Some(ControlEvent::Freeze),
+        60 => Some(Command::TapTempo),
+        n if (61..=69).contains(&n) => Some(Command::SceneRecall((n - 61) as usize)),
+        70 => Some(Command::Blackout),
+        71 => Some(Command::Freeze),
         _ => None,
     }
 }
 
 impl Source for MidiSource {
-    fn poll(&mut self) -> Vec<ControlEvent> {
+    fn poll(&mut self) -> Vec<Command> {
         let mut out = Vec::new();
         while let Ok(e) = self.rx.try_recv() {
             out.push(e);
@@ -120,14 +120,14 @@ mod tests {
     #[test]
     fn decode_note_on_60_is_tap() {
         let msg = [0x90, 60, 100];
-        assert!(matches!(decode(&msg), Some(ControlEvent::TapTempo)));
+        assert!(matches!(decode(&msg), Some(Command::TapTempo)));
     }
 
     #[test]
     fn decode_scene_recall_offset() {
         let msg = [0x91, 64, 90]; // channel 2, note 64
         match decode(&msg) {
-            Some(ControlEvent::SceneRecall(idx)) => assert_eq!(idx, 3),
+            Some(Command::SceneRecall(idx)) => assert_eq!(idx, 3),
             other => panic!("expected SceneRecall(3), got {other:?}"),
         }
     }

@@ -1,5 +1,5 @@
 //! `KeyboardSource` — buffers winit keyboard events and translates them
-//! into [`ControlEvent`]s on `poll()`. T-M4-09.
+//! into [`Command`]s on `poll()`. T-M4-09.
 //!
 //! Wired by App::window_event: each `WindowEvent::KeyboardInput` pressed
 //! event is forwarded to `push_winit_key(physical_key)`. The buffered
@@ -19,11 +19,11 @@ use std::collections::VecDeque;
 
 use winit::keyboard::{KeyCode, PhysicalKey};
 
-use crate::controls::{ControlEvent, Source};
+use crate::controls::{Command, Source};
 
 #[derive(Default)]
 pub struct KeyboardSource {
-    pending: VecDeque<ControlEvent>,
+    pending: VecDeque<Command>,
 }
 
 impl KeyboardSource {
@@ -36,18 +36,18 @@ impl KeyboardSource {
     /// consumer can dedupe if it wants.
     pub fn push_winit_key(&mut self, physical_key: PhysicalKey) {
         let event = match physical_key {
-            PhysicalKey::Code(KeyCode::Space) => Some(ControlEvent::TapTempo),
-            PhysicalKey::Code(KeyCode::KeyB) => Some(ControlEvent::Blackout),
-            PhysicalKey::Code(KeyCode::KeyF) => Some(ControlEvent::Freeze),
-            PhysicalKey::Code(KeyCode::Digit1) => Some(ControlEvent::SceneRecall(0)),
-            PhysicalKey::Code(KeyCode::Digit2) => Some(ControlEvent::SceneRecall(1)),
-            PhysicalKey::Code(KeyCode::Digit3) => Some(ControlEvent::SceneRecall(2)),
-            PhysicalKey::Code(KeyCode::Digit4) => Some(ControlEvent::SceneRecall(3)),
-            PhysicalKey::Code(KeyCode::Digit5) => Some(ControlEvent::SceneRecall(4)),
-            PhysicalKey::Code(KeyCode::Digit6) => Some(ControlEvent::SceneRecall(5)),
-            PhysicalKey::Code(KeyCode::Digit7) => Some(ControlEvent::SceneRecall(6)),
-            PhysicalKey::Code(KeyCode::Digit8) => Some(ControlEvent::SceneRecall(7)),
-            PhysicalKey::Code(KeyCode::Digit9) => Some(ControlEvent::SceneRecall(8)),
+            PhysicalKey::Code(KeyCode::Space) => Some(Command::TapTempo),
+            PhysicalKey::Code(KeyCode::KeyB) => Some(Command::Blackout),
+            PhysicalKey::Code(KeyCode::KeyF) => Some(Command::Freeze),
+            PhysicalKey::Code(KeyCode::Digit1) => Some(Command::SceneRecall(0)),
+            PhysicalKey::Code(KeyCode::Digit2) => Some(Command::SceneRecall(1)),
+            PhysicalKey::Code(KeyCode::Digit3) => Some(Command::SceneRecall(2)),
+            PhysicalKey::Code(KeyCode::Digit4) => Some(Command::SceneRecall(3)),
+            PhysicalKey::Code(KeyCode::Digit5) => Some(Command::SceneRecall(4)),
+            PhysicalKey::Code(KeyCode::Digit6) => Some(Command::SceneRecall(5)),
+            PhysicalKey::Code(KeyCode::Digit7) => Some(Command::SceneRecall(6)),
+            PhysicalKey::Code(KeyCode::Digit8) => Some(Command::SceneRecall(7)),
+            PhysicalKey::Code(KeyCode::Digit9) => Some(Command::SceneRecall(8)),
             _ => None,
         };
         if let Some(e) = event {
@@ -57,7 +57,7 @@ impl KeyboardSource {
 }
 
 impl Source for KeyboardSource {
-    fn poll(&mut self) -> Vec<ControlEvent> {
+    fn poll(&mut self) -> Vec<Command> {
         self.pending.drain(..).collect()
     }
 }
@@ -72,7 +72,7 @@ mod tests {
         src.push_winit_key(PhysicalKey::Code(KeyCode::Space));
         let events = src.poll();
         assert_eq!(events.len(), 1);
-        assert!(matches!(events[0], ControlEvent::TapTempo));
+        assert!(matches!(events[0], Command::TapTempo));
         // Second poll empty.
         assert!(src.poll().is_empty());
     }
@@ -84,8 +84,8 @@ mod tests {
         src.push_winit_key(PhysicalKey::Code(KeyCode::KeyF));
         let events = src.poll();
         assert_eq!(events.len(), 2);
-        assert!(matches!(events[0], ControlEvent::Blackout));
-        assert!(matches!(events[1], ControlEvent::Freeze));
+        assert!(matches!(events[0], Command::Blackout));
+        assert!(matches!(events[1], Command::Freeze));
     }
 
     #[test]
@@ -96,9 +96,9 @@ mod tests {
         }
         let events = src.poll();
         assert_eq!(events.len(), 3);
-        assert!(matches!(events[0], ControlEvent::SceneRecall(0)));
-        assert!(matches!(events[1], ControlEvent::SceneRecall(4)));
-        assert!(matches!(events[2], ControlEvent::SceneRecall(8)));
+        assert!(matches!(events[0], Command::SceneRecall(0)));
+        assert!(matches!(events[1], Command::SceneRecall(4)));
+        assert!(matches!(events[2], Command::SceneRecall(8)));
     }
 
     #[test]

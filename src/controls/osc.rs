@@ -2,7 +2,7 @@
 //!
 //! Architecture: a UDP socket bound to a configurable port runs in a
 //! background thread that receives datagrams, decodes via `rosc`, and
-//! pushes [`ControlEvent`]s into a bounded crossbeam channel. The
+//! pushes [`Command`]s into a bounded crossbeam channel. The
 //! [`OscSource::poll`] impl drains the channel each frame.
 //!
 //! v1 address mappings (case-insensitive):
@@ -24,7 +24,7 @@ use std::thread;
 use crossbeam_channel::{bounded, Receiver};
 use rosc::{OscMessage, OscPacket};
 
-use crate::controls::{ControlEvent, Source};
+use crate::controls::{Command, Source};
 
 /// Default UDP listen port for OSC. Operators expecting a different
 /// port pass it to [`OscSource::start`].
@@ -39,7 +39,7 @@ const RECV_BUF: usize = 4096;
 /// listener checks between blocking reads (via socket read timeouts) so
 /// dropping the source winds the thread down cleanly.
 pub struct OscSource {
-    rx: Receiver<ControlEvent>,
+    rx: Receiver<Command>,
     stop: Arc<AtomicBool>,
     // Hold the join handle so the thread is reaped on drop.
     #[allow(dead_code)]
@@ -66,7 +66,7 @@ impl OscSource {
         let local = socket.local_addr().map(|a| a.to_string()).unwrap_or_default();
         tracing::info!(local = %local, "osc listening");
 
-        let (tx, rx) = bounded::<ControlEvent>(QUEUE_DEPTH);
+        let (tx, rx) = bounded::<Command>(QUEUE_DEPTH);
         let stop = Arc::new(AtomicBool::new(false));
         let stop_for_thread = stop.clone();
 
@@ -104,7 +104,7 @@ impl OscSource {
     }
 }
 
-fn emit_from_packet(packet: OscPacket, tx: &crossbeam_channel::Sender<ControlEvent>) {
+fn emit_from_packet(packet: OscPacket, tx: &crossbeam_channel::Sender<Command>) {
     match packet {
         OscPacket::Message(msg) => {
             if let Some(event) = decode_message(&msg) {
@@ -122,26 +122,26 @@ fn emit_from_packet(packet: OscPacket, tx: &crossbeam_channel::Sender<ControlEve
 /// Decode one OSC message against the v1 address table. Args are
 /// ignored for the four supported addresses; presence of the address
 /// itself is the signal.
-fn decode_message(msg: &OscMessage) -> Option<ControlEvent> {
+fn decode_message(msg: &OscMessage) -> Option<Command> {
     let addr = msg.addr.to_lowercase();
     match addr.as_str() {
-        "/rmap/tap" => Some(ControlEvent::TapTempo),
-        "/rmap/blackout" => Some(ControlEvent::Blackout),
-        "/rmap/freeze" => Some(ControlEvent::Freeze),
+        "/rmap/tap" => Some(Command::TapTempo),
+        "/rmap/blackout" => Some(Command::Blackout),
+        "/rmap/freeze" => Some(Command::Freeze),
         a if a.starts_with("/rmap/scene/") => {
             let suffix = &a["/rmap/scene/".len()..];
             suffix
                 .parse::<usize>()
                 .ok()
                 .filter(|n| (1..=9).contains(n))
-                .map(|n| ControlEvent::SceneRecall(n - 1))
+                .map(|n| Command::SceneRecall(n - 1))
         }
         _ => None,
     }
 }
 
 impl Source for OscSource {
-    fn poll(&mut self) -> Vec<ControlEvent> {
+    fn poll(&mut self) -> Vec<Command> {
         let mut out = Vec::new();
         while let Ok(e) = self.rx.try_recv() {
             out.push(e);
@@ -165,7 +165,7 @@ mod tests {
     fn decode_tap() {
         assert!(matches!(
             decode_message(&msg("/rmap/tap")),
-            Some(ControlEvent::TapTempo)
+            Some(Command::TapTempo)
         ));
     }
 
@@ -173,22 +173,22 @@ mod tests {
     fn decode_blackout_and_freeze() {
         assert!(matches!(
             decode_message(&msg("/rmap/blackout")),
-            Some(ControlEvent::Blackout)
+            Some(Command::Blackout)
         ));
         assert!(matches!(
             decode_message(&msg("/rmap/freeze")),
-            Some(ControlEvent::Freeze)
+            Some(Command::Freeze)
         ));
     }
 
     #[test]
     fn decode_scene_recall_one_indexed() {
         match decode_message(&msg("/rmap/scene/1")) {
-            Some(ControlEvent::SceneRecall(idx)) => assert_eq!(idx, 0),
+            Some(Command::SceneRecall(idx)) => assert_eq!(idx, 0),
             other => panic!("got {other:?}"),
         }
         match decode_message(&msg("/rmap/scene/9")) {
-            Some(ControlEvent::SceneRecall(idx)) => assert_eq!(idx, 8),
+            Some(Command::SceneRecall(idx)) => assert_eq!(idx, 8),
             other => panic!("got {other:?}"),
         }
     }
@@ -209,7 +209,7 @@ mod tests {
     fn decode_is_case_insensitive() {
         assert!(matches!(
             decode_message(&msg("/RMAP/Tap")),
-            Some(ControlEvent::TapTempo)
+            Some(Command::TapTempo)
         ));
     }
 }

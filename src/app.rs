@@ -26,7 +26,7 @@ use winit::window::WindowId;
 
 use crate::clock::Clock;
 use crate::controls::keyboard::KeyboardSource;
-use crate::controls::ControlEvent;
+use crate::controls::Command;
 use crate::controls::Source;
 use crate::effects::blur::BlurPipeline;
 use crate::effects::color::ColorPipeline;
@@ -279,7 +279,7 @@ struct EditingState {
     scene_editor: crate::windows::scene_editor::SceneEditorState,
 }
 
-/// One scene-to-scene fade, scheduled by `ControlEvent::SceneRecall` when
+/// One scene-to-scene fade, scheduled by `Command::SceneRecall` when
 /// `Project::crossfade_duration_s > 0` and both snapshots share layer
 /// topology. Holds the original endpoints so each frame's interpolation
 /// re-derives the live state from immutable inputs (no error accumulation).
@@ -379,7 +379,7 @@ fn next_unique_layer_id(project: &Project) -> String {
     }
 }
 
-/// Apply one [`ControlEvent`] to `state`. Used by the keyboard, MIDI,
+/// Apply one [`Command`] to `state`. Used by the keyboard, MIDI,
 /// and OSC sources so all three drive the same behavior.
 ///
 /// `Blackout` and `Freeze` toggle the corresponding `OutputState` flag —
@@ -388,26 +388,26 @@ fn next_unique_layer_id(project: &Project) -> String {
 /// keyboard's inline B/F handlers (in `window_event`) already do this
 /// directly because they want layout-independent physical-key matching;
 /// for the source-poll path we toggle through here.
-fn dispatch_control_event(state: &mut EditingState, event: ControlEvent) {
+fn apply_command_legacy(state: &mut EditingState, event: Command) {
     match event {
-        ControlEvent::TapTempo => {
+        Command::TapTempo => {
             state.clock.tap();
             tracing::debug!(bpm = state.clock.bpm(), "tap tempo");
         }
-        ControlEvent::SceneRecall(idx) => {
+        Command::SceneRecall(idx) => {
             if matches!(schedule_scene_recall(state, idx), RecallOutcome::Snapped) {
                 rebuild_layers_for_state(state);
             }
         }
-        ControlEvent::Blackout => {
+        Command::Blackout => {
             state.output.state.toggle_blackout();
             tracing::info!(blackout = state.output.state.blackout, "blackout via source");
         }
-        ControlEvent::Freeze => {
+        Command::Freeze => {
             state.output.state.toggle_freeze();
             tracing::info!(freeze = state.output.state.freeze, "freeze via source");
         }
-        ControlEvent::ParamSet { .. } => {
+        Command::ParamSet { .. } => {
             // Reserved for Param::Bound resolution (v1.5+); v1 has no consumer.
         }
     }
@@ -1639,7 +1639,7 @@ fn handle_editing_window_event(
                 not(any(feature = "midi", feature = "osc")),
                 allow(unused_mut)
             )]
-            let mut events: Vec<ControlEvent> = state.keyboard.poll();
+            let mut events: Vec<Command> = state.keyboard.poll();
             #[cfg(feature = "midi")]
             if let Some(midi) = state.midi.as_mut() {
                 events.extend(crate::controls::Source::poll(midi));
@@ -1649,7 +1649,7 @@ fn handle_editing_window_event(
                 events.extend(crate::controls::Source::poll(osc));
             }
             for e in events {
-                dispatch_control_event(state, e);
+                apply_command_legacy(state, e);
             }
 
             for (i, ls) in state.layers.iter_mut().enumerate() {

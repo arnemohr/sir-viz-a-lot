@@ -17,7 +17,7 @@ use crate::controls::param::SourceRef;
 
 /// Operator-driven event coming from any registered [`Source`].
 #[derive(Debug, Clone)]
-pub enum ControlEvent {
+pub enum Command {
     TapTempo,
     SceneRecall(usize),
     Blackout,
@@ -30,7 +30,7 @@ pub enum ControlEvent {
 /// [`InputState`] and polled per frame.
 pub trait Source {
     /// Drain any pending events since the last poll.
-    fn poll(&mut self) -> Vec<ControlEvent>;
+    fn poll(&mut self) -> Vec<Command>;
 
     /// Read a source's current value by handle. Used by
     /// `Param::Bound` resolution. Default impl returns `None` so
@@ -55,7 +55,7 @@ impl InputState {
     }
 
     /// Drain every registered source, concatenating their events.
-    pub fn poll(&mut self) -> Vec<ControlEvent> {
+    pub fn poll(&mut self) -> Vec<Command> {
         let mut events = Vec::new();
         for s in self.sources.iter_mut() {
             events.extend(s.poll());
@@ -80,12 +80,12 @@ mod tests {
     use super::*;
 
     struct MockSource {
-        events: Vec<ControlEvent>,
+        events: Vec<Command>,
         read_value: Option<f32>,
     }
 
     impl Source for MockSource {
-        fn poll(&mut self) -> Vec<ControlEvent> {
+        fn poll(&mut self) -> Vec<Command> {
             std::mem::take(&mut self.events)
         }
 
@@ -104,7 +104,7 @@ mod tests {
 
         // Register a mock with two seeded events.
         let mock = MockSource {
-            events: vec![ControlEvent::TapTempo, ControlEvent::Blackout],
+            events: vec![Command::TapTempo, Command::Blackout],
             read_value: Some(0.5),
         };
         state.register(Box::new(mock));
@@ -112,8 +112,8 @@ mod tests {
         // First poll drains the two seeded events.
         let events = state.poll();
         assert_eq!(events.len(), 2);
-        assert!(matches!(events[0], ControlEvent::TapTempo));
-        assert!(matches!(events[1], ControlEvent::Blackout));
+        assert!(matches!(events[0], Command::TapTempo));
+        assert!(matches!(events[1], Command::Blackout));
 
         // Second poll returns nothing (source drained).
         assert!(state.poll().is_empty());
