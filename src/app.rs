@@ -14,6 +14,12 @@
 //! surface recovery; T-M2-09 owns B/F/T keys; T-M4-14 opens the control window.
 //! M6: `*.rmap.json` load/save, `--autostart`, and monitor index from project.
 
+// 003-T2.18 — operator preferences submodule. Lives under `src/app/prefs.rs`
+// (Rust 2018+ flat-file + same-name directory layout); load on launcher
+// mount, save on operator-initiated mutations like the projector pick.
+#[cfg(feature = "v3")]
+pub mod prefs;
+
 use std::path::PathBuf;
 
 use crossbeam_channel::{Receiver, Sender};

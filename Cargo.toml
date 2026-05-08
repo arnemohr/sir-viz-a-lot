@@ -55,6 +55,12 @@ clap = { version = "4", features = ["derive"] }
 serde      = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+# 003-T2.18 — operator preferences persistence (~/Library/Preferences/rmap.toml).
+# Distinct from project save/load (serde_json) because the prefs file is a
+# user-editable, OS-conventional config file; TOML is what the platform
+# expects for that flavour of data.
+toml = "1"
+
 # Logging — daily rolling file appender lives behind tracing-appender
 tracing            = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
