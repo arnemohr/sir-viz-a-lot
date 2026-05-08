@@ -3,6 +3,8 @@
 
 pub mod control;
 pub mod control_panel;
+#[cfg(feature = "v3")]
+pub mod launcher;
 pub mod output;
 pub mod scene_editor;
 #[cfg(feature = "v3")]
