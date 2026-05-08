@@ -640,14 +640,34 @@ fn init_gpu() -> Result<GpuContext> {
     GpuContext::new().map_err(Into::into)
 }
 
-fn init_running_app(
+/// 003-T1.8: bundle of resources owned by the projector-output
+/// side of the app. Produced by [`init_output_window`]; consumed
+/// by `init_running_app` to populate `EditingState`. Bundling is
+/// necessary because every field except the OutputWindow itself
+/// depends on the swap-chain's chosen surface format, which is
+/// only known after `OutputWindow::new` succeeds.
+struct OutputBundle {
+    output: OutputWindow,
+    renderer: Renderer,
+    test_patterns: TestPatternRenderer,
+    color_pipeline: ColorPipeline,
+    blur_pipeline: BlurPipeline,
+    transform_pipeline: TransformPipeline,
+    sleep_assertion: SleepAssertion,
+}
+
+/// 003-T1.8: open the projector window, build the per-format
+/// pipelines, hand wgpu ownership to the `Renderer`, and acquire
+/// the display-sleep assertion. Returns everything bundled so the
+/// caller doesn't have to thread surface-format around.
+///
+/// Consumes `gpu` because `Renderer::new` takes ownership.
+fn init_output_window(
     event_loop: &ActiveEventLoop,
     monitor: Option<MonitorHandle>,
-    project: Project,
-    project_file_path: Option<PathBuf>,
+    gpu: GpuContext,
     output_windowed: bool,
-) -> Result<EditingState> {
-    let gpu = init_gpu()?;
+) -> Result<OutputBundle> {
     let output = OutputWindow::new(
         event_loop,
         monitor,
@@ -656,6 +676,39 @@ fn init_running_app(
         &gpu.device,
         output_windowed,
     )?;
+    let surface_format = output.config.format;
+    let test_patterns = TestPatternRenderer::new(&gpu.device, surface_format);
+    let color_pipeline = ColorPipeline::new(&gpu.device, surface_format);
+    let blur_pipeline = BlurPipeline::new(&gpu.device, surface_format);
+    let transform_pipeline = TransformPipeline::new(&gpu.device, surface_format);
+    let renderer = Renderer::new(gpu, surface_format)?;
+    let sleep_assertion = SleepAssertion::acquire("rmap output window");
+    Ok(OutputBundle {
+        output,
+        renderer,
+        test_patterns,
+        color_pipeline,
+        blur_pipeline,
+        transform_pipeline,
+        sleep_assertion,
+    })
+}
+
+fn init_running_app(
+    event_loop: &ActiveEventLoop,
+    monitor: Option<MonitorHandle>,
+    project: Project,
+    project_file_path: Option<PathBuf>,
+    output_windowed: bool,
+) -> Result<EditingState> {
+    let gpu = init_gpu()?;
+
+    // 003-T1.8: the control window is opened *before* the output
+    // bundle is built because `init_output_window` consumes `gpu`
+    // (Renderer takes ownership). Reordering is behaviour-identical
+    // — winit doesn't actually present either window until its
+    // first redraw later in the loop. T-003-T1.9 extracts this
+    // block into its own helper.
     let control = match ControlWindow::new(event_loop, &gpu.instance, &gpu.adapter, &gpu.device) {
         Ok(c) => Some(c),
         Err(e) => {
@@ -666,13 +719,17 @@ fn init_running_app(
             None
         }
     };
+
+    let OutputBundle {
+        output,
+        renderer,
+        test_patterns,
+        color_pipeline,
+        blur_pipeline,
+        transform_pipeline,
+        sleep_assertion,
+    } = init_output_window(event_loop, monitor, gpu, output_windowed)?;
     let surface_format = output.config.format;
-    let test_patterns = TestPatternRenderer::new(&gpu.device, surface_format);
-    let color_pipeline = ColorPipeline::new(&gpu.device, surface_format);
-    let blur_pipeline = BlurPipeline::new(&gpu.device, surface_format);
-    let transform_pipeline = TransformPipeline::new(&gpu.device, surface_format);
-    let renderer = Renderer::new(gpu, surface_format)?;
-    let sleep_assertion = SleepAssertion::acquire("rmap output window");
 
     // T-M7-03: bring up the audio capture provider when the `audio` feature
     // is on. Failure to open the input device is non-fatal — a wedding
