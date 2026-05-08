@@ -153,6 +153,19 @@ impl AppState {
             Self::Booting | Self::Launcher(_) | Self::Failed(_) => ControlFlow::Wait,
         }
     }
+
+    /// 003-T1.5: short label for tracing / log inspection. Avoids
+    /// requiring `Debug` on payload types (EditingState carries
+    /// non-Debug wgpu fields).
+    fn kind_label(&self) -> &'static str {
+        match self {
+            Self::Booting => "Booting",
+            Self::Launcher(_) => "Launcher",
+            Self::Editing(_) => "Editing",
+            Self::GoLive(_) => "GoLive",
+            Self::Failed(_) => "Failed",
+        }
+    }
 }
 
 /// Unit-testable Booting→Failed transition (T-003-T1.2 acceptance #5).
@@ -1646,10 +1659,18 @@ fn handle_editing_window_event(
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.state.is_running() {
-            // macOS can fire `resumed` more than once on lifecycle changes;
-            // the first call already brought everything up. The guard
-            // covers Launcher / Editing / GoLive — i.e. anything past
-            // Booting that is not Failed (Failed should re-init on resume).
+            // 003-T1.5: macOS can fire `resumed` more than once on
+            // lifecycle changes (suspend/resume, screen lock, App
+            // Nap exit). The guard covers Launcher / Editing /
+            // GoLive — i.e. anything past Booting that is not
+            // Failed. Failed *does* re-init on resume so a
+            // load-failure can be retried after the user fixes
+            // whatever went wrong (e.g. plugged the projector
+            // back in).
+            tracing::debug!(
+                state = self.state.kind_label(),
+                "resumed fired but app already running; guard suppressed re-init"
+            );
             return;
         }
 
@@ -1816,6 +1837,37 @@ mod tests {
             s,
             AppState::Failed(FailureKind::RenderInitFailed)
         ));
+    }
+
+    /// 003-T1.5: the macOS resume guard checks `is_running()`,
+    /// which must include all "live session" variants
+    /// (Launcher, Editing, GoLive) but exclude Booting and Failed
+    /// so a Failed state can re-attempt initialisation on resume.
+    /// Also verifies `kind_label` is non-empty for every variant
+    /// so tracing logs always carry a discriminator.
+    #[test]
+    fn resume_guard_excludes_booting_and_failed() {
+        // Live sessions: re-resume must be suppressed.
+        assert!(AppState::Launcher(LauncherState).is_running());
+        // Editing / GoLive carry EditingState which can't be unit-
+        // constructed without wgpu; the structural match in
+        // `is_running` covers them.
+
+        // Inactive states: re-resume must be allowed (so Failed can
+        // retry).
+        assert!(!AppState::Booting.is_running());
+        assert!(!AppState::Failed(FailureKind::RenderInitFailed).is_running());
+
+        // Tracing label coverage — none empty, all unique enough to
+        // disambiguate at a glance in log review.
+        for label in [
+            AppState::Booting.kind_label(),
+            AppState::Launcher(LauncherState).kind_label(),
+            AppState::Failed(FailureKind::RenderInitFailed).kind_label(),
+        ] {
+            assert!(!label.is_empty());
+            assert!(label.chars().next().is_some_and(|c| c.is_uppercase()));
+        }
     }
 
     /// 003-T1.4 acceptance: ControlFlow is derived per-state.

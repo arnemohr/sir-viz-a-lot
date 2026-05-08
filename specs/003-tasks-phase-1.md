@@ -54,7 +54,7 @@ Phase 1 unblocks every later phase. M1 is the gate.
 | ✅ T1.2 | Migrate `App::resumed` to AppState | RUST | M | T1.1 |
 | ✅ T1.3 | Migrate `App::window_event` to AppState | RUST | M | T1.1 |
 | ✅ T1.4 | Per-state `ControlFlow` derivation | RUST | S | T1.2 |
-| T1.5 | macOS resume guard for new states | RUST | S | T1.2 |
+| ✅ T1.5 | macOS resume guard for new states | RUST | S | T1.2 |
 | T1.6 | Verify `--list-monitors` + `--autostart` regression-free | RUST + QA | S | T1.2, T1.3 |
 | T1.7 | Extract `init_gpu()` | RUST | S | T1.1 |
 | T1.8 | Extract `init_output_window()` | RUST | M | T1.7 |
