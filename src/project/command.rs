@@ -56,6 +56,87 @@
 
 use crate::project::schema::{BlendMode, LayerConfig, Project};
 
+/// 003-T1.22 — addressing key for a single `Modulator` slot inside a
+/// layer's effect chain. Combined with `(layer_idx, effect_idx)` it
+/// uniquely identifies one of the 9 modulator-typed fields across all
+/// `Effect` variants.
+///
+/// Variants are ordered by their position in `Effect`:
+/// `Color { hue, saturation, brightness, contrast }`,
+/// `Tint { amount }`, `Blur { radius_px }`,
+/// `Transform { rotate_deg, scale_x, scale_y }`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModulatorField {
+    /// `Effect::Color::hue`.
+    ColorHue,
+    /// `Effect::Color::saturation`.
+    ColorSaturation,
+    /// `Effect::Color::brightness`.
+    ColorBrightness,
+    /// `Effect::Color::contrast`.
+    ColorContrast,
+    /// `Effect::Tint::amount`.
+    #[allow(dead_code)]
+    // Tint UI not yet wired (T1.23+); variant exists for schema completeness.
+    TintAmount,
+    /// `Effect::Blur::radius_px`.
+    BlurRadius,
+    /// `Effect::Transform::rotate_deg`.
+    TransformRotateDeg,
+    /// `Effect::Transform::scale_x`.
+    TransformScaleX,
+    /// `Effect::Transform::scale_y`.
+    TransformScaleY,
+}
+
+/// Resolve a `ModulatorField` to the matching `&Modulator` slot
+/// inside `effect`. Returns `None` if the field doesn't apply to the
+/// effect's variant (e.g., `BlurRadius` on an `Effect::Color`).
+fn modulator_at_ref(
+    effect: &crate::effects::Effect,
+    field: ModulatorField,
+) -> Option<&crate::modulators::Modulator> {
+    use crate::effects::Effect;
+    match (effect, field) {
+        (Effect::Color { hue, .. }, ModulatorField::ColorHue) => Some(hue),
+        (Effect::Color { saturation, .. }, ModulatorField::ColorSaturation) => Some(saturation),
+        (Effect::Color { brightness, .. }, ModulatorField::ColorBrightness) => Some(brightness),
+        (Effect::Color { contrast, .. }, ModulatorField::ColorContrast) => Some(contrast),
+        (Effect::Tint { amount, .. }, ModulatorField::TintAmount) => Some(amount),
+        (Effect::Blur { radius_px }, ModulatorField::BlurRadius) => Some(radius_px),
+        (Effect::Transform { rotate_deg, .. }, ModulatorField::TransformRotateDeg) => {
+            Some(rotate_deg)
+        }
+        (Effect::Transform { scale_x, .. }, ModulatorField::TransformScaleX) => Some(scale_x),
+        (Effect::Transform { scale_y, .. }, ModulatorField::TransformScaleY) => Some(scale_y),
+        _ => None,
+    }
+}
+
+/// Resolve a `ModulatorField` to the matching `&mut Modulator` slot
+/// inside `effect`. Returns `None` if the field doesn't apply to the
+/// effect's variant (e.g., `BlurRadius` on an `Effect::Color`).
+fn modulator_at_mut(
+    effect: &mut crate::effects::Effect,
+    field: ModulatorField,
+) -> Option<&mut crate::modulators::Modulator> {
+    use crate::effects::Effect;
+    match (effect, field) {
+        (Effect::Color { hue, .. }, ModulatorField::ColorHue) => Some(hue),
+        (Effect::Color { saturation, .. }, ModulatorField::ColorSaturation) => Some(saturation),
+        (Effect::Color { brightness, .. }, ModulatorField::ColorBrightness) => Some(brightness),
+        (Effect::Color { contrast, .. }, ModulatorField::ColorContrast) => Some(contrast),
+        (Effect::Tint { amount, .. }, ModulatorField::TintAmount) => Some(amount),
+        (Effect::Blur { radius_px }, ModulatorField::BlurRadius) => Some(radius_px),
+        (Effect::Transform { rotate_deg, .. }, ModulatorField::TransformRotateDeg) => {
+            Some(rotate_deg)
+        }
+        (Effect::Transform { scale_x, .. }, ModulatorField::TransformScaleX) => Some(scale_x),
+        (Effect::Transform { scale_y, .. }, ModulatorField::TransformScaleY) => Some(scale_y),
+        _ => None,
+    }
+}
+
 /// 003-T1.14 — typed project mutations.
 ///
 /// Each variant carries the previous value of every field it
@@ -204,6 +285,24 @@ pub enum Mutation {
         i: usize,
         /// Second swap index.
         j: usize,
+    },
+
+    /// Replace the modulator at `(layer_idx, effect_idx, field)` with `new`,
+    /// storing the previous value as `old` (Reverse rule 1 — whole-enum
+    /// Reverse). Both `new` and `old` are full `Modulator` enum values so a
+    /// variant switch (e.g. Sine → Static) round-trips byte-equally — the
+    /// canonical case the rule was written for.
+    SetModulator {
+        /// Index into `Project.layers`.
+        layer_idx: usize,
+        /// Index into `LayerConfig.effects`.
+        effect_idx: usize,
+        /// Which modulator slot inside the effect.
+        field: ModulatorField,
+        /// Replacement modulator (full enum value).
+        new: crate::modulators::Modulator,
+        /// Pre-mutation modulator (full enum value — Reverse rule 1).
+        old: crate::modulators::Modulator,
     },
 
     /// Replace the entire project from a serde_json snapshot
@@ -471,6 +570,35 @@ impl Mutation {
                 project.layers.swap(i, j);
                 Mutation::SwapLayers { i, j }
             }
+            Mutation::SetModulator {
+                layer_idx,
+                effect_idx,
+                field,
+                new,
+                old,
+            } => {
+                let layer = project
+                    .layers
+                    .get_mut(layer_idx)
+                    .expect("SetModulator: layer_idx out of range");
+                let effect = layer
+                    .effects
+                    .get_mut(effect_idx)
+                    .expect("SetModulator: effect_idx out of range");
+                let slot = modulator_at_mut(effect, field)
+                    .expect("SetModulator: field does not apply to this effect variant");
+                // Cheap stale-Reverse check is impossible without PartialEq on Modulator.
+                // The proptest harness covers content drift; structural invariants
+                // are enforced via the helper's Option return above.
+                *slot = new.clone();
+                Mutation::SetModulator {
+                    layer_idx,
+                    effect_idx,
+                    field,
+                    new: old,
+                    old: new,
+                }
+            }
             Mutation::ApplyProjectSnapshot {
                 new,
                 old,
@@ -506,6 +634,7 @@ impl Mutation {
             | Mutation::SetLayerEnabled { .. }
             | Mutation::SetLayerBlendMode { .. }
             | Mutation::SetLayerEffects { .. }
+            | Mutation::SetModulator { .. }
             | Mutation::AddLayer { .. }
             | Mutation::RemoveLayer { .. }
             | Mutation::SwapLayers { .. } => false,
@@ -683,6 +812,32 @@ impl Project {
             old: layer.effects.clone(),
         }
     }
+
+    /// Build a `SetModulator` mutation. Captures the current modulator at
+    /// `(layer_idx, effect_idx, field)` as `old` for whole-enum Reverse
+    /// (rule 1). `new` is the full `Modulator` enum value to install.
+    /// Panics if the indices are out of range or `field` doesn't apply to
+    /// the effect variant at `effect_idx`.
+    pub fn set_modulator_mutation(
+        &self,
+        layer_idx: usize,
+        effect_idx: usize,
+        field: ModulatorField,
+        new: crate::modulators::Modulator,
+    ) -> Mutation {
+        let layer = &self.layers[layer_idx];
+        let effect = &layer.effects[effect_idx];
+        let old = modulator_at_ref(effect, field)
+            .expect("set_modulator_mutation: field does not apply to effect variant")
+            .clone();
+        Mutation::SetModulator {
+            layer_idx,
+            effect_idx,
+            field,
+            new,
+            old,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -739,6 +894,49 @@ mod tests {
         let _ = stale.apply(&mut p);
     }
 
+    /// 003-T1.22 — canonical whole-enum Reverse smoke test.
+    ///
+    /// Constructs a fully-populated `Modulator::Sine`, flips it to
+    /// `Modulator::Static(0.7)` via `SetModulator`, then undoes via the
+    /// returned Reverse. Asserts every field of the original `Sine` is
+    /// restored byte-equal — the property that `new: Modulator` and
+    /// `old: Modulator` (whole-enum Reverse) are designed to guarantee.
+    #[test]
+    fn modulator_whole_enum_reverse_round_trips_sine_to_static() {
+        use crate::modulators::Modulator;
+        let mut p = fresh_project();
+        // Position a Sine in the seeded layer's Color::hue slot.
+        let sine = Modulator::Sine {
+            period_s: 2.0,
+            amp: 0.3,
+            phase: 1.0,
+            offset: 0.5,
+        };
+        if let crate::effects::Effect::Color { hue, .. } = &mut p.layers[0].effects[0] {
+            *hue = sine.clone();
+        } else {
+            panic!("fresh_project layer 0 effect 0 should be Color");
+        }
+        let before = serde_json::to_value(&p).unwrap();
+
+        let mutation =
+            p.set_modulator_mutation(0, 0, ModulatorField::ColorHue, Modulator::Static(0.7));
+        let reverse = mutation.apply(&mut p);
+        // Sanity: hue is now Static(0.7).
+        if let crate::effects::Effect::Color { hue, .. } = &p.layers[0].effects[0] {
+            assert!(
+                matches!(hue, Modulator::Static(v) if (v - 0.7).abs() < 1e-6),
+                "after apply, hue should be Static(0.7)"
+            );
+        }
+        let _ = reverse.apply(&mut p);
+        let after = serde_json::to_value(&p).unwrap();
+        assert_eq!(
+            before, after,
+            "Sine fields (period_s/amp/phase/offset) must restore byte-equal"
+        );
+    }
+
     /// All three sliders are undoable.
     #[test]
     fn slider_mutations_are_undoable() {
@@ -775,7 +973,10 @@ mod tests {
             CrossfadeDurationS(f32),
             OutputWindowed(bool),
             WarpMaskFeather(f32),
-            WarpDimensions { rows: u32, cols: u32 },
+            WarpDimensions {
+                rows: u32,
+                cols: u32,
+            },
             Snapshot,
             LayerOpacity(f32),
             LayerEnabled(bool),
@@ -783,7 +984,16 @@ mod tests {
             AddLayer,
             RemoveLayer,
             SwapLayers,
-            LayerEffectsTransformTranslate { x: f32, y: f32 },
+            LayerEffectsTransformTranslate {
+                x: f32,
+                y: f32,
+            },
+            /// 003-T1.22 — SetModulator round-trip coverage.
+            SetModulator {
+                effect_idx: usize,
+                field: ModulatorField,
+                new: crate::modulators::Modulator,
+            },
         }
 
         fn to_mutation(kind: &MutationKind, project: &Project) -> Mutation {
@@ -872,6 +1082,17 @@ mod tests {
                         project.set_layer_effects_mutation(0, new)
                     }
                 }
+                MutationKind::SetModulator {
+                    effect_idx,
+                    field,
+                    new,
+                } => {
+                    if project.layers.is_empty() || project.layers[0].effects.len() <= *effect_idx {
+                        project.set_gamma_mutation(project.gamma) // no-op fallback
+                    } else {
+                        project.set_modulator_mutation(0, *effect_idx, *field, new.clone())
+                    }
+                }
             }
         }
 
@@ -881,6 +1102,70 @@ mod tests {
                 Just(BlendMode::Add),
                 Just(BlendMode::Multiply),
                 Just(BlendMode::Screen),
+            ]
+        }
+
+        /// 003-T1.22 — strategy covering all six `Modulator` variants.
+        fn arb_modulator() -> impl Strategy<Value = crate::modulators::Modulator> {
+            use crate::modulators::Modulator;
+            prop_oneof![
+                (-1.0_f32..=1.0).prop_map(Modulator::Static),
+                (
+                    0.05_f32..=10.0,
+                    0.0_f32..=1.0,
+                    0.0_f32..=std::f32::consts::TAU,
+                    -1.0_f32..=1.0
+                )
+                    .prop_map(|(period_s, amp, phase, offset)| Modulator::Sine {
+                        period_s,
+                        amp,
+                        phase,
+                        offset,
+                    }),
+                (0.05_f32..=10.0, 0.0_f32..=1.0, -1.0_f32..=1.0).prop_map(
+                    |(period_s, amp, offset)| Modulator::Triangle {
+                        period_s,
+                        amp,
+                        offset,
+                    }
+                ),
+                (0.05_f32..=10.0, 0.0_f32..=1.0, -1.0_f32..=1.0).prop_map(
+                    |(period_s, amp, offset)| Modulator::Noise {
+                        period_s,
+                        amp,
+                        offset,
+                    }
+                ),
+                (0.25_f32..=4.0, 0.0_f32..=1.0, -1.0_f32..=1.0).prop_map(
+                    |(divisor, amp, offset)| Modulator::Bpm {
+                        divisor,
+                        amp,
+                        offset,
+                    }
+                ),
+                (0u8..=7, 0.0_f32..=1.0, 0.0_f32..=1.0, -1.0_f32..=1.0).prop_map(
+                    |(band, smoothing, amp, offset)| Modulator::Audio {
+                        band,
+                        smoothing,
+                        amp,
+                        offset,
+                    }
+                ),
+            ]
+        }
+
+        /// 003-T1.22 — (effect_idx, field) pairs valid for `default_effect_chain()`
+        /// (Color[0] → Blur[1] → Transform[2]). TintAmount omitted — no Tint in chain.
+        fn arb_field_and_effect_idx() -> impl Strategy<Value = (usize, ModulatorField)> {
+            prop_oneof![
+                Just((0, ModulatorField::ColorHue)),
+                Just((0, ModulatorField::ColorSaturation)),
+                Just((0, ModulatorField::ColorBrightness)),
+                Just((0, ModulatorField::ColorContrast)),
+                Just((1, ModulatorField::BlurRadius)),
+                Just((2, ModulatorField::TransformRotateDeg)),
+                Just((2, ModulatorField::TransformScaleX)),
+                Just((2, ModulatorField::TransformScaleY)),
             ]
         }
 
@@ -905,6 +1190,13 @@ mod tests {
                 Just(MutationKind::SwapLayers),
                 (-1.0_f32..=1.0, -1.0_f32..=1.0)
                     .prop_map(|(x, y)| { MutationKind::LayerEffectsTransformTranslate { x, y } }),
+                (arb_field_and_effect_idx(), arb_modulator()).prop_map(
+                    |((effect_idx, field), new)| MutationKind::SetModulator {
+                        effect_idx,
+                        field,
+                        new,
+                    }
+                ),
             ]
         }
 

@@ -8,7 +8,7 @@ use serde::Deserialize;
 use crate::effects::Effect;
 use crate::modulators::Modulator;
 #[cfg(feature = "v3")]
-use crate::project::command::Mutation;
+use crate::project::command::{ModulatorField, Mutation};
 use crate::project::schema::{self, BlendMode, Project, Scene};
 use crate::project::snapshot;
 use crate::windows::scene_editor::{self, SceneEditorState};
@@ -615,27 +615,45 @@ fn show_effects_tab(ui: &mut Ui, project: &mut Project, st: &mut ControlPanelSta
                 }
             });
     }
-    // 003-T1.21: after the loop, apply staged changes as a single
-    // SetLayerEffects mutation (Effects-Vec Reverse, rule 2).
+    // 003-T1.21/T1.22: after the loop, apply staged changes.
+    // T1.22: ModulatorSwitch emits SetModulator (per-slot, whole-enum Reverse);
+    // field changes (TransformTranslate*) still funnel into a single SetLayerEffects.
     #[cfg(feature = "v3")]
     if !staged_changes.is_empty() {
-        let old = project.layers[layer_idx].effects.clone();
-        let mut new = old.clone();
+        let mut field_changes: Vec<(usize, EffectChange)> = Vec::new();
         for (effect_idx, change) in staged_changes {
-            if let Some(crate::effects::Effect::Transform { translate, .. }) =
-                new.get_mut(effect_idx)
-            {
-                match change {
-                    EffectChange::TransformTranslateX(v) => translate[0] = v,
-                    EffectChange::TransformTranslateY(v) => translate[1] = v,
+            match change {
+                EffectChange::ModulatorSwitch {
+                    effect_idx: ei,
+                    field,
+                    new,
+                } => {
+                    st.pending_mutations
+                        .push(project.set_modulator_mutation(layer_idx, ei, field, new));
                 }
+                other => field_changes.push((effect_idx, other)),
             }
         }
-        st.pending_mutations.push(Mutation::SetLayerEffects {
-            layer_idx,
-            new,
-            old,
-        });
+        if !field_changes.is_empty() {
+            let old = project.layers[layer_idx].effects.clone();
+            let mut new = old.clone();
+            for (effect_idx, change) in field_changes {
+                if let Some(crate::effects::Effect::Transform { translate, .. }) =
+                    new.get_mut(effect_idx)
+                {
+                    match change {
+                        EffectChange::TransformTranslateX(v) => translate[0] = v,
+                        EffectChange::TransformTranslateY(v) => translate[1] = v,
+                        EffectChange::ModulatorSwitch { .. } => unreachable!(),
+                    }
+                }
+            }
+            st.pending_mutations.push(Mutation::SetLayerEffects {
+                layer_idx,
+                new,
+                old,
+            });
+        }
     }
 }
 
@@ -1205,13 +1223,26 @@ fn effect_label(e: &Effect) -> &'static str {
 /// the same under all feature combinations. Under non-v3 builds the type is
 /// dead code; the emit paths inside `show_effect` are cfg-gated so the return
 /// value is always `None` without v3.
+///
+/// `Copy` was dropped in 003-T1.22 when `ModulatorSwitch` was added (Modulator
+/// is not Copy). Existing move semantics are unaffected — push/destructure uses moves.
 #[allow(dead_code)] // populated only under the v3 feature
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 enum EffectChange {
     /// `Effect::Transform.translate[0]` set to `new`.
     TransformTranslateX(f32),
     /// `Effect::Transform.translate[1]` set to `new`.
     TransformTranslateY(f32),
+    /// 003-T1.22 — picker chose a different `Modulator` variant.
+    /// Carries the freshly-constructed `Modulator` to install; the
+    /// caller (`show_effects_tab`) reads `old` from the project at
+    /// emit time and pushes a `Mutation::SetModulator`.
+    #[cfg(feature = "v3")]
+    ModulatorSwitch {
+        effect_idx: usize,
+        field: ModulatorField,
+        new: crate::modulators::Modulator,
+    },
 }
 
 fn show_effect(ui: &mut Ui, idx: usize, effect: &mut Effect) -> Option<EffectChange> {
@@ -1226,16 +1257,97 @@ fn show_effect(ui: &mut Ui, idx: usize, effect: &mut Effect) -> Option<EffectCha
             brightness,
             contrast,
         } => {
-            modulator_slider(ui, (idx, "hue"), "hue (deg)", hue, -180.0..=180.0);
-            modulator_slider(ui, (idx, "sat"), "saturation", saturation, 0.0..=2.0);
-            modulator_slider(ui, (idx, "bri"), "brightness", brightness, -1.0..=1.0);
-            modulator_slider(ui, (idx, "con"), "contrast", contrast, 0.0..=2.0);
+            #[cfg(feature = "v3")]
+            {
+                change = change.or(modulator_slider(
+                    ui,
+                    (idx, "hue"),
+                    "hue (deg)",
+                    hue,
+                    -180.0..=180.0,
+                    ModulatorField::ColorHue,
+                    idx,
+                ));
+                change = change.or(modulator_slider(
+                    ui,
+                    (idx, "sat"),
+                    "saturation",
+                    saturation,
+                    0.0..=2.0,
+                    ModulatorField::ColorSaturation,
+                    idx,
+                ));
+                change = change.or(modulator_slider(
+                    ui,
+                    (idx, "bri"),
+                    "brightness",
+                    brightness,
+                    -1.0..=1.0,
+                    ModulatorField::ColorBrightness,
+                    idx,
+                ));
+                change = change.or(modulator_slider(
+                    ui,
+                    (idx, "con"),
+                    "contrast",
+                    contrast,
+                    0.0..=2.0,
+                    ModulatorField::ColorContrast,
+                    idx,
+                ));
+            }
+            #[cfg(not(feature = "v3"))]
+            {
+                modulator_slider(ui, (idx, "hue"), "hue (deg)", hue, -180.0..=180.0, (), idx);
+                modulator_slider(
+                    ui,
+                    (idx, "sat"),
+                    "saturation",
+                    saturation,
+                    0.0..=2.0,
+                    (),
+                    idx,
+                );
+                modulator_slider(
+                    ui,
+                    (idx, "bri"),
+                    "brightness",
+                    brightness,
+                    -1.0..=1.0,
+                    (),
+                    idx,
+                );
+                modulator_slider(ui, (idx, "con"), "contrast", contrast, 0.0..=2.0, (), idx);
+            }
         }
         Effect::Tint { .. } => {
             ui.label("(Tint not yet implemented; see Effect::Tint stub)");
         }
         Effect::Blur { radius_px } => {
-            modulator_slider(ui, (idx, "blur"), "radius (px)", radius_px, 0.0..=32.0);
+            #[cfg(feature = "v3")]
+            {
+                change = change.or(modulator_slider(
+                    ui,
+                    (idx, "blur"),
+                    "radius (px)",
+                    radius_px,
+                    0.0..=32.0,
+                    ModulatorField::BlurRadius,
+                    idx,
+                ));
+            }
+            #[cfg(not(feature = "v3"))]
+            {
+                modulator_slider(
+                    ui,
+                    (idx, "blur"),
+                    "radius (px)",
+                    radius_px,
+                    0.0..=32.0,
+                    (),
+                    idx,
+                );
+            }
         }
         Effect::Transform {
             translate,
@@ -1261,17 +1373,52 @@ fn show_effect(ui: &mut Ui, idx: usize, effect: &mut Effect) -> Option<EffectCha
                     translate[1],
                     -1.0..=1.0,
                 ) {
-                    change = Some(EffectChange::TransformTranslateY(new));
+                    change = change.or(Some(EffectChange::TransformTranslateY(new)));
                 }
+                change = change.or(modulator_slider(
+                    ui,
+                    (idx, "rot"),
+                    "rotate (deg)",
+                    rotate_deg,
+                    -180.0..=180.0,
+                    ModulatorField::TransformRotateDeg,
+                    idx,
+                ));
+                change = change.or(modulator_slider(
+                    ui,
+                    (idx, "scx"),
+                    "scale x",
+                    scale_x,
+                    0.1..=3.0,
+                    ModulatorField::TransformScaleX,
+                    idx,
+                ));
+                change = change.or(modulator_slider(
+                    ui,
+                    (idx, "scy"),
+                    "scale y",
+                    scale_y,
+                    0.1..=3.0,
+                    ModulatorField::TransformScaleY,
+                    idx,
+                ));
             }
             #[cfg(not(feature = "v3"))]
             {
                 ui.add(egui::Slider::new(&mut translate[0], -1.0..=1.0).text("tx"));
                 ui.add(egui::Slider::new(&mut translate[1], -1.0..=1.0).text("ty"));
+                modulator_slider(
+                    ui,
+                    (idx, "rot"),
+                    "rotate (deg)",
+                    rotate_deg,
+                    -180.0..=180.0,
+                    (),
+                    idx,
+                );
+                modulator_slider(ui, (idx, "scx"), "scale x", scale_x, 0.1..=3.0, (), idx);
+                modulator_slider(ui, (idx, "scy"), "scale y", scale_y, 0.1..=3.0, (), idx);
             }
-            modulator_slider(ui, (idx, "rot"), "rotate (deg)", rotate_deg, -180.0..=180.0);
-            modulator_slider(ui, (idx, "scx"), "scale x", scale_x, 0.1..=3.0);
-            modulator_slider(ui, (idx, "scy"), "scale y", scale_y, 0.1..=3.0);
         }
         Effect::External { id, params } => {
             // Extension hook: no rich UI in v1. Display the registered id and
@@ -1287,13 +1434,73 @@ fn show_effect(ui: &mut Ui, idx: usize, effect: &mut Effect) -> Option<EffectCha
     change
 }
 
+/// Inner body of `modulator_slider` — shared between v3 and non-v3.
+/// Returns `Some(EffectChange::ModulatorSwitch { .. })` in v3 mode on a
+/// variant switch; in non-v3 it writes directly to `*m` and returns `None`.
+#[cfg(feature = "v3")]
 fn modulator_slider(
     ui: &mut Ui,
     salt: (usize, &'static str),
     label: &str,
     m: &mut Modulator,
     range: std::ops::RangeInclusive<f32>,
-) {
+    field: ModulatorField,
+    effect_idx: usize,
+) -> Option<EffectChange> {
+    let mut change: Option<EffectChange> = None;
+
+    ui.horizontal(|ui| {
+        ui.label(label);
+        let cur_label = match m {
+            Modulator::Static(_) => "static",
+            Modulator::Sine { .. } => "sine",
+            Modulator::Triangle { .. } => "tri",
+            Modulator::Noise { .. } => "noise",
+            Modulator::Bpm { .. } => "bpm",
+            Modulator::Audio { .. } => "audio",
+        };
+        egui::ComboBox::from_id_salt(salt)
+            .selected_text(cur_label)
+            .show_ui(ui, |ui| {
+                let is_static = matches!(m, Modulator::Static(_));
+                let is_sine = matches!(m, Modulator::Sine { .. });
+                if ui.selectable_label(is_static, "static").clicked() && !is_static {
+                    change = Some(EffectChange::ModulatorSwitch {
+                        effect_idx,
+                        field,
+                        new: Modulator::Static(*range.start()),
+                    });
+                }
+                if ui.selectable_label(is_sine, "sine").clicked() && !is_sine {
+                    let span = range.end() - range.start();
+                    change = Some(EffectChange::ModulatorSwitch {
+                        effect_idx,
+                        field,
+                        new: Modulator::Sine {
+                            period_s: 1.0,
+                            amp: span * 0.5,
+                            phase: 0.0,
+                            offset: (range.start() + range.end()) * 0.5,
+                        },
+                    });
+                }
+            });
+    });
+    modulator_slider_params(ui, m, range);
+    change
+}
+
+/// Inner body of `modulator_slider` — non-v3 version. Writes directly to `*m`.
+#[cfg(not(feature = "v3"))]
+fn modulator_slider(
+    ui: &mut Ui,
+    salt: (usize, &'static str),
+    label: &str,
+    m: &mut Modulator,
+    range: std::ops::RangeInclusive<f32>,
+    _field: (),
+    _effect_idx: usize,
+) -> Option<EffectChange> {
     ui.horizontal(|ui| {
         ui.label(label);
         let cur_label = match m {
@@ -1323,6 +1530,13 @@ fn modulator_slider(
                 }
             });
     });
+    modulator_slider_params(ui, m, range);
+    None
+}
+
+/// Parameter sliders for the currently-active `Modulator` variant.
+/// Shared between v3 and non-v3 modulator_slider implementations (T1.23 territory).
+fn modulator_slider_params(ui: &mut Ui, m: &mut Modulator, range: std::ops::RangeInclusive<f32>) {
     match m {
         Modulator::Static(v) => {
             ui.add(egui::Slider::new(v, range.clone()).text("value"));
