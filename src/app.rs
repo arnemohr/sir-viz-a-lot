@@ -640,6 +640,77 @@ fn init_gpu() -> Result<GpuContext> {
     GpuContext::new().map_err(Into::into)
 }
 
+/// 003-T1.10: bundle of input sources owned by `EditingState`.
+/// Keyboard is always present; audio / MIDI / OSC are
+/// feature-gated and may be `None` when the cargo feature is on
+/// but the platform refuses to bring up the source.
+struct InputsBundle {
+    keyboard: KeyboardSource,
+    #[cfg(feature = "audio")]
+    audio_capture: Option<crate::modulators::audio::AudioCaptureGuard>,
+    #[cfg(feature = "midi")]
+    midi: Option<crate::controls::midi::MidiSource>,
+    #[cfg(feature = "osc")]
+    osc: Option<crate::controls::osc::OscSource>,
+}
+
+/// 003-T1.10: bring up every operator-input source. Each cfg-
+/// gated source is independently fallible; failure is non-fatal
+/// (the projector still runs without audio / MIDI / OSC).
+fn init_inputs() -> InputsBundle {
+    let keyboard = KeyboardSource::new();
+
+    // T-M7-03: audio capture provider; failure to open the input
+    // device is non-fatal — a wedding venue without a mic still
+    // wants the projector running.
+    #[cfg(feature = "audio")]
+    let audio_capture = match crate::modulators::audio::start_default() {
+        Ok((provider, guard)) => {
+            crate::modulators::audio::install(std::sync::Arc::new(provider));
+            tracing::info!("audio capture started; Modulator::Audio bands live");
+            Some(guard)
+        }
+        Err(err) => {
+            tracing::warn!(?err, "audio init failed; Modulator::Audio will read 0.0");
+            None
+        }
+    };
+
+    // T-M7-05: subscribe to every MIDI input port. Empty port
+    // list is fine (Source produces no events); only init failure
+    // of midir itself is logged.
+    #[cfg(feature = "midi")]
+    let midi = match crate::controls::midi::MidiSource::start_all() {
+        Ok(src) => Some(src),
+        Err(err) => {
+            tracing::warn!(?err, "midi init failed; midi events disabled");
+            None
+        }
+    };
+
+    // T-M7-06: bind UDP for OSC. Default port from the
+    // controls::osc module; future work can plumb the port through
+    // Project / CLI.
+    #[cfg(feature = "osc")]
+    let osc = match crate::controls::osc::OscSource::start(0) {
+        Ok(src) => Some(src),
+        Err(err) => {
+            tracing::warn!(?err, "osc bind failed; osc events disabled");
+            None
+        }
+    };
+
+    InputsBundle {
+        keyboard,
+        #[cfg(feature = "audio")]
+        audio_capture,
+        #[cfg(feature = "midi")]
+        midi,
+        #[cfg(feature = "osc")]
+        osc,
+    }
+}
+
 /// 003-T1.9: open the egui control window. Optional; failure is
 /// non-fatal (D-01 fallback) — operators can drive the projector
 /// from the keyboard alone if the secondary window can't open.
@@ -741,43 +812,16 @@ fn init_running_app(
     } = init_output_window(event_loop, monitor, gpu, output_windowed)?;
     let surface_format = output.config.format;
 
-    // T-M7-03: bring up the audio capture provider when the `audio` feature
-    // is on. Failure to open the input device is non-fatal — a wedding
-    // venue without a mic still wants the projector running.
-    #[cfg(feature = "audio")]
-    let audio_capture = match crate::modulators::audio::start_default() {
-        Ok((provider, guard)) => {
-            crate::modulators::audio::install(std::sync::Arc::new(provider));
-            tracing::info!("audio capture started; Modulator::Audio bands live");
-            Some(guard)
-        }
-        Err(err) => {
-            tracing::warn!(?err, "audio init failed; Modulator::Audio will read 0.0");
-            None
-        }
-    };
-
-    // T-M7-05: subscribe to every MIDI input port. Empty port list is fine
-    // (Source produces no events); only init failure of midir itself is logged.
-    #[cfg(feature = "midi")]
-    let midi = match crate::controls::midi::MidiSource::start_all() {
-        Ok(src) => Some(src),
-        Err(err) => {
-            tracing::warn!(?err, "midi init failed; midi events disabled");
-            None
-        }
-    };
-
-    // T-M7-06: bind UDP for OSC. Default port from the controls::osc module;
-    // future work can plumb the port through Project / CLI.
-    #[cfg(feature = "osc")]
-    let osc = match crate::controls::osc::OscSource::start(0) {
-        Ok(src) => Some(src),
-        Err(err) => {
-            tracing::warn!(?err, "osc bind failed; osc events disabled");
-            None
-        }
-    };
+    // 003-T1.10: keyboard + cfg-gated audio/MIDI/OSC sources.
+    let InputsBundle {
+        keyboard,
+        #[cfg(feature = "audio")]
+        audio_capture,
+        #[cfg(feature = "midi")]
+        midi,
+        #[cfg(feature = "osc")]
+        osc,
+    } = init_inputs();
 
     let mut control_panel = ControlPanelState::default();
     if let Some(ref p) = project_file_path {
@@ -823,7 +867,7 @@ fn init_running_app(
         warp_rt_view,
         control_panel,
         clock: Clock::new(),
-        keyboard: KeyboardSource::new(),
+        keyboard,
         color_pipeline,
         blur_pipeline,
         transform_pipeline,
