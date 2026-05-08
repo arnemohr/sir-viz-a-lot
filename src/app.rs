@@ -323,6 +323,27 @@ struct EditingState {
     /// route to `AppState::Failed` before `EditingState` is created.
     #[cfg(feature = "v3")]
     toast_queue: crate::windows::toast::ToastQueue,
+    /// 003-T1.45: per-session "first" telemetry guards. Plan §11.7
+    /// metrics fire exactly once per `Editing` lifetime — we toggle
+    /// the flag the first time a matching mutation flows through
+    /// the undo stack, then skip subsequent occurrences.
+    #[cfg(feature = "v3")]
+    telemetry: SessionTelemetry,
+}
+
+/// 003-T1.45 — once-per-session "first X" guards for the Plan §11.7
+/// telemetry metrics. Reset on session boundary (each `EditingState`
+/// gets a fresh `Default::default()`); never serialised to project.
+#[cfg(feature = "v3")]
+#[derive(Default)]
+struct SessionTelemetry {
+    /// Whether `first_layer_added` has fired this session.
+    first_layer_added: bool,
+    /// Whether `first_warp_drag` has fired this session. Triggers on
+    /// the first `SetWarpDimensions` mutation (the closest analog to
+    /// the spec's `Command::SetWarpCorner`; warp-grid drags also flow
+    /// through SetWarpDimensions when row / col edits resample).
+    first_warp_drag: bool,
 }
 
 /// One scene-to-scene fade, scheduled by `Command::SceneRecall` when
@@ -1058,6 +1079,43 @@ fn assemble_editing_state(
         modifiers: ModifiersState::empty(),
         #[cfg(feature = "v3")]
         toast_queue: crate::windows::toast::ToastQueue::new(),
+        #[cfg(feature = "v3")]
+        telemetry: SessionTelemetry::default(),
+    }
+}
+
+/// 003-T1.45 — emit Plan §11.7 telemetry events when a matching
+/// mutation flows through the undo stack. Called from each
+/// `state.undo_stack.push(...)` site BEFORE the push so we read the
+/// mutation's variant without consuming it. Fires once per session
+/// per metric.
+///
+/// All events use `target = "rmap::ux"` so T-003-T1.47's daily JSON
+/// sink can filter on the target. No user payload (no paths,
+/// filenames, layer ids) — see Plan §11.12 / privacy review.
+#[cfg(feature = "v3")]
+fn emit_mutation_telemetry(t: &mut SessionTelemetry, m: &crate::project::command::Mutation) {
+    use crate::project::command::Mutation;
+    match m {
+        Mutation::AddLayer { .. } => {
+            if !t.first_layer_added {
+                t.first_layer_added = true;
+                tracing::info!(
+                    target: "rmap::ux",
+                    event = "first_layer_added",
+                );
+            }
+        }
+        Mutation::SetWarpDimensions { .. } => {
+            if !t.first_warp_drag {
+                t.first_warp_drag = true;
+                tracing::info!(
+                    target: "rmap::ux",
+                    event = "first_warp_drag",
+                );
+            }
+        }
+        _ => {}
     }
 }
 
@@ -1658,6 +1716,7 @@ fn handle_editing_window_event(
                         let position = state.project.layers.len();
                         let mutation =
                             crate::project::command::Mutation::AddLayer { layer, position };
+                        emit_mutation_telemetry(&mut state.telemetry, &mutation);
                         state.undo_stack.push(mutation, &mut state.project);
                         rebuild_layers_for_state(state);
                     }
@@ -1721,6 +1780,7 @@ fn handle_editing_window_event(
                         if m.needs_layer_rebuild() {
                             needs_rebuild_after_drain = true;
                         }
+                        emit_mutation_telemetry(&mut state.telemetry, &m);
                         state.undo_stack.push(m, &mut state.project);
                     }
                 }
@@ -1803,6 +1863,13 @@ fn handle_editing_window_event(
                             let outcome = state.undo_stack.redo(&mut state.project);
                             let did = outcome.is_some();
                             tracing::info!(did, "redo");
+                            if did {
+                                // 003-T1.46 — telemetry counts both undo
+                                // and redo as undo_invoked (the metric is
+                                // "operator reached for the safety net";
+                                // direction doesn't matter for the count).
+                                tracing::info!(target: "rmap::ux", event = "undo_invoked");
+                            }
                             if matches!(outcome, Some(true)) {
                                 rebuild_layers_for_state(state);
                             }
@@ -1810,6 +1877,9 @@ fn handle_editing_window_event(
                             let outcome = state.undo_stack.undo(&mut state.project);
                             let did = outcome.is_some();
                             tracing::info!(did, "undo");
+                            if did {
+                                tracing::info!(target: "rmap::ux", event = "undo_invoked");
+                            }
                             if matches!(outcome, Some(true)) {
                                 rebuild_layers_for_state(state);
                             }
@@ -2197,10 +2267,27 @@ impl ApplicationHandler for App {
                         // routed to AppState::Failed before init_running_app.
                         crate::project::audit::Severity::Critical => continue,
                     };
+                    // 003-T1.46 — telemetry: one event per non-critical
+                    // finding routed to a toast. No payload (no message
+                    // text — that would leak project content into the
+                    // sink). Severity gives enough context for the
+                    // privacy-reviewed metric.
+                    tracing::info!(
+                        target: "rmap::ux",
+                        event = "project_audit_warned",
+                        severity = ?finding.severity,
+                    );
                     running
                         .toast_queue
                         .push(crate::windows::toast::Toast::new(kind, finding.message));
                 }
+                // 003-T1.45 — session_start fires once per Editing
+                // lifetime, after init succeeds and toasts are queued.
+                #[cfg(feature = "v3")]
+                tracing::info!(
+                    target: "rmap::ux",
+                    event = "session_start",
+                );
                 self.state = AppState::Editing(running);
             }
             Err(e) => {
