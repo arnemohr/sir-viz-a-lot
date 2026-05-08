@@ -89,6 +89,98 @@ impl Project {
             .unwrap_or_else(|| project_path.parent().unwrap_or(Path::new(".")));
         base.join(rel)
     }
+
+    /// 003-T2.23 — save the project with layer asset paths normalized to
+    /// **relative form** when the asset lives at or below the project
+    /// file's parent directory. Absolute paths that don't lie under that
+    /// dir are preserved as-is.
+    ///
+    /// This is the cross-machine portability path the wedding-DJ
+    /// "second laptop" failover relies on. Operators copy the project
+    /// folder; relative paths follow naturally.
+    ///
+    /// Save-As is the migration trigger (the operator picks a new
+    /// destination, this helper relativizes against it). The plain
+    /// [`Self::save`] path keeps the legacy as-stored behaviour so an
+    /// existing absolute-path project that's just being saved in place
+    /// over its old file does not silently rewrite paths.
+    #[allow(dead_code)] // Wired by T-003-T2.* Save-As flow once it ships.
+    pub fn save_portable(&self, path: &Path) -> Result<(), ProjectError> {
+        let mut staged = self.clone();
+        let project_dir = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .map(Path::to_path_buf);
+        if let Some(dir) = project_dir.as_deref() {
+            relativize_layer_paths(&mut staged, dir);
+        }
+        staged.save(path)
+    }
+
+    /// 003-T2.23 — true when at least one layer references its asset
+    /// via an absolute path. Drives the launcher / editor's one-time
+    /// migration toast: existing absolute-path projects surface a
+    /// "Save As… to make this project portable" hint on first load.
+    #[allow(dead_code)] // Read by T-003-T2.* Save-As migration toast site.
+    pub fn has_absolute_asset_paths(&self) -> bool {
+        self.layers
+            .iter()
+            .any(|l| l.kind.asset_path().is_absolute())
+    }
+}
+
+/// Rewrite each layer's asset path to be relative to `project_dir` when
+/// the asset lives under it. Paths that aren't descendants of
+/// `project_dir` (sibling dirs, unrelated absolute paths) are left
+/// alone so the project stays loadable as written.
+///
+/// We deliberately only relativize via `strip_prefix`, not via a
+/// general `..`-walking diff: the spec's three intended portability
+/// cases (asset in the same folder, in a `media/` subfolder, in a
+/// `~/Documents/rmap/` shared folder) are all *descendants* of the
+/// project file's parent. Sibling-dir relativization (`../photos/img.jpg`)
+/// is fragile — the asset must move with the project AND keep the
+/// same relative position — so we skip it for v3 and revisit if
+/// operator demand surfaces.
+fn relativize_layer_paths(project: &mut Project, project_dir: &Path) {
+    use crate::project::schema::LayerKind;
+    let canon_dir =
+        std::fs::canonicalize(project_dir).unwrap_or_else(|_| project_dir.to_path_buf());
+    for layer in &mut project.layers {
+        match &mut layer.kind {
+            LayerKind::Svg { svg_path } => {
+                if let Some(rel) = relative_under(svg_path, &canon_dir) {
+                    *svg_path = rel;
+                }
+            }
+            LayerKind::Image { path, .. } => {
+                if let Some(rel) = relative_under(path, &canon_dir) {
+                    *path = rel;
+                }
+            }
+        }
+    }
+}
+
+/// Return `Some(rel)` when `asset` is at or below `project_dir`, where
+/// `rel` is the path of `asset` relative to `project_dir`. Returns
+/// `None` for paths that aren't descendants (the caller keeps the
+/// absolute path as-stored).
+///
+/// Both inputs are canonicalised on a best-effort basis — iCloud
+/// Drive-synced project folders surface symlinks that would defeat a
+/// raw `strip_prefix`. Canonicalisation failure (e.g. asset doesn't
+/// exist on disk yet — broken-link projects) falls back to the
+/// uncanonicalised compare so a save-then-fix workflow still works.
+fn relative_under(asset: &Path, project_dir: &Path) -> Option<PathBuf> {
+    if asset.is_relative() {
+        return None;
+    }
+    let canon_asset = std::fs::canonicalize(asset).unwrap_or_else(|_| asset.to_path_buf());
+    canon_asset
+        .strip_prefix(project_dir)
+        .ok()
+        .map(PathBuf::from)
 }
 
 /// Serialize the full project for scene slots (lossless via serde_json).
@@ -506,5 +598,167 @@ mod tests {
         let a = serde_json::json!({"layers": [{"kind": {"Svg": {"svg_path": "/x.svg"}}}]});
         let b = serde_json::json!({"layers": [{"kind": {"Image": {"path": "/x.jpg", "fit": "Cover", "focal": [0.5, 0.5]}}}]});
         assert!(!snapshots_share_layer_topology(&a, &b));
+    }
+
+    /// 003-T2.23 acceptance criterion 1 + 5: an asset that lives in
+    /// the project file's parent directory is saved as a relative
+    /// path; the round-trip restores the absolute path via
+    /// `Project::resolve_asset`.
+    #[test]
+    fn save_portable_writes_relative_path_for_descendant_asset() {
+        use crate::project::schema::{BlendMode, LayerConfig, LayerKind};
+
+        let dir = std::env::temp_dir().join(format!(
+            "rmap_t2_23_descendant_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0),
+        ));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let media = dir.join("media");
+        std::fs::create_dir_all(&media).expect("media dir");
+        let asset = media.join("photo.jpg");
+        std::fs::write(&asset, b"fake jpg").expect("fake asset");
+        // Use the canonicalised path on disk so save_portable's
+        // canonicalisation matches what's stored in the project
+        // (macOS /tmp is symlinked to /private/tmp).
+        let canon_asset = std::fs::canonicalize(&asset).expect("canon asset");
+
+        let mut project = Project::default();
+        project.layers.push(LayerConfig {
+            id: "img".into(),
+            kind: LayerKind::Image {
+                path: canon_asset,
+                fit: crate::project::schema::FitMode::Cover,
+                focal: [0.5, 0.5],
+            },
+            enabled: true,
+            transform: crate::project::schema::Transform2D::default(),
+            effects: crate::effects::default_effect_chain(),
+            blend_mode: BlendMode::Normal,
+            opacity: 1.0,
+        });
+
+        let project_path = dir.join("show.rmap.json");
+        project.save_portable(&project_path).expect("save_portable");
+
+        let raw = std::fs::read_to_string(&project_path).expect("read project file");
+        assert!(
+            raw.contains("\"path\": \"media/photo.jpg\""),
+            "expected relative path media/photo.jpg in project file; got: {raw}"
+        );
+
+        let loaded = Project::load(&project_path).expect("reload");
+        let stored = loaded.layers[0].kind.asset_path();
+        assert!(stored.is_relative(), "stored path must be relative");
+
+        let resolved = loaded.resolve_asset(&project_path, stored);
+        let canon_resolved = std::fs::canonicalize(&resolved).expect("resolve to existing file");
+        assert!(
+            canon_resolved.is_absolute(),
+            "resolve_asset must produce an absolute path"
+        );
+
+        // Cleanup.
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 003-T2.23 acceptance criterion 3: an absolute asset path that
+    /// does not lie under the project file's parent dir is preserved
+    /// as-is by save_portable. Existing absolute-path projects must
+    /// not be silently rewritten on a Save-As to a new location.
+    #[test]
+    fn save_portable_preserves_absolute_path_for_non_descendant_asset() {
+        use crate::project::schema::{BlendMode, LayerConfig, LayerKind};
+
+        let dir = std::env::temp_dir().join(format!(
+            "rmap_t2_23_non_descendant_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0),
+        ));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        // Asset lives somewhere completely unrelated to the project dir.
+        let elsewhere = std::env::temp_dir().join(format!(
+            "rmap_t2_23_elsewhere_{}_{}.svg",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0),
+        ));
+        std::fs::write(&elsewhere, b"<svg/>").expect("fake svg");
+        let canon_elsewhere = std::fs::canonicalize(&elsewhere).expect("canon");
+
+        let mut project = Project::default();
+        project.layers.push(LayerConfig {
+            id: "svg".into(),
+            kind: LayerKind::Svg {
+                svg_path: canon_elsewhere.clone(),
+            },
+            enabled: true,
+            transform: crate::project::schema::Transform2D::default(),
+            effects: crate::effects::default_effect_chain(),
+            blend_mode: BlendMode::Normal,
+            opacity: 1.0,
+        });
+
+        let project_path = dir.join("show.rmap.json");
+        project.save_portable(&project_path).expect("save_portable");
+
+        let loaded = Project::load(&project_path).expect("reload");
+        let stored = loaded.layers[0].kind.asset_path();
+        assert!(
+            stored.is_absolute(),
+            "non-descendant path must remain absolute, got {stored:?}"
+        );
+        assert_eq!(stored, canon_elsewhere.as_path());
+
+        let _ = std::fs::remove_file(&elsewhere);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 003-T2.23 — `has_absolute_asset_paths` drives the migration
+    /// toast on an existing project. Mixed absolute + relative paths
+    /// still trip the flag (the operator should be invited to migrate
+    /// the absolute one).
+    #[test]
+    fn has_absolute_asset_paths_detects_any_absolute_layer() {
+        use crate::project::schema::{BlendMode, LayerConfig, LayerKind};
+
+        let mut p = Project::default();
+        // Pure-relative layers → no absolute paths.
+        p.layers.push(LayerConfig {
+            id: "rel".into(),
+            kind: LayerKind::Svg {
+                svg_path: PathBuf::from("media/x.svg"),
+            },
+            enabled: true,
+            transform: crate::project::schema::Transform2D::default(),
+            effects: crate::effects::default_effect_chain(),
+            blend_mode: BlendMode::Normal,
+            opacity: 1.0,
+        });
+        assert!(!p.has_absolute_asset_paths());
+
+        // Mixed — adding an absolute layer trips the flag.
+        p.layers.push(LayerConfig {
+            id: "abs".into(),
+            kind: LayerKind::Image {
+                path: PathBuf::from("/var/tmp/abs.jpg"),
+                fit: crate::project::schema::FitMode::Cover,
+                focal: [0.5, 0.5],
+            },
+            enabled: true,
+            transform: crate::project::schema::Transform2D::default(),
+            effects: crate::effects::default_effect_chain(),
+            blend_mode: BlendMode::Normal,
+            opacity: 1.0,
+        });
+        assert!(p.has_absolute_asset_paths());
     }
 }
