@@ -19,6 +19,10 @@
 // mount, save on operator-initiated mutations like the projector pick.
 #[cfg(feature = "v3")]
 pub mod prefs;
+// 003-T2.19 — `~/Documents/rmap/` first-launch bootstrap, plus the
+// directory-resolution helpers the recents listing reads from.
+#[cfg(feature = "v3")]
+pub mod projects_dir;
 
 use std::path::PathBuf;
 
@@ -228,6 +232,14 @@ struct LauncherState {
     /// `cargo check` warns the field is constructed but never read.
     #[allow(dead_code)]
     inputs: InputsBundle,
+    /// 003-T2.19 — outcome of the `~/Documents/rmap/` bootstrap that
+    /// runs on launcher mount. The `warning` field carries the
+    /// toast-ready copy if directory creation failed; T-003-T2.4 (the
+    /// launcher's button-painting pass) is responsible for surfacing
+    /// it in the launcher's UI. The path itself is consumed by
+    /// T-003-T2.10's recents listing.
+    #[allow(dead_code)]
+    projects_bootstrap: crate::app::projects_dir::BootstrapOutcome,
 }
 
 /// Non-v3 build keeps the legacy zero-sized stub so the `AppState`
@@ -1316,6 +1328,7 @@ fn apply_launch_command(
         launcher: launcher_window,
         gpu,
         inputs,
+        projects_bootstrap: _,
     } = launcher;
     drop(launcher_window); // close the launcher surface before opening the editor
 
@@ -1383,10 +1396,20 @@ fn init_launcher(event_loop: &ActiveEventLoop) -> Result<LauncherState> {
     // a `RedrawRequested` — defeating the launcher's purpose as the
     // first thing the operator sees on a cold start.
     launcher.request_redraw();
+    // 003-T2.19 — make sure `~/Documents/rmap/` exists so the launcher
+    // and editor's Save-as flow (T2.13) have a default destination.
+    // Failures are non-fatal and surfaced as a toast in T-003-T2.4 once
+    // the launcher gains its own toast strip; until then we log and
+    // carry the warning string for the eventual surface.
+    let bootstrap = crate::app::projects_dir::bootstrap();
+    if let Some(warning) = bootstrap.warning.as_deref() {
+        tracing::warn!(warning, "launcher: projects-dir bootstrap warning");
+    }
     Ok(LauncherState {
         launcher,
         gpu,
         inputs,
+        projects_bootstrap: bootstrap,
     })
 }
 
