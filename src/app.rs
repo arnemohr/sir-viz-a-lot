@@ -185,6 +185,16 @@ fn failed_state_for_render_init() -> AppState {
     AppState::Failed(FailureKind::RenderInitFailed)
 }
 
+/// 003-T1.44 — route Critical audit findings to `AppState::Failed`.
+///
+/// Extracted so the transition is unit-testable without bringing up
+/// wgpu / winit (same pattern as `failed_state_for_project_load` and
+/// `failed_state_for_render_init`).
+#[cfg(feature = "v3")]
+fn failed_state_for_audit_critical(findings: Vec<crate::project::audit::AuditFinding>) -> AppState {
+    AppState::Failed(FailureKind::ProjectAuditCritical { findings })
+}
+
 /// Stub for the Phase-2 launcher window state. T-003-T2.2 populates
 /// the body; declared here so the `AppState` enum is stable from
 /// T1.1 onward.
@@ -195,15 +205,28 @@ struct LauncherState;
 /// surfaces a recoverable or terminal failure. T-003-T1.44 wires
 /// these into the project-load and surface-init paths; until then
 /// the failure paths still call `event_loop.exit()` directly.
-///
-/// `ProjectAuditCritical` is deliberately omitted in T1.1 because
-/// the `AuditFinding` type does not yet exist (lands in T1.34).
-/// T1.44 adds the variant when the audit pipeline is in place.
 #[derive(Debug)]
 #[allow(dead_code)]
 enum FailureKind {
-    ProjectLoadFailed { reason: String },
+    ProjectLoadFailed {
+        reason: String,
+    },
     RenderInitFailed,
+    /// 003-T1.44 — the loaded project has Critical audit findings.
+    /// The audit runs immediately after project load; Critical findings
+    /// block the Editing transition so the renderer never starts with
+    /// broken state (missing assets, schema-too-new, etc.).
+    ///
+    /// Phase-2 (T-003-T2.*) will render a Failed screen that lists
+    /// each finding's message and offers a "Try another project" /
+    /// "Quit" pair. For T1.44 the findings are logged via
+    /// `tracing::error!` and the process exits (same as the other
+    /// two failure paths above); the typed variant is preserved so
+    /// the state machine is correct from day one.
+    #[cfg(feature = "v3")]
+    ProjectAuditCritical {
+        findings: Vec<crate::project::audit::AuditFinding>,
+    },
 }
 
 /// Bundle of resources that exist only after `resumed`: the output window,
@@ -292,6 +315,14 @@ struct EditingState {
     /// like Cmd-Z (super+Z on macOS, ctrl+Z on Linux/Windows).
     #[cfg(feature = "v3")]
     modifiers: ModifiersState,
+    /// 003-T1.43: transient notifications surfaced to the operator.
+    /// Audit findings (Warn / Info severity) are pushed here
+    /// immediately after load; the toast strip render path
+    /// (`toast_strip` in `windows/toast.rs`) iterates `iter_visible`
+    /// each frame. Critical findings never reach this queue — they
+    /// route to `AppState::Failed` before `EditingState` is created.
+    #[cfg(feature = "v3")]
+    toast_queue: crate::windows::toast::ToastQueue,
 }
 
 /// One scene-to-scene fade, scheduled by `Command::SceneRecall` when
@@ -1025,6 +1056,8 @@ fn assemble_editing_state(
         undo_stack: crate::project::undo::UndoStack::new(),
         #[cfg(feature = "v3")]
         modifiers: ModifiersState::empty(),
+        #[cfg(feature = "v3")]
+        toast_queue: crate::windows::toast::ToastQueue::new(),
     }
 }
 
@@ -2046,6 +2079,51 @@ impl ApplicationHandler for App {
             }
         };
 
+        // 003-T1.43 — run the project audit immediately after load.
+        //
+        // Critical findings block the Editing transition so the renderer
+        // never starts with broken state (missing assets, schema-too-new).
+        // Info / Warn findings are collected here and pushed as toasts
+        // onto EditingState after `init_running_app` succeeds below.
+        //
+        // NOTE: T1.43 AC#2 (auto-fix click restores layer scale) is
+        // intentionally deferred — toasts ship without action buttons for
+        // now. Wiring `finding.autofix` (a `Mutation`) through the toast
+        // click path requires a richer dispatch type (Toast → Command | Mutation)
+        // that belongs in a Phase-2 task. The toast message alone surfaces
+        // the finding to the operator.
+        #[cfg(feature = "v3")]
+        let audit_findings = {
+            let env = crate::project::audit::AuditEnv {
+                monitor_count: event_loop.available_monitors().count() as u32,
+            };
+            crate::project::audit::ProjectAudit::run(&project, &env)
+        };
+        #[cfg(feature = "v3")]
+        {
+            let critical: Vec<_> = audit_findings
+                .iter()
+                .filter(|f| f.severity == crate::project::audit::Severity::Critical)
+                .cloned()
+                .collect();
+            if !critical.is_empty() {
+                tracing::error!(
+                    count = critical.len(),
+                    "project audit emitted Critical findings; routing to Failed",
+                );
+                for f in &critical {
+                    tracing::error!(message = %f.message, "critical audit finding");
+                }
+                // Phase-2 (T-003-T2.*) will render a Failed screen that
+                // lists each finding's message. For T1.44 we log and exit,
+                // matching the behaviour of the other two failure paths
+                // above (project-load failure, render-init failure).
+                self.state = failed_state_for_audit_critical(critical);
+                event_loop.exit();
+                return;
+            }
+        }
+
         // `--monitor` overrides [`Project::output_monitor_index`] from the file.
         let monitor_index = self
             .monitor_override
@@ -2093,6 +2171,36 @@ impl ApplicationHandler for App {
         ) {
             Ok(mut running) => {
                 register_scene_preview(&mut running);
+                // 003-T1.43 — push non-critical audit findings as toasts
+                // so the operator sees them after the canvas opens.
+                //
+                // Critical findings were already handled above (they route
+                // to AppState::Failed before we reach this point); only
+                // Info and Warn remain here.
+                //
+                // Auto-fix action buttons (T1.43 AC#2) are deferred to
+                // Phase-2: `finding.autofix` is a `Mutation`, but
+                // `ToastAction.command` expects a `controls::Command`.
+                // Mixing the two requires a richer dispatch type that is
+                // out of scope for T1.43. The toast message alone is enough
+                // to alert the operator; they can fix via the existing UI.
+                #[cfg(feature = "v3")]
+                for finding in audit_findings {
+                    let kind = match finding.severity {
+                        crate::project::audit::Severity::Info => {
+                            crate::windows::toast::ToastKind::Info
+                        }
+                        crate::project::audit::Severity::Warn => {
+                            crate::windows::toast::ToastKind::Warn
+                        }
+                        // Unreachable: Critical findings were filtered and
+                        // routed to AppState::Failed before init_running_app.
+                        crate::project::audit::Severity::Critical => continue,
+                    };
+                    running
+                        .toast_queue
+                        .push(crate::windows::toast::Toast::new(kind, finding.message));
+                }
                 self.state = AppState::Editing(running);
             }
             Err(e) => {
@@ -2323,5 +2431,32 @@ mod tests {
             }
             _ => panic!("expected AppState::Failed(ProjectLoadFailed)"),
         }
+    }
+
+    /// 003-T1.44 acceptance criterion 1: Critical audit findings must
+    /// route to `AppState::Failed(ProjectAuditCritical)`, not to
+    /// `AppState::Editing`. The helper is extracted and unit-testable
+    /// without bringing up wgpu / winit.
+    #[cfg(feature = "v3")]
+    #[test]
+    fn audit_critical_routes_to_failed() {
+        use crate::project::audit::{AuditFinding, AuditKind, Severity};
+        let findings = vec![AuditFinding {
+            kind: AuditKind::SchemaTooNew {
+                project_version: 99,
+                max_supported: 3,
+            },
+            severity: Severity::Critical,
+            message: "schema 99 newer than supported 3".into(),
+            autofix: None,
+        }];
+        let s = failed_state_for_audit_critical(findings);
+        assert!(
+            matches!(
+                s,
+                AppState::Failed(FailureKind::ProjectAuditCritical { .. })
+            ),
+            "Critical findings must route to AppState::Failed(ProjectAuditCritical)"
+        );
     }
 }
