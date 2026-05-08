@@ -937,6 +937,80 @@ mod tests {
         );
     }
 
+    /// 003-T1.26 — canonical effects-Vec Reverse smoke test.
+    ///
+    /// `mutate_transform_effect` (in `windows/scene_editor.rs`) appends a
+    /// default `Effect::Transform` when the layer's chain doesn't already
+    /// have one, then mutates it. A naive per-field Reverse would leave
+    /// the appended Transform on undo. The Effects-Vec Reverse rule
+    /// (rule 2) protects against this: the snapshot captured before any
+    /// drag mutation is the entire `Vec<Effect>`, so undo restores the
+    /// pre-drag length and contents byte-equal.
+    ///
+    /// This test sets up a layer with NO Transform effect, simulates the
+    /// drag-stopped emission `SetLayerEffects { new: <chain with appended
+    /// Transform>, old: <original chain> }`, applies the Reverse, and
+    /// asserts the chain is back to its original length and contents.
+    #[test]
+    fn effects_vec_reverse_no_stray_transform_after_undo() {
+        use crate::effects::Effect;
+        use crate::modulators::Modulator;
+        let mut p = fresh_project();
+        // Strip the default Transform from the seeded layer so the drag
+        // append-or-mutate path takes the *append* branch.
+        p.layers[0]
+            .effects
+            .retain(|e| !matches!(e, Effect::Transform { .. }));
+        let pre_drag_len = p.layers[0].effects.len();
+        let pre_drag = p.layers[0].effects.clone();
+        assert!(
+            !pre_drag
+                .iter()
+                .any(|e| matches!(e, Effect::Transform { .. })),
+            "fixture should not contain Transform pre-drag"
+        );
+        let before = serde_json::to_value(&p).unwrap();
+
+        // Simulate what handle_scene_input does for an alt-drag rotate:
+        // append a default Transform, set rotate_deg, ship as new.
+        let mut new = pre_drag.clone();
+        new.push(Effect::Transform {
+            translate: [0.0, 0.0],
+            rotate_deg: Modulator::Static(45.0),
+            scale_x: Modulator::Static(1.0),
+            scale_y: Modulator::Static(1.0),
+        });
+        let mutation = Mutation::SetLayerEffects {
+            layer_idx: 0,
+            new,
+            old: pre_drag,
+        };
+
+        let reverse = mutation.apply(&mut p);
+        // Sanity: post-apply, the chain has one more effect (the Transform).
+        assert_eq!(
+            p.layers[0].effects.len(),
+            pre_drag_len + 1,
+            "after apply, chain should have the appended Transform"
+        );
+
+        let _ = reverse.apply(&mut p);
+        let after = serde_json::to_value(&p).unwrap();
+        assert_eq!(
+            p.layers[0].effects.len(),
+            pre_drag_len,
+            "after undo, chain length must equal pre-drag length (no stray Transform)"
+        );
+        assert!(
+            !p.layers[0]
+                .effects
+                .iter()
+                .any(|e| matches!(e, Effect::Transform { .. })),
+            "after undo, chain must contain no Transform effect"
+        );
+        assert_eq!(before, after, "byte-equal restoration of full project");
+    }
+
     /// All three sliders are undoable.
     #[test]
     fn slider_mutations_are_undoable() {
@@ -1001,6 +1075,12 @@ mod tests {
             LayerEffectsDragTranslate {
                 dx: f32,
                 dy: f32,
+            },
+            /// 003-T1.26 — drag-rotate path: same append-or-mutate pattern
+            /// as drag-translate but writes `Transform.rotate_deg`. Covers
+            /// the canonical effects-Vec Reverse case proptest-side.
+            LayerEffectsDragRotate {
+                degrees: f32,
             },
         }
 
@@ -1137,6 +1217,39 @@ mod tests {
                         }
                     }
                 }
+                MutationKind::LayerEffectsDragRotate { degrees } => {
+                    // Same append-or-mutate pattern as drag-translate but
+                    // writes Transform.rotate_deg as Modulator::Static
+                    // (T-003-T1.26).
+                    if project.layers.is_empty() {
+                        project.set_gamma_mutation(project.gamma) // no-op fallback
+                    } else {
+                        let old = project.layers[0].effects.clone();
+                        let mut new = old.clone();
+                        if !new
+                            .iter()
+                            .any(|e| matches!(e, crate::effects::Effect::Transform { .. }))
+                        {
+                            new.push(crate::effects::Effect::Transform {
+                                translate: [0.0, 0.0],
+                                rotate_deg: crate::modulators::Modulator::Static(0.0),
+                                scale_x: crate::modulators::Modulator::Static(1.0),
+                                scale_y: crate::modulators::Modulator::Static(1.0),
+                            });
+                        }
+                        for e in new.iter_mut() {
+                            if let crate::effects::Effect::Transform { rotate_deg, .. } = e {
+                                *rotate_deg = crate::modulators::Modulator::Static(*degrees);
+                                break;
+                            }
+                        }
+                        Mutation::SetLayerEffects {
+                            layer_idx: 0,
+                            new,
+                            old,
+                        }
+                    }
+                }
             }
         }
 
@@ -1244,6 +1357,10 @@ mod tests {
                 // 003-T1.24 — drag-translate coverage: append-then-mutate path.
                 (-0.5_f32..=0.5, -0.5_f32..=0.5)
                     .prop_map(|(dx, dy)| MutationKind::LayerEffectsDragTranslate { dx, dy }),
+                // 003-T1.26 — drag-rotate coverage: same append-or-mutate path,
+                // distinct field (rotate_deg).
+                (-180.0_f32..=180.0)
+                    .prop_map(|degrees| MutationKind::LayerEffectsDragRotate { degrees }),
             ]
         }
 
