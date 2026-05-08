@@ -640,6 +640,26 @@ fn init_gpu() -> Result<GpuContext> {
     GpuContext::new().map_err(Into::into)
 }
 
+/// 003-T1.9: open the egui control window. Optional; failure is
+/// non-fatal (D-01 fallback) — operators can drive the projector
+/// from the keyboard alone if the secondary window can't open.
+/// Borrows `gpu` because [`init_output_window`] consumes it next.
+fn init_control_window(
+    event_loop: &ActiveEventLoop,
+    gpu: &GpuContext,
+) -> Option<ControlWindow> {
+    match ControlWindow::new(event_loop, &gpu.instance, &gpu.adapter, &gpu.device) {
+        Ok(c) => Some(c),
+        Err(e) => {
+            tracing::warn!(
+                ?e,
+                "control window init failed; continuing without it (D-01 fallback)"
+            );
+            None
+        }
+    }
+}
+
 /// 003-T1.8: bundle of resources owned by the projector-output
 /// side of the app. Produced by [`init_output_window`]; consumed
 /// by `init_running_app` to populate `EditingState`. Bundling is
@@ -703,22 +723,12 @@ fn init_running_app(
 ) -> Result<EditingState> {
     let gpu = init_gpu()?;
 
-    // 003-T1.8: the control window is opened *before* the output
-    // bundle is built because `init_output_window` consumes `gpu`
-    // (Renderer takes ownership). Reordering is behaviour-identical
-    // — winit doesn't actually present either window until its
-    // first redraw later in the loop. T-003-T1.9 extracts this
-    // block into its own helper.
-    let control = match ControlWindow::new(event_loop, &gpu.instance, &gpu.adapter, &gpu.device) {
-        Ok(c) => Some(c),
-        Err(e) => {
-            tracing::warn!(
-                ?e,
-                "control window init failed; continuing without it (D-01 fallback)"
-            );
-            None
-        }
-    };
+    // 003-T1.8/T1.9: the control window is opened *before* the
+    // output bundle is built because `init_output_window` consumes
+    // `gpu` (Renderer takes ownership). Reordering is behaviour-
+    // identical — winit doesn't actually present either window
+    // until its first redraw later in the loop.
+    let control = init_control_window(event_loop, &gpu);
 
     let OutputBundle {
         output,
