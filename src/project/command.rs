@@ -93,6 +93,22 @@ pub enum Mutation {
         /// Pre-mutation value.
         old: f32,
     },
+
+    /// Replace the entire project from a serde_json snapshot
+    /// (Reverse rule 3: snapshot Reverse). T-003-T1.30 routes
+    /// scene-recall and crossfade-tick through this variant.
+    /// `non_undoable: true` is reserved for the crossfade-tick
+    /// path which fires ~60×/s and must not enter the
+    /// user-facing undo stack.
+    ApplyProjectSnapshot {
+        /// Snapshot to install.
+        new: serde_json::Value,
+        /// Project state captured before the apply call.
+        old: serde_json::Value,
+        /// `true` for crossfade-tick callers; `false` for
+        /// user-triggered scene recall.
+        non_undoable: bool,
+    },
 }
 
 #[allow(dead_code)] // T-003-T1.18+ wires call sites.
@@ -133,6 +149,21 @@ impl Mutation {
                 project.contrast = new;
                 Mutation::SetContrast { new: old, old: new }
             }
+            Mutation::ApplyProjectSnapshot {
+                new,
+                old,
+                non_undoable,
+            } => {
+                // Snapshot Reverse (rule 3): the previous
+                // serialised project. Use restore_scene to
+                // overwrite project state in-place.
+                let _ = crate::project::restore_scene(project, &new);
+                Mutation::ApplyProjectSnapshot {
+                    new: old,
+                    old: new,
+                    non_undoable,
+                }
+            }
         }
     }
 
@@ -145,6 +176,7 @@ impl Mutation {
             Mutation::SetGamma { .. }
             | Mutation::SetBrightness { .. }
             | Mutation::SetContrast { .. } => false,
+            Mutation::ApplyProjectSnapshot { non_undoable, .. } => *non_undoable,
         }
     }
 }

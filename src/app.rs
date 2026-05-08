@@ -277,6 +277,13 @@ struct EditingState {
     /// Scene tab (T-M10-01). Lives on EditingState because the Scene tab
     /// mutates `project` based on it; control_panel borrows both per frame.
     scene_editor: crate::windows::scene_editor::SceneEditorState,
+    /// 003-T1.16: Undo / Redo history. T-003-T1.18+ migrations
+    /// route their mutations through `undo_stack.push(...)`;
+    /// Cmd-Z / Cmd-Shift-Z (T-003-T1.* future) call
+    /// `undo_stack.undo(...)` / `redo(...)`.
+    #[cfg(feature = "v3")]
+    #[allow(dead_code)] // T-003-T1.18+ wires push call sites.
+    undo_stack: crate::project::undo::UndoStack,
 }
 
 /// One scene-to-scene fade, scheduled by `Command::SceneRecall` when
@@ -388,29 +395,58 @@ fn next_unique_layer_id(project: &Project) -> String {
 /// keyboard's inline B/F handlers (in `window_event`) already do this
 /// directly because they want layout-independent physical-key matching;
 /// for the source-poll path we toggle through here.
-fn apply_command_legacy(state: &mut EditingState, event: Command) {
+///
+/// 003-T1.16: returns `SideEffect` so the event-loop caller can do
+/// the GPU-touching work (e.g. `RebuildLayers`) outside the
+/// borrow chain — `EditingState` is mutably borrowed during the
+/// dispatch, so render-graph mutations from inside the match
+/// would re-enter the same borrow.
+fn apply_command(state: &mut EditingState, event: Command) -> SideEffect {
     match event {
         Command::TapTempo => {
             state.clock.tap();
             tracing::debug!(bpm = state.clock.bpm(), "tap tempo");
+            SideEffect::None
         }
         Command::SceneRecall(idx) => {
-            if matches!(schedule_scene_recall(state, idx), RecallOutcome::Snapped) {
-                rebuild_layers_for_state(state);
+            // T-003-T1.30 will route this through
+            // Mutation::ApplyProjectSnapshot so undo / redo work
+            // for scene recalls. For T1.16 we keep the existing
+            // schedule_scene_recall semantics and surface the
+            // GPU-rebuild requirement as a SideEffect.
+            match schedule_scene_recall(state, idx) {
+                RecallOutcome::Snapped => SideEffect::RebuildLayers,
+                _ => SideEffect::None,
             }
         }
         Command::Blackout => {
             state.output.state.toggle_blackout();
             tracing::info!(blackout = state.output.state.blackout, "blackout via source");
+            SideEffect::None
         }
         Command::Freeze => {
             state.output.state.toggle_freeze();
             tracing::info!(freeze = state.output.state.freeze, "freeze via source");
+            SideEffect::None
         }
         Command::ParamSet { .. } => {
             // Reserved for Param::Bound resolution (v1.5+); v1 has no consumer.
+            SideEffect::None
         }
     }
+}
+
+/// 003-T1.16: side-effects the event loop must perform after
+/// `apply_command` returns. Decouples mutation logic from GPU /
+/// window-management work so the borrow checker doesn't require
+/// the dispatch to hold mutable references to multiple sub-systems.
+#[derive(Debug, Clone, Copy)]
+enum SideEffect {
+    /// No follow-up work needed.
+    None,
+    /// `state.layers` is stale relative to `state.project.layers`;
+    /// rebuild via [`rebuild_layers_for_state`].
+    RebuildLayers,
 }
 
 /// Rebuild GPU layer state for the current `project.layers`. Common
@@ -927,6 +963,8 @@ fn assemble_editing_state(
         scene_texture_id: None,
         control_redraw_skip: false,
         scene_editor: crate::windows::scene_editor::SceneEditorState::default(),
+        #[cfg(feature = "v3")]
+        undo_stack: crate::project::undo::UndoStack::new(),
     }
 }
 
@@ -1648,8 +1686,18 @@ fn handle_editing_window_event(
             if let Some(osc) = state.osc.as_mut() {
                 events.extend(crate::controls::Source::poll(osc));
             }
+            // 003-T1.16: every input event flows through
+            // `apply_command` and may emit a SideEffect that the
+            // event loop applies after the borrow returns.
+            let mut pending_rebuild = false;
             for e in events {
-                apply_command_legacy(state, e);
+                match apply_command(state, e) {
+                    SideEffect::None => {}
+                    SideEffect::RebuildLayers => pending_rebuild = true,
+                }
+            }
+            if pending_rebuild {
+                rebuild_layers_for_state(state);
             }
 
             for (i, ls) in state.layers.iter_mut().enumerate() {
