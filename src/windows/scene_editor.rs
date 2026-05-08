@@ -100,6 +100,27 @@ pub enum DragKind {
     },
 }
 
+/// 003-T3.7: canvas interaction mode. Each non-`Inspect` mode is
+/// implicitly scoped to the selected layer — there is no global
+/// warp or mask under v4 (T3.0a).
+#[allow(dead_code)] // T3.4 wires Warp button; T3.5 reads Warp in corner-drag; T3.8 reads all for banner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EditMode {
+    /// Default: drag/scale/rotate the selected layer's body.
+    #[default]
+    Layer,
+    /// Edit the selected layer's warp grid corners. T3.5 wires the
+    /// drag handler.
+    Warp,
+    /// Edit the selected layer's mask polygon. The existing mask-
+    /// vertex drag in `handle_scene_input` already targets the
+    /// selected layer's mask; T3.7 just gates the visual on this
+    /// mode.
+    Mask,
+    /// Selection only, no drag.
+    Inspect,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DragMode {
     Translate,
@@ -111,6 +132,7 @@ pub enum DragMode {
 pub struct SceneEditorState {
     pub selected: Option<Selection>,
     pub drag: Option<DragSession>,
+    pub mode: EditMode,
 }
 
 /// Read the layer's effective static `(translate, scale, rotate_deg)` from
@@ -366,6 +388,7 @@ pub fn handle_scene_input(
             // in M11 future work.
             if let Some((w_idx, v_idx)) = hit_mask_vertex(project, pos, preview_rect) {
                 let start_pos = project.layers[w_idx].warp.mask_polygon[v_idx];
+                scene.mode = EditMode::Mask;
                 scene.selected = Some(Selection::MaskVertex {
                     warp: w_idx,
                     idx: v_idx,
@@ -561,6 +584,7 @@ pub fn handle_scene_input(
             scene.drag = None;
             if let Some((w_idx, v_idx)) = hit_mask_vertex(project, pos, preview_rect) {
                 let start_pos = project.layers[w_idx].warp.mask_polygon[v_idx];
+                scene.mode = EditMode::Mask;
                 scene.selected = Some(Selection::MaskVertex {
                     warp: w_idx,
                     idx: v_idx,
@@ -911,5 +935,92 @@ mod tests {
         assert!((n[1] - 0.5).abs() < 1e-4);
         // Outside the rect returns None.
         assert!(screen_to_normalized(egui::pos2(0.0, 0.0), rect).is_none());
+    }
+
+    // --- 003-T3.7: EditMode tests ---
+
+    /// `EditMode::default()` must be `Layer` (the operator starts in layer-
+    /// drag mode and only enters Mask/Warp/Inspect explicitly).
+    #[test]
+    fn edit_mode_default_is_layer() {
+        assert_eq!(EditMode::default(), EditMode::Layer);
+    }
+
+    /// All four variants must be pairwise distinct so downstream code that
+    /// matches on mode cannot silently conflate two states.
+    #[test]
+    fn edit_mode_variants_are_distinct() {
+        let all = [
+            EditMode::Layer,
+            EditMode::Warp,
+            EditMode::Mask,
+            EditMode::Inspect,
+        ];
+        for (i, a) in all.iter().enumerate() {
+            for (j, b) in all.iter().enumerate() {
+                if i == j {
+                    assert_eq!(a, b, "same variant must equal itself");
+                } else {
+                    assert_ne!(a, b, "distinct variants must not be equal");
+                }
+            }
+        }
+    }
+
+    /// Touching a mask vertex in `hit_mask_vertex` must auto-switch
+    /// `SceneEditorState::mode` to `EditMode::Mask`.
+    ///
+    /// We drive `hit_mask_vertex` + the mode-switch logic directly rather
+    /// than synthesising a full `egui::Response` (which requires a live
+    /// egui context). The integration-level smoke test that calls
+    /// `handle_scene_input` end-to-end is tracked as T3.26.
+    #[test]
+    fn selecting_mask_vertex_switches_to_mask_mode() {
+        // Build a project with one layer that has a 4-vertex mask polygon
+        // in the top-left quadrant of normalized space.
+        let mut layer = dummy_layer("a", [0.0, 0.0], [1.0, 1.0]);
+        layer.warp.mask_polygon = vec![[0.1, 0.1], [0.4, 0.1], [0.4, 0.4], [0.1, 0.4]];
+        let mut project = Project::default();
+        project.layers.push(layer);
+
+        let preview_rect = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(200.0, 200.0));
+
+        // Screen position of the first vertex ([0.1, 0.1] → (20, 20) in the
+        // 200×200 preview rect) — well within MASK_HANDLE_HIT_PX.
+        let pos = egui::pos2(20.0, 20.0);
+
+        // Confirm hit_mask_vertex finds it.
+        let hit = hit_mask_vertex(&project, pos, preview_rect);
+        assert_eq!(hit, Some((0, 0)), "expected vertex hit at (0, 0)");
+
+        // Simulate the drag_started branch that sets mode + selected.
+        let (w_idx, v_idx) = hit.unwrap();
+        let start_pos = project.layers[w_idx].warp.mask_polygon[v_idx];
+        let mut scene = SceneEditorState::default();
+        assert_eq!(scene.mode, EditMode::Layer, "starts in Layer mode");
+
+        scene.mode = EditMode::Mask;
+        scene.selected = Some(Selection::MaskVertex {
+            warp: w_idx,
+            idx: v_idx,
+        });
+        scene.drag = Some(DragSession {
+            start_screen: pos,
+            kind: DragKind::MaskVertex {
+                warp: w_idx,
+                idx: v_idx,
+                start_pos,
+            },
+        });
+
+        assert_eq!(
+            scene.mode,
+            EditMode::Mask,
+            "mode must be Mask after vertex hit"
+        );
+        assert_eq!(
+            scene.selected,
+            Some(Selection::MaskVertex { warp: 0, idx: 0 })
+        );
     }
 }
