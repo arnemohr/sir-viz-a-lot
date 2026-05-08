@@ -1752,6 +1752,8 @@ fn handle_editing_window_event(
                 {
                     state.toast_queue.drain_expired();
                 }
+                #[cfg(feature = "v3")]
+                let mut undo_rebuild_after_render = false;
                 if let Some(ctrl) = state.control.as_mut() {
                     let result = ctrl.render(device, queue, |ui| {
                         panel_action = control_panel_show(
@@ -1761,6 +1763,40 @@ fn handle_editing_window_event(
                             &mut state.scene_editor,
                             &inputs,
                         );
+                        // 003-T1.18 follow-up — handle Cmd-Z / Cmd-Shift-Z
+                        // when the control window is focused. The output
+                        // window's KeyboardInput arm catches the same chord
+                        // when output is focused; this branch covers the
+                        // (more common) case where the operator is inside
+                        // the control panel. egui's `command` modifier is
+                        // Cmd on macOS and Ctrl on Linux/Windows.
+                        #[cfg(feature = "v3")]
+                        {
+                            let undo_intent = ui.input(|i| {
+                                if (i.modifiers.command || i.modifiers.ctrl)
+                                    && i.key_pressed(egui::Key::Z)
+                                {
+                                    Some(i.modifiers.shift)
+                                } else {
+                                    None
+                                }
+                            });
+                            if let Some(redo) = undo_intent {
+                                let outcome = if redo {
+                                    state.undo_stack.redo(&mut state.project)
+                                } else {
+                                    state.undo_stack.undo(&mut state.project)
+                                };
+                                let did = outcome.is_some();
+                                tracing::info!(did, op = if redo { "redo" } else { "undo" });
+                                if did {
+                                    tracing::info!(target: "rmap::ux", event = "undo_invoked");
+                                }
+                                if matches!(outcome, Some(true)) {
+                                    undo_rebuild_after_render = true;
+                                }
+                            }
+                        }
                         // 003-T1.42 — render the toast strip in the
                         // canvas top-right after the control panel so it
                         // overlays on top. The Area widget anchors to
@@ -1778,6 +1814,10 @@ fn handle_editing_window_event(
                     if let Err(e) = result {
                         tracing::warn!(?e, "control window render error");
                     }
+                }
+                #[cfg(feature = "v3")]
+                if undo_rebuild_after_render {
+                    rebuild_layers_for_state(state);
                 }
                 // 003-T1.18: drain Mutations emitted by the control
                 // panel's `command_*` helpers and route each through
