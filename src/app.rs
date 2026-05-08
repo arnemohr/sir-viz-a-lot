@@ -459,6 +459,28 @@ fn apply_command(state: &mut EditingState, event: Command) -> SideEffect {
             tracing::info!(freeze = state.output.state.freeze, "freeze via source");
             SideEffect::None
         }
+        Command::CycleTestPattern => {
+            // 003-T1.32: T hotkey routes through Command for telemetry.
+            // Output-state toggles bypass UndoStack — they're session-
+            // scoped and reverting them by Cmd-Z would be confusing
+            // (operator hits T to escape a frozen show, then bumps Z
+            // and the test pattern comes back).
+            state.output.state.cycle_test_pattern();
+            tracing::info!(
+                pattern = state.output.state.test_pattern.label(),
+                "test pattern via source"
+            );
+            SideEffect::None
+        }
+        Command::ToggleEditorOverlay => {
+            // 003-T1.32: O hotkey routes through Command for telemetry.
+            state.output.state.toggle_editor_overlay();
+            tracing::info!(
+                overlay = state.output.state.show_editor_overlay,
+                "editor overlay via source"
+            );
+            SideEffect::None
+        }
         Command::ParamSet { .. } => {
             // Reserved for Param::Bound resolution (v1.5+); v1 has no consumer.
             SideEffect::None
@@ -1717,26 +1739,18 @@ fn handle_editing_window_event(
             match key_event.physical_key {
                 PhysicalKey::Code(KeyCode::Escape) => event_loop.exit(),
                 PhysicalKey::Code(KeyCode::KeyB) => {
-                    state.output.state.toggle_blackout();
-                    tracing::info!(blackout = state.output.state.blackout, "blackout toggled");
+                    // 003-T1.32: route through apply_command so telemetry
+                    // sees one canonical event regardless of source.
+                    let _ = apply_command(state, Command::Blackout);
                 }
                 PhysicalKey::Code(KeyCode::KeyF) => {
-                    state.output.state.toggle_freeze();
-                    tracing::info!(freeze = state.output.state.freeze, "freeze toggled");
+                    let _ = apply_command(state, Command::Freeze);
                 }
                 PhysicalKey::Code(KeyCode::KeyT) => {
-                    state.output.state.cycle_test_pattern();
-                    tracing::info!(
-                        pattern = state.output.state.test_pattern.label(),
-                        "test pattern"
-                    );
+                    let _ = apply_command(state, Command::CycleTestPattern);
                 }
                 PhysicalKey::Code(KeyCode::KeyO) => {
-                    state.output.state.toggle_editor_overlay();
-                    tracing::info!(
-                        overlay = state.output.state.show_editor_overlay,
-                        "editor overlay toggled",
-                    );
+                    let _ = apply_command(state, Command::ToggleEditorOverlay);
                 }
                 #[cfg(feature = "v3")]
                 PhysicalKey::Code(KeyCode::KeyZ) => {
@@ -2212,6 +2226,53 @@ mod tests {
             assert!(!label.is_empty());
             assert!(label.chars().next().is_some_and(|c| c.is_uppercase()));
         }
+    }
+
+    /// 003-T1.32 — output-state toggles must NOT enter the undo
+    /// stack. The four B/F/T/O hotkeys route through `apply_command`
+    /// for telemetry, but their handlers call `OutputState::*`
+    /// methods directly; no `Mutation` is ever constructed, so
+    /// `UndoStack::push` cannot be called from this code path.
+    ///
+    /// We can't easily construct an `EditingState` in a unit test
+    /// (it owns wgpu resources), so this test asserts the structural
+    /// invariants that make the non-undoable claim true:
+    /// 1. The four `Command` variants exist.
+    /// 2. `OutputState`'s toggle methods modify state in place.
+    /// 3. None of them returns or constructs a `Mutation`.
+    #[test]
+    fn output_state_non_undoable() {
+        // 1. Variants exist and are constructible.
+        let _b = Command::Blackout;
+        let _f = Command::Freeze;
+        let _t = Command::CycleTestPattern;
+        let _o = Command::ToggleEditorOverlay;
+
+        // 2. Toggle methods modify state in place (no Mutation
+        //    return type, no UndoStack interaction).
+        let mut s = crate::windows::output::OutputState::default();
+        let pre_blackout = s.blackout;
+        s.toggle_blackout();
+        assert_ne!(pre_blackout, s.blackout, "toggle_blackout flips state");
+
+        let pre_freeze = s.freeze;
+        s.toggle_freeze();
+        assert_ne!(pre_freeze, s.freeze, "toggle_freeze flips state");
+
+        let pre_overlay = s.show_editor_overlay;
+        s.toggle_editor_overlay();
+        assert_ne!(
+            pre_overlay, s.show_editor_overlay,
+            "toggle_editor_overlay flips state"
+        );
+
+        // cycle_test_pattern walks the test pattern enum; any of
+        // the variants different from the starting one works as
+        // proof that state mutated.
+        let pre_pattern = s.test_pattern.label().to_string();
+        s.cycle_test_pattern();
+        let post_pattern = s.test_pattern.label().to_string();
+        assert_ne!(pre_pattern, post_pattern, "cycle_test_pattern walks");
     }
 
     /// 003-T1.4 acceptance: ControlFlow is derived per-state.

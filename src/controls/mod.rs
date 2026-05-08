@@ -22,7 +22,17 @@ pub enum Command {
     SceneRecall(usize),
     Blackout,
     Freeze,
-    ParamSet { binding: SourceRef, value: f32 },
+    /// 003-T1.32 — cycle the projector test pattern (T hotkey). Routed
+    /// through `apply_command` so telemetry sees one event per press
+    /// regardless of source (keyboard / future MIDI-mapped button).
+    CycleTestPattern,
+    /// 003-T1.32 — toggle the editor overlay on the output window
+    /// (O hotkey). Same telemetry rationale as `CycleTestPattern`.
+    ToggleEditorOverlay,
+    ParamSet {
+        binding: SourceRef,
+        value: f32,
+    },
 }
 
 /// A pluggable input. v1 ships [`KeyboardSource`] (T-M4-09); v1.5
