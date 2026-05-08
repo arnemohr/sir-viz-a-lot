@@ -655,7 +655,16 @@ fn rebuild_layers_for_state(state: &mut EditingState) {
     let w = state.output.config.width.max(1);
     let h = state.output.config.height.max(1);
     let fmt = state.output.config.format;
-    match rebuild_layers(device, queue, &state.project, w, h, fmt) {
+    let project_path = state.project_file_path.clone();
+    match rebuild_layers(
+        device,
+        queue,
+        &state.project,
+        project_path.as_deref(),
+        w,
+        h,
+        fmt,
+    ) {
         Ok(layers) => {
             state.layers = layers;
             state.control_panel.selected_layer = state
@@ -902,6 +911,7 @@ struct RenderGraph {
 fn init_render_graph(
     renderer: &Renderer,
     project: &Project,
+    project_path: Option<&std::path::Path>,
     output_size: (u32, u32),
     surface_format: wgpu::TextureFormat,
 ) -> Result<RenderGraph> {
@@ -923,7 +933,7 @@ fn init_render_graph(
     let gamma = GammaPipeline::new(device, surface_format);
     let overlay = OverlayPipeline::new(device, surface_format);
     let (warp_rt, warp_rt_view) = make_warp_render_target(device, w, h, surface_format);
-    let layers = rebuild_layers(device, queue, project, w, h, surface_format)?;
+    let layers = rebuild_layers(device, queue, project, project_path, w, h, surface_format)?;
 
     Ok(RenderGraph {
         svg_pipeline,
@@ -1140,6 +1150,7 @@ fn init_running_app_with_resources(
     let render_graph = init_render_graph(
         &output_bundle.renderer,
         &project,
+        project_file_path.as_deref(),
         output_size,
         surface_format,
     )?;
@@ -1815,13 +1826,24 @@ fn rebuild_layers(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     project: &Project,
+    project_path: Option<&std::path::Path>,
     width: u32,
     height: u32,
     surface_format: wgpu::TextureFormat,
 ) -> Result<Vec<LayerState>> {
     let mut out = Vec::with_capacity(project.layers.len());
     for lc in project.layers.iter() {
-        let asset_path = lc.kind.asset_path().to_path_buf();
+        // 003-T2.23 follow-up: relative asset paths must be resolved
+        // against the project file's parent dir before the file
+        // watcher / image loader / SVG worker get them. Without this
+        // the demo project (T-003-T2.8) and any portable project
+        // saved via save_portable would fail at render init with a
+        // notify "No path was found" error.
+        let stored = lc.kind.asset_path().to_path_buf();
+        let asset_path = match project_path {
+            Some(p) if stored.is_relative() => project.resolve_asset(p, &stored),
+            _ => stored,
+        };
         let mut layer = SvgLayer::pending(asset_path.clone());
         let (job_tx, result_rx) = Worker::spawn();
         let (watcher, watch_rx) = Watcher::new(std::slice::from_ref(&asset_path))?;
@@ -1844,24 +1866,28 @@ fn rebuild_layers(
                     generation,
                 });
             }
-            schema::LayerKind::Image { path, .. } => {
+            schema::LayerKind::Image { .. } => {
                 // Image path: synchronous decode + GPU upload, no worker
                 // round-trip. Failure logs and leaves the layer texture
                 // empty so the renderer's Option<&TextureView> guard
                 // skips the layer rather than crashes.
-                match crate::image_layer::upload_image_rgba8(device, queue, path) {
+                //
+                // 003-T2.23 follow-up: load via the resolved
+                // `asset_path`, not the as-stored `path`, so relative
+                // paths under a portable project work.
+                match crate::image_layer::upload_image_rgba8(device, queue, &asset_path) {
                     Ok((texture, view, dims)) => {
                         layer.set_uploaded_texture(texture, view);
                         texture_aspect = dims.0.max(1) as f32 / dims.1.max(1) as f32;
                         tracing::info!(
-                            path = %path.display(),
+                            path = %asset_path.display(),
                             width = dims.0,
                             height = dims.1,
                             "image layer loaded",
                         );
                     }
                     Err(err) => tracing::warn!(
-                        path = %path.display(),
+                        path = %asset_path.display(),
                         ?err,
                         "image layer load failed; layer will skip render",
                     ),
