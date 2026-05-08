@@ -34,9 +34,15 @@ impl ControlWindow {
         adapter: &wgpu::Adapter,
         device: &wgpu::Device,
     ) -> Result<Self, RenderError> {
+        // Offset the initial position so the control window doesn't stack
+        // directly behind the output window on macOS — they're created
+        // back-to-back from the same process and winit/macOS otherwise
+        // reuses the most-recent window's position, hiding the control
+        // window from the operator on launch.
         let attrs = WindowAttributes::default()
             .with_title("rmap control")
-            .with_inner_size(winit::dpi::LogicalSize::new(420u32, 600u32));
+            .with_inner_size(winit::dpi::LogicalSize::new(420u32, 600u32))
+            .with_position(winit::dpi::LogicalPosition::new(40.0, 40.0));
         let window = active_loop
             .create_window(attrs)
             .map_err(|e| RenderError::Surface(format!("create control window: {e}")))?;
