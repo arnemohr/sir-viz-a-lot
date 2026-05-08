@@ -60,7 +60,7 @@ Phase 1 unblocks every later phase. M1 is the gate.
 | ✅ T1.8 | Extract `init_output_window()` | RUST | M | T1.7 |
 | ✅ T1.9 | Extract `init_control_window()` | RUST | S | T1.7 |
 | ✅ T1.10 | Extract `init_inputs()` | RUST | M | T1.7 |
-| T1.11 | Extract `init_render_graph()` | RUST | M | T1.8, T1.9 |
+| ✅ T1.11 | Extract `init_render_graph()` | RUST | M | T1.8, T1.9 |
 | T1.12 | Reduce `init_running_app` to orchestrator | RUST | S | T1.7–T1.11 |
 | T1.13 | Rename `ControlEvent` → `Command` | RUST | S | T1.1 |
 | T1.14 | Reverse-storage type machinery | RUST | L (justified) | T1.13 |

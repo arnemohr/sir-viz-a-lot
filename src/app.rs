@@ -640,6 +640,64 @@ fn init_gpu() -> Result<GpuContext> {
     GpuContext::new().map_err(Into::into)
 }
 
+/// 003-T1.11: bundle of GPU resources that form the projector
+/// render graph. Produced by [`init_render_graph`]; consumed by
+/// `init_running_app` to populate `EditingState`. Bundling lets
+/// the launcher (T-003-T2.*) reuse the construction without
+/// rebuilding by hand.
+struct RenderGraph {
+    svg_pipeline: SvgLayerPipeline,
+    compositor: Compositor,
+    warps: Vec<WarpRenderer>,
+    gamma: GammaPipeline,
+    overlay: OverlayPipeline,
+    warp_rt: wgpu::Texture,
+    warp_rt_view: wgpu::TextureView,
+    layers: Vec<LayerState>,
+}
+
+/// 003-T1.11: build the per-projector render graph (compositor +
+/// warp renderers + gamma + overlay + warp-RT + per-layer GPU
+/// state). The graph depends on the output's chosen surface
+/// format and on the project's layer / warp configuration.
+fn init_render_graph(
+    renderer: &Renderer,
+    project: &Project,
+    output_size: (u32, u32),
+    surface_format: wgpu::TextureFormat,
+) -> Result<RenderGraph> {
+    let (w, h) = (output_size.0.max(1), output_size.1.max(1));
+    let device = &renderer.gpu.device;
+    let queue = &renderer.gpu.queue;
+
+    let svg_pipeline = SvgLayerPipeline::new(device, surface_format);
+    let compositor = Compositor::new(device, w, h, surface_format);
+
+    // T-M7-02: one WarpRenderer per project.warps entry. Project::load
+    // guarantees a default warp when the file omits `warps`, so this Vec
+    // is always non-empty after init.
+    let warp_count = project.warps.len().max(1);
+    let warps: Vec<WarpRenderer> = (0..warp_count)
+        .map(|_| WarpRenderer::new(device, surface_format))
+        .collect();
+
+    let gamma = GammaPipeline::new(device, surface_format);
+    let overlay = OverlayPipeline::new(device, surface_format);
+    let (warp_rt, warp_rt_view) = make_warp_render_target(device, w, h, surface_format);
+    let layers = rebuild_layers(device, queue, project, w, h, surface_format)?;
+
+    Ok(RenderGraph {
+        svg_pipeline,
+        compositor,
+        warps,
+        gamma,
+        overlay,
+        warp_rt,
+        warp_rt_view,
+        layers,
+    })
+}
+
 /// 003-T1.10: bundle of input sources owned by `EditingState`.
 /// Keyboard is always present; audio / MIDI / OSC are
 /// feature-gated and may be `None` when the cargo feature is on
@@ -828,26 +886,20 @@ fn init_running_app(
         control_panel.project_save_path = p.display().to_string();
     }
 
-    let w = output.config.width.max(1);
-    let h = output.config.height.max(1);
-    let svg_pipeline = SvgLayerPipeline::new(&renderer.gpu.device, surface_format);
-    let compositor = Compositor::new(&renderer.gpu.device, w, h, surface_format);
-    // T-M7-02: one WarpRenderer per project.warps entry. Project::load
-    // guarantees a default warp when the file omits `warps`, so this Vec
-    // is always non-empty after init.
-    let warp_count = project.warps.len().max(1);
-    let warps: Vec<WarpRenderer> = (0..warp_count)
-        .map(|_| WarpRenderer::new(&renderer.gpu.device, surface_format))
-        .collect();
-    let gamma = GammaPipeline::new(&renderer.gpu.device, surface_format);
-    let overlay = OverlayPipeline::new(&renderer.gpu.device, surface_format);
-    let (warp_rt, warp_rt_view) = make_warp_render_target(&renderer.gpu.device, w, h, surface_format);
-    let layers = rebuild_layers(
-        &renderer.gpu.device,
-        &renderer.gpu.queue,
+    // 003-T1.11: build the per-projector render graph.
+    let RenderGraph {
+        svg_pipeline,
+        compositor,
+        warps,
+        gamma,
+        overlay,
+        warp_rt,
+        warp_rt_view,
+        layers,
+    } = init_render_graph(
+        &renderer,
         &project,
-        w,
-        h,
+        (output.config.width, output.config.height),
         surface_format,
     )?;
 
