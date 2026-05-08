@@ -273,7 +273,51 @@ struct LauncherState {
     /// dropdown click handler. Threads into `Command::Launch.monitor`
     /// when the operator clicks any start button.
     selected_monitor: usize,
+    /// 003-T2.6 — in-flight 5-second projector-test session. `Some`
+    /// while the temporary output window is open + rendering the test
+    /// pattern; `None` when the launcher is idle. Drop closes the
+    /// output window and releases the sleep assertion.
+    test_session: Option<TestSession>,
+    /// 003-T2.6 — most-recent error surfaced to the operator (e.g. the
+    /// Test button couldn't open the surface, or the projects-dir
+    /// bootstrap failed). Rendered as a small red banner below the
+    /// heading until `expires_at`. Acts as a minimal "launcher toast"
+    /// without pulling in the editor's full ToastQueue infrastructure;
+    /// the editor's toast strip lands later in the show.
+    last_error: Option<(String, std::time::Instant)>,
 }
+
+/// 003-T2.6 — temporary windowed output + test-pattern renderer the
+/// launcher's "Test" button drives for 5 seconds. Lives next to the
+/// launcher window (peer winit::Window on the launcher's GPU device).
+/// Drop releases the surface, the sleep assertion, and the test
+/// pattern resources in one go.
+#[cfg(feature = "v3")]
+struct TestSession {
+    output: OutputWindow,
+    test_renderer: TestPatternRenderer,
+    started_at: std::time::Instant,
+    /// Hold the IOPMAssertion for the duration of the test so the
+    /// projector doesn't sleep mid-pattern. Same RAII shape the
+    /// editor uses (T-M2-04).
+    _sleep_assertion: SleepAssertion,
+    /// Pattern to render. Fixed to `Crosshair` for v3 — the spec
+    /// names "Crosshatch (or similar)"; Crosshair is the closest
+    /// existing variant.
+    pattern: TestPattern,
+}
+
+/// 003-T2.6 — duration of one Test-button session. 5 seconds matches
+/// the spec ("renders for 5 seconds, closes the output window").
+#[cfg(feature = "v3")]
+const TEST_SESSION_DURATION: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// 003-T2.6 — TTL for `last_error`. Five seconds matches the test
+/// session duration so a "couldn't open projector" failure stays
+/// visible long enough for the operator to read it without lingering
+/// past the next interaction.
+#[cfg(feature = "v3")]
+const LAUNCHER_ERROR_TTL: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Non-v3 build keeps the legacy zero-sized stub so the `AppState`
 /// enum still compiles unchanged on the v2 default. The `Launcher`
@@ -1382,6 +1426,8 @@ fn apply_launch_command(
         recents_open: _,
         monitors: _,
         selected_monitor: _,
+        test_session: _,
+        last_error: _,
     } = launcher;
     drop(launcher_window); // close the launcher surface before opening the editor
 
@@ -1434,6 +1480,74 @@ fn apply_launch_command(
 /// Failure here is fatal in the same sense as `init_running_app`'s
 /// render-init failure: without a GPU the app has nothing to draw,
 /// so the caller routes to `AppState::Failed` and exits.
+/// 003-T2.6 — open a temporary windowed `OutputWindow` on the chosen
+/// monitor and build the matching `TestPatternRenderer`. Returns
+/// `Err(RenderError)` for the operator-visible failure modes
+/// (surface init failure, no monitor) so the caller can convert into
+/// a `last_error` toast.
+#[cfg(feature = "v3")]
+fn start_test_session(
+    event_loop: &ActiveEventLoop,
+    gpu: &GpuContext,
+    monitor: Option<MonitorHandle>,
+) -> std::result::Result<TestSession, RenderError> {
+    let output = OutputWindow::new(
+        event_loop,
+        monitor,
+        &gpu.instance,
+        &gpu.adapter,
+        &gpu.device,
+        true, // windowed: true — the spec requires a 1280×720 window
+    )?;
+    let test_renderer = TestPatternRenderer::new(&gpu.device, output.config.format);
+    let sleep_assertion = SleepAssertion::acquire("rmap test pattern");
+    Ok(TestSession {
+        output,
+        test_renderer,
+        started_at: std::time::Instant::now(),
+        _sleep_assertion: sleep_assertion,
+        pattern: TestPattern::Crosshair,
+    })
+}
+
+/// 003-T2.6 — render one frame into the test session's surface.
+/// Mirrors the editor's render path but stripped to a single
+/// `TestPatternRenderer::render` pass on a clear-to-black background.
+/// Surface-loss outcomes follow the same recipe as `ControlWindow::render`.
+#[cfg(feature = "v3")]
+fn render_test_session(session: &mut TestSession, gpu: &GpuContext) {
+    let frame = match session.output.surface.get_current_texture() {
+        wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
+        wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
+            session
+                .output
+                .surface
+                .configure(&gpu.device, &session.output.config);
+            return;
+        }
+        wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
+            return;
+        }
+        wgpu::CurrentSurfaceTexture::Validation => {
+            tracing::error!("test session: surface acquire validation error");
+            return;
+        }
+    };
+    let view = frame
+        .texture
+        .create_view(&wgpu::TextureViewDescriptor::default());
+    let mut encoder = gpu
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("test session encoder"),
+        });
+    session
+        .test_renderer
+        .render(session.pattern, &mut encoder, &view);
+    gpu.queue.submit(std::iter::once(encoder.finish()));
+    frame.present();
+}
+
 /// 003-T2.5 — choose which projector the launcher's dropdown should
 /// preselect on first paint. Decision order:
 ///
@@ -1526,6 +1640,8 @@ fn init_launcher(event_loop: &ActiveEventLoop) -> Result<LauncherState> {
         recents_open: false,
         monitors,
         selected_monitor,
+        test_session: None,
+        last_error: None,
     })
 }
 
@@ -1557,12 +1673,20 @@ fn launcher_render(
             default_monitor_for_launcher(&state.monitors, &state.prefs, event_loop);
     }
 
+    // 003-T2.6 — drop the last_error if it's expired so the closure's
+    // banner test (read after this) sees a fresh state.
+    let now_inst = std::time::Instant::now();
+    if let Some((_, expires_at)) = state.last_error.as_ref() {
+        if now_inst >= *expires_at {
+            state.last_error = None;
+        }
+    }
+
     // Split-borrow against the LauncherState fields the egui closure
     // needs to read alongside the &mut self.launcher.render call. Rust's
     // borrow checker tracks disjoint fields, so this is safe — the
-    // closure only touches `prefs` / `recents` / `monitors` via these
-    // immutable refs and `recents_open` / `selected_monitor` via
-    // mutable refs, never via `state` directly.
+    // closure only touches each field via its dedicated reference,
+    // never via `state` directly.
     let device = &state.gpu.device;
     let queue = &state.gpu.queue;
     let prefs = &state.prefs;
@@ -1570,6 +1694,9 @@ fn launcher_render(
     let recents_open = &mut state.recents_open;
     let monitors = &state.monitors;
     let selected_monitor = &mut state.selected_monitor;
+    let test_session_active = state.test_session.is_some();
+    let mut test_session_request = false;
+    let last_error_label = state.last_error.as_ref();
     let mut action: Option<LauncherAction> = None;
     // Snapshot `now` once outside the closure so each entry's relative
     // date reads consistently within a single frame.
@@ -1699,13 +1826,36 @@ fn launcher_render(
                 } else {
                     let current_idx = (*selected_monitor).min(monitors.len() - 1);
                     let current_name = monitors[current_idx].name.as_str();
-                    egui::ComboBox::from_label("Projector")
-                        .selected_text(current_name)
-                        .show_ui(center_ui, |combo| {
-                            for (idx, m) in monitors.iter().enumerate() {
-                                combo.selectable_value(selected_monitor, idx, &m.name);
-                            }
-                        });
+                    center_ui.horizontal(|row| {
+                        egui::ComboBox::from_label("Projector")
+                            .selected_text(current_name)
+                            .show_ui(row, |combo| {
+                                for (idx, m) in monitors.iter().enumerate() {
+                                    combo.selectable_value(selected_monitor, idx, &m.name);
+                                }
+                            });
+                        // 003-T2.6 — Test button. Opens a 1280×720
+                        // windowed OutputWindow on the chosen monitor
+                        // for 5 seconds rendering TestPattern::Crosshair.
+                        // The button is disabled while a test session
+                        // is already active so a double-click doesn't
+                        // try to open two surfaces at once.
+                        let test_active = test_session_active;
+                        let test_label = if test_active { "Testing…" } else { "Test" };
+                        if row
+                            .add_enabled(!test_active, egui::Button::new(test_label))
+                            .clicked()
+                        {
+                            test_session_request = true;
+                        }
+                    });
+                }
+
+                // 003-T2.6 — error banner. Renders below the dropdown
+                // when the most-recent failure is still within its TTL.
+                if let Some((msg, _)) = last_error_label {
+                    center_ui.add_space(10.0);
+                    center_ui.colored_label(egui::Color32::from_rgb(220, 80, 80), msg.as_str());
                 }
             });
         });
@@ -1713,7 +1863,62 @@ fn launcher_render(
     if let Err(err) = render_result {
         tracing::error!(?err, "launcher render frame failed");
     }
+
+    // 003-T2.6 — open the test session if the button was clicked
+    // this frame. Done after the render closure returns so we don't
+    // hold the egui borrow while creating a sibling winit Window.
+    if test_session_request {
+        launch_test_session(state, event_loop);
+    }
+
     action
+}
+
+/// 003-T2.6 — pump the test session: tear it down once 5s have
+/// elapsed, otherwise request another redraw. Called from
+/// `about_to_wait` so the temporary output window keeps painting
+/// even though the launcher's `ControlFlow::Wait` would otherwise
+/// suppress redraws.
+#[cfg(feature = "v3")]
+fn pump_test_session(state: &mut LauncherState) {
+    let Some(session) = state.test_session.as_ref() else {
+        return;
+    };
+    if session.started_at.elapsed() >= TEST_SESSION_DURATION {
+        tracing::info!("test pattern session expired; closing window");
+        state.test_session = None;
+        return;
+    }
+    session.output.window.request_redraw();
+}
+
+/// 003-T2.6 — try to open a test session in response to a button
+/// click. Failures (surface init, no monitor reported) flow through
+/// `last_error` so the launcher renders a small red banner.
+#[cfg(feature = "v3")]
+fn launch_test_session(state: &mut LauncherState, event_loop: &ActiveEventLoop) {
+    if state.test_session.is_some() {
+        return;
+    }
+    let monitor = event_loop.available_monitors().nth(state.selected_monitor);
+    match start_test_session(event_loop, &state.gpu, monitor) {
+        Ok(session) => {
+            tracing::info!(
+                target: "rmap::ux",
+                event = "test_pattern_started",
+                monitor = state.selected_monitor,
+            );
+            session.output.window.request_redraw();
+            state.test_session = Some(session);
+        }
+        Err(err) => {
+            tracing::error!(?err, "couldn't open test pattern surface");
+            state.last_error = Some((
+                format!("Couldn't open the test pattern: {err}"),
+                std::time::Instant::now() + LAUNCHER_ERROR_TTL,
+            ));
+        }
+    }
 }
 
 /// 003-T2.2: dispatch a winit window event to the launcher window.
@@ -1733,6 +1938,31 @@ fn handle_launcher_window_event(
     window_id: WindowId,
     event: WindowEvent,
 ) -> Option<LauncherAction> {
+    // 003-T2.6 — events for the temporary test-pattern output window.
+    // CloseRequested closes the test session without exiting the app;
+    // Resized reconfigures the test surface; RedrawRequested paints
+    // one frame of the test pattern.
+    if let Some(session) = state.test_session.as_mut() {
+        if session.output.window.id() == window_id {
+            match event {
+                WindowEvent::CloseRequested => {
+                    state.test_session = None;
+                }
+                WindowEvent::Resized(new_size) => {
+                    let cfg = &mut session.output.config;
+                    cfg.width = new_size.width.max(1);
+                    cfg.height = new_size.height.max(1);
+                    session.output.surface.configure(&state.gpu.device, cfg);
+                }
+                WindowEvent::RedrawRequested => {
+                    render_test_session(session, &state.gpu);
+                }
+                _ => {}
+            }
+            return None;
+        }
+    }
+
     if window_id != state.launcher.id() {
         return None;
     }
@@ -3137,6 +3367,21 @@ impl ApplicationHandler for App {
         // automatically; no explicit set_control_flow call elsewhere
         // needed.
         event_loop.set_control_flow(self.state.control_flow());
+
+        // 003-T2.6 — pump the launcher's test session if one is open:
+        // tear it down once 5s have elapsed, otherwise request another
+        // redraw on the test window. While a session is active we
+        // override ControlFlow to Poll so the deadline check runs every
+        // loop tick — Wait would suppress wakeups until a user event,
+        // and the session's lifetime is wall-clock-driven.
+        #[cfg(feature = "v3")]
+        if let AppState::Launcher(state) = &mut self.state {
+            pump_test_session(state);
+            if state.test_session.is_some() {
+                event_loop.set_control_flow(ControlFlow::Poll);
+                state.launcher.request_redraw();
+            }
+        }
 
         if let Some(state) = self.state.editing_mut() {
             state.output.window.request_redraw();
