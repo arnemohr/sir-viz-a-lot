@@ -40,6 +40,9 @@ const HDR_BLEND_MODE: &str = "adv_blend_mode";
 const HDR_MAPPING: &str = "adv_mapping";
 const HDR_PROJECT: &str = "adv_project";
 const HDR_DIAGNOSTICS: &str = "adv_diagnostics";
+// 003-T3.28 — per-display tone override section. Sits between Master and the
+// per-layer block so the operator's mental model is "global → display → layer".
+const HDR_DISPLAY_OUTPUT: &str = "adv_display_output";
 
 /// Render the Advanced panel body. Called from `control_panel::show` when
 /// `st.advanced_open` is `true`, inside a `SidePanel::right("rmap_advanced")`.
@@ -96,6 +99,26 @@ pub fn show(
                         st.pending_mutations
                             .push(project.set_contrast_mutation(new));
                     }
+                });
+
+            ui.add_space(4.0);
+
+            // ----------------------------------------------------------------
+            // 1b. Display output (T3.28) — per-projector gamma/brightness/
+            //     contrast overrides. Sliders are only enabled when the
+            //     "Override" checkbox is on; clearing the checkbox writes
+            //     `None` and the projector inherits master.
+            // ----------------------------------------------------------------
+            egui::CollapsingHeader::new("Display output")
+                .id_salt(HDR_DISPLAY_OUTPUT)
+                .default_open(false)
+                .show(ui, |ui| {
+                    glossary_label(ui, GlossaryTerm::DisplayOverride);
+                    ui.label(
+                        "Override the master tone for the projector only. The \
+                         control-window preview always shows the pre-gamma image.",
+                    );
+                    show_display_overrides(ui, project, st);
                 });
 
             ui.add_space(4.0);
@@ -424,6 +447,85 @@ fn show_layer_mapping(
 }
 
 // ---------------------------------------------------------------------------
+// Display output sub-section body (T3.28)
+// ---------------------------------------------------------------------------
+/// Render the three override rows. Each row is a checkbox + slider pair:
+/// the checkbox toggles `Some(master) ↔ None`; the slider is only
+/// interactive when the override is `Some`. Both edits route through the
+/// matching `set_project_*_override_mutation` so undo is byte-equal.
+fn show_display_overrides(ui: &mut Ui, project: &mut Project, st: &mut ControlPanelState) {
+    if let Some(new) = override_row(
+        ui,
+        "Gamma",
+        "adv_display_gamma",
+        project.gamma,
+        project.gamma_override,
+        0.2..=4.0,
+    ) {
+        st.pending_mutations
+            .push(project.set_project_gamma_override_mutation(new));
+    }
+    if let Some(new) = override_row(
+        ui,
+        "Brightness",
+        "adv_display_brightness",
+        project.brightness,
+        project.brightness_override,
+        -1.0..=1.0,
+    ) {
+        st.pending_mutations
+            .push(project.set_project_brightness_override_mutation(new));
+    }
+    if let Some(new) = override_row(
+        ui,
+        "Contrast",
+        "adv_display_contrast",
+        project.contrast,
+        project.contrast_override,
+        0.0..=4.0,
+    ) {
+        st.pending_mutations
+            .push(project.set_project_contrast_override_mutation(new));
+    }
+}
+
+/// Render one checkbox + slider row. Returns `Some(new_override)` only
+/// when the user actually changed something this frame:
+///   * checkbox flip on  → `Some(Some(master))` (capture current master).
+///   * checkbox flip off → `Some(None)`.
+///   * slider drag while enabled → `Some(Some(new_value))`.
+fn override_row(
+    ui: &mut Ui,
+    label: &str,
+    id: &str,
+    master: f32,
+    override_value: Option<f32>,
+    range: std::ops::RangeInclusive<f32>,
+) -> Option<Option<f32>> {
+    let pre_enabled = override_value.is_some();
+    let mut enabled = pre_enabled;
+    let mut current = override_value.unwrap_or(master);
+    let mut staged: Option<Option<f32>> = None;
+
+    ui.horizontal(|ui| {
+        if ui.checkbox(&mut enabled, label).changed() {
+            staged = Some(if enabled { Some(master) } else { None });
+        }
+        // `push_id` scopes the slider's auto-generated id to a stable
+        // string so toggling the checkbox doesn't relocate the widget
+        // and reset its drag state.
+        ui.push_id(id, |ui| {
+            let resp = ui.add_enabled(pre_enabled, egui::Slider::new(&mut current, range));
+            if resp.drag_stopped() && pre_enabled {
+                staged = Some(Some(current));
+            }
+        });
+    });
+
+    staged
+}
+
+// ---------------------------------------------------------------------------
 // Project sub-section body (T3.11)
 // ---------------------------------------------------------------------------
 fn show_project_section(ui: &mut Ui, project: &mut Project, st: &mut ControlPanelState) {
@@ -501,5 +603,6 @@ mod tests {
         assert_eq!(HDR_MAPPING, "adv_mapping");
         assert_eq!(HDR_PROJECT, "adv_project");
         assert_eq!(HDR_DIAGNOSTICS, "adv_diagnostics");
+        assert_eq!(HDR_DISPLAY_OUTPUT, "adv_display_output");
     }
 }

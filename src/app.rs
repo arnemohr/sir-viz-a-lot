@@ -505,6 +505,9 @@ struct ActiveCrossfade {
     to: serde_json::Value,
     started_at: std::time::Instant,
     duration_s: f32,
+    /// 003-T4.4 — zero-based index of the target scene slot, used by the
+    /// cue strip to paint the crossfade progress bar on the correct tile.
+    target_scene_idx: usize,
 }
 
 /// Outcome from scheduling a scene recall: did the live `Project` mutate
@@ -575,6 +578,7 @@ fn schedule_scene_recall(state: &mut EditingState, slot: usize) -> RecallOutcome
             to: target,
             started_at: std::time::Instant::now(),
             duration_s: dur,
+            target_scene_idx: slot,
         });
         tracing::info!(slot, duration_s = dur, "scene crossfade scheduled");
         RecallOutcome::Scheduled
@@ -800,6 +804,31 @@ fn apply_command(state: &mut EditingState, event: Command) -> SideEffect {
             // editor will re-run the file-watcher / image-loader path
             // on the new path.
             SideEffect::RebuildLayers
+        }
+        // 003-T4.3 — operator clicked "+" in the cue strip: save current
+        // project state as a new scene slot with a placeholder thumbnail.
+        // Routes through `set_project_scenes_mutation` so Cmd-Z removes
+        // the new slot cleanly.
+        #[cfg(feature = "v3")]
+        Command::SceneSave => {
+            let snapshot = crate::project::snapshot(&state.project);
+            let name = format!("Cue {}", state.project.scenes.len() + 1);
+            let thumbnail = crate::windows::cue_strip::placeholder_thumbnail_for_name(&name);
+            let mut new_scenes = state.project.scenes.clone();
+            new_scenes.push(crate::project::schema::Scene {
+                name,
+                snapshot,
+                thumbnail: Some(thumbnail),
+            });
+            let mutation = state.project.set_project_scenes_mutation(new_scenes);
+            state.undo_stack.push(mutation, &mut state.project);
+            state.dirty = true;
+            tracing::info!(
+                target: "rmap::ux",
+                event = "scene_save",
+                slot = state.project.scenes.len().saturating_sub(1),
+            );
+            SideEffect::None
         }
     }
 }
@@ -2939,6 +2968,14 @@ fn handle_editing_window_event(
                         .to_string(),
                     #[cfg(feature = "v3")]
                     dirty: state.dirty,
+                    // 003-T4.4: crossfade progress for the cue strip indicator.
+                    // Compute progress from the in-flight fade; `None` when idle.
+                    #[cfg(feature = "v3")]
+                    crossfade_progress: state.crossfade.as_ref().map(|cf| {
+                        let elapsed = cf.started_at.elapsed().as_secs_f32();
+                        let t = (elapsed / cf.duration_s.max(1e-3)).clamp(0.0, 1.0);
+                        (cf.target_scene_idx, t)
+                    }),
                 };
                 // 003-T1.42 follow-up: drain expired toasts once per frame
                 // before render. Sticky Error toasts survive; auto-expiring

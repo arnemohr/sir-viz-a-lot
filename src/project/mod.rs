@@ -364,6 +364,7 @@ mod tests {
         original.scenes.push(Scene {
             name: "intro".into(),
             snapshot: serde_json::json!({"k": 1}),
+            thumbnail: None,
         });
         original.gamma = 1.8;
         original.background_color = [0.1, 0.2, 0.3, 1.0];
@@ -402,6 +403,7 @@ mod tests {
         p.scenes.push(Scene {
             name: "slot1".into(),
             snapshot: serde_json::json!({}),
+            thumbnail: None,
         });
         p.gamma = 2.2;
         p.brightness = 0.1;
@@ -450,6 +452,7 @@ mod tests {
         p.scenes.push(Scene {
             name: "1".into(),
             snapshot: serde_json::json!({}),
+            thumbnail: None,
         });
         p.scenes[0].snapshot = snapshot(&p);
 
@@ -460,6 +463,7 @@ mod tests {
         p.scenes.push(Scene {
             name: "2".into(),
             snapshot: serde_json::json!({}),
+            thumbnail: None,
         });
         p.scenes[1].snapshot = snapshot(&p);
 
@@ -502,6 +506,7 @@ mod tests {
         p.scenes.push(Scene {
             name: "1".into(),
             snapshot: serde_json::json!({}),
+            thumbnail: None,
         });
         p.scenes[0].snapshot = snapshot(&p);
         // Modify + save slot 1
@@ -511,6 +516,7 @@ mod tests {
         p.scenes.push(Scene {
             name: "2".into(),
             snapshot: serde_json::json!({}),
+            thumbnail: None,
         });
         p.scenes[1].snapshot = snapshot(&p);
         let slot1_saved = p.scenes[1].snapshot.clone();
@@ -785,6 +791,7 @@ mod tests {
                 new_scenes.push(Scene {
                     name: format!("scene{}", new_scenes.len() + 1),
                     snapshot: serde_json::json!({}),
+                    thumbnail: None,
                 });
             }
             new_scenes[0].snapshot = snap;

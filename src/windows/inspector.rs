@@ -132,8 +132,9 @@ fn show_layer(
 
     ui.separator();
 
-    // ---- Mapping sub-section ----
-    ui.strong("Mapping");
+    // ---- Placement / Warp sub-section (003-T3.29 — warp is the layer's
+    // placement on the projector under v5; the heading reflects that).
+    ui.strong("Placement / Warp");
     let warp = &project.layers[idx].warp;
     ui.label(format!("{}×{} grid", warp.rows, warp.cols));
     ui.label(format!("mask vertices: {}", warp.mask_polygon.len()));

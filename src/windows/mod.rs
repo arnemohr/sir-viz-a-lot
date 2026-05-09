@@ -6,6 +6,8 @@ pub mod advanced;
 pub mod control;
 pub mod control_panel;
 #[cfg(feature = "v3")]
+pub mod cue_strip;
+#[cfg(feature = "v3")]
 pub mod file_dialogs;
 #[cfg(feature = "v3")]
 pub mod glossary;
@@ -21,6 +23,7 @@ pub mod primitives;
 pub mod scene_editor;
 #[cfg(feature = "v3")]
 pub mod show_day_strip;
+pub mod theme;
 #[cfg(feature = "v3")]
 pub mod toast;
 #[cfg(feature = "v3")]

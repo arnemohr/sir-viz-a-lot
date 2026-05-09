@@ -84,6 +84,12 @@ pub enum Command {
     /// `project_file_path` is updated, and the dirty flag is cleared.
     #[cfg(feature = "v3")]
     OpenSaveAsPicker,
+    /// 003-T4.3 — operator clicked the "+" tile in the cue strip, requesting
+    /// that the current project state be saved as a new scene slot. The handler
+    /// in `apply_command` captures a thumbnail placeholder and pushes a
+    /// `Mutation::SetProjectScenes` through the undo stack.
+    #[cfg(feature = "v3")]
+    SceneSave,
 }
 
 /// A pluggable input. v1 ships [`KeyboardSource`] (T-M4-09); v1.5

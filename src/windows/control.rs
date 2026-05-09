@@ -80,6 +80,7 @@ impl ControlWindow {
         surface.configure(device, &config);
 
         let egui_ctx = egui::Context::default();
+        crate::windows::theme::install(&egui_ctx);
         let viewport_id = egui_ctx.viewport_id();
         let egui_state = egui_winit::State::new(
             egui_ctx.clone(),

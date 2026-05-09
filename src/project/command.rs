@@ -183,6 +183,31 @@ pub enum Mutation {
         /// Pre-mutation value.
         old: f32,
     },
+    /// 003-T3.28 — replace `Project.gamma_override`. `None` ⇒ inherit
+    /// master gamma; `Some(v)` ⇒ projector uses `v`. Whole-`Option`
+    /// Reverse so a `Some → None → Some` toggle round-trips byte-equally.
+    SetProjectGammaOverride {
+        /// Value to write (`None` clears the override).
+        new: Option<f32>,
+        /// Pre-mutation value.
+        old: Option<f32>,
+    },
+    /// 003-T3.28 — replace `Project.brightness_override`. See
+    /// `SetProjectGammaOverride`.
+    SetProjectBrightnessOverride {
+        /// Value to write.
+        new: Option<f32>,
+        /// Pre-mutation value.
+        old: Option<f32>,
+    },
+    /// 003-T3.28 — replace `Project.contrast_override`. See
+    /// `SetProjectGammaOverride`.
+    SetProjectContrastOverride {
+        /// Value to write.
+        new: Option<f32>,
+        /// Pre-mutation value.
+        old: Option<f32>,
+    },
     /// Replace `Project.output_windowed`. Boolean toggle.
     SetOutputWindowed {
         /// Value to write.
@@ -491,6 +516,36 @@ impl Mutation {
                 );
                 project.crossfade_duration_s = new;
                 Mutation::SetCrossfadeDurationS { new: old, old: new }
+            }
+            Mutation::SetProjectGammaOverride { new, old } => {
+                debug_assert!(
+                    project.gamma_override == old,
+                    "SetProjectGammaOverride stale Reverse: project.gamma_override={:?}, expected old={:?}",
+                    project.gamma_override,
+                    old
+                );
+                project.gamma_override = new;
+                Mutation::SetProjectGammaOverride { new: old, old: new }
+            }
+            Mutation::SetProjectBrightnessOverride { new, old } => {
+                debug_assert!(
+                    project.brightness_override == old,
+                    "SetProjectBrightnessOverride stale Reverse: project.brightness_override={:?}, expected old={:?}",
+                    project.brightness_override,
+                    old
+                );
+                project.brightness_override = new;
+                Mutation::SetProjectBrightnessOverride { new: old, old: new }
+            }
+            Mutation::SetProjectContrastOverride { new, old } => {
+                debug_assert!(
+                    project.contrast_override == old,
+                    "SetProjectContrastOverride stale Reverse: project.contrast_override={:?}, expected old={:?}",
+                    project.contrast_override,
+                    old
+                );
+                project.contrast_override = new;
+                Mutation::SetProjectContrastOverride { new: old, old: new }
             }
             Mutation::SetOutputWindowed { new, old } => {
                 debug_assert!(
@@ -990,6 +1045,9 @@ impl Mutation {
             | Mutation::SetLayerWarpCorner { .. }
             | Mutation::SetProjectScenes { .. }
             | Mutation::SetOutputMonitorIndex { .. }
+            | Mutation::SetProjectGammaOverride { .. }
+            | Mutation::SetProjectBrightnessOverride { .. }
+            | Mutation::SetProjectContrastOverride { .. }
             | Mutation::RelinkAssetPath { .. } => false,
             Mutation::ApplyProjectSnapshot { non_undoable, .. } => *non_undoable,
         }
@@ -1060,6 +1118,30 @@ impl Project {
         Mutation::SetCrossfadeDurationS {
             new,
             old: self.crossfade_duration_s,
+        }
+    }
+
+    /// 003-T3.28 — build a `SetProjectGammaOverride` mutation.
+    pub fn set_project_gamma_override_mutation(&self, new: Option<f32>) -> Mutation {
+        Mutation::SetProjectGammaOverride {
+            new,
+            old: self.gamma_override,
+        }
+    }
+
+    /// 003-T3.28 — build a `SetProjectBrightnessOverride` mutation.
+    pub fn set_project_brightness_override_mutation(&self, new: Option<f32>) -> Mutation {
+        Mutation::SetProjectBrightnessOverride {
+            new,
+            old: self.brightness_override,
+        }
+    }
+
+    /// 003-T3.28 — build a `SetProjectContrastOverride` mutation.
+    pub fn set_project_contrast_override_mutation(&self, new: Option<f32>) -> Mutation {
+        Mutation::SetProjectContrastOverride {
+            new,
+            old: self.contrast_override,
         }
     }
 
@@ -1355,6 +1437,52 @@ mod tests {
         assert_eq!(before, after, "round-trip should be byte-equal");
     }
 
+    /// 003-T3.28 — Apply/Reverse on the per-display tone overrides round-
+    /// trips through every transition the operator exercises:
+    ///   None → Some(v) → None  (toggle on then off)
+    ///   Some(a) → Some(b)      (drag slider while enabled)
+    /// Only one variant is asserted explicitly; brightness/contrast share
+    /// the same shape and are covered by `arb_mutation_kind` in proptest.
+    #[test]
+    fn set_project_gamma_override_round_trips() {
+        let mut p = fresh_project();
+
+        // None → Some(2.5)
+        let m = p.set_project_gamma_override_mutation(Some(2.5));
+        let reverse = m.apply(&mut p);
+        assert_eq!(p.gamma_override, Some(2.5));
+
+        // Reverse: Some(2.5) → None
+        let _ = reverse.apply(&mut p);
+        assert_eq!(p.gamma_override, None);
+
+        // Some(a) → Some(b) chain
+        p.gamma_override = Some(1.2);
+        let m = p.set_project_gamma_override_mutation(Some(3.4));
+        let reverse = m.apply(&mut p);
+        assert_eq!(p.gamma_override, Some(3.4));
+        let _ = reverse.apply(&mut p);
+        assert_eq!(p.gamma_override, Some(1.2));
+    }
+
+    /// 003-T3.28 — overrides are user-driven and Cmd-Z reversible.
+    #[test]
+    fn project_overrides_are_undoable() {
+        let p = fresh_project();
+        assert!(
+            !p.set_project_gamma_override_mutation(Some(2.0))
+                .is_non_undoable()
+        );
+        assert!(
+            !p.set_project_brightness_override_mutation(Some(0.1))
+                .is_non_undoable()
+        );
+        assert!(
+            !p.set_project_contrast_override_mutation(None)
+                .is_non_undoable()
+        );
+    }
+
     /// 003-T2.24 — `RelinkAssetPath` round-trip restores the original
     /// asset path byte-equal when applied + reversed. The fresh
     /// project's seeded layer is `LayerKind::Svg { svg_path: ... }`
@@ -1543,6 +1671,7 @@ mod tests {
         new_scenes.push(crate::project::schema::Scene {
             name: "scene1".into(),
             snapshot: crate::project::snapshot(&p),
+            thumbnail: None,
         });
         stack.push(p.set_project_scenes_mutation(new_scenes), &mut p);
 
@@ -1701,6 +1830,12 @@ mod tests {
                 x: f32,
                 y: f32,
             },
+            /// T3.28 — set per-display gamma override (`None` to clear).
+            ProjectGammaOverride(Option<f32>),
+            /// T3.28 — set per-display brightness override.
+            ProjectBrightnessOverride(Option<f32>),
+            /// T3.28 — set per-display contrast override.
+            ProjectContrastOverride(Option<f32>),
         }
 
         fn to_mutation(kind: &MutationKind, project: &Project) -> Mutation {
@@ -1982,6 +2117,16 @@ mod tests {
                         }
                     }
                 }
+                // T3.28 — per-display tone overrides.
+                MutationKind::ProjectGammaOverride(v) => {
+                    project.set_project_gamma_override_mutation(*v)
+                }
+                MutationKind::ProjectBrightnessOverride(v) => {
+                    project.set_project_brightness_override_mutation(*v)
+                }
+                MutationKind::ProjectContrastOverride(v) => {
+                    project.set_project_contrast_override_mutation(*v)
+                }
             }
         }
 
@@ -2124,6 +2269,15 @@ mod tests {
                         y,
                     },
                 ),
+                // T3.28 — per-display tone overrides; cover both Some/None
+                // arms so the whole-Option Reverse round-trips through the
+                // toggle states an operator actually exercises.
+                proptest::option::weighted(0.5, 0.2_f32..=4.0)
+                    .prop_map(MutationKind::ProjectGammaOverride),
+                proptest::option::weighted(0.5, -1.0_f32..=1.0)
+                    .prop_map(MutationKind::ProjectBrightnessOverride),
+                proptest::option::weighted(0.5, 0.0_f32..=4.0)
+                    .prop_map(MutationKind::ProjectContrastOverride),
             ]
         }
 

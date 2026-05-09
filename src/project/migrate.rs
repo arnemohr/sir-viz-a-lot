@@ -36,12 +36,15 @@ pub fn migrate(mut value: Value) -> Result<(Value, MigrationOutcome), ProjectErr
         // layer's new `warp` field. `Project.warps` is preserved during
         // T3.0a so the renderer + audit + mutations keep compiling; T3.0b
         // deletes it once the render graph reads per-layer warps.
-        0 | 1 | 2 | 3 => {
+        0 | 1 | 2 | 3 | 4 => {
             if version <= 2 {
                 migrate_v2_to_v3_layers(&mut value);
             }
             if version <= 3 {
                 migrate_v3_to_v4_per_layer_warp(&mut value, &mut outcome);
+            }
+            if version <= 4 {
+                migrate_v4_to_v5_warp_as_placement(&mut value);
             }
             value["schema_version"] = serde_json::json!(CURRENT_SCHEMA_VERSION);
             Ok((value, outcome))
@@ -111,6 +114,206 @@ fn default_identity_warp() -> Value {
         "mask_polygon": [],
         "mask_feather": 0.02,
     })
+}
+
+/// 003-T3.29 — migrate v4 projects to the warp-as-placement model.
+///
+/// Pre-v5: warp grid corners were in projector [0, 1]² space and the
+/// layer's `Effect::Transform` did the placement. New layers default
+/// to a full-canvas warp (corners at the projector edges) and the
+/// operator sized them via the Transform effect — leaving the warp
+/// handles disconnected from the visible layer.
+///
+/// Post-v5: the warp grid IS the layer's placement on the projector.
+/// New layers default to a half-size centered quad. Existing v4
+/// projects migrate by reading each layer's first `Effect::Transform`
+/// and synthesising warp corners that reproduce the same on-screen
+/// quad, then resetting the Transform's `translate`/`scale_*` to
+/// identity. `rotate_deg` is preserved on the Transform because
+/// rotating the warp's four corners introduces a small visual delta
+/// (the corners rotate but the layer image inside still rotates via
+/// the Transform); leaving rotate alone keeps the migration visually
+/// stable.
+///
+/// Three cases (per the T3.29 spec):
+///   1. Identity grid + non-identity translate / scale (all-static
+///      modulators) → synthesise corners; reset translate / scale.
+///   2. Identity grid + identity translate / scale → replace grid
+///      with the half-size centered default so the operator sees
+///      the new model immediately.
+///   3. Non-identity grid OR animated translate / scale → leave
+///      unchanged. Either the operator authored a custom warp
+///      already, or the layer is animation-driven; either way we
+///      don't second-guess.
+fn migrate_v4_to_v5_warp_as_placement(value: &mut Value) {
+    let Some(layers) = value
+        .as_object_mut()
+        .and_then(|o| o.get_mut("layers"))
+        .and_then(|v| v.as_array_mut())
+    else {
+        return;
+    };
+
+    for layer in layers.iter_mut() {
+        let Some(layer_obj) = layer.as_object_mut() else {
+            continue;
+        };
+        if !warp_grid_is_full_canvas(layer_obj.get("warp")) {
+            continue;
+        }
+
+        let placement = read_static_transform_placement(layer_obj.get("effects"));
+        let new_grid = match placement {
+            // Case 1: scaled / translated → synthesise from the placement.
+            Some(p) if !p.is_identity() => placement_to_grid(p),
+            // Case 2: identity transform → centered half-size default.
+            _ => default_placement_grid(),
+        };
+
+        if let Some(warp_obj) = layer_obj.get_mut("warp").and_then(|v| v.as_object_mut()) {
+            warp_obj.insert("grid".into(), new_grid);
+        }
+
+        // Reset translate + scale on the first static Effect::Transform.
+        // Only when we actually consumed a placement (case 1) — case 2
+        // leaves Transform alone (it was already identity).
+        if matches!(placement, Some(p) if !p.is_identity()) {
+            reset_transform_placement(layer_obj.get_mut("effects"));
+        }
+    }
+}
+
+/// `true` when the warp's grid is the full-canvas identity quad
+/// `[[0,0],[1,0]],[[0,1],[1,1]]`. We tolerate float jitter at 1e-4
+/// because v3 → v4 wrote integer corners.
+fn warp_grid_is_full_canvas(warp: Option<&Value>) -> bool {
+    let Some(grid) = warp.and_then(|w| w.get("grid")).and_then(|g| g.as_array()) else {
+        return false;
+    };
+    if grid.len() != 2 {
+        return false;
+    }
+    let expected: [[(f64, f64); 2]; 2] = [[(0.0, 0.0), (1.0, 0.0)], [(0.0, 1.0), (1.0, 1.0)]];
+    for (r, row) in grid.iter().enumerate() {
+        let Some(row_arr) = row.as_array() else {
+            return false;
+        };
+        if row_arr.len() != 2 {
+            return false;
+        }
+        for (c, vert) in row_arr.iter().enumerate() {
+            let Some(arr) = vert.as_array() else {
+                return false;
+            };
+            if arr.len() != 2 {
+                return false;
+            }
+            let x = arr[0].as_f64().unwrap_or(f64::NAN);
+            let y = arr[1].as_f64().unwrap_or(f64::NAN);
+            let (ex, ey) = expected[r][c];
+            if (x - ex).abs() > 1e-4 || (y - ey).abs() > 1e-4 {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// Static placement read off the first `Effect::Transform` in a layer's
+/// effects array. `None` when the effect is absent or any modulator is
+/// non-static (animation case — leave alone per the T3.29 spec).
+#[derive(Clone, Copy)]
+struct StaticPlacement {
+    translate: [f32; 2],
+    scale_x: f32,
+    scale_y: f32,
+}
+
+impl StaticPlacement {
+    fn is_identity(&self) -> bool {
+        self.translate[0].abs() < 1e-6
+            && self.translate[1].abs() < 1e-6
+            && (self.scale_x - 1.0).abs() < 1e-6
+            && (self.scale_y - 1.0).abs() < 1e-6
+    }
+}
+
+fn read_static_transform_placement(effects: Option<&Value>) -> Option<StaticPlacement> {
+    let effects = effects?.as_array()?;
+    for eff in effects {
+        let Some(t) = eff.get("Transform") else {
+            continue;
+        };
+        // translate is `[f32; 2]` (not a Modulator) — read directly.
+        let translate = t
+            .get("translate")
+            .and_then(|v| v.as_array())
+            .and_then(|a| Some([a.first()?.as_f64()? as f32, a.get(1)?.as_f64()? as f32]))?;
+        // scale_x / scale_y are Modulator enums; we only handle Static.
+        let scale_x = static_modulator_value(t.get("scale_x"))?;
+        let scale_y = static_modulator_value(t.get("scale_y"))?;
+        return Some(StaticPlacement {
+            translate,
+            scale_x,
+            scale_y,
+        });
+    }
+    None
+}
+
+/// Read a `Static` modulator's f32 value. Returns `None` for any
+/// non-Static variant so the migration falls through to "leave alone."
+fn static_modulator_value(m: Option<&Value>) -> Option<f32> {
+    let m = m?;
+    // Modulator serializes as `{ "Static": <f32> }`. Other variants
+    // serialize with their own keys (e.g. `{ "Sine": { … } }`).
+    let s = m.get("Static")?;
+    Some(s.as_f64()? as f32)
+}
+
+/// Convert `Effect::Transform`'s placement to a 2×2 warp grid.
+/// `translate` is in the schema convention `[-1, 1]` (±1 = full screen
+/// width/height); the layer's resulting bounding box in projector
+/// `[0, 1]²` coords is `(0.5 + tx*0.5 ± 0.5*scale_x, 0.5 + ty*0.5 ±
+/// 0.5*scale_y)`.
+fn placement_to_grid(p: StaticPlacement) -> Value {
+    let cx = 0.5 + p.translate[0] * 0.5;
+    let cy = 0.5 + p.translate[1] * 0.5;
+    let half_w = 0.5 * p.scale_x;
+    let half_h = 0.5 * p.scale_y;
+    let l = cx - half_w;
+    let r = cx + half_w;
+    let t = cy - half_h;
+    let b = cy + half_h;
+    serde_json::json!([[[l, t], [r, t]], [[l, b], [r, b]],])
+}
+
+/// JSON form of `WarpMesh::default_placement().grid` — half-size
+/// centered quad used for case 2 of the migration.
+fn default_placement_grid() -> Value {
+    serde_json::json!([[[0.25, 0.25], [0.75, 0.25]], [[0.25, 0.75], [0.75, 0.75]],])
+}
+
+/// Reset the first `Effect::Transform`'s `translate` to `[0, 0]` and
+/// `scale_x` / `scale_y` to `Static(1.0)`. `rotate_deg` is preserved.
+/// No-op when no Transform effect is present or modulators are non-
+/// static (the caller is expected to have gated on `read_static_…`).
+fn reset_transform_placement(effects: Option<&mut Value>) {
+    let Some(effects) = effects.and_then(|v| v.as_array_mut()) else {
+        return;
+    };
+    for eff in effects.iter_mut() {
+        let Some(t) = eff.get_mut("Transform") else {
+            continue;
+        };
+        let Some(t_obj) = t.as_object_mut() else {
+            continue;
+        };
+        t_obj.insert("translate".into(), serde_json::json!([0.0, 0.0]));
+        t_obj.insert("scale_x".into(), serde_json::json!({ "Static": 1.0 }));
+        t_obj.insert("scale_y".into(), serde_json::json!({ "Static": 1.0 }));
+        return;
+    }
 }
 
 fn migrate_v2_to_v3_layers(value: &mut Value) {
@@ -299,9 +502,10 @@ mod tests {
         assert!(p.layers[0].warp.mask_polygon.is_empty());
     }
 
-    /// T3.0a — v4-native projects pass through unchanged; outcome
-    /// reports `previous_warp_count == 0` so the audit finding never
-    /// fires for fresh projects.
+    /// T3.0a / T3.29 — v4-native projects flow through the v4 → v5
+    /// step. Empty-layers project bumps schema_version to 5 with no
+    /// other changes; outcome reports `previous_warp_count == 0` so
+    /// the audit finding never fires for fresh projects.
     #[test]
     fn migrate_v4_native_passes_through() {
         let v = serde_json::json!({
@@ -310,7 +514,152 @@ mod tests {
             "warps": [],
         });
         let (out, outcome) = migrate(v).expect("migrate");
-        assert_eq!(out["schema_version"], serde_json::json!(4));
+        assert_eq!(out["schema_version"], serde_json::json!(5));
         assert_eq!(outcome.previous_warp_count, 0);
+    }
+
+    /// T3.29 — a v4 layer with full-canvas warp + scaled / translated
+    /// `Effect::Transform` migrates to a quad warp matching the
+    /// pre-migration on-screen placement, with the Transform's
+    /// translate / scale reset to identity.
+    #[test]
+    fn migrate_v4_to_v5_synthesises_grid_from_static_transform() {
+        // Layer scaled to half-size, no translate. Expected: warp
+        // grid corners at (0.25 … 0.75) and Transform reset.
+        let v = serde_json::json!({
+            "schema_version": 4,
+            "layers": [{
+                "id": "scaled",
+                "kind": { "Image": { "path": "/tmp/x.png", "fit": "Cover", "focal": [0.5, 0.5] } },
+                "enabled": true,
+                "transform": {
+                    "translate": [0.0, 0.0], "rotate_deg": 0.0,
+                    "scale": [1.0, 1.0], "anchor": [0.5, 0.5]
+                },
+                "effects": [
+                    { "Transform": {
+                        "translate": [0.0, 0.0],
+                        "rotate_deg": { "Static": 0.0 },
+                        "scale_x": { "Static": 0.5 },
+                        "scale_y": { "Static": 0.5 }
+                    }}
+                ],
+                "blend_mode": "Normal",
+                "opacity": 1.0,
+                "warp": {
+                    "rows": 1, "cols": 1,
+                    "grid": [[[0.0, 0.0], [1.0, 0.0]], [[0.0, 1.0], [1.0, 1.0]]],
+                    "mask_polygon": [],
+                    "mask_feather": 0.02
+                }
+            }]
+        });
+        let (out, _) = migrate(v).expect("migrate");
+        let p: Project = serde_json::from_value(out).expect("deserialize as v5");
+        assert_eq!(p.schema_version, 5);
+
+        // Synthesised quad: corners at (0.25 … 0.75) for scale 0.5.
+        let g = &p.layers[0].warp.grid;
+        let approx = |a: f32, b: f32| (a - b).abs() < 1e-4;
+        assert!(approx(g[0][0][0], 0.25) && approx(g[0][0][1], 0.25));
+        assert!(approx(g[0][1][0], 0.75) && approx(g[0][1][1], 0.25));
+        assert!(approx(g[1][0][0], 0.25) && approx(g[1][0][1], 0.75));
+        assert!(approx(g[1][1][0], 0.75) && approx(g[1][1][1], 0.75));
+
+        // Transform's translate / scale reset to identity; the rest
+        // (rotate, anchor) preserved.
+        let eff = &p.layers[0].effects[0];
+        let crate::effects::Effect::Transform {
+            translate,
+            scale_x,
+            scale_y,
+            ..
+        } = eff
+        else {
+            panic!("expected Effect::Transform after migration, got {eff:?}");
+        };
+        assert_eq!(*translate, [0.0, 0.0]);
+        match scale_x {
+            crate::modulators::Modulator::Static(v) => assert!(approx(*v, 1.0)),
+            other => panic!("scale_x should be Static(1.0), got {other:?}"),
+        }
+        match scale_y {
+            crate::modulators::Modulator::Static(v) => assert!(approx(*v, 1.0)),
+            other => panic!("scale_y should be Static(1.0), got {other:?}"),
+        }
+    }
+
+    /// T3.29 — a v4 layer with full-canvas warp + identity Transform
+    /// gets the half-size centered default warp so the new model is
+    /// immediately visible to the operator.
+    #[test]
+    fn migrate_v4_to_v5_identity_transform_gets_default_placement() {
+        let v = serde_json::json!({
+            "schema_version": 4,
+            "layers": [{
+                "id": "fresh",
+                "kind": { "Image": { "path": "/tmp/x.png", "fit": "Cover", "focal": [0.5, 0.5] } },
+                "enabled": true,
+                "transform": {
+                    "translate": [0.0, 0.0], "rotate_deg": 0.0,
+                    "scale": [1.0, 1.0], "anchor": [0.5, 0.5]
+                },
+                "effects": [
+                    { "Transform": {
+                        "translate": [0.0, 0.0],
+                        "rotate_deg": { "Static": 0.0 },
+                        "scale_x": { "Static": 1.0 },
+                        "scale_y": { "Static": 1.0 }
+                    }}
+                ],
+                "blend_mode": "Normal",
+                "opacity": 1.0,
+                "warp": {
+                    "rows": 1, "cols": 1,
+                    "grid": [[[0.0, 0.0], [1.0, 0.0]], [[0.0, 1.0], [1.0, 1.0]]],
+                    "mask_polygon": [],
+                    "mask_feather": 0.02
+                }
+            }]
+        });
+        let (out, _) = migrate(v).expect("migrate");
+        let p: Project = serde_json::from_value(out).expect("deserialize as v5");
+        let g = &p.layers[0].warp.grid;
+        let approx = |a: f32, b: f32| (a - b).abs() < 1e-4;
+        assert!(approx(g[0][0][0], 0.25) && approx(g[0][0][1], 0.25));
+        assert!(approx(g[1][1][0], 0.75) && approx(g[1][1][1], 0.75));
+    }
+
+    /// T3.29 — a v4 layer with a custom (non-identity) warp grid is
+    /// left alone — operator already authored a placement.
+    #[test]
+    fn migrate_v4_to_v5_custom_grid_left_alone() {
+        let custom_grid = serde_json::json!([[[0.1, 0.1], [0.9, 0.1]], [[0.1, 0.9], [0.9, 0.9]]]);
+        let v = serde_json::json!({
+            "schema_version": 4,
+            "layers": [{
+                "id": "authored",
+                "kind": { "Image": { "path": "/tmp/x.png", "fit": "Cover", "focal": [0.5, 0.5] } },
+                "enabled": true,
+                "transform": {
+                    "translate": [0.0, 0.0], "rotate_deg": 0.0,
+                    "scale": [1.0, 1.0], "anchor": [0.5, 0.5]
+                },
+                "effects": [],
+                "blend_mode": "Normal",
+                "opacity": 1.0,
+                "warp": {
+                    "rows": 1, "cols": 1,
+                    "grid": custom_grid.clone(),
+                    "mask_polygon": [],
+                    "mask_feather": 0.02
+                }
+            }]
+        });
+        let (out, _) = migrate(v).expect("migrate");
+        let p: Project = serde_json::from_value(out).expect("deserialize as v5");
+        let g = &p.layers[0].warp.grid;
+        assert!((g[0][0][0] - 0.1).abs() < 1e-4);
+        assert!((g[1][1][0] - 0.9).abs() < 1e-4);
     }
 }

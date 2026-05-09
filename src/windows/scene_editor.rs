@@ -21,12 +21,24 @@ use egui::Pos2;
 
 use crate::effects::Effect;
 use crate::modulators::Modulator;
-use crate::project::schema::{LayerConfig, Project};
+use crate::project::schema::{LayerConfig, Project, WarpMesh};
 
 /// Pixel radius for mask-vertex hit-testing in preview space (M11).
 const MASK_HANDLE_HIT_PX: f32 = 9.0;
 /// Pixel radius for the painted mask handle.
 const MASK_HANDLE_DRAW_PX: f32 = 5.5;
+/// Hit-test radius for warp grid corners. Larger than the mask radius
+/// (Fitts's law — warp corners are the canvas's primary direct-
+/// manipulation surface; an 9 px target on a HiDPI display is too
+/// tight to grab reliably). Stays well under WARP_SNAP_RADIUS_PX so
+/// the magnetic-corner snap behaviour at drag-end is unaffected.
+#[cfg_attr(not(feature = "v3"), allow(dead_code))]
+const WARP_HANDLE_HIT_PX: f32 = 16.0;
+/// Painted radius for warp grid handles. Slightly larger than the
+/// mask-handle radius so the grippable target reads as a handle, not
+/// a decoration.
+#[cfg_attr(not(feature = "v3"), allow(dead_code))]
+const WARP_HANDLE_DRAW_PX: f32 = 7.0;
 /// Distance to a mask edge that counts as "double-click on this edge"
 /// for the insert-vertex gesture (M11).
 const MASK_EDGE_HIT_PX: f32 = 7.0;
@@ -108,15 +120,19 @@ pub enum DragKind {
         start_scale: [f32; 2],
         start_rotate_deg: f32,
         mode: DragMode,
-        /// 003-T1.24 — pre-drag effects Vec snapshot, captured at
-        /// drag_started for v3's `SetLayerEffects` Reverse storage
-        /// (rule 2). `mutate_transform_effect` may append a default
-        /// `Effect::Transform` to layers that don't have one — a
-        /// per-field Reverse would leave a stray effect on undo.
-        /// T1.24 covers Translate; T1.25 / T1.26 extend to Scale
-        /// and Rotate.
+        /// 003-T3.29 — pre-drag warp snapshot, captured at drag_started
+        /// for v3's `ResetLayerWarpMesh` Reverse storage (rule 3 — full
+        /// `WarpMesh` snapshot). Under v5 the warp IS the layer's
+        /// placement, so Layer-mode Translate / Scale / Rotate drags
+        /// transform the warp grid (and emit a warp mutation at
+        /// drag-stop) instead of writing to `Effect::Transform`.
+        ///
+        /// Replaces the v3-original `effects_snapshot` field — Layer-
+        /// mode drag no longer touches `Effect::Transform`. Modulator
+        /// pickers and the Effects panel continue to mutate the
+        /// effects chain through their own paths.
         #[cfg(feature = "v3")]
-        effects_snapshot: Vec<Effect>,
+        start_warp: WarpMesh,
     },
     /// Mask polygon vertex move (M11). Captures the original normalized
     /// position so live drag is `start + delta_normalized`.
@@ -240,6 +256,93 @@ where
             return;
         }
     }
+}
+
+/// 003-T3.29 — centroid (mean position) of all warp grid points.
+/// Used as the pivot for Scale / Rotate drags so the quad scales and
+/// rotates "in place" rather than relative to the canvas origin.
+#[cfg(feature = "v3")]
+fn warp_grid_centroid(grid: &[Vec<[f32; 2]>]) -> [f32; 2] {
+    let mut n = 0u32;
+    let mut sx = 0.0f32;
+    let mut sy = 0.0f32;
+    for row in grid {
+        for p in row {
+            sx += p[0];
+            sy += p[1];
+            n += 1;
+        }
+    }
+    if n == 0 {
+        [0.5, 0.5]
+    } else {
+        [sx / n as f32, sy / n as f32]
+    }
+}
+
+/// 003-T3.29 — bit-exact grid comparison used by the drag-stop path
+/// to skip the mutation entirely on a zero-delta drag (operator
+/// clicked without moving — no work to undo).
+#[cfg(feature = "v3")]
+fn grids_byte_equal(a: &[Vec<[f32; 2]>], b: &[Vec<[f32; 2]>]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    for (ar, br) in a.iter().zip(b.iter()) {
+        if ar.len() != br.len() {
+            return false;
+        }
+        for (ap, bp) in ar.iter().zip(br.iter()) {
+            if ap[0].to_bits() != bp[0].to_bits() || ap[1].to_bits() != bp[1].to_bits() {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// 003-T3.29 — return a translated copy of `grid`. Each point shifts
+/// by `(dx, dy)` in projector [0, 1]² space.
+#[cfg(feature = "v3")]
+fn translated_grid(grid: &[Vec<[f32; 2]>], dx: f32, dy: f32) -> Vec<Vec<[f32; 2]>> {
+    grid.iter()
+        .map(|row| row.iter().map(|p| [p[0] + dx, p[1] + dy]).collect())
+        .collect()
+}
+
+/// 003-T3.29 — return a copy of `grid` scaled about its centroid by
+/// `factor`. `factor < 1` shrinks; `factor > 1` enlarges. The centroid
+/// is unchanged.
+#[cfg(feature = "v3")]
+fn scaled_grid(grid: &[Vec<[f32; 2]>], factor: f32) -> Vec<Vec<[f32; 2]>> {
+    let [cx, cy] = warp_grid_centroid(grid);
+    grid.iter()
+        .map(|row| {
+            row.iter()
+                .map(|p| [cx + (p[0] - cx) * factor, cy + (p[1] - cy) * factor])
+                .collect()
+        })
+        .collect()
+}
+
+/// 003-T3.29 — return a copy of `grid` rotated about its centroid by
+/// `theta_rad`. Positive theta rotates clockwise in the canvas
+/// y-down coordinate system (matches egui's mouse delta convention).
+#[cfg(feature = "v3")]
+fn rotated_grid(grid: &[Vec<[f32; 2]>], theta_rad: f32) -> Vec<Vec<[f32; 2]>> {
+    let [cx, cy] = warp_grid_centroid(grid);
+    let (s, c) = theta_rad.sin_cos();
+    grid.iter()
+        .map(|row| {
+            row.iter()
+                .map(|p| {
+                    let dx = p[0] - cx;
+                    let dy = p[1] - cy;
+                    [cx + dx * c - dy * s, cy + dx * s + dy * c]
+                })
+                .collect()
+        })
+        .collect()
 }
 
 /// Hit-test screen-space `pos` against every layer in `project`, walking
@@ -375,7 +478,7 @@ pub fn hit_mask_edge(
 
 /// 003-T3.5 — hit-test screen-space `pos` against the warp grid
 /// vertices of `layer_idx`'s warp. Returns `(r, c)` of the closest
-/// vertex within `MASK_HANDLE_HIT_PX`. Caller should only invoke when
+/// vertex within `WARP_HANDLE_HIT_PX`. Caller should only invoke when
 /// `EditMode::Warp` is active and a layer is selected — this is the
 /// per-layer-clarity contract from T3.5's spec.
 #[cfg_attr(not(feature = "v3"), allow(dead_code))]
@@ -396,7 +499,7 @@ pub fn hit_warp_corner(
             preview_rect.top() + n[1] * preview_rect.height(),
         )
     };
-    let r2 = MASK_HANDLE_HIT_PX * MASK_HANDLE_HIT_PX;
+    let r2 = WARP_HANDLE_HIT_PX * WARP_HANDLE_HIT_PX;
     let mut best: Option<(f32, usize, usize)> = None;
     for (r, row) in warp.grid.iter().enumerate() {
         for (c, p) in row.iter().enumerate() {
@@ -514,28 +617,39 @@ pub fn handle_scene_input(
                     },
                 });
             } else if let Some(idx) = hit_layer(project, pos, preview_rect) {
-                let (translate, scale, rotate) = effective_static_transform(&project.layers[idx]);
-                let mode = if modifiers.shift {
-                    DragMode::Scale
-                } else if modifiers.alt {
-                    DragMode::Rotate
+                // 003-T3.5 follow-up — in Warp mode a layer-body click selects
+                // the layer (so its grid becomes visible and its corners are
+                // hit-testable) but does NOT start a translate/scale/rotate
+                // drag. Otherwise an operator who clicks slightly off a small
+                // corner handle accidentally moves the whole layer instead of
+                // missing the corner and leaving state untouched.
+                if scene.mode == EditMode::Warp {
+                    scene.selected = Some(Selection::Layer(idx));
                 } else {
-                    DragMode::Translate
-                };
-                #[cfg(feature = "v3")]
-                let effects_snapshot = project.layers[idx].effects.clone();
-                scene.selected = Some(Selection::Layer(idx));
-                scene.drag = Some(DragSession {
-                    start_screen: pos,
-                    kind: DragKind::LayerTransform {
-                        start_translate: translate,
-                        start_scale: scale,
-                        start_rotate_deg: rotate,
-                        mode,
-                        #[cfg(feature = "v3")]
-                        effects_snapshot,
-                    },
-                });
+                    let (translate, scale, rotate) =
+                        effective_static_transform(&project.layers[idx]);
+                    let mode = if modifiers.shift {
+                        DragMode::Scale
+                    } else if modifiers.alt {
+                        DragMode::Rotate
+                    } else {
+                        DragMode::Translate
+                    };
+                    #[cfg(feature = "v3")]
+                    let start_warp = project.layers[idx].warp.clone();
+                    scene.selected = Some(Selection::Layer(idx));
+                    scene.drag = Some(DragSession {
+                        start_screen: pos,
+                        kind: DragKind::LayerTransform {
+                            start_translate: translate,
+                            start_scale: scale,
+                            start_rotate_deg: rotate,
+                            mode,
+                            #[cfg(feature = "v3")]
+                            start_warp,
+                        },
+                    });
+                }
             } else {
                 scene.selected = None;
             }
@@ -552,15 +666,46 @@ pub fn handle_scene_input(
                     start_scale,
                     start_rotate_deg,
                     mode,
+                    #[cfg(feature = "v3")]
+                    start_warp,
                     ..
                 } => {
                     if let Some(Selection::Layer(idx)) = scene.selected {
                         if let Some(layer) = project.layers.get_mut(idx) {
-                            // Mutate the layer's first Effect::Transform —
-                            // the field the M5 render pipeline actually reads.
-                            // LayerConfig.transform is currently unused at
-                            // render time; mutating it would just make drag
-                            // visually do nothing.
+                            // 003-T3.29 — under v3 the warp IS the layer's
+                            // placement; Layer-mode drags transform the warp
+                            // grid (about the quad's centroid for Scale /
+                            // Rotate) rather than mutating Effect::Transform.
+                            // The drag math reads `start_warp.grid` (frozen
+                            // at drag-start) so the cumulative transform is
+                            // re-applied each frame from a stable origin —
+                            // not delta-on-current, which would compound.
+                            #[cfg(feature = "v3")]
+                            {
+                                let _ = (start_translate, start_scale, start_rotate_deg);
+                                let new_grid = match mode {
+                                    DragMode::Translate => {
+                                        translated_grid(&start_warp.grid, dx, dy)
+                                    }
+                                    DragMode::Scale => {
+                                        // Same gesture math as the v4 Effect-
+                                        // Transform path: cumulative drag
+                                        // delta along x+y, floored at 0.05
+                                        // so the quad can't collapse.
+                                        let factor = (1.0 + (dx + dy)).max(0.05);
+                                        scaled_grid(&start_warp.grid, factor)
+                                    }
+                                    DragMode::Rotate => {
+                                        // Cumulative drag along x → 360° spin.
+                                        let theta_rad = (dx * 360.0).to_radians();
+                                        rotated_grid(&start_warp.grid, theta_rad)
+                                    }
+                                };
+                                layer.warp.grid = new_grid;
+                            }
+                            // v2 path preserved: writes Effect::Transform
+                            // through the legacy helper. v2 has no undo.
+                            #[cfg(not(feature = "v3"))]
                             match mode {
                                 DragMode::Translate => {
                                     let new_t = [start_translate[0] + dx, start_translate[1] + dy];
@@ -623,26 +768,26 @@ pub fn handle_scene_input(
     }
 
     if response.drag_stopped() {
-        // 003-T1.24 — emit a single SetLayerEffects covering the full
-        // cumulative translate delta. We must revert the live-drag mutation
-        // before emitting: `Mutation::SetLayerEffects::apply` debug_asserts
-        // that project state == old at apply time, and the drain runs
-        // `apply` in the same frame (which re-installs `new`), so no flash.
-        // 003-T1.25 — Scale (shift-drag) follows the same pattern.
-        // 003-T1.26 — Rotate (alt-drag) too. This is the canonical
-        // effects-Vec Reverse case: rotating a layer that has no
-        // Transform in its chain triggers `mutate_transform_effect`
-        // to APPEND one. A per-field Reverse would leave the appended
-        // effect on undo; the whole-Vec snapshot Reverse undoes the
-        // append cleanly. The `effects_vec_reverse_no_stray_transform`
-        // unit test in `src/project/command.rs` proves this.
+        // 003-T3.29 — Layer-mode Translate / Scale / Rotate drags emit
+        // a single `ResetLayerWarpMesh` covering the full cumulative
+        // delta as a snapshot Reverse (rule 3 — full WarpMesh snap).
+        // The live drag has mutated `layer.warp.grid`; we revert before
+        // emit so `apply` sees project state == old at apply time.
+        // The drain re-applies `new` in the same frame — no flash.
+        //
+        // Pre-T3.29 this branch emitted `SetLayerEffects` against
+        // `effects_snapshot` (T1.24/25/26's effects-Vec Reverse pattern
+        // for Effect::Transform mutations). Under v5 Layer-mode no
+        // longer touches Effect::Transform; modulator pickers and the
+        // Effects panel still emit `SetLayerEffects` through their own
+        // paths, so the canonical effects-Vec Reverse test in
+        // command.rs (`effects_vec_reverse_no_stray_transform`) stays
+        // load-bearing — just exercises a different code path.
         #[cfg(feature = "v3")]
         if let Some(drag) = scene.drag.as_ref() {
             match &drag.kind {
                 DragKind::LayerTransform {
-                    mode,
-                    effects_snapshot,
-                    ..
+                    mode, start_warp, ..
                 } => {
                     if matches!(
                         mode,
@@ -650,17 +795,26 @@ pub fn handle_scene_input(
                     ) {
                         if let Some(Selection::Layer(layer_idx)) = scene.selected {
                             if let Some(layer) = project.layers.get_mut(layer_idx) {
-                                let old = effects_snapshot.clone();
-                                let new = layer.effects.clone();
+                                let old = start_warp.clone();
+                                let new = layer.warp.clone();
+                                // Skip the mutation entirely on a zero-delta
+                                // drag (operator clicked without moving) —
+                                // ResetLayerWarpMesh's debug_assert only
+                                // permits same-state apply when new != old
+                                // would also be a no-op. Cleaner to drop it.
+                                let same = grids_byte_equal(&old.grid, &new.grid);
                                 // Revert live-drag mutation so `apply` sees
-                                // project state == old (Reverse-storage rule 2).
-                                layer.effects = old.clone();
-                                emitted =
-                                    Some(crate::project::command::Mutation::SetLayerEffects {
-                                        layer_idx,
-                                        new,
-                                        old,
-                                    });
+                                // project state == old (Reverse-storage rule 3).
+                                layer.warp = old.clone();
+                                if !same {
+                                    emitted = Some(
+                                        crate::project::command::Mutation::ResetLayerWarpMesh {
+                                            layer_idx,
+                                            new,
+                                            old,
+                                        },
+                                    );
+                                }
                             }
                         }
                     }
@@ -876,8 +1030,12 @@ pub fn mode_banner_copy(mode: EditMode, has_layer_selected: bool) -> &'static st
     match mode {
         EditMode::Layer => "Drag to move. Shift-drag to scale. Alt-drag to rotate.",
         EditMode::Warp => {
+            // 003-T3.29 — copy reflects the warp-as-placement model:
+            // each corner is a point in projector space, and dragging
+            // moves the layer on the wall directly (not a fine-tune
+            // layered on top of a separate transform).
             if has_layer_selected {
-                "Drag the corners to fit the wall."
+                "Drag the corners to position the layer on the wall."
             } else {
                 "Select a layer first."
             }
@@ -1076,7 +1234,7 @@ pub fn paint_warp_grid_overlay(
                     egui::Stroke::new(1.0, egui::Color32::from_rgb(40, 40, 40)),
                 )
             };
-            painter.circle(center, MASK_HANDLE_DRAW_PX, fill, stroke);
+            painter.circle(center, WARP_HANDLE_DRAW_PX, fill, stroke);
         }
     }
 }
@@ -1312,12 +1470,13 @@ mod tests {
     }
 
     /// Warp mode with a layer selected must return the drag instruction.
+    /// 003-T3.29 — copy updated for the warp-as-placement model.
     #[cfg(feature = "v3")]
     #[test]
     fn mode_banner_copy_warp_with_layer_returns_drag_instruction() {
         assert_eq!(
             super::mode_banner_copy(EditMode::Warp, true),
-            "Drag the corners to fit the wall."
+            "Drag the corners to position the layer on the wall."
         );
     }
 
@@ -1468,5 +1627,80 @@ mod tests {
             scene.selected,
             Some(Selection::MaskVertex { warp: 0, idx: 0 })
         );
+    }
+
+    // 003-T3.29 — Layer-mode drag math now operates on the warp grid.
+    // Centroid + translate + scale + rotate helpers each get a tight
+    // unit test so the math is pinned independent of the egui layer.
+    #[cfg(feature = "v3")]
+    fn placement_grid() -> Vec<Vec<[f32; 2]>> {
+        vec![
+            vec![[0.25, 0.25], [0.75, 0.25]],
+            vec![[0.25, 0.75], [0.75, 0.75]],
+        ]
+    }
+
+    #[cfg(feature = "v3")]
+    fn approx2(a: [f32; 2], b: [f32; 2]) -> bool {
+        (a[0] - b[0]).abs() < 1e-5 && (a[1] - b[1]).abs() < 1e-5
+    }
+
+    #[cfg(feature = "v3")]
+    #[test]
+    fn warp_grid_centroid_of_default_placement_is_screen_center() {
+        let g = placement_grid();
+        let c = super::warp_grid_centroid(&g);
+        assert!(approx2(c, [0.5, 0.5]));
+    }
+
+    #[cfg(feature = "v3")]
+    #[test]
+    fn translated_grid_shifts_every_point() {
+        let g = placement_grid();
+        let out = super::translated_grid(&g, 0.1, -0.05);
+        assert!(approx2(out[0][0], [0.35, 0.20]));
+        assert!(approx2(out[1][1], [0.85, 0.70]));
+    }
+
+    /// Scale × 2 about (0.5, 0.5) sends (0.25, 0.25) → (0.0, 0.0)
+    /// and (0.75, 0.75) → (1.0, 1.0). Centroid unchanged.
+    #[cfg(feature = "v3")]
+    #[test]
+    fn scaled_grid_doubles_about_centroid() {
+        let g = placement_grid();
+        let out = super::scaled_grid(&g, 2.0);
+        assert!(approx2(out[0][0], [0.0, 0.0]));
+        assert!(approx2(out[1][1], [1.0, 1.0]));
+        let c = super::warp_grid_centroid(&out);
+        assert!(approx2(c, [0.5, 0.5]));
+    }
+
+    /// 90° rotation about the centroid swaps the corners cyclically.
+    /// In y-down screen space, +90° sends top-left (0.25, 0.25) →
+    /// top-right (0.75, 0.25) → bottom-right (0.75, 0.75) → ...
+    #[cfg(feature = "v3")]
+    #[test]
+    fn rotated_grid_quarter_turn_cycles_corners() {
+        let g = placement_grid();
+        let theta = std::f32::consts::FRAC_PI_2; // 90° (y-down)
+        let out = super::rotated_grid(&g, theta);
+        // Top-left of the new quad should be at the OLD bottom-left.
+        // Top-left is out[0][0] (the cell at row 0, col 0).
+        assert!(approx2(out[0][0], [0.75, 0.25]));
+        assert!(approx2(out[1][1], [0.25, 0.75]));
+        let c = super::warp_grid_centroid(&out);
+        assert!(approx2(c, [0.5, 0.5]));
+    }
+
+    /// 003-T3.29 — zero-delta drag is a byte-equal grid; the drag-stop
+    /// path uses `grids_byte_equal` to skip emitting a no-op mutation.
+    #[cfg(feature = "v3")]
+    #[test]
+    fn grids_byte_equal_skips_zero_delta_drags() {
+        let a = placement_grid();
+        let b = placement_grid();
+        assert!(super::grids_byte_equal(&a, &b));
+        let c = super::translated_grid(&a, 1e-3, 0.0);
+        assert!(!super::grids_byte_equal(&a, &c));
     }
 }

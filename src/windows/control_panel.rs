@@ -260,6 +260,13 @@ pub struct ControlPanelState {
     /// button that toggles this; T3.11+ refines the panel's content
     /// layout. v2 builds ignore this flag (the tabbed UI stays).
     pub advanced_open: bool,
+    /// 003-T4.2 — per-session cache of egui `TextureHandle`s for scene
+    /// thumbnails, keyed by a hash of the thumbnail pixel bytes. Rebuilt
+    /// automatically when a scene is saved with a new thumbnail; stale
+    /// entries (from deleted scenes) are evicted lazily across frames since
+    /// the set is small (≤ 9 tiles in practice).
+    #[cfg(feature = "v3")]
+    pub thumbnail_cache: crate::windows::cue_strip::ThumbnailCache,
 }
 
 pub enum ControlPanelAction {
@@ -338,6 +345,11 @@ pub struct ControlPanelInputs {
     /// shows a "• " prefix on the project name when this is set (T4.10).
     #[cfg(feature = "v3")]
     pub dirty: bool,
+    /// 003-T4.4 — active crossfade indicator for the cue strip.
+    /// `Some((target_scene_idx, progress_0_to_1))` while a crossfade is
+    /// in flight; `None` when no fade is active.
+    #[cfg(feature = "v3")]
+    pub crossfade_progress: Option<(usize, f32)>,
 }
 
 /// Render the control panel. Mutates `project` in place.
@@ -440,6 +452,11 @@ pub fn show(
     // Claimed before the CentralPanel so the panel layout reserves
     // the bottom edge. Visible in both Editing and GoLive — both
     // AppState arms hit this code path (see app.rs:3593).
+    //
+    // NOTE: egui claims bottom panels from outermost (first declared) to
+    // innermost (last declared). show_day_strip is declared FIRST so it
+    // occupies the outermost bottom edge. cue_strip is declared SECOND so
+    // it sits directly above show_day_strip, i.e. between it and the canvas.
     #[cfg(feature = "v3")]
     egui::TopBottomPanel::bottom("rmap_show_day_strip")
         .resizable(false)
@@ -447,6 +464,24 @@ pub fn show(
             if let Some(cmd) =
                 crate::windows::show_day_strip::show(ui, &inputs.output_state_snapshot)
             {
+                action = ControlPanelAction::EmitCommand(cmd);
+            }
+        });
+
+    // 003-T4.2–T4.5: cue strip — horizontal row of scene tiles above the
+    // show-day strip. Declared after show_day_strip so egui places it
+    // between show_day_strip and the canvas (inner panel).
+    #[cfg(feature = "v3")]
+    egui::TopBottomPanel::bottom("rmap_cue_strip")
+        .resizable(false)
+        .exact_size(crate::windows::cue_strip::STRIP_HEIGHT)
+        .show_inside(ui, |ui| {
+            if let Some(cmd) = crate::windows::cue_strip::show(
+                ui,
+                project,
+                &mut st.thumbnail_cache,
+                inputs.crossfade_progress,
+            ) {
                 action = ControlPanelAction::EmitCommand(cmd);
             }
         });
@@ -1317,6 +1352,7 @@ fn show_scenes_tab(
                         project.scenes.push(Scene {
                             name: format!("scene{}", project.scenes.len() + 1),
                             snapshot: serde_json::json!({}),
+                            thumbnail: None,
                         });
                     }
                     project.scenes[slot].snapshot = snapshot(project);

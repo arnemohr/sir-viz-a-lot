@@ -45,6 +45,8 @@ pub enum GlossaryTerm {
     MaskFeather,
     GridDetail,
     Opacity,
+    /// 003-T3.28 — per-display tone overrides.
+    DisplayOverride,
 }
 
 /// A single glossary entry: a short headline and a 1–2 sentence body.
@@ -61,8 +63,10 @@ pub fn entry(t: GlossaryTerm) -> GlossaryEntry {
     match t {
         GlossaryTerm::Warp => GlossaryEntry {
             headline: "Warp",
-            body: "Per-layer corner-pin grid that maps the layer's image onto the \
-                   projection surface.  Drag corners to align the image with the wall.",
+            body: "Per-layer corner-pin quad that places the layer on the projector. \
+                   Each corner is a point in projector space; drag a corner to \
+                   move/resize/distort the layer on the wall directly. Increase \
+                   rows × cols (Advanced → Mapping) for finer mesh control.",
         },
         GlossaryTerm::MaskPolygon => GlossaryEntry {
             headline: "Mask Polygon",
@@ -172,6 +176,13 @@ pub fn entry(t: GlossaryTerm) -> GlossaryEntry {
                    0.0 is invisible.  Useful for subtle overlays or \
                    for fading content in and out.",
         },
+        GlossaryTerm::DisplayOverride => GlossaryEntry {
+            headline: "Display Override",
+            body: "Optional per-projector gamma / brightness / contrast that \
+                   replaces the master values for the projector output only.  \
+                   Tune the master for what looks right on your laptop, then \
+                   set the override for what looks right on the wall.",
+        },
     }
 }
 
@@ -246,6 +257,7 @@ mod tests {
             GlossaryTerm::MaskFeather,
             GlossaryTerm::GridDetail,
             GlossaryTerm::Opacity,
+            GlossaryTerm::DisplayOverride,
         ];
         for t in all {
             let e = entry(t);

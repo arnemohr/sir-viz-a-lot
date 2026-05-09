@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 4;
+pub const CURRENT_SCHEMA_VERSION: u32 = 5;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Transform2D {
@@ -101,11 +101,12 @@ pub struct WarpMesh {
 }
 
 impl WarpMesh {
-    /// Full-canvas identity warp used for `LayerConfig::warp`'s serde
-    /// default and for `Project::default()`: 2×2 grid pinned to the
-    /// unit square, `mask_feather: 0.02`. v3's `source_rect` field is
-    /// gone — under v4 each layer's warp samples the entire layer
-    /// output, so the source-rect concept doesn't apply.
+    /// Full-canvas identity warp: 2×2 grid pinned to the unit square,
+    /// `mask_feather: 0.02`. Used as `LayerConfig::warp`'s serde default
+    /// (so old projects loading without the field round-trip safely) and
+    /// as the migration target. v3's `source_rect` field is gone — under
+    /// v4 each layer's warp samples the entire layer output, so the
+    /// source-rect concept doesn't apply.
     pub fn identity() -> Self {
         WarpMesh {
             rows: 1,
@@ -115,12 +116,47 @@ impl WarpMesh {
             mask_feather: 0.02,
         }
     }
+
+    /// 003-T3.29 — default warp for **newly added layers** under v5's
+    /// warp-as-placement model: a half-size centered 2×2 quad. Corners
+    /// land at the layer's bounding box (0.25 … 0.75) so the operator
+    /// sees the warp handles on the layer, not at the projector edges.
+    /// Distinct from [`identity`] (which fills the projector and remains
+    /// the serde / migration fallback).
+    pub fn default_placement() -> Self {
+        WarpMesh {
+            rows: 1,
+            cols: 1,
+            grid: vec![
+                vec![[0.25, 0.25], [0.75, 0.25]],
+                vec![[0.25, 0.75], [0.75, 0.75]],
+            ],
+            mask_polygon: Vec::new(),
+            mask_feather: 0.02,
+        }
+    }
+}
+
+/// 003-T4.1 — 192×108 RGBA8 thumbnail captured when a scene is saved.
+/// Stored as a flat `width * height * 4` byte array in row-major order.
+/// `#[serde(default)]` ensures existing v5 saves (without this field) load
+/// cleanly with `thumbnail = None`. Size: 192 × 108 × 4 = 82,944 bytes;
+/// JSON-encoded as a numeric array that's fine for v3 scope.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ThumbnailRgba {
+    pub width: u32,
+    pub height: u32,
+    pub data: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Scene {
     pub name: String,
     pub snapshot: serde_json::Value,
+    /// 003-T4.1 — optional thumbnail captured at save time. `None` for
+    /// scenes saved before T4.1 or when capture fails.
+    #[serde(default)]
+    pub thumbnail: Option<ThumbnailRgba>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -148,6 +184,21 @@ pub struct Project {
     pub brightness: f32,
     #[serde(default = "default_one")]
     pub contrast: f32,
+    /// 003-T3.28 — per-display tone override. `None` means inherit `gamma`
+    /// (master); `Some(v)` overrides the projector output only. The control-
+    /// window preview reads the pre-gamma `warp_rt_view`, so master tuning
+    /// is invisible there in either case; the override therefore creates the
+    /// preview-vs-projector divergence the practitioner needs without a
+    /// second gamma pass. Multi-projector v0.4 will move this onto an
+    /// `OutputTarget`; the `Option<f32>` shape is forward-compatible.
+    #[serde(default)]
+    pub gamma_override: Option<f32>,
+    /// 003-T3.28 — per-display brightness override. See `gamma_override`.
+    #[serde(default)]
+    pub brightness_override: Option<f32>,
+    /// 003-T3.28 — per-display contrast override. See `gamma_override`.
+    #[serde(default)]
+    pub contrast_override: Option<f32>,
     /// Seconds to interpolate between scenes on recall. `0.0` = instant snap
     /// (the default; preserves M5 behaviour). Crossfades only fire when both
     /// snapshots share the same layer paths in the same order; structural
@@ -189,6 +240,9 @@ impl Default for Project {
             gamma: 1.0,
             brightness: 0.0,
             contrast: 1.0,
+            gamma_override: None,
+            brightness_override: None,
+            contrast_override: None,
             crossfade_duration_s: 0.0,
             transient_audit_signals: Cell::new(TransientAuditSignals::default()),
         }
@@ -262,6 +316,10 @@ pub fn identity_grid(rows: u32, cols: u32) -> Vec<Vec<[f32; 2]>> {
 }
 
 /// Build a layer row for an SVG path using the v1 default effect chain.
+///
+/// 003-T3.29 — newly-added layers get [`WarpMesh::default_placement`]
+/// (a centered half-size quad) so the operator's first sight of the
+/// warp handles is on the layer, not at the projector edges.
 pub fn layer_from_svg_path(id: impl Into<String>, svg_path: PathBuf) -> LayerConfig {
     LayerConfig {
         id: id.into(),
@@ -271,13 +329,16 @@ pub fn layer_from_svg_path(id: impl Into<String>, svg_path: PathBuf) -> LayerCon
         effects: crate::effects::default_effect_chain(),
         blend_mode: BlendMode::Normal,
         opacity: 1.0,
-        warp: WarpMesh::identity(),
+        warp: WarpMesh::default_placement(),
     }
 }
 
 /// Build a layer row for an image (JPG/PNG) path using the v1 default chain.
 /// Defaults to `Cover` fit + center focal — matches the "drop a photo,
 /// it fills the wall" operator expectation (T-M8-05).
+///
+/// 003-T3.29 — sees [`WarpMesh::default_placement`] for the same reason
+/// as [`layer_from_svg_path`].
 #[allow(dead_code)] // Consumed by T-M8-05 drag-drop path; predates that hook.
 pub fn layer_from_image_path(id: impl Into<String>, path: PathBuf) -> LayerConfig {
     LayerConfig {
@@ -292,7 +353,7 @@ pub fn layer_from_image_path(id: impl Into<String>, path: PathBuf) -> LayerConfi
         effects: crate::effects::default_effect_chain(),
         blend_mode: BlendMode::Normal,
         opacity: 1.0,
-        warp: WarpMesh::identity(),
+        warp: WarpMesh::default_placement(),
     }
 }
 
@@ -334,5 +395,39 @@ mod tests {
         let degenerate: Vec<Vec<[f32; 2]>> = vec![];
         let out = resample_grid(&degenerate, 1, 1);
         assert_eq!(out, identity_grid(1, 1));
+    }
+
+    /// 003-T4.1 — `thumbnail: Option<ThumbnailRgba>` round-trips through
+    /// `serde_json` and the `#[serde(default)]` attribute keeps old projects
+    /// (without the field) loading cleanly with `thumbnail = None`.
+    #[test]
+    fn scene_thumbnail_round_trip_through_serde() {
+        // Build a scene with a synthetic thumbnail.
+        let data: Vec<u8> = (0u8..=255).cycle().take(192 * 108 * 4).collect();
+        let thumb = ThumbnailRgba {
+            width: 192,
+            height: 108,
+            data: data.clone(),
+        };
+        let scene = Scene {
+            name: "intro".to_string(),
+            snapshot: serde_json::Value::Null,
+            thumbnail: Some(thumb.clone()),
+        };
+
+        // Serialize → deserialize → assert byte-equal thumbnail.
+        let json = serde_json::to_string(&scene).expect("serialize scene");
+        let decoded: Scene = serde_json::from_str(&json).expect("deserialize scene");
+        assert_eq!(decoded.thumbnail, Some(thumb));
+    }
+
+    /// Old saves (without a `thumbnail` field) must deserialize cleanly with
+    /// `thumbnail = None` thanks to `#[serde(default)]`.
+    #[test]
+    fn scene_missing_thumbnail_deserializes_as_none() {
+        let json = r#"{"name":"old-scene","snapshot":null}"#;
+        let scene: Scene = serde_json::from_str(json).expect("deserialize old scene");
+        assert_eq!(scene.thumbnail, None);
+        assert_eq!(scene.name, "old-scene");
     }
 }
