@@ -32,6 +32,13 @@ pub struct RecentProject {
     /// `mtime` from the filesystem; drives the sort and the relative-
     /// date display.
     pub modified: SystemTime,
+    /// 003-T4.7: `true` for autosave crash-recovery entries; `false`
+    /// for deliberate user-named saves. The launcher surfaces recovery
+    /// entries with a distinct "Last session (recovery)" label so the
+    /// operator knows they're loading an autosave, not a named project.
+    // Consumed by the launcher UI (T-Phase4+); not yet wired in the binary.
+    #[allow(dead_code)]
+    pub is_recovery: bool,
 }
 
 /// Phase-2 cap on listing length per Q6 / D6 in `specs/003-tasks.md`.
@@ -92,12 +99,95 @@ pub fn scan(dir: &Path) -> Vec<RecentProject> {
             path,
             label,
             modified,
+            is_recovery: false,
         });
     }
 
     found.sort_by(|a, b| b.modified.cmp(&a.modified));
     found.truncate(RECENTS_LIMIT);
     found
+}
+
+/// 003-T4.7 — scan `autosave_dir` for autosave files and return the most
+/// recently modified one as a recovery entry, if any.
+///
+/// Returns `None` when `autosave_dir` is missing, unreadable, or holds no
+/// `*.rmap.json` files. The returned `RecentProject` has `is_recovery: true`
+/// and `label = "Last session (recovery)"` so the launcher can render it
+/// distinctly from deliberate saves.
+///
+/// This function does **not** filter by age — even an old autosave is
+/// surfaced as a recovery candidate. The operator dismisses it by opening or
+/// creating a named project.
+// Wired by the launcher UI (T-Phase 4 launcher integration); not yet called
+// in the binary, so suppress dead_code until that landing.
+#[allow(dead_code)]
+pub fn scan_autosave_recovery(autosave_dir: &Path) -> Option<RecentProject> {
+    let Ok(entries) = std::fs::read_dir(autosave_dir) else {
+        return None;
+    };
+
+    let mut best: Option<RecentProject> = None;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        if !metadata.is_file() {
+            continue;
+        }
+        let Some(filename) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if !filename.to_ascii_lowercase().ends_with(RMAP_SUFFIX) {
+            continue;
+        }
+        let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+        let candidate = RecentProject {
+            path,
+            label: "Last session (recovery)".to_string(),
+            modified,
+            is_recovery: true,
+        };
+        match &best {
+            None => best = Some(candidate),
+            Some(b) if candidate.modified > b.modified => best = Some(candidate),
+            _ => {}
+        }
+    }
+    best
+}
+
+/// 003-T4.7 — combined recents listing: up to `RECENTS_LIMIT` deliberate
+/// saves from `named_dir` (via [`scan`]) prepended with a single recovery
+/// entry from `named_dir/_autosave/` (via [`scan_autosave_recovery`]) when
+/// one exists.
+///
+/// The recovery entry is inserted at the front if present (it's the most
+/// actionable item for a operator restarting after a crash). The combined
+/// list is still capped at `RECENTS_LIMIT` total entries so the launcher
+/// card height stays bounded.
+// Wired by the launcher UI (T-Phase 4 launcher integration); not yet called
+// in the binary, so suppress dead_code until that landing.
+#[allow(dead_code)]
+pub fn scan_with_recovery(named_dir: &Path) -> Vec<RecentProject> {
+    let autosave_dir = named_dir.join("_autosave");
+    let recovery = scan_autosave_recovery(&autosave_dir);
+    let mut named = scan(named_dir);
+
+    let capacity = named.len() + if recovery.is_some() { 1 } else { 0 };
+    let mut combined = Vec::with_capacity(capacity.min(RECENTS_LIMIT));
+    if let Some(r) = recovery {
+        combined.push(r);
+    }
+    // Fill remaining slots from named saves.
+    for entry in named.drain(..) {
+        if combined.len() >= RECENTS_LIMIT {
+            break;
+        }
+        combined.push(entry);
+    }
+    combined
 }
 
 /// Render `modified` as a short relative-date string.
@@ -317,5 +407,68 @@ mod tests {
         // Filesystem clock skew can produce a future mtime; we should
         // treat it as "just now" rather than crashing.
         assert_eq!(relative_date(future, now), "just now");
+    }
+
+    /// 003-T4.7 acceptance: `scan_with_recovery` surfaces autosave files as
+    /// a distinct recovery entry while keeping deliberate saves intact and
+    /// separate. Verifies:
+    ///
+    /// 1. The recovery entry is present, has `is_recovery: true`, and has
+    ///    `label = "Last session (recovery)"`.
+    /// 2. Named saves still appear with `is_recovery: false` and their own
+    ///    labels.
+    /// 3. `scan` (the plain named-saves scan) is unaffected — autosave files
+    ///    do not appear in its output (existing invariant preserved).
+    #[test]
+    fn recents_includes_autosave_recovery_distinct_from_named() {
+        let dir = temp_recents_dir("t4-7-recovery");
+
+        // Two deliberate named saves.
+        std::fs::write(dir.join("show_a.rmap.json"), b"{}").expect("show_a");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(dir.join("show_b.rmap.json"), b"{}").expect("show_b");
+
+        // One autosave recovery file.
+        std::fs::create_dir_all(dir.join("_autosave")).expect("autosave dir");
+        std::fs::write(dir.join("_autosave/12345_9876543210.rmap.json"), b"{}")
+            .expect("autosave file");
+
+        // --- scan_with_recovery ---
+        let combined = scan_with_recovery(&dir);
+        assert!(
+            !combined.is_empty(),
+            "scan_with_recovery should return at least one entry"
+        );
+
+        let recovery_entries: Vec<_> = combined.iter().filter(|r| r.is_recovery).collect();
+        assert_eq!(
+            recovery_entries.len(),
+            1,
+            "exactly one recovery entry expected"
+        );
+        assert_eq!(
+            recovery_entries[0].label, "Last session (recovery)",
+            "recovery entry label must be canonical"
+        );
+
+        let named_entries: Vec<_> = combined.iter().filter(|r| !r.is_recovery).collect();
+        assert_eq!(named_entries.len(), 2, "two named saves expected");
+        for e in &named_entries {
+            assert!(
+                !e.label.is_empty(),
+                "named entry should have a non-empty label"
+            );
+            assert!(!e.label.contains(".rmap.json"), "label should strip suffix");
+        }
+
+        // --- scan (plain) must remain unaffected ---
+        let plain = scan(&dir);
+        assert!(
+            plain.iter().all(|r| !r.is_recovery),
+            "scan() must never return recovery entries"
+        );
+        assert_eq!(plain.len(), 2, "scan() should only see the two named saves");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -25,7 +25,7 @@ use std::path::PathBuf;
 /// target but the resolver is shaped so it doesn't crash there
 /// (Windows uses a registry-backed path that the `dirs` crate would
 /// expose; v3 won't add that dep just for first-launch bootstrap).
-fn projects_dir() -> Option<PathBuf> {
+pub(crate) fn projects_dir() -> Option<PathBuf> {
     #[cfg(target_os = "macos")]
     {
         let home = std::env::var_os("HOME")?;

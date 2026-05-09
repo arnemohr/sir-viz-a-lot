@@ -27,6 +27,9 @@ pub mod projects_dir;
 // sub-list; reads `~/Documents/rmap/`.
 #[cfg(feature = "v3")]
 pub mod recents;
+// 003-T4.6 — debounced autosave to `~/Documents/rmap/_autosave/`.
+#[cfg(feature = "v3")]
+pub mod autosave;
 
 use std::path::PathBuf;
 
@@ -459,6 +462,23 @@ struct EditingState {
     /// preview never registers (e.g. `--monitor 99`).
     #[cfg(feature = "v3")]
     connecting_toast_emitted: bool,
+    /// 003-T4.6: `true` when the project has mutations since the last save
+    /// or autosave write. Flipped `true` on every undoable `undo_stack.push`;
+    /// cleared on save / autosave write. Also set on successful undo / redo
+    /// so save-then-undo marks the project dirty again.
+    #[cfg(feature = "v3")]
+    dirty: bool,
+    /// 003-T4.6: per-session autosave token (`<pid>_<nanos_since_epoch>`).
+    /// Used as the autosave filename stem. Stable for the session lifetime so
+    /// prior-session autosave files accumulate in `_autosave/` as recovery
+    /// candidates without overwriting each other.
+    #[cfg(feature = "v3")]
+    session_token: String,
+    /// 003-T4.6: wall-clock instant of the most-recent autosave write
+    /// attempt. `None` until the first write. Used by `autosave::should_autosave`
+    /// to enforce the 5-second debounce window.
+    #[cfg(feature = "v3")]
+    last_autosave_request: Option<std::time::Instant>,
 }
 
 /// 003-T1.45 — once-per-session "first X" guards for the Plan §11.7
@@ -531,6 +551,10 @@ fn schedule_scene_recall(state: &mut EditingState, slot: usize) -> RecallOutcome
                 non_undoable: false,
             };
             state.undo_stack.push(mutation, &mut state.project);
+            #[cfg(feature = "v3")]
+            {
+                state.dirty = true;
+            }
             state.crossfade = None;
             RecallOutcome::Snapped
         }
@@ -687,6 +711,43 @@ fn apply_command(state: &mut EditingState, event: Command) -> SideEffect {
         // reverts the relink. The picker blocks the egui frame for
         // the duration of the modal — acceptable for a one-shot relink
         // action; documented in the helper's module doc.
+        // 003-T4.8 — operator clicked "Save as…" in the toolbar. Opens the
+        // rfd Save dialog; on a successful pick writes via `save_portable`
+        // (which relativises asset paths), updates `project_file_path`, and
+        // clears the dirty flag.
+        #[cfg(feature = "v3")]
+        Command::OpenSaveAsPicker => {
+            let default_name = state
+                .project_file_path
+                .as_deref()
+                .and_then(|p| p.file_stem())
+                .and_then(|s| s.to_str())
+                .unwrap_or("Untitled show");
+            let Some(dest) = crate::windows::file_dialogs::pick_save_destination(default_name)
+            else {
+                tracing::info!(target: "rmap::ux", event = "save_as_cancelled");
+                return SideEffect::None;
+            };
+            tracing::info!(
+                target: "rmap::ux",
+                event = "save_as_picked",
+                path = %dest.display(),
+            );
+            match state.project.save_portable(&dest) {
+                Ok(()) => {
+                    state.project_file_path = Some(dest);
+                    state.dirty = false;
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        path = %state.project_file_path.as_deref().map(|p| p.display().to_string()).unwrap_or_default(),
+                        ?err,
+                        "save_as: write failed",
+                    );
+                }
+            }
+            SideEffect::None
+        }
         #[cfg(feature = "v3")]
         Command::OpenRelinkPicker {
             layer_idx,
@@ -733,6 +794,7 @@ fn apply_command(state: &mut EditingState, event: Command) -> SideEffect {
                 old_path,
             };
             state.undo_stack.push(mutation, &mut state.project);
+            state.dirty = true;
             // RelinkAssetPath::needs_layer_rebuild() == true so we
             // tell the event loop to refresh GPU layer state and the
             // editor will re-run the file-watcher / image-loader path
@@ -1330,6 +1392,18 @@ fn assemble_editing_state(
         session_started_at: std::time::Instant::now(),
         #[cfg(feature = "v3")]
         connecting_toast_emitted: false,
+        #[cfg(feature = "v3")]
+        dirty: false,
+        #[cfg(feature = "v3")]
+        session_token: {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            format!("{}_{}", std::process::id(), nanos)
+        },
+        #[cfg(feature = "v3")]
+        last_autosave_request: None,
     }
 }
 
@@ -2694,15 +2768,21 @@ fn render_m5_pipeline(
                     .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                         label: Some("m5 gamma encoder"),
                     });
+            // 003-T3.28 — projector output applies per-display tone overrides
+            // when set; otherwise inherits master. The egui control-window
+            // preview binds `warp_rt_view` (post-warp, pre-gamma), so master
+            // tuning isn't visible there in either case — the override is
+            // therefore the only way to make projector output diverge from
+            // preview without a second gamma pass.
             gamma.render(
                 &renderer.gpu.device,
                 &renderer.gpu.queue,
                 &mut enc_gamma,
                 &surface_view,
                 warp_rt_view,
-                project.gamma,
-                project.brightness,
-                project.contrast,
+                project.gamma_override.unwrap_or(project.gamma),
+                project.brightness_override.unwrap_or(project.brightness),
+                project.contrast_override.unwrap_or(project.contrast),
                 wgpu::LoadOp::Clear(wgpu::Color::BLACK),
             );
             // Editor overlay: paint per-layer outlines + mask polygons on
@@ -2785,6 +2865,7 @@ fn handle_editing_window_event(
                             crate::project::command::Mutation::AddLayer { layer, position };
                         emit_mutation_telemetry(&mut state.telemetry, &mutation);
                         state.undo_stack.push(mutation, &mut state.project);
+                        state.dirty = true;
                         rebuild_layers_for_state(state);
                         state.toast_queue.push(crate::windows::toast::Toast::new(
                             crate::windows::toast::ToastKind::Info,
@@ -2846,6 +2927,18 @@ fn handle_editing_window_event(
                             overlay_on: state.output.state.show_editor_overlay,
                         }
                     },
+                    // 003-T4.9: derive project name from file path at call
+                    // site; fall back to "Untitled show" when no path is set.
+                    #[cfg(feature = "v3")]
+                    project_name: state
+                        .project_file_path
+                        .as_deref()
+                        .and_then(|p| p.file_stem())
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("Untitled show")
+                        .to_string(),
+                    #[cfg(feature = "v3")]
+                    dirty: state.dirty,
                 };
                 // 003-T1.42 follow-up: drain expired toasts once per frame
                 // before render. Sticky Error toasts survive; auto-expiring
@@ -2924,6 +3017,7 @@ fn handle_editing_window_event(
                                 let did = outcome.is_some();
                                 tracing::info!(did, op = if redo { "redo" } else { "undo" });
                                 if did {
+                                    state.dirty = true;
                                     tracing::info!(target: "rmap::ux", event = "undo_invoked");
                                 }
                                 if matches!(outcome, Some(true)) {
@@ -2989,6 +3083,9 @@ fn handle_editing_window_event(
                             needs_rebuild_after_drain = true;
                         }
                         emit_mutation_telemetry(&mut state.telemetry, &m);
+                        if !m.is_non_undoable() {
+                            state.dirty = true;
+                        }
                         state.undo_stack.push(m, &mut state.project);
                     }
                 }
@@ -3013,6 +3110,7 @@ fn handle_editing_window_event(
                     ControlPanelAction::RequestUndo => {
                         let outcome = state.undo_stack.undo(&mut state.project);
                         if outcome.is_some() {
+                            state.dirty = true;
                             tracing::info!(target: "rmap::ux", event = "undo_invoked");
                         }
                         if matches!(outcome, Some(true)) {
@@ -3023,6 +3121,7 @@ fn handle_editing_window_event(
                     ControlPanelAction::RequestRedo => {
                         let outcome = state.undo_stack.redo(&mut state.project);
                         if outcome.is_some() {
+                            state.dirty = true;
                             tracing::info!(target: "rmap::ux", event = "redo_invoked");
                         }
                         if matches!(outcome, Some(true)) {
@@ -3036,6 +3135,23 @@ fn handle_editing_window_event(
                     #[cfg(feature = "v3")]
                     ControlPanelAction::EmitCommand(cmd) => {
                         let side = apply_command(state, cmd);
+                        if matches!(side, SideEffect::RebuildLayers) {
+                            rebuild_layers_for_state(state);
+                        }
+                    }
+                    // 003-T4.8: toolbar Save button — write to the current
+                    // project_file_path if known, otherwise open Save as…
+                    #[cfg(feature = "v3")]
+                    ControlPanelAction::RequestSave => {
+                        let side = apply_command(state, crate::controls::Command::OpenSaveAsPicker);
+                        if matches!(side, SideEffect::RebuildLayers) {
+                            rebuild_layers_for_state(state);
+                        }
+                    }
+                    // 003-T4.8: toolbar Save as… button.
+                    #[cfg(feature = "v3")]
+                    ControlPanelAction::RequestSaveAs => {
+                        let side = apply_command(state, crate::controls::Command::OpenSaveAsPicker);
                         if matches!(side, SideEffect::RebuildLayers) {
                             rebuild_layers_for_state(state);
                         }
@@ -3104,6 +3220,7 @@ fn handle_editing_window_event(
                             let did = outcome.is_some();
                             tracing::info!(did, "redo");
                             if did {
+                                state.dirty = true;
                                 // 003-T1.46 — telemetry counts both undo
                                 // and redo as undo_invoked (the metric is
                                 // "operator reached for the safety net";
@@ -3118,6 +3235,7 @@ fn handle_editing_window_event(
                             let did = outcome.is_some();
                             tracing::info!(did, "undo");
                             if did {
+                                state.dirty = true;
                                 tracing::info!(target: "rmap::ux", event = "undo_invoked");
                             }
                             if matches!(outcome, Some(true)) {
@@ -3655,6 +3773,18 @@ impl ApplicationHandler for App {
                 if let Some(ctrl) = state.control.as_ref() {
                     ctrl.window.request_redraw();
                 }
+            }
+            // 003-T4.6: debounced autosave — writes to
+            // `~/Documents/rmap/_autosave/<session_token>.rmap.json` at
+            // most once every 5 seconds when the project is dirty.
+            #[cfg(feature = "v3")]
+            {
+                crate::app::autosave::maybe_autosave(
+                    &state.project,
+                    &state.session_token,
+                    &mut state.dirty,
+                    &mut state.last_autosave_request,
+                );
             }
         }
     }

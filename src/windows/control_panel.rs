@@ -287,6 +287,15 @@ pub enum ControlPanelAction {
     /// of whether the action came from the keyboard or this button.
     #[cfg(feature = "v3")]
     EmitCommand(crate::controls::Command),
+    /// 003-T4.8: toolbar "Save" button clicked. App writes the project to
+    /// the current `project_file_path`, or falls back to a Save-as picker
+    /// if no path is known yet.
+    #[cfg(feature = "v3")]
+    RequestSave,
+    /// 003-T4.8: toolbar "Save as…" button clicked. App opens the rfd Save
+    /// dialog via `Command::OpenSaveAsPicker`.
+    #[cfg(feature = "v3")]
+    RequestSaveAs,
 }
 
 /// Per-frame inputs from the App into the control panel render. Bundled so the
@@ -320,6 +329,15 @@ pub struct ControlPanelInputs {
     /// `app.rs` so the UI never borrows `EditingState` directly.
     #[cfg(feature = "v3")]
     pub output_state_snapshot: crate::windows::show_day_strip::OutputStateSnapshot,
+    /// 003-T4.9: display name derived from `project_file_path` file stem, or
+    /// `"Untitled show"` when no file path is set. Derived at the call site
+    /// in `app.rs` so it doesn't need to be stored on `EditingState`.
+    #[cfg(feature = "v3")]
+    pub project_name: String,
+    /// 003-T4.9: `true` when the project has unsaved mutations. The toolbar
+    /// shows a "• " prefix on the project name when this is set (T4.10).
+    #[cfg(feature = "v3")]
+    pub dirty: bool,
 }
 
 /// Render the control panel. Mutates `project` in place.
@@ -380,9 +398,17 @@ pub fn show(
     // T3.17 (External JSON gating).  T3.18 persistence via egui id_sources.
     #[cfg(feature = "v3")]
     if st.advanced_open {
+        // 003-T3.11 — fixed-width Advanced panel.
+        //
+        // The panel is **non-resizable** so its left edge can't overlap the
+        // canvas's right column with a drag-to-resize cursor zone. Warp grid
+        // corners at normalized (1.0, *) sit exactly there; with a resizable
+        // panel an operator dragging the rightmost warp handle would
+        // accidentally grab the panel resize handle instead, get a
+        // "panel-grew" surprise, and lose their warp drag entirely.
         egui::SidePanel::right("rmap_advanced")
-            .resizable(true)
-            .default_width(360.0)
+            .resizable(false)
+            .exact_width(360.0)
             .show_inside(ui, |ui| {
                 // Esc closes the panel.
                 if ui.input(|i| i.key_pressed(egui::Key::Escape)) {

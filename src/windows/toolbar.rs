@@ -40,7 +40,13 @@ pub fn show(
     let mut action: Option<ControlPanelAction> = None;
     ui.horizontal(|ui| {
         // --- Left side ---
-        ui.label("Untitled show"); // T-Phase4 wires the real project name
+        // 003-T4.9 / T4.10: project name with dirty indicator.
+        let label_text = if inputs.dirty {
+            format!("• {}", inputs.project_name)
+        } else {
+            inputs.project_name.clone()
+        };
+        ui.label(label_text);
         ui.add_space(12.0);
         if ui
             .add_enabled(inputs.can_undo, egui::Button::new("⟲ Undo"))
@@ -53,6 +59,18 @@ pub fn show(
             .clicked()
         {
             action = Some(ControlPanelAction::RequestRedo);
+        }
+        ui.add_space(8.0);
+        // 003-T4.8: Save button — enabled only when dirty (nothing to save
+        // otherwise). Save-as is always available.
+        if ui
+            .add_enabled(inputs.dirty, egui::Button::new("Save"))
+            .clicked()
+        {
+            action = Some(ControlPanelAction::RequestSave);
+        }
+        if ui.button("Save as\u{2026}").clicked() {
+            action = Some(ControlPanelAction::RequestSaveAs);
         }
 
         // --- Right side --- push remaining widgets to the right edge

@@ -78,6 +78,12 @@ pub enum Command {
         layer_idx: usize,
         missing_path: std::path::PathBuf,
     },
+    /// 003-T4.8 — operator clicked "Save as…" in the toolbar. The handler
+    /// in `apply_command` opens an rfd Save dialog; on a successful pick
+    /// the project is written via `save_portable` (relativises asset paths),
+    /// `project_file_path` is updated, and the dirty flag is cleared.
+    #[cfg(feature = "v3")]
+    OpenSaveAsPicker,
 }
 
 /// A pluggable input. v1 ships [`KeyboardSource`] (T-M4-09); v1.5
