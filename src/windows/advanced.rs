@@ -55,6 +55,7 @@ pub fn show(
     project: &mut Project,
     st: &mut ControlPanelState,
     scene: &SceneEditorState,
+    monitor_names: &[String],
 ) -> ControlPanelAction {
     // Sync st.selected_layer from scene.selected so the migrated
     // effects-tab code that reads st.selected_layer stays correct.
@@ -222,7 +223,7 @@ pub fn show(
                 .id_salt(HDR_PROJECT)
                 .default_open(false)
                 .show(ui, |ui| {
-                    show_project_section(ui, project, st);
+                    show_project_section(ui, project, st, monitor_names);
                 });
 
             ui.add_space(4.0);
@@ -528,8 +529,27 @@ fn override_row(
 // ---------------------------------------------------------------------------
 // Project sub-section body (T3.11)
 // ---------------------------------------------------------------------------
-fn show_project_section(ui: &mut Ui, project: &mut Project, st: &mut ControlPanelState) {
+fn show_project_section(
+    ui: &mut Ui,
+    project: &mut Project,
+    st: &mut ControlPanelState,
+    monitor_names: &[String],
+) {
     use std::path::Path;
+
+    // 003-T4.11 — show the human-readable name for the current output monitor.
+    // `crate::monitors::list()` on macOS resolves `NSScreen::localizedName`
+    // (e.g. "BenQ TH685") so the operator can confirm the right display is
+    // selected without memorising numeric indices.  Falls back to "monitor N"
+    // when the live list is shorter than the stored index (display unplugged).
+    let idx = project.output_monitor_index;
+    let monitor_label = monitor_names
+        .get(idx)
+        .cloned()
+        .unwrap_or_else(|| format!("monitor {idx}"));
+    ui.label(format!("Output: {monitor_label}"));
+
+    ui.add_space(4.0);
 
     if let Some(new) = command_checkbox(ui, "Windowed output", project.output_windowed) {
         st.pending_mutations

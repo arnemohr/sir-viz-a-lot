@@ -121,6 +121,22 @@ pub fn show(
             if ui.toggle_value(&mut is_warp, "Warp").clicked() {
                 scene.mode = flip_warp(scene.mode);
             }
+
+            // 003-T5.12 — Glossary + Help buttons.
+            // Glossary toggles the in-app term window; "?" opens the README
+            // in the default browser via `std::process::Command`.
+            #[cfg(feature = "v3")]
+            {
+                ui.add_space(4.0);
+                ui.toggle_value(&mut st.glossary_open, "Glossary");
+                if ui
+                    .button("?")
+                    .on_hover_text("Open rmap help in browser")
+                    .clicked()
+                {
+                    crate::windows::control_panel::open_help_url();
+                }
+            }
         });
     });
     action

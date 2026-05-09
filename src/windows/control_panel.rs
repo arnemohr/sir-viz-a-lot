@@ -270,6 +270,12 @@ pub struct ControlPanelState {
     /// the set is small (≤ 9 tiles in practice).
     #[cfg(feature = "v3")]
     pub thumbnail_cache: crate::windows::cue_strip::ThumbnailCache,
+    /// 003-T5.12 — whether the in-app Glossary window is visible. Toggled
+    /// by the "Glossary" button in the toolbar right section. The window
+    /// renders all [`GlossaryTerm`] entries in a scrollable popup so the
+    /// operator can scan the full vocabulary without hovering over each label.
+    #[cfg(feature = "v3")]
+    pub glossary_open: bool,
 }
 
 pub enum ControlPanelAction {
@@ -377,6 +383,14 @@ pub struct ControlPanelInputs {
     /// The toolbar uses this to toggle the Preview button label.
     #[cfg(feature = "v3")]
     pub has_preview: bool,
+    /// 003-T4.11 — human-readable monitor names from
+    /// `crate::monitors::list()` (macOS: `NSScreen::localizedName`; other
+    /// platforms: winit's `MonitorHandle::name()` or a numeric fallback).
+    /// Index `i` corresponds to `event_loop.available_monitors().nth(i)`.
+    /// Used by the Advanced > Project section to show e.g.
+    /// `"Output: BenQ TH685"` instead of the bare index.
+    #[cfg(feature = "v3")]
+    pub monitor_names: Vec<String>,
 }
 
 /// Render the control panel. Mutates `project` in place.
@@ -467,7 +481,13 @@ pub fn show(
                     }
                     ui.heading("Advanced");
                     ui.separator();
-                    let act = crate::windows::advanced::show(ui, project, st, scene);
+                    let act = crate::windows::advanced::show(
+                        ui,
+                        project,
+                        st,
+                        scene,
+                        &inputs.monitor_names,
+                    );
                     match act {
                         ControlPanelAction::None => {}
                         _ => action = act,
@@ -606,6 +626,12 @@ pub fn show(
                 });
         }
     });
+
+    // 003-T5.12 — in-app Glossary window. Rendered here (using the egui
+    // context, not `ui`) so it floats over the panel layout. Toggled by
+    // the "Glossary" button added to the toolbar's right section.
+    #[cfg(feature = "v3")]
+    show_glossary_window(ui.ctx(), &mut st.glossary_open);
 
     action
 }
@@ -1954,4 +1980,108 @@ fn modulator_slider_params(
     }
     ui.add_space(2.0);
     None
+}
+
+// ---------------------------------------------------------------------------
+// 003-T5.12 — in-app Glossary window
+// ---------------------------------------------------------------------------
+
+/// Render a floating egui `Window` listing every [`GlossaryTerm`] with its
+/// headline and body text. Toggled by `open`; the window's own close button
+/// also clears the flag so the operator has two ways to dismiss it.
+///
+/// This is a `v3`-only function (`advanced.rs` and `glossary.rs` are both
+/// behind the `v3` feature gate).
+#[cfg(feature = "v3")]
+fn show_glossary_window(ctx: &egui::Context, open: &mut bool) {
+    use crate::windows::glossary::{all_terms, entry};
+
+    egui::Window::new("Glossary")
+        .open(open)
+        .resizable(true)
+        .default_width(420.0)
+        .default_height(500.0)
+        .show(ctx, |ui| {
+            ui.label(
+                "Every term used in rmap, with a short explanation. \
+                 Hover the ? next to a label in the Advanced panel for context-sensitive help.",
+            );
+            ui.separator();
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                for &term in all_terms() {
+                    let e = entry(term);
+                    ui.strong(e.headline);
+                    ui.label(e.body);
+                    ui.add_space(8.0);
+                }
+            });
+        });
+}
+
+// ---------------------------------------------------------------------------
+// 003-T5.12 — help URL
+// ---------------------------------------------------------------------------
+
+/// The canonical URL for rmap's built-in help. Opens in the default browser
+/// via `open_help_url()`. Kept as a constant so both the "?" button and any
+/// future deep-link code share a single definition.
+///
+/// No repository URL is set in `Cargo.toml`; this placeholder points to the
+/// docs.rs page. Update when the canonical public URL is established.
+///
+/// TODO: replace with the GitHub README URL when the repository is public.
+#[cfg(feature = "v3")]
+pub const HELP_URL: &str = "https://docs.rs/rmap";
+
+/// Open `HELP_URL` in the user's default browser (macOS `open` command).
+/// Returns `Ok(())` immediately — the browser opens asynchronously. Logs a
+/// warning (does not panic) if the `open` subprocess cannot be spawned.
+#[cfg(feature = "v3")]
+pub fn open_help_url() {
+    match std::process::Command::new("open").arg(HELP_URL).spawn() {
+        Ok(_) => {
+            tracing::info!(url = HELP_URL, "opened help URL in browser");
+        }
+        Err(e) => {
+            tracing::warn!(?e, url = HELP_URL, "failed to spawn 'open' for help URL");
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 003-T5.12 unit tests
+// ---------------------------------------------------------------------------
+#[cfg(all(test, feature = "v3"))]
+mod help_tests {
+    use super::HELP_URL;
+    use crate::windows::glossary::{all_terms, entry};
+
+    /// T5.12 — the help URL is non-empty and starts with https://.
+    #[test]
+    fn help_url_is_non_empty_https() {
+        assert!(!HELP_URL.is_empty(), "HELP_URL must not be empty");
+        assert!(
+            HELP_URL.starts_with("https://"),
+            "HELP_URL should be an HTTPS URL, got: {HELP_URL:?}"
+        );
+    }
+
+    /// T5.12 — the Glossary window can iterate every GlossaryTerm and produce
+    /// a non-empty headline + body (same check as T3.22 but verifies the
+    /// `all_terms()` path that the window iterates, not just the entry()
+    /// exhaustive match).
+    #[test]
+    fn glossary_window_assembles_every_term() {
+        for &term in all_terms() {
+            let e = entry(term);
+            assert!(
+                !e.headline.is_empty(),
+                "glossary window: headline empty for {term:?}"
+            );
+            assert!(
+                !e.body.is_empty(),
+                "glossary window: body empty for {term:?}"
+            );
+        }
+    }
 }

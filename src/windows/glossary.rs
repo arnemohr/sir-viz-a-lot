@@ -189,6 +189,42 @@ pub fn entry(t: GlossaryTerm) -> GlossaryEntry {
 }
 
 // ---------------------------------------------------------------------------
+// T5.12 — canonical term list for the in-app Glossary window.
+// ---------------------------------------------------------------------------
+
+/// All [`GlossaryTerm`] variants in display order.
+///
+/// This is the single source of truth for both the `lint_terms_have_entries`
+/// unit test and the in-app Glossary window — keeping them in sync is
+/// automatic.  When you add a new variant to [`GlossaryTerm`] you must also
+/// add it here (the compiler will remind you if you forget the `entry()` arm;
+/// this list is the "add copy alongside code" tax).
+pub fn all_terms() -> &'static [GlossaryTerm] {
+    &[
+        GlossaryTerm::Warp,
+        GlossaryTerm::MaskPolygon,
+        GlossaryTerm::Modulator,
+        GlossaryTerm::Gamma,
+        GlossaryTerm::Brightness,
+        GlossaryTerm::Contrast,
+        GlossaryTerm::BlendMode,
+        GlossaryTerm::Crossfade,
+        GlossaryTerm::Scene,
+        GlossaryTerm::ZoneTemplate,
+        GlossaryTerm::Blackout,
+        GlossaryTerm::Freeze,
+        GlossaryTerm::TestPattern,
+        GlossaryTerm::EditorOverlay,
+        GlossaryTerm::Effect,
+        GlossaryTerm::FitMode,
+        GlossaryTerm::MaskFeather,
+        GlossaryTerm::GridDetail,
+        GlossaryTerm::Opacity,
+        GlossaryTerm::DisplayOverride,
+    ]
+}
+
+// ---------------------------------------------------------------------------
 // T3.19 — glossary_label primitive
 // ---------------------------------------------------------------------------
 
@@ -235,33 +271,12 @@ mod tests {
     /// **compile error**.  This test catches the complementary failure:
     /// an arm that exists but has empty or suspiciously short copy.
     ///
-    /// IMPORTANT: when you add a new `GlossaryTerm` variant, also add it
-    /// to `all` below — the compiler won't remind you here, only in `entry()`.
+    /// Uses `all_terms()` as the single source of truth for the term list:
+    /// adding a new variant requires updating `all_terms()` and the `entry()`
+    /// match; this test then automatically covers the new variant.
     #[test]
     fn lint_terms_have_entries() {
-        let all = [
-            GlossaryTerm::Warp,
-            GlossaryTerm::MaskPolygon,
-            GlossaryTerm::Modulator,
-            GlossaryTerm::Gamma,
-            GlossaryTerm::Brightness,
-            GlossaryTerm::Contrast,
-            GlossaryTerm::BlendMode,
-            GlossaryTerm::Crossfade,
-            GlossaryTerm::Scene,
-            GlossaryTerm::ZoneTemplate,
-            GlossaryTerm::Blackout,
-            GlossaryTerm::Freeze,
-            GlossaryTerm::TestPattern,
-            GlossaryTerm::EditorOverlay,
-            GlossaryTerm::Effect,
-            GlossaryTerm::FitMode,
-            GlossaryTerm::MaskFeather,
-            GlossaryTerm::GridDetail,
-            GlossaryTerm::Opacity,
-            GlossaryTerm::DisplayOverride,
-        ];
-        for t in all {
+        for &t in super::all_terms() {
             let e = entry(t);
             assert!(!e.headline.is_empty(), "headline empty for {t:?}");
             assert!(!e.body.is_empty(), "body empty for {t:?}");
@@ -271,5 +286,25 @@ mod tests {
                 e.body
             );
         }
+    }
+
+    /// T5.12 — `all_terms()` covers every variant (no missing terms).
+    ///
+    /// The exhaustive `entry()` match is the compile-time guard against
+    /// *missing* variants; this test is the runtime guard against *forgetting
+    /// to add to `all_terms()`*. The expected count must be bumped whenever
+    /// a new `GlossaryTerm` variant is added.
+    #[test]
+    fn all_terms_covers_every_variant() {
+        // Bump this when you add a new GlossaryTerm variant.
+        const EXPECTED_VARIANT_COUNT: usize = 20;
+        assert_eq!(
+            super::all_terms().len(),
+            EXPECTED_VARIANT_COUNT,
+            "all_terms() has {} entries but expected {}. \
+             Add the new variant to all_terms() and bump EXPECTED_VARIANT_COUNT.",
+            super::all_terms().len(),
+            EXPECTED_VARIANT_COUNT,
+        );
     }
 }

@@ -3080,6 +3080,14 @@ fn handle_editing_window_event(
                     // toolbar label.
                     #[cfg(feature = "v3")]
                     has_preview: state.preview_window.is_some(),
+                    // 003-T4.11: human-readable monitor names for Advanced > Project.
+                    // crate::monitors::list() resolves NSScreen::localizedName on macOS
+                    // so we get "BenQ TH685" instead of winit's "Monitor #41052" placeholders.
+                    #[cfg(feature = "v3")]
+                    monitor_names: crate::monitors::list(event_loop)
+                        .into_iter()
+                        .map(|m| m.name)
+                        .collect(),
                 };
                 // 003-T1.42 follow-up: drain expired toasts once per frame
                 // before render. Sticky Error toasts survive; auto-expiring
