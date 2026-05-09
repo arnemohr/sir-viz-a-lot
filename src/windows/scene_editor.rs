@@ -21,7 +21,13 @@ use egui::Pos2;
 
 use crate::effects::Effect;
 use crate::modulators::Modulator;
+#[cfg_attr(not(feature = "v3"), allow(unused_imports))]
 use crate::project::schema::{LayerConfig, Project, WarpMesh};
+#[cfg_attr(not(feature = "v3"), allow(unused_imports))]
+use crate::windows::theme::{
+    ACCENT, ACCENT_DIM, HANDLE_ACTIVE, HANDLE_DEFAULT, HANDLE_OUTLINE, LAYER_PALETTE, MASK_EDGE,
+    MESH_LINE, TEXT_SECONDARY,
+};
 
 /// Pixel radius for mask-vertex hit-testing in preview space (M11).
 const MASK_HANDLE_HIT_PX: f32 = 9.0;
@@ -186,6 +192,10 @@ pub struct SceneEditorState {
     pub selected: Option<Selection>,
     pub drag: Option<DragSession>,
     pub mode: EditMode,
+    /// Last mode rendered — used by [`mode_banner`] to drive the cross-fade
+    /// animation when the mode changes.
+    #[cfg_attr(not(feature = "v3"), allow(dead_code))]
+    pub previous_mode: Option<EditMode>,
 }
 
 /// Read the layer's effective static `(translate, scale, rotate_deg)` from
@@ -1054,18 +1064,24 @@ pub fn mode_banner_copy(mode: EditMode, has_layer_selected: bool) -> &'static st
 /// 003-T3.8 — thin instruction strip at the top of the canvas.
 ///
 /// Renders a single low-contrast label with guidance text that varies by
-/// `scene.mode`. No border; small font; grey text so it doesn't compete
-/// with the canvas content. v3-only — v2 has its own static instruction
-/// label in `show_scene_tab`.
+/// `scene.mode`. T4.15: fades the text in over `TRANSITION_MS` when the mode
+/// changes. No border; small font; grey text so it doesn't compete with the
+/// canvas content. v3-only — v2 has its own static instruction label in
+/// `show_scene_tab`.
 #[cfg(feature = "v3")]
-pub fn mode_banner(ui: &mut egui::Ui, scene: &SceneEditorState) {
+pub fn mode_banner(ui: &mut egui::Ui, scene: &mut SceneEditorState) {
+    use crate::windows::anim::{TRANSITION_MS, animate_bool_to};
+
     let has_selection = scene.selected.is_some();
     let copy = mode_banner_copy(scene.mode, has_selection);
-    ui.label(
-        egui::RichText::new(copy)
-            .small()
-            .color(egui::Color32::from_gray(140)),
-    );
+
+    // Each mode gets its own animation id so switching modes starts a fresh
+    // 0→1 fade automatically — no manual reset needed.
+    let anim_id = ui.id().with(("mode_banner_alpha", scene.mode as u8));
+    let alpha = animate_bool_to(ui, anim_id, true, TRANSITION_MS);
+
+    let color = TEXT_SECONDARY.linear_multiply(alpha);
+    ui.label(egui::RichText::new(copy).small().color(color));
 }
 
 /// 003-T3.9 — map the current `EditMode` to the cursor icon that reflects
@@ -1085,17 +1101,7 @@ pub fn cursor_for_mode(mode: EditMode) -> egui::CursorIcon {
 /// contrast against typical projection content (mid-grey to dark
 /// backgrounds) and against each other on screen.
 pub fn layer_color(idx: usize) -> egui::Color32 {
-    const PALETTE: [egui::Color32; 8] = [
-        egui::Color32::from_rgb(255, 110, 130), // pink
-        egui::Color32::from_rgb(110, 200, 255), // sky
-        egui::Color32::from_rgb(180, 240, 130), // lime
-        egui::Color32::from_rgb(255, 200, 90),  // amber
-        egui::Color32::from_rgb(190, 130, 245), // violet
-        egui::Color32::from_rgb(110, 230, 200), // teal
-        egui::Color32::from_rgb(245, 150, 80),  // orange
-        egui::Color32::from_rgb(180, 180, 220), // grey-violet
-    ];
-    PALETTE[idx % PALETTE.len()]
+    LAYER_PALETTE[idx % LAYER_PALETTE.len()]
 }
 
 /// Paint a colored, rotation-aware outline for every enabled layer.
@@ -1190,10 +1196,7 @@ pub fn paint_warp_grid_overlay(
             inner.top() + n[1] * inner.height(),
         )
     };
-    let mesh_stroke = egui::Stroke::new(
-        1.0,
-        egui::Color32::from_rgba_premultiplied(160, 200, 255, 90),
-    );
+    let mesh_stroke = egui::Stroke::new(1.0, MESH_LINE);
     // Horizontal grid lines: one per vertex row.
     for row in warp.grid.iter() {
         for pair in row.windows(2) {
@@ -1224,15 +1227,9 @@ pub fn paint_warp_grid_overlay(
                     if warp == layer_idx && sr == r && sc == c
             );
             let (fill, stroke) = if is_selected {
-                (
-                    egui::Color32::from_rgb(255, 230, 110),
-                    egui::Stroke::new(2.0, egui::Color32::WHITE),
-                )
+                (HANDLE_ACTIVE, egui::Stroke::new(2.0, egui::Color32::WHITE))
             } else {
-                (
-                    egui::Color32::from_rgb(120, 180, 240),
-                    egui::Stroke::new(1.0, egui::Color32::from_rgb(40, 40, 40)),
-                )
+                (HANDLE_DEFAULT, egui::Stroke::new(1.0, HANDLE_OUTLINE))
             };
             painter.circle(center, WARP_HANDLE_DRAW_PX, fill, stroke);
         }
@@ -1281,8 +1278,8 @@ pub fn paint_warp_snap_indicator(
     painter.circle(
         center,
         WARP_SNAP_RADIUS_PX,
-        egui::Color32::from_rgba_premultiplied(255, 230, 110, 50),
-        egui::Stroke::new(1.5, egui::Color32::from_rgb(255, 230, 110)),
+        ACCENT_DIM.linear_multiply(0.3),
+        egui::Stroke::new(1.5, ACCENT),
     );
 }
 
@@ -1301,8 +1298,7 @@ pub fn paint_mask_overlays(
             inner.top() + n[1] * inner.height(),
         )
     };
-    let edge_color = egui::Color32::from_rgb(140, 100, 200);
-    let edge_stroke = egui::Stroke::new(1.5, edge_color);
+    let edge_stroke = egui::Stroke::new(1.5, MASK_EDGE);
     for (w_idx, layer) in project.layers.iter().enumerate() {
         let warp = &layer.warp;
         let n = warp.mask_polygon.len();
@@ -1322,15 +1318,9 @@ pub fn paint_mask_overlays(
                     if warp == w_idx && idx == v_idx
             );
             let (fill, stroke) = if is_selected {
-                (
-                    egui::Color32::from_rgb(255, 230, 110),
-                    egui::Stroke::new(2.0, egui::Color32::WHITE),
-                )
+                (HANDLE_ACTIVE, egui::Stroke::new(2.0, egui::Color32::WHITE))
             } else {
-                (
-                    egui::Color32::from_rgb(180, 130, 220),
-                    egui::Stroke::new(1.0, egui::Color32::from_rgb(40, 40, 40)),
-                )
+                (MASK_EDGE, egui::Stroke::new(1.0, HANDLE_OUTLINE))
             };
             painter.circle(center, MASK_HANDLE_DRAW_PX, fill, stroke);
         }

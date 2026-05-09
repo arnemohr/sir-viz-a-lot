@@ -21,6 +21,8 @@ use std::collections::HashMap;
 
 use egui::{Color32, FontId, Rect, Response, RichText, Sense, TextureHandle, Ui, vec2};
 
+use crate::windows::theme;
+
 use crate::controls::Command;
 use crate::project::schema::{Project, ThumbnailRgba};
 
@@ -153,13 +155,13 @@ pub fn show(
             ui.add_space(8.0);
             ui.label(
                 RichText::new("(no cues yet)")
-                    .color(Color32::from_gray(140))
+                    .color(theme::TEXT_SECONDARY)
                     .font(FontId::proportional(13.0)),
             );
             ui.add_space(6.0);
             ui.label(
                 RichText::new("Save your first cue →")
-                    .color(Color32::from_gray(110))
+                    .color(theme::TEXT_SECONDARY.linear_multiply(0.78))
                     .font(FontId::proportional(12.0))
                     .italics(),
             );
@@ -209,14 +211,14 @@ fn scene_tile(
         let painter = ui.painter();
 
         // Background.
-        let bg = Color32::from_gray(38);
+        let bg = theme::BG_PANEL.linear_multiply(1.5);
         let highlight = crossfade_progress.is_some_and(|(t, _)| t == idx);
         let border_col = if highlight {
-            Color32::from_rgb(100, 180, 255)
+            theme::ACCENT
         } else if resp.hovered() {
-            Color32::from_gray(110)
+            theme::TEXT_SECONDARY
         } else {
-            Color32::from_gray(60)
+            theme::BG_PANEL.linear_multiply(3.0)
         };
         let rounding = egui::CornerRadius::same(4);
         painter.rect_filled(rect, rounding, bg);
@@ -246,7 +248,7 @@ fn scene_tile(
                 egui::Align2::CENTER_CENTER,
                 "—",
                 FontId::proportional(18.0),
-                Color32::from_gray(80),
+                theme::TEXT_SECONDARY.linear_multiply(0.57),
             );
         }
 
@@ -257,7 +259,7 @@ fn scene_tile(
             egui::Align2::LEFT_TOP,
             (idx + 1).to_string(),
             FontId::proportional(11.0),
-            Color32::from_gray(200),
+            theme::TEXT_PRIMARY,
         );
 
         // Scene name, right of the index.
@@ -267,7 +269,7 @@ fn scene_tile(
             egui::Align2::LEFT_TOP,
             &scene.name,
             FontId::proportional(11.0),
-            Color32::from_gray(160),
+            theme::TEXT_SECONDARY,
         );
 
         // T4.4 — crossfade progress bar along the bottom edge.
@@ -278,7 +280,7 @@ fn scene_tile(
                 let bar_w = TILE_W * progress.clamp(0.0, 1.0);
                 let bar_rect =
                     Rect::from_min_size(egui::pos2(rect.min.x, bar_y), vec2(bar_w, bar_h));
-                painter.rect_filled(bar_rect, 0.0, Color32::from_rgb(100, 180, 255));
+                painter.rect_filled(bar_rect, 0.0, theme::ACCENT);
             }
         }
     }
@@ -292,11 +294,11 @@ fn plus_tile(ui: &mut Ui) -> Response {
 
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
-        let bg = Color32::from_gray(30);
+        let bg = theme::BG_BACKGROUND.linear_multiply(1.3);
         let border_col = if resp.hovered() {
-            Color32::from_rgb(100, 200, 120)
+            theme::SUCCESS
         } else {
-            Color32::from_gray(55)
+            theme::BG_PANEL.linear_multiply(2.5)
         };
         let rounding = egui::CornerRadius::same(4);
         painter.rect_filled(rect, rounding, bg);
@@ -309,9 +311,9 @@ fn plus_tile(ui: &mut Ui) -> Response {
 
         let center = rect.center();
         let plus_col = if resp.hovered() {
-            Color32::from_rgb(140, 230, 160)
+            theme::SUCCESS
         } else {
-            Color32::from_gray(150)
+            theme::TEXT_SECONDARY
         };
         painter.text(
             center,
@@ -328,7 +330,7 @@ fn plus_tile(ui: &mut Ui) -> Response {
             egui::Align2::CENTER_CENTER,
             "Save cue",
             FontId::proportional(10.0),
-            Color32::from_gray(110),
+            theme::TEXT_SECONDARY.linear_multiply(0.78),
         );
     }
 

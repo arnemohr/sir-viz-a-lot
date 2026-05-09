@@ -20,7 +20,10 @@ use crate::project::schema::{BlendMode, Scene};
 // snapshot only needed in v2 Scenes tab.
 #[cfg(not(feature = "v3"))]
 use crate::project::snapshot;
+#[cfg(feature = "v3")]
+use crate::windows::anim;
 use crate::windows::scene_editor::{self, SceneEditorState};
+use crate::windows::theme;
 
 /// 003-T1.18 — live-preview slider that emits a `Mutation` on
 /// drag-stop instead of binding directly to a project field.
@@ -408,33 +411,45 @@ pub fn show(
     // temporary stack.  Content migrated: T3.12 (Master), T3.13 (Modulator
     // picker), T3.14 (effect chain), T3.15 (Mapping), T3.16 (blend mode),
     // T3.17 (External JSON gating).  T3.18 persistence via egui id_sources.
+    //
+    // T4.15 — animated slide-in/out: the panel width is animated from 0 to
+    // 360 over TRANSITION_MS so it slides in rather than snapping open.
+    // SidePanel doesn't natively animate; we control the width ourselves and
+    // skip rendering when the animated width rounds to zero.
     #[cfg(feature = "v3")]
-    if st.advanced_open {
-        // 003-T3.11 — fixed-width Advanced panel.
-        //
-        // The panel is **non-resizable** so its left edge can't overlap the
-        // canvas's right column with a drag-to-resize cursor zone. Warp grid
-        // corners at normalized (1.0, *) sit exactly there; with a resizable
-        // panel an operator dragging the rightmost warp handle would
-        // accidentally grab the panel resize handle instead, get a
-        // "panel-grew" surprise, and lose their warp drag entirely.
-        egui::SidePanel::right("rmap_advanced")
-            .resizable(false)
-            .exact_width(360.0)
-            .show_inside(ui, |ui| {
-                // Esc closes the panel.
-                if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                    st.advanced_open = false;
-                    return;
-                }
-                ui.heading("Advanced");
-                ui.separator();
-                let act = crate::windows::advanced::show(ui, project, st, scene);
-                match act {
-                    ControlPanelAction::None => {}
-                    _ => action = act,
-                }
-            });
+    {
+        const ADVANCED_MAX_WIDTH: f32 = 360.0;
+        let adv_anim_id = ui.id().with("adv_panel_open");
+        let adv_t = anim::animate_bool_to(ui, adv_anim_id, st.advanced_open, anim::TRANSITION_MS);
+        let adv_width = adv_t * ADVANCED_MAX_WIDTH;
+
+        if adv_width >= 1.0 {
+            // 003-T3.11 — animated-width Advanced panel.
+            //
+            // The panel is **non-resizable** so its left edge can't overlap
+            // the canvas's right column with a drag-to-resize cursor zone.
+            // Warp grid corners at normalized (1.0, *) sit exactly there;
+            // with a resizable panel an operator dragging the rightmost warp
+            // handle would accidentally grab the panel resize handle instead,
+            // get a "panel-grew" surprise, and lose their warp drag entirely.
+            egui::SidePanel::right("rmap_advanced")
+                .resizable(false)
+                .exact_width(adv_width)
+                .show_inside(ui, |ui| {
+                    // Esc closes the panel.
+                    if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                        st.advanced_open = false;
+                        return;
+                    }
+                    ui.heading("Advanced");
+                    ui.separator();
+                    let act = crate::windows::advanced::show(ui, project, st, scene);
+                    match act {
+                        ControlPanelAction::None => {}
+                        _ => action = act,
+                    }
+                });
+        }
     }
 
     // 003-T3.2: layer thumbnail strip on the left edge. Only under v3;
@@ -712,11 +727,7 @@ fn show_scene_tab(
             }
         }
     }
-    painter.rect_filled(
-        outer,
-        egui::CornerRadius::ZERO,
-        egui::Color32::from_rgb(8, 9, 12),
-    );
+    painter.rect_filled(outer, egui::CornerRadius::ZERO, theme::BG_BACKGROUND);
     painter.image(
         tex_id,
         inner,
@@ -726,7 +737,7 @@ fn show_scene_tab(
     painter.rect_stroke(
         inner,
         egui::CornerRadius::ZERO,
-        egui::Stroke::new(1.0, egui::Color32::from_rgb(70, 75, 85)),
+        egui::Stroke::new(1.0, theme::BG_PANEL.linear_multiply(3.5)),
         egui::StrokeKind::Outside,
     );
 
@@ -1131,7 +1142,7 @@ fn show_layers_tab(
     #[cfg(feature = "v3")]
     ui.label("Drop a JPG, PNG, or SVG onto the canvas, or use + Add image above. Order in this list = draw order, top to bottom.");
     if !st.add_layer_error.is_empty() {
-        ui.colored_label(egui::Color32::from_rgb(220, 120, 100), &st.add_layer_error);
+        ui.colored_label(theme::DESTRUCTIVE, &st.add_layer_error);
     }
 
     ui.add_space(6.0);

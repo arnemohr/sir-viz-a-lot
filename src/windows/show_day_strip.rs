@@ -6,6 +6,8 @@
 use egui::text::{LayoutJob, TextFormat};
 use egui::{Color32, FontId, Ui};
 
+use crate::windows::theme;
+
 use crate::controls::Command;
 
 /// Snapshot of output state passed into the strip so the UI can read active
@@ -22,9 +24,9 @@ pub struct OutputStateSnapshot {
 /// Returns the highlighted label colour when `active`, muted otherwise.
 pub fn button_color(active: bool) -> Color32 {
     if active {
-        Color32::from_rgb(255, 230, 110)
+        theme::ACCENT
     } else {
-        Color32::from_gray(200)
+        theme::TEXT_PRIMARY
     }
 }
 
@@ -47,7 +49,7 @@ fn button_label_job(label: &str, badge: &str, label_color: Color32) -> LayoutJob
         0.0,
         TextFormat {
             font_id: FontId::proportional(10.0),
-            color: Color32::from_gray(140),
+            color: theme::TEXT_SECONDARY,
             valign: egui::Align::Max,
             ..Default::default()
         },
@@ -100,11 +102,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn button_color_active_is_warm_yellow() {
+    fn button_color_active_is_accent() {
         let active = button_color(true);
         let inactive = button_color(false);
-        // Active must be the warm yellow, inactive the muted gray.
-        assert_eq!(active, Color32::from_rgb(255, 230, 110));
+        // Active must be the theme accent, inactive the primary text colour.
+        assert_eq!(active, theme::ACCENT);
+        assert_eq!(inactive, theme::TEXT_PRIMARY);
         assert_ne!(active, inactive);
     }
 

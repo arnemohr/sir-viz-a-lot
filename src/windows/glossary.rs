@@ -15,6 +15,8 @@
 //!
 //! This module is `#[cfg(feature = "v3")]`-only; see `src/windows/mod.rs`.
 
+use crate::windows::theme;
+
 /// Every domain term that can appear in the Advanced panel.
 ///
 /// One variant per term — a typo is a compile error, not a runtime surprise.
@@ -206,7 +208,7 @@ pub fn glossary_label(ui: &mut egui::Ui, term: GlossaryTerm) -> egui::Response {
         let q = ui.label(
             egui::RichText::new(" ?")
                 .small()
-                .color(egui::Color32::from_gray(140)),
+                .color(theme::TEXT_SECONDARY),
         );
         let combined = r.union(q);
         let with_tip = combined.on_hover_ui(|ui| {

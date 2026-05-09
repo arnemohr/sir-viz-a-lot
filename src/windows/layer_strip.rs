@@ -12,6 +12,10 @@ use std::hash::{Hash, Hasher};
 
 use egui::{Color32, Stroke, Ui};
 
+#[cfg(feature = "v3")]
+use crate::windows::anim;
+use crate::windows::theme;
+
 use crate::project::command::Mutation;
 use crate::project::schema::{self, Project};
 use crate::windows::control_panel::ControlPanelState;
@@ -24,8 +28,10 @@ pub const ROW_HEIGHT: f32 = 56.0;
 /// Thumbnail size within each row.
 pub const THUMB_W: f32 = 64.0;
 pub const THUMB_H: f32 = 36.0;
-/// Highlight stroke colour — matches the scene_editor's selected-handle colour.
-const SELECTED_COLOUR: Color32 = Color32::from_rgb(255, 230, 110);
+/// Highlight stroke colour — warm accent from the theme palette.
+fn selected_colour() -> Color32 {
+    theme::ACCENT
+}
 
 // ── colour derivation ───────────────────────────────────────────────────────
 
@@ -69,10 +75,11 @@ fn hsv_to_rgb(h: f32, s: f32, v: f32) -> Color32 {
         (c, 0.0, x)
     };
 
-    Color32::from_rgb(
+    Color32::from_rgba_unmultiplied(
         ((r1 + m) * 255.0) as u8,
         ((g1 + m) * 255.0) as u8,
         ((b1 + m) * 255.0) as u8,
+        255,
     )
 }
 
@@ -124,22 +131,34 @@ pub fn show(
                     egui::Sense::click(),
                 );
 
-                let painter = ui.painter_at(row_rect);
+                // T4.15 — hover scale: expand the row's paint rect slightly
+                // when the pointer is over it, using HOVER_FADE_MS for the
+                // blend. The allocation stays fixed (avoids layout jitter);
+                // only the painted region expands by up to 2%.
+                let hover_id = ui.id().with(("layer_row_hover", idx));
+                let hover_t =
+                    anim::animate_bool_to(ui, hover_id, row_resp.hovered(), anim::HOVER_FADE_MS);
+                // Expand from 0.0 to 2% of row height at full hover.
+                let expand = hover_t * ROW_HEIGHT * 0.02;
+                let draw_rect = row_rect.expand(expand);
+
+                let painter = ui.painter_at(draw_rect);
 
                 // ── row background ──────────────────────────────────────
                 let bg = if is_selected {
-                    Color32::from_rgb(45, 42, 35)
+                    // Warm tint from the theme accent, darkened.
+                    theme::ACCENT.linear_multiply(0.08)
                 } else {
-                    Color32::from_rgb(28, 28, 32)
+                    theme::BG_PANEL
                 };
-                painter.rect_filled(row_rect, egui::CornerRadius::same(2), bg);
+                painter.rect_filled(draw_rect, egui::CornerRadius::same(2), bg);
 
                 // ── selected highlight border ───────────────────────────
                 if is_selected {
                     painter.rect_stroke(
-                        row_rect,
+                        draw_rect,
                         egui::CornerRadius::same(2),
-                        Stroke::new(2.0, SELECTED_COLOUR),
+                        Stroke::new(2.0, selected_colour()),
                         egui::StrokeKind::Inside,
                     );
                 }
@@ -162,7 +181,7 @@ pub fn show(
                     egui::Align2::CENTER_TOP,
                     &layer.id,
                     egui::FontId::proportional(9.5),
-                    Color32::from_gray(190),
+                    theme::TEXT_PRIMARY,
                 );
 
                 // ── right-side controls column ──────────────────────────
@@ -244,7 +263,7 @@ pub fn show(
             let add_btn = ui.add(
                 egui::Button::new(egui::RichText::new("+ Add image").size(11.0))
                     .min_size(egui::vec2(ui.available_width(), 28.0))
-                    .fill(Color32::from_rgb(38, 42, 50)),
+                    .fill(theme::BG_PANEL.linear_multiply(1.4)),
             );
             if add_btn.clicked() {
                 if let Some(path) = crate::windows::file_dialogs::pick_image_to_add() {
@@ -348,20 +367,20 @@ mod tests {
     #[test]
     fn hsv_red() {
         let c = hsv_to_rgb(0.0, 1.0, 1.0);
-        assert_eq!(c, Color32::from_rgb(255, 0, 0));
+        assert_eq!(c, Color32::RED);
     }
 
     /// Pure green (h=120, s=1, v=1) should come back as (0, 255, 0).
     #[test]
     fn hsv_green() {
         let c = hsv_to_rgb(120.0, 1.0, 1.0);
-        assert_eq!(c, Color32::from_rgb(0, 255, 0));
+        assert_eq!(c, Color32::GREEN);
     }
 
     /// Pure blue (h=240, s=1, v=1) should come back as (0, 0, 255).
     #[test]
     fn hsv_blue() {
         let c = hsv_to_rgb(240.0, 1.0, 1.0);
-        assert_eq!(c, Color32::from_rgb(0, 0, 255));
+        assert_eq!(c, Color32::BLUE);
     }
 }

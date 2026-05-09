@@ -3,6 +3,7 @@
 
 #[cfg(feature = "v3")]
 pub mod advanced;
+pub mod anim;
 pub mod control;
 pub mod control_panel;
 #[cfg(feature = "v3")]

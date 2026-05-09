@@ -74,6 +74,8 @@ use crate::windows::control_panel::{
     ControlPanelAction, ControlPanelInputs, ControlPanelState, show as control_panel_show,
 };
 use crate::windows::output::OutputWindow;
+#[cfg(feature = "v3")]
+use crate::windows::theme;
 
 /// Application root. Holds the persistent state across event-loop iterations.
 ///
@@ -2066,7 +2068,7 @@ fn launcher_render(
                 // when the most-recent failure is still within its TTL.
                 if let Some((msg, _)) = last_error_label {
                     center_ui.add_space(10.0);
-                    center_ui.colored_label(egui::Color32::from_rgb(220, 80, 80), msg.as_str());
+                    center_ui.colored_label(theme::DESTRUCTIVE, msg.as_str());
                 }
             });
         });
