@@ -306,6 +306,22 @@ pub enum ControlPanelAction {
     /// dialog via `Command::OpenSaveAsPicker`.
     #[cfg(feature = "v3")]
     RequestSaveAs,
+    /// 003-T4.17: toolbar "Go live" button clicked while in `Editing`.
+    /// App transitions `Editing → GoLive` and calls `set_fullscreen(true)`.
+    #[cfg(feature = "v3")]
+    RequestEnterGoLive,
+    /// 003-T4.17: toolbar "Stop" button clicked while in `GoLive`.
+    /// App transitions `GoLive → Editing` and calls `set_fullscreen(false)`.
+    #[cfg(feature = "v3")]
+    RequestExitGoLive,
+    /// 003-T4.16a: toolbar "Preview" button clicked while preview is closed.
+    /// App opens a `PreviewWindow` on the primary display.
+    #[cfg(feature = "v3")]
+    RequestOpenPreview,
+    /// 003-T4.16a: toolbar "Close preview" button clicked while preview is open.
+    /// App drops `EditingState::preview_window`.
+    #[cfg(feature = "v3")]
+    RequestClosePreview,
 }
 
 /// Per-frame inputs from the App into the control panel render. Bundled so the
@@ -353,6 +369,14 @@ pub struct ControlPanelInputs {
     /// in flight; `None` when no fade is active.
     #[cfg(feature = "v3")]
     pub crossfade_progress: Option<(usize, f32)>,
+    /// 003-T4.17 — `true` when the app is in `AppState::GoLive`. The toolbar
+    /// uses this to show "Stop" instead of "Go live" on the same button slot.
+    #[cfg(feature = "v3")]
+    pub is_go_live: bool,
+    /// 003-T4.16a — `true` when `EditingState::preview_window` is `Some`.
+    /// The toolbar uses this to toggle the Preview button label.
+    #[cfg(feature = "v3")]
+    pub has_preview: bool,
 }
 
 /// Render the control panel. Mutates `project` in place.

@@ -90,6 +90,35 @@ pub enum Command {
     /// `Mutation::SetProjectScenes` through the undo stack.
     #[cfg(feature = "v3")]
     SceneSave,
+    /// 003-T4.17 — operator clicked "Go live". Transitions
+    /// `AppState::Editing → GoLive` and hot-swaps the projector to borderless
+    /// fullscreen on the monitor stored in `EditingState`.
+    ///
+    /// Routed through `App::window_event` (not `apply_command`) because the
+    /// transition mutates `AppState` one level above `EditingState`. An
+    /// `apply_command` arm exists only to drop the event with a warning if it
+    /// somehow leaks into the editing dispatch path after the transition.
+    ///
+    /// `non_undoable: true` — the operator cannot Cmd-Z back from a live show.
+    #[cfg(feature = "v3")]
+    EnterGoLive,
+    /// 003-T4.17 — operator clicked "Stop". Transitions
+    /// `AppState::GoLive → Editing` and returns the projector to windowed mode.
+    ///
+    /// Same dispatch note as `EnterGoLive`.
+    #[cfg(feature = "v3")]
+    ExitGoLive,
+    /// 003-T4.16a — operator clicked "Preview". Opens a child `PreviewWindow`
+    /// on the laptop in `EditingState::preview_window` so the operator can
+    /// dry-run the show without a projector.
+    ///
+    /// No display-sleep assertion is held during preview mode.
+    #[cfg(feature = "v3")]
+    OpenPreview,
+    /// 003-T4.16a — close the preview window opened by `OpenPreview`.
+    /// The child surface is dropped; the next frame skips preview rendering.
+    #[cfg(feature = "v3")]
+    ClosePreview,
 }
 
 /// A pluggable input. v1 ships [`KeyboardSource`] (T-M4-09); v1.5

@@ -11,6 +11,90 @@ use winit::window::{Fullscreen, Window, WindowAttributes};
 
 use crate::render::RenderError;
 
+/// 003-T4.16a — "Preview as projector" pre-show window. A thin stub that opens
+/// a plain windowed output on the laptop so the operator can dry-run the show
+/// before connecting a projector. The child window renders the same gamma output
+/// as the real projector would.
+///
+/// **Stub status (T4.16a):** this struct exists so `EditingState` can hold
+/// `Option<PreviewWindow>` and the toolbar can open/close it. Full rendering
+/// (blitting `warp_rt_view` to the child surface) is deferred as a follow-up;
+/// for now the window opens with a solid background colour.
+///
+/// Sleep assertion: NOT held during preview mode. Only `GoLive` holds it.
+// T4.16a stub: `surface` and `config` will be consumed by the blit renderer
+// once the full preview rendering lands. Suppress dead-code lint for now.
+#[allow(dead_code)]
+#[cfg(feature = "v3")]
+pub struct PreviewWindow {
+    pub window: Arc<Window>,
+    pub surface: wgpu::Surface<'static>,
+    pub config: wgpu::SurfaceConfiguration,
+}
+
+#[cfg(feature = "v3")]
+impl PreviewWindow {
+    /// Open the preview window on the primary display, sized to `width × height`
+    /// (caller picks a target-aspect size such as 640 × 360 for 16:9).
+    ///
+    /// # Errors
+    /// Returns `RenderError::Surface` if the window or surface cannot be created
+    /// (e.g. the compositor refuses a second surface).
+    pub fn new(
+        active_loop: &ActiveEventLoop,
+        instance: &wgpu::Instance,
+        adapter: &wgpu::Adapter,
+        device: &wgpu::Device,
+        width: u32,
+        height: u32,
+    ) -> Result<Self, RenderError> {
+        let attrs = WindowAttributes::default()
+            .with_title("rmap — Preview")
+            .with_inner_size(LogicalSize::new(width, height));
+
+        let window = active_loop
+            .create_window(attrs)
+            .map_err(|e| RenderError::Surface(format!("preview window create: {e}")))?;
+        let window = Arc::new(window);
+
+        let surface = instance
+            .create_surface(window.clone())
+            .map_err(|e| RenderError::Surface(format!("preview surface create: {e}")))?;
+
+        let caps = surface.get_capabilities(adapter);
+        let format = if caps.formats.contains(&wgpu::TextureFormat::Bgra8UnormSrgb) {
+            wgpu::TextureFormat::Bgra8UnormSrgb
+        } else if let Some(srgb) = caps.formats.iter().copied().find(|f| f.is_srgb()) {
+            srgb
+        } else {
+            caps.formats.first().copied().ok_or_else(|| {
+                RenderError::Surface("preview surface: no supported formats".into())
+            })?
+        };
+        let alpha_mode = caps.alpha_modes.first().copied().ok_or_else(|| {
+            RenderError::Surface("preview surface: no supported alpha modes".into())
+        })?;
+
+        let config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format,
+            width: width.max(1),
+            height: height.max(1),
+            present_mode: wgpu::PresentMode::AutoVsync,
+            alpha_mode,
+            view_formats: vec![],
+            desired_maximum_frame_latency: 2,
+        };
+        surface.configure(device, &config);
+
+        Ok(Self {
+            window,
+            surface,
+            config,
+        })
+    }
+}
+
 #[derive(Debug)]
 pub struct OutputState {
     pub blackout: bool,
@@ -173,5 +257,54 @@ impl OutputWindow {
     /// SurfaceError::Lost / Outdated recovery.
     pub fn recreate_surface(&self, device: &wgpu::Device) {
         self.surface.configure(device, &self.config);
+    }
+
+    /// 003-T4.16 — Hot-swap the projector between windowed and borderless
+    /// fullscreen at runtime.
+    ///
+    /// Calls `winit::window::Window::set_fullscreen` on the existing window so
+    /// the wgpu surface stays bound to the same window pointer — no surface
+    /// re-creation is required here. The OS will fire a `WindowEvent::Resized`
+    /// next frame; the App's `Resized` handler calls `recreate_surface` +
+    /// `resize_m5_gpu` + `register_scene_preview`, which handles any dimension
+    /// change cleanly.
+    ///
+    /// **Note on the preview:** the control-window preview's `TextureId` is
+    /// bound to the projector RT view (`warp_rt_view`, post-warp, pre-gamma;
+    /// T3.0b). That view is an offscreen texture independent of the projector's
+    /// swap chain, so it survives this call without re-registration.
+    ///
+    /// Wrapped in `catch_unwind` so a windowing-system panic (observed on some
+    /// macOS Sequoia betas) converts to `RenderError::Surface` rather than
+    /// unwinding the event loop. The failure path logs + toasts the message and
+    /// the App routes to `AppState::Failed`.
+    #[cfg(feature = "v3")]
+    pub fn set_fullscreen(
+        &self,
+        fullscreen: bool,
+        monitor: Option<MonitorHandle>,
+    ) -> Result<(), RenderError> {
+        // The winit call may panic on driver / compositor bugs. Capture it.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let fs = if fullscreen {
+                Some(Fullscreen::Borderless(monitor))
+            } else {
+                None
+            };
+            self.window.set_fullscreen(fs);
+        }));
+        match result {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                let msg = if let Some(s) = e.downcast_ref::<&str>() {
+                    format!("set_fullscreen panicked: {s}")
+                } else if let Some(s) = e.downcast_ref::<String>() {
+                    format!("set_fullscreen panicked: {s}")
+                } else {
+                    "set_fullscreen panicked (unknown payload)".to_string()
+                };
+                Err(RenderError::Surface(msg))
+            }
+        }
     }
 }

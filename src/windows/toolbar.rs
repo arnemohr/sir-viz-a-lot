@@ -75,8 +75,41 @@ pub fn show(
 
         // --- Right side --- push remaining widgets to the right edge
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            // Go-live stub — Phase 4 wires the fullscreen output transition
-            let _ = ui.button("Go live");
+            // 003-T4.17: Go-live / Stop button. Label flips on is_go_live;
+            // the click returns RequestEnterGoLive or RequestExitGoLive so
+            // App::window_event can perform the AppState swap.
+            #[cfg(feature = "v3")]
+            {
+                let go_live_label = if inputs.is_go_live { "Stop" } else { "Go live" };
+                if ui.button(go_live_label).clicked() {
+                    if inputs.is_go_live {
+                        action = Some(ControlPanelAction::RequestExitGoLive);
+                    } else {
+                        action = Some(ControlPanelAction::RequestEnterGoLive);
+                    }
+                }
+            }
+            // 003-T4.16a: Preview button. Opens / closes the child preview window.
+            #[cfg(feature = "v3")]
+            {
+                let preview_label = if inputs.has_preview {
+                    "Close preview"
+                } else {
+                    "Preview"
+                };
+                if ui.button(preview_label).clicked() {
+                    if inputs.has_preview {
+                        action = Some(ControlPanelAction::RequestClosePreview);
+                    } else {
+                        action = Some(ControlPanelAction::RequestOpenPreview);
+                    }
+                }
+            }
+            // Non-v3 stub preserved so v2 builds continue to compile.
+            #[cfg(not(feature = "v3"))]
+            {
+                let _ = ui.button("Go live");
+            }
             ui.add_space(8.0);
 
             // Advanced disclosure toggle
