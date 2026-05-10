@@ -3562,6 +3562,18 @@ fn handle_editing_window_event(
                             tracing::info!("preview window closed");
                         }
                     }
+                    // 004-V31.8.2: thumbnail clicked while preview is already open —
+                    // bring the preview window to front.
+                    #[cfg(feature = "v3")]
+                    ControlPanelAction::FocusPreview => {
+                        if let Some(pw) = &state.preview_window {
+                            pw.window.focus_window();
+                            tracing::info!(
+                                target: "rmap::ux",
+                                event = "thumbnail_clicked_focus_preview"
+                            );
+                        }
+                    }
                 }
             }
             _ => {}

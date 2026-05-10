@@ -328,6 +328,11 @@ pub enum ControlPanelAction {
     /// App drops `EditingState::preview_window`.
     #[cfg(feature = "v3")]
     RequestClosePreview,
+    /// 004-V31.8.2: thumbnail in the control-window header was clicked while
+    /// the preview window is already open. App brings the preview window to
+    /// front via `Window::focus_window()`.
+    #[cfg(feature = "v3")]
+    FocusPreview,
 }
 
 /// Per-frame inputs from the App into the control panel render. Bundled so the

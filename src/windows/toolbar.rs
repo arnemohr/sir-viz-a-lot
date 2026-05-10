@@ -14,6 +14,22 @@ use crate::project::schema::Project;
 use crate::windows::control_panel::{ControlPanelAction, ControlPanelInputs, ControlPanelState};
 use crate::windows::scene_editor::{EditMode, SceneEditorState};
 
+/// 004-V31.8.2 — Compute `(width, height)` for the header thumbnail.
+///
+/// `output_size` is the projector framebuffer dimensions from
+/// `ControlPanelInputs::output_size`; `(0, 0)` falls back to 16:9. The
+/// returned width is `thumb_height × aspect` so both the `ImageButton`
+/// and the placeholder rectangle allocate exactly the same space,
+/// preventing jitter when the texture cycles through `None` on resize.
+pub(super) fn thumbnail_size(output_size: (u32, u32), thumb_height: f32) -> (f32, f32) {
+    let aspect = if output_size.0 > 0 && output_size.1 > 0 {
+        output_size.0 as f32 / output_size.1 as f32
+    } else {
+        16.0 / 9.0
+    };
+    (thumb_height * aspect, thumb_height)
+}
+
 /// Flip `EditMode` between `Layer` and `Warp`.
 ///
 /// Any mode other than `Warp` (e.g. `Mask`, `Inspect`) is treated as "not
@@ -111,6 +127,39 @@ pub fn show(
 
         // --- Right side --- push remaining widgets to the right edge
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            // 004-V31.8.2: projector-output thumbnail — rightmost widget.
+            // `right_to_left` means this block executes first → renders at
+            // the far right. Clicking focuses the preview window (if open)
+            // or opens it (if closed). Placeholder rect keeps layout stable
+            // while the texture is unregistered (init gap / post-resize).
+            #[cfg(feature = "v3")]
+            {
+                const THUMB_H: f32 = 56.0;
+                let (tw, th) = thumbnail_size(inputs.output_size, THUMB_H);
+                if let Some(tex) = inputs.scene_texture {
+                    let sized = egui::load::SizedTexture::new(tex, egui::vec2(tw, th));
+                    let resp = ui
+                        .add(egui::Button::image(sized))
+                        .on_hover_cursor(egui::CursorIcon::PointingHand);
+                    if resp.clicked() {
+                        if inputs.has_preview {
+                            action = Some(ControlPanelAction::FocusPreview);
+                        } else {
+                            action = Some(ControlPanelAction::RequestOpenPreview);
+                        }
+                    }
+                } else {
+                    let (rect, _resp) =
+                        ui.allocate_exact_size(egui::vec2(tw, th), egui::Sense::hover());
+                    ui.painter().rect_filled(
+                        rect,
+                        egui::CornerRadius::same(2),
+                        crate::windows::theme::BG_PANEL,
+                    );
+                }
+                ui.add_space(4.0);
+            }
+
             // 003-T4.17: Go-live / Stop button. Label flips on is_go_live;
             // the click returns RequestEnterGoLive or RequestExitGoLive so
             // App::window_event can perform the AppState swap.
@@ -196,5 +245,43 @@ mod tests {
     fn toolbar_warp_button_from_other_modes() {
         assert_eq!(flip_warp(EditMode::Mask), EditMode::Warp);
         assert_eq!(flip_warp(EditMode::Inspect), EditMode::Warp);
+    }
+
+    // ---- 004-V31.8.2: thumbnail_size ----------------------------------------
+
+    /// `(0, 0)` output size falls back to 16:9; height is preserved exactly.
+    #[test]
+    fn thumbnail_size_zero_falls_back_to_16x9() {
+        let (w, h) = thumbnail_size((0, 0), 56.0);
+        assert!((h - 56.0).abs() < 1e-4, "height must equal thumb_height");
+        let expected_w = 56.0 * (16.0 / 9.0);
+        assert!(
+            (w - expected_w).abs() < 1e-3,
+            "width should be 56×16/9 ≈ {expected_w:.2}, got {w:.2}"
+        );
+    }
+
+    /// 1920×1080 (16:9) — width ≈ height × (16/9).
+    #[test]
+    fn thumbnail_size_1920x1080() {
+        let (w, h) = thumbnail_size((1920, 1080), 56.0);
+        assert!((h - 56.0).abs() < 1e-4);
+        let expected_w = 56.0 * (1920.0 / 1080.0);
+        assert!(
+            (w - expected_w).abs() < 1e-3,
+            "expected {expected_w:.2}, got {w:.2}"
+        );
+    }
+
+    /// 800×600 (4:3) — width ≈ height × (4/3).
+    #[test]
+    fn thumbnail_size_800x600_4x3() {
+        let (w, h) = thumbnail_size((800, 600), 56.0);
+        assert!((h - 56.0).abs() < 1e-4);
+        let expected_w = 56.0 * (800.0 / 600.0);
+        assert!(
+            (w - expected_w).abs() < 1e-3,
+            "expected {expected_w:.2}, got {w:.2}"
+        );
     }
 }
