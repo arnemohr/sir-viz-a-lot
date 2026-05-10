@@ -2513,6 +2513,70 @@ mod tests {
             ]
         }
 
+        /// Finite-f32 strategy covering edge cases useful for bit-exact round-trip
+        /// assertions on `crossfade_duration_s`: 0.0, -0.0, subnormals, 1.0,
+        /// near-max (4.999 / 5.0), and arbitrary values in [0.0, 5.0].
+        fn arb_crossfade_duration_s() -> impl Strategy<Value = f32> {
+            prop_oneof![
+                Just(0.0_f32),
+                Just(-0.0_f32),
+                Just(f32::MIN_POSITIVE),       // smallest normal
+                Just(f32::MIN_POSITIVE / 2.0), // a real subnormal
+                Just(1.0_f32),
+                Just(4.999_f32),
+                Just(5.0_f32),
+                (0.0_f32..=5.0_f32), // fuzzy range
+            ]
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(1024))]
+
+            /// 004-V31.1.2 — `SetCrossfadeDurationS` apply→undo restores the prior
+            /// value with bit-exact (`f32::to_bits()`) equality.
+            ///
+            /// Regression guard: this test would have failed against the
+            /// pre-V31.3.2 manual Reverse code if that code had captured the
+            /// wrong `old` value. After V31.3.2 migrated all variants to the
+            /// `ReverseStorage` trait, `SetCrossfadeDurationS::apply` is
+            /// structurally correct — this test lands as a compile-time-enforced
+            /// regression guard that would catch any future regression at the
+            /// `ReverseStorage::apply` level.
+            ///
+            /// Uses `f32::to_bits()` instead of an epsilon comparison because
+            /// the spec requires bit-exact restoration of the prior value; an
+            /// epsilon check would miss cases where the implementation stores
+            /// a rounded copy of `old` rather than the original bits.
+            ///
+            /// Non-finite f32 (NaN / Inf) are intentionally excluded: they
+            /// would trigger the `debug_assert!` epsilon guard inside `apply`
+            /// and are out of scope for this task (see V31.1.1 for the
+            /// static-modulator non-finite case).
+            #[test]
+            fn set_crossfade_duration_s_apply_undo_bit_exact(
+                prior in arb_crossfade_duration_s(),
+                new   in arb_crossfade_duration_s(),
+            ) {
+                let mut p = fresh_project();
+                p.crossfade_duration_s = prior;
+                let mutation = p.set_crossfade_duration_s_mutation(new);
+                // apply: writes `new` into the project, returns the undo mutation.
+                let reverse = mutation.apply(&mut p);
+                prop_assert_eq!(
+                    p.crossfade_duration_s.to_bits(),
+                    new.to_bits(),
+                    "apply should write `new` into the project"
+                );
+                // undo: apply the reverse mutation, should restore `prior` exactly.
+                let _ = reverse.apply(&mut p);
+                prop_assert_eq!(
+                    p.crossfade_duration_s.to_bits(),
+                    prior.to_bits(),
+                    "undo should restore the prior value bit-exactly"
+                );
+            }
+        }
+
         proptest! {
             #![proptest_config(ProptestConfig::with_cases(256))]
 
