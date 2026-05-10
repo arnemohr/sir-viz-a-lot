@@ -229,7 +229,24 @@ pub fn show(
             ui.add_space(4.0);
 
             // ----------------------------------------------------------------
-            // 4. Diagnostics stub (T3.11) + P0.3.2 dropped-frames counter
+            // 4. OSC bindings summary (P0.2.4, W2.4)
+            //
+            // Read-only walk of every `Modulator::OscBound` in the
+            // project. Add / unbind happens through the parameter-row
+            // picker (P0.2.3a-c); this surface is the operator's
+            // single-page overview of "what's wired to OSC right now".
+            // ----------------------------------------------------------------
+            egui::CollapsingHeader::new("OSC bindings")
+                .id_salt("rmap_osc_bindings_summary")
+                .default_open(false)
+                .show(ui, |ui| {
+                    show_osc_bindings_summary(ui, project);
+                });
+
+            ui.add_space(4.0);
+
+            // ----------------------------------------------------------------
+            // 5. Diagnostics stub (T3.11) + P0.3.2 dropped-frames counter
             // ----------------------------------------------------------------
             egui::CollapsingHeader::new("Diagnostics")
                 .id_salt(HDR_DIAGNOSTICS)
@@ -650,6 +667,127 @@ fn blend_label(m: BlendMode) -> &'static str {
         BlendMode::Add => "Add",
         BlendMode::Multiply => "Multiply",
         BlendMode::Screen => "Screen",
+    }
+}
+
+// ---------------------------------------------------------------------------
+// P0.2.4 (W2.4) — OSC bindings summary
+// ---------------------------------------------------------------------------
+
+/// Walk every layer's effect chain and render a one-line entry per
+/// `Modulator::OscBound` parameter. Columns: address · layer.id ·
+/// param-name · live value bar.
+///
+/// Read-only for v0.4. Operators add / unbind via the parameter-row
+/// picker (P0.2.3a-c). Inline editing of the address + a port-config
+/// row + a "+ Add binding" button can land in a follow-up commit.
+fn show_osc_bindings_summary(ui: &mut Ui, project: &Project) {
+    use crate::effects::Effect;
+    use crate::modulators::Modulator;
+
+    let mut any_binding = false;
+
+    for (layer_idx, layer) in project.layers.iter().enumerate() {
+        for (effect_idx, effect) in layer.effects.iter().enumerate() {
+            // Walk every Modulator field on every effect type. Each
+            // (effect_kind, field_name) pair gets a row when the
+            // modulator is `OscBound`.
+            let bindings = collect_osc_bindings_in_effect(effect);
+            for (field_name, addr, scale, offset) in bindings {
+                any_binding = true;
+                ui.horizontal(|ui| {
+                    ui.monospace(format!("{addr:32}"));
+                    ui.weak(format!(
+                        "→ layer {layer_idx} ({}) · effect {effect_idx} ({}) · {field_name}",
+                        layer.id,
+                        effect_kind_label(effect),
+                    ));
+                    let live = crate::modulators::osc::current_value(addr) * scale + offset;
+                    ui.weak(format!("= {live:.3}"));
+                });
+            }
+        }
+    }
+
+    if !any_binding {
+        ui.weak(
+            "No OSC bindings yet. Pick `osc` in any parameter row's binding picker \
+             to attach an OSC address.",
+        );
+    }
+}
+
+/// Collect every `(field_name, addr, scale, offset)` for OSC-bound
+/// modulators inside a single `Effect`. Field names are the same
+/// strings used by `ModulatorField` so the operator can correlate
+/// the summary row with the parameter row in Selected-layer.
+fn collect_osc_bindings_in_effect(
+    effect: &crate::effects::Effect,
+) -> Vec<(&'static str, &str, f32, f32)> {
+    use crate::effects::Effect;
+    use crate::modulators::Modulator;
+
+    fn extract<'a>(
+        name: &'static str,
+        m: &'a Modulator,
+    ) -> Option<(&'static str, &'a str, f32, f32)> {
+        if let Modulator::OscBound {
+            addr,
+            scale,
+            offset,
+        } = m
+        {
+            Some((name, addr.as_str(), *scale, *offset))
+        } else {
+            None
+        }
+    }
+
+    let mut out: Vec<(&'static str, &str, f32, f32)> = Vec::new();
+    match effect {
+        Effect::Color {
+            hue,
+            saturation,
+            brightness,
+            contrast,
+        } => {
+            out.extend(extract("hue", hue));
+            out.extend(extract("saturation", saturation));
+            out.extend(extract("brightness", brightness));
+            out.extend(extract("contrast", contrast));
+        }
+        Effect::Tint { amount, .. } => {
+            out.extend(extract("amount", amount));
+        }
+        Effect::Blur { radius_px } => {
+            out.extend(extract("radius_px", radius_px));
+        }
+        Effect::Transform {
+            rotate_deg,
+            scale_x,
+            scale_y,
+            ..
+        } => {
+            out.extend(extract("rotate_deg", rotate_deg));
+            out.extend(extract("scale_x", scale_x));
+            out.extend(extract("scale_y", scale_y));
+        }
+        Effect::External { .. } => {
+            // External effects opaque to this walk — their params are
+            // a JSON blob, not a Modulator chain.
+        }
+    }
+    out
+}
+
+fn effect_kind_label(effect: &crate::effects::Effect) -> &'static str {
+    use crate::effects::Effect;
+    match effect {
+        Effect::Color { .. } => "Color",
+        Effect::Tint { .. } => "Tint",
+        Effect::Blur { .. } => "Blur",
+        Effect::Transform { .. } => "Transform",
+        Effect::External { .. } => "External",
     }
 }
 
