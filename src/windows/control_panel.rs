@@ -1278,7 +1278,21 @@ fn show_layers_tab(
                 {
                     ui.checkbox(&mut layer.enabled, &format!("{}", layer.id));
                 }
-                ui.label(layer.kind.asset_path().display().to_string());
+                ui.label(match &layer.kind {
+                    crate::project::schema::LayerKind::Svg { svg_path } => {
+                        svg_path.display().to_string()
+                    }
+                    crate::project::schema::LayerKind::Image { path, .. } => {
+                        path.display().to_string()
+                    }
+                    crate::project::schema::LayerKind::Video { path } => path.display().to_string(),
+                    crate::project::schema::LayerKind::FxLayer { preset_id } => {
+                        format!("FX preset: {preset_id}")
+                    }
+                    crate::project::schema::LayerKind::Ndi { source_name } => {
+                        format!("NDI: {source_name}")
+                    }
+                });
             });
             ui.horizontal(|ui| {
                 ui.label("blend");

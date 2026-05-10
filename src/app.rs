@@ -921,7 +921,16 @@ fn apply_command(state: &mut EditingState, event: Command) -> SideEffect {
                 .as_deref()
                 .and_then(|p| p.parent())
                 .map(std::path::Path::to_path_buf);
-            let old_path = layer.kind.asset_path().to_path_buf();
+            let Some(old_path) = layer.kind.asset_path().map(|p| p.to_path_buf()) else {
+                // P0.1.2: relink only applies to layers with an asset
+                // path on disk. FxLayer / Ndi can't be the target of a
+                // missing-asset relink (audit gates on `is_some()`).
+                tracing::warn!(
+                    layer_idx,
+                    "OpenRelinkPicker dispatched against pathless layer; dropping",
+                );
+                return SideEffect::None;
+            };
             let Some(new_path) = crate::windows::file_dialogs::pick_relink_replacement(
                 &missing_path,
                 project_dir.as_deref(),
@@ -2545,7 +2554,12 @@ fn rebuild_layers(
         // the demo project (T-003-T2.8) and any portable project
         // saved via save_portable would fail at render init with a
         // notify "No path was found" error.
-        let stored = lc.kind.asset_path().to_path_buf();
+        // P0.1.2 placeholder: variants without an asset path (`FxLayer`,
+        // `Ndi`) skip the SvgLayer-shaped pipeline entirely. W5 / W6
+        // wire dedicated render paths.
+        let Some(stored) = lc.kind.asset_path().map(|p| p.to_path_buf()) else {
+            continue;
+        };
         let asset_path = match project_path {
             Some(p) if stored.is_relative() => project.resolve_asset(p, &stored),
             _ => stored,
@@ -2571,6 +2585,18 @@ fn rebuild_layers(
                     size: (width, height),
                     generation,
                 });
+            }
+            schema::LayerKind::Video { .. } => {
+                // P0.1.2 placeholder — texture-upload pipeline (W3.1) +
+                // decoder thread (P0.4.1) wire real frames here.
+                tracing::debug!(
+                    path = %asset_path.display(),
+                    "Video layer placeholder — render path lands in P0.4.2",
+                );
+            }
+            schema::LayerKind::FxLayer { .. } | schema::LayerKind::Ndi { .. } => {
+                // Unreachable: filtered by the asset_path guard above.
+                // Kept for exhaustiveness.
             }
             schema::LayerKind::Image { .. } => {
                 // Image path: synchronous decode + GPU upload, no worker
@@ -2706,7 +2732,15 @@ fn resize_m5_gpu(state: &mut EditingState) {
         layer._warp_texture = wtex;
         layer.warp_view = wview;
         layer.generation = layer.generation.wrapping_add(1);
-        let path = state.project.layers[i].kind.asset_path().to_path_buf();
+        // P0.1.2 placeholder: only raster-shaped layers (Svg/Image/Video)
+        // need a raster-job re-send on resize. FxLayer / Ndi are skipped.
+        let Some(path) = state.project.layers[i]
+            .kind
+            .asset_path()
+            .map(|p| p.to_path_buf())
+        else {
+            continue;
+        };
         let _ = layer.job_tx.send(RasterJob {
             layer_id: layer.layer_id,
             path,
@@ -2955,6 +2989,12 @@ fn render_m5_pipeline(
             //   aspect + focal.
             let (mode_id, focal) = match &cfg.kind {
                 schema::LayerKind::Svg { .. } => (0u32, [0.5f32, 0.5]),
+                // P0.1.2 placeholder — Video / FxLayer / Ndi default to
+                // Stretch with centred focal until W4 / W5 / W6 wire
+                // variant-specific fit modes.
+                schema::LayerKind::Video { .. }
+                | schema::LayerKind::FxLayer { .. }
+                | schema::LayerKind::Ndi { .. } => (0u32, [0.5f32, 0.5]),
                 schema::LayerKind::Image { fit, focal, .. } => {
                     let id = match fit {
                         schema::FitMode::Stretch => 0u32,
@@ -3730,7 +3770,11 @@ fn handle_editing_window_event(
                 while let Ok(_event) = ls.watch_rx.try_recv() {
                     ls.generation = ls.generation.wrapping_add(1);
                     let kind = &state.project.layers[i].kind;
-                    let asset_path = kind.asset_path().to_path_buf();
+                    // P0.1.2 placeholder: variants without an asset path
+                    // never have a watcher firing, but guard defensively.
+                    let Some(asset_path) = kind.asset_path().map(|p| p.to_path_buf()) else {
+                        continue;
+                    };
                     let layer_id = ls.layer_id;
                     let generation = ls.generation;
                     match kind {
@@ -3773,6 +3817,15 @@ fn handle_editing_window_event(
                                     "image hot-reload failed; previous texture retained",
                                 ),
                             }
+                        }
+                        schema::LayerKind::Video { .. } => {
+                            // P0.1.2 placeholder — video frames stream
+                            // through the texture-upload queue (W3.1) once
+                            // P0.4.2 lands; no file-watcher hot-reload path.
+                        }
+                        schema::LayerKind::FxLayer { .. } | schema::LayerKind::Ndi { .. } => {
+                            // Unreachable: filtered by the asset_path guard
+                            // above. Kept for exhaustiveness.
                         }
                     }
                 }

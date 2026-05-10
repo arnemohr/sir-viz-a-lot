@@ -8,7 +8,7 @@
 //!
 //! No oversampling — raster layers are already raster; doubling them would
 //! 4× the GPU memory for no quality win. We do clamp to a max dimension
-//! (4096) so a 12 MP wedding portrait doesn't OOM the GPU on a venue
+//! (4096) so a 12 MP event portrait doesn't OOM the GPU on a venue
 //! laptop with a modest integrated chip.
 
 use std::path::Path;
@@ -45,7 +45,7 @@ pub fn upload_image_rgba8(
         width = new_w;
         height = new_h;
         // image::DynamicImage::resize uses Lanczos3 — sharp enough that a
-        // 4 K wedding shot downscaled to 4096 stays crisp on a projector.
+        // 4 K event shot downscaled to 4096 stays crisp on a projector.
         img.resize(new_w, new_h, image::imageops::FilterType::Lanczos3)
             .into_rgba8()
     };

@@ -295,6 +295,7 @@ mod tests {
         let target = OutputTarget {
             uuid: Some("AAAA-1111".to_string()),
             fallback_index: 0,
+            ..OutputTarget::default()
         };
         let outcome = resolve_output_target(&target, &monitors);
         assert!(
@@ -310,6 +311,7 @@ mod tests {
         let target = OutputTarget {
             uuid: Some("ZZZZ-9999".to_string()), // not in live list
             fallback_index: 1,
+            ..OutputTarget::default()
         };
         let outcome = resolve_output_target(&target, &monitors);
         assert!(
@@ -325,6 +327,7 @@ mod tests {
         let target = OutputTarget {
             uuid: None,
             fallback_index: 1,
+            ..OutputTarget::default()
         };
         let outcome = resolve_output_target(&target, &monitors);
         assert!(
@@ -340,6 +343,7 @@ mod tests {
         let target = OutputTarget {
             uuid: None,
             fallback_index: 5,
+            ..OutputTarget::default()
         };
         let outcome = resolve_output_target(&target, &monitors);
         assert!(
@@ -362,6 +366,7 @@ mod tests {
         let target = OutputTarget {
             uuid: Some("ZZZZ-9999".to_string()),
             fallback_index: 5,
+            ..OutputTarget::default()
         };
         let outcome = resolve_output_target(&target, &monitors);
         assert!(

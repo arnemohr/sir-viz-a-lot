@@ -27,7 +27,7 @@ use crate::project::command::Mutation;
 use crate::project::schema::Project;
 
 /// Soft cap on the undo history. Once exceeded, the oldest entry
-/// is dropped (FIFO). Tuned for wedding-scale operator sessions —
+/// is dropped (FIFO). Tuned for event-scale operator sessions —
 /// 200 ≈ 5 minutes of moderately-active editing without
 /// truncation.
 pub const UNDO_HISTORY_CAP: usize = 200;

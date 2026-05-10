@@ -302,7 +302,7 @@ fn toast_alpha(toast: &Toast, now: Instant) -> f32 {
     in_alpha.min(out_alpha).clamp(0.0, 1.0)
 }
 
-/// Severity → (fill color, stroke color) at the given alpha. Wedding-
+/// Severity → (fill color, stroke color) at the given alpha. event-
 /// scale dark theme: muted backgrounds, high-contrast outlines.
 fn toast_palette(kind: ToastKind, alpha: f32) -> (egui::Color32, egui::Color32) {
     let a = (alpha * 220.0) as u8;

@@ -36,7 +36,7 @@ pub fn migrate(mut value: Value) -> Result<(Value, MigrationOutcome), ProjectErr
         // layer's new `warp` field. `Project.warps` is preserved during
         // T3.0a so the renderer + audit + mutations keep compiling; T3.0b
         // deletes it once the render graph reads per-layer warps.
-        0 | 1 | 2 | 3 | 4 | 5 => {
+        0 | 1 | 2 | 3 | 4 | 5 | 6 => {
             if version <= 2 {
                 migrate_v2_to_v3_layers(&mut value);
             }
@@ -49,6 +49,11 @@ pub fn migrate(mut value: Value) -> Result<(Value, MigrationOutcome), ProjectErr
             if version <= 5 {
                 migrate_v5_to_v6_output_target(&mut value);
             }
+            // v6 → v7 (P0.1.2): adds `OutputTarget.rgb_matrix` (defaulted
+            // to identity by serde) and three new `LayerKind` variants
+            // (`Video`, `FxLayer`, `Ndi`) used by W4 / W5 / W6. Existing
+            // v6 fields are unchanged; the migration is a version-bump
+            // only — defaults populate `rgb_matrix` on deserialise.
             value["schema_version"] = serde_json::json!(CURRENT_SCHEMA_VERSION);
             Ok((value, outcome))
         }
@@ -539,7 +544,10 @@ mod tests {
             "warps": [],
         });
         let (out, outcome) = migrate(v).expect("migrate");
-        assert_eq!(out["schema_version"], serde_json::json!(6));
+        assert_eq!(
+            out["schema_version"],
+            serde_json::json!(CURRENT_SCHEMA_VERSION)
+        );
         assert_eq!(outcome.previous_warp_count, 0);
     }
 
@@ -580,8 +588,8 @@ mod tests {
             }]
         });
         let (out, _) = migrate(v).expect("migrate");
-        let p: Project = serde_json::from_value(out).expect("deserialize as v6");
-        assert_eq!(p.schema_version, 6);
+        let p: Project = serde_json::from_value(out).expect("deserialize migrated project");
+        assert_eq!(p.schema_version, CURRENT_SCHEMA_VERSION);
 
         // Synthesised quad: corners at (0.25 … 0.75) for scale 0.5.
         let g = &p.layers[0].warp.grid;
@@ -688,10 +696,12 @@ mod tests {
         assert_eq!(p.output_target.fallback_index, 0);
     }
 
-    /// V31.2.1 — a native v6 project (with `output_target` already present)
-    /// is returned unchanged by the migration chain.
+    /// V31.2.1 — a v6 project with `output_target` already present is
+    /// migrated to v7 by the migration chain (P0.1.2). The output_target
+    /// data is preserved verbatim; the new `rgb_matrix` field is
+    /// populated with the identity matrix via serde's default.
     #[test]
-    fn v6_native_round_trips_unchanged() {
+    fn v6_with_output_target_migrates_to_v7() {
         let v = serde_json::json!({
             "schema_version": 6,
             "layers": [],
@@ -701,10 +711,103 @@ mod tests {
             },
         });
         let (out, _) = migrate(v).expect("migrate");
-        let p: Project = serde_json::from_value(out).expect("deserialize as v6");
-        assert_eq!(p.schema_version, 6);
+        let p: Project = serde_json::from_value(out).expect("deserialize as v7");
+        assert_eq!(p.schema_version, CURRENT_SCHEMA_VERSION);
         assert_eq!(p.output_target.uuid, None);
         assert_eq!(p.output_target.fallback_index, 3);
+        assert_eq!(
+            p.output_target.rgb_matrix,
+            crate::project::schema::rgb_matrix_identity(),
+            "v6 → v7 migration must default rgb_matrix to identity",
+        );
+    }
+
+    /// P0.1.2 — a v7 project with all three new `LayerKind` variants
+    /// round-trips through the migration chain unchanged.
+    #[test]
+    fn v7_with_new_layer_kinds_round_trips() {
+        let v = serde_json::json!({
+            "schema_version": 7,
+            "layers": [
+                {
+                    "id": "vid",
+                    "kind": { "Video": { "path": "/tmp/clip.mp4" } },
+                    "enabled": true,
+                    "transform": {
+                        "translate": [0.0, 0.0],
+                        "rotate_deg": 0.0,
+                        "scale": [1.0, 1.0],
+                        "anchor": [0.5, 0.5],
+                    },
+                    "effects": [],
+                    "blend_mode": "Normal",
+                    "opacity": 1.0,
+                    "warp": {
+                        "rows": 1,
+                        "cols": 1,
+                        "grid": [[[0.0, 0.0], [1.0, 0.0]], [[0.0, 1.0], [1.0, 1.0]]],
+                    },
+                },
+                {
+                    "id": "fx",
+                    "kind": { "FxLayer": { "preset_id": "ripple_wash" } },
+                    "enabled": true,
+                    "transform": {
+                        "translate": [0.0, 0.0],
+                        "rotate_deg": 0.0,
+                        "scale": [1.0, 1.0],
+                        "anchor": [0.5, 0.5],
+                    },
+                    "effects": [],
+                    "blend_mode": "Normal",
+                    "opacity": 1.0,
+                    "warp": {
+                        "rows": 1,
+                        "cols": 1,
+                        "grid": [[[0.0, 0.0], [1.0, 0.0]], [[0.0, 1.0], [1.0, 1.0]]],
+                    },
+                },
+                {
+                    "id": "ndi",
+                    "kind": { "Ndi": { "source_name": "OBS-NDI" } },
+                    "enabled": true,
+                    "transform": {
+                        "translate": [0.0, 0.0],
+                        "rotate_deg": 0.0,
+                        "scale": [1.0, 1.0],
+                        "anchor": [0.5, 0.5],
+                    },
+                    "effects": [],
+                    "blend_mode": "Normal",
+                    "opacity": 1.0,
+                    "warp": {
+                        "rows": 1,
+                        "cols": 1,
+                        "grid": [[[0.0, 0.0], [1.0, 0.0]], [[0.0, 1.0], [1.0, 1.0]]],
+                    },
+                },
+            ],
+        });
+        let (out, _) = migrate(v).expect("migrate");
+        let p: Project = serde_json::from_value(out).expect("deserialize as v7");
+        assert_eq!(p.schema_version, CURRENT_SCHEMA_VERSION);
+        assert_eq!(p.layers.len(), 3);
+        assert!(matches!(
+            p.layers[0].kind,
+            crate::project::schema::LayerKind::Video { .. }
+        ));
+        assert!(matches!(
+            p.layers[1].kind,
+            crate::project::schema::LayerKind::FxLayer { .. }
+        ));
+        assert!(matches!(
+            p.layers[2].kind,
+            crate::project::schema::LayerKind::Ndi { .. }
+        ));
+        // asset_path semantics: Video has one, FxLayer + Ndi do not.
+        assert!(p.layers[0].kind.asset_path().is_some());
+        assert!(p.layers[1].kind.asset_path().is_none());
+        assert!(p.layers[2].kind.asset_path().is_none());
     }
 
     /// V31.2.1 — defensive: a malformed v5 project missing `output_monitor_index`

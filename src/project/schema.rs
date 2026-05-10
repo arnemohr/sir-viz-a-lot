@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 6;
+pub const CURRENT_SCHEMA_VERSION: u32 = 7;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Transform2D {
@@ -39,8 +39,11 @@ pub enum FitMode {
 }
 
 /// Source of pixels for a single layer. v2 splits SVG (rasterized via resvg)
-/// from raster Image (uploaded directly via the `image` crate). The two flow
-/// through the same compositor + effects + warp chain after upload.
+/// from raster Image (uploaded directly via the `image` crate). v0.4 adds
+/// Video (mp4 / H.264, decoded on a background thread — W4), FxLayer
+/// (procedural via mask SDF — W5), and Ndi (live network stream — W6).
+/// All variants flow through the same compositor + effects + warp chain
+/// after their respective upload paths.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum LayerKind {
     Svg {
@@ -54,15 +57,40 @@ pub enum LayerKind {
         #[serde(default = "default_focal")]
         focal: [f32; 2],
     },
+    /// v0.4 W4 — mp4 / H.264 video. Real fields land in P0.4.1; for the
+    /// P0.1.2 scaffold this carries the path only and renders a
+    /// placeholder rectangle until the decoder thread + texture-upload
+    /// pipeline are wired.
+    Video {
+        path: PathBuf,
+    },
+    /// v0.4 W5 — procedural FX layer driven by mask SDF. Real fields
+    /// (params HashMap) land in P0.5.1; the scaffold carries the
+    /// preset id only and renders a placeholder until P0.5.3 wires the
+    /// real shader dispatch.
+    FxLayer {
+        preset_id: String,
+    },
+    /// v0.4 W6 — live NDI input as a layer source. Real receiver lands
+    /// in P0.6.2; the scaffold carries the source name only and renders
+    /// a placeholder until then.
+    Ndi {
+        source_name: String,
+    },
 }
 
 impl LayerKind {
-    /// Path on disk the renderer (or worker) reads from. Both variants
-    /// have one; the helper saves callers a match arm.
-    pub fn asset_path(&self) -> &std::path::Path {
+    /// Path on disk the renderer (or worker) reads from. `Svg` /
+    /// `Image` / `Video` carry one; `FxLayer` (procedural) and `Ndi`
+    /// (network) do not, returning `None`. Callers that need a path
+    /// (audit's `MissingAsset` check, relinking) skip variants
+    /// returning `None`.
+    pub fn asset_path(&self) -> Option<&std::path::Path> {
         match self {
-            LayerKind::Svg { svg_path } => svg_path.as_path(),
-            LayerKind::Image { path, .. } => path.as_path(),
+            LayerKind::Svg { svg_path } => Some(svg_path.as_path()),
+            LayerKind::Image { path, .. } => Some(path.as_path()),
+            LayerKind::Video { path } => Some(path.as_path()),
+            LayerKind::FxLayer { .. } | LayerKind::Ndi { .. } => None,
         }
     }
 }
@@ -151,7 +179,7 @@ impl WarpMesh {
 /// save). `uuid: None` covers v5-migrated projects and platforms without UUID
 /// support. `fallback_index` is used when `uuid` is absent or no live monitor
 /// matches; it maps to the index reported by `--list-monitors`.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OutputTarget {
     /// macOS `CGDisplayCreateUUIDFromDisplayID` value if known (V31.2.3
     /// captures it on save). `None` for v5-migrated projects and on
@@ -162,6 +190,29 @@ pub struct OutputTarget {
     /// monitor matches. Maps to the index reported by `--list-monitors`.
     #[serde(default)]
     pub fallback_index: usize,
+    /// P0.1.2 (W8.2) — 3×3 colour-correction matrix applied per-projector
+    /// at present time. Identity by default; populated by the W8.3
+    /// calibration UI. Stored as row-major `[[r_r, r_g, r_b], [g_r,
+    /// g_g, g_b], [b_r, b_g, b_b]]` — `out = matrix * in` per channel.
+    #[serde(default = "rgb_matrix_identity")]
+    pub rgb_matrix: [[f32; 3]; 3],
+}
+
+impl Default for OutputTarget {
+    fn default() -> Self {
+        Self {
+            uuid: None,
+            fallback_index: 0,
+            rgb_matrix: rgb_matrix_identity(),
+        }
+    }
+}
+
+/// Identity colour matrix — `out = in` for every channel. Used as the
+/// `OutputTarget.rgb_matrix` serde default so v6 projects load with no
+/// colour change.
+pub fn rgb_matrix_identity() -> [[f32; 3]; 3] {
+    [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
 }
 
 /// 003-T4.1 — 192×108 RGBA8 thumbnail captured when a scene is saved.

@@ -748,7 +748,7 @@ impl ReverseStorage for RelinkAssetPath {
             .expect("RelinkAssetPath: layer_idx out of range");
         debug_assert_eq!(
             layer.kind.asset_path(),
-            self.old_path.as_path(),
+            Some(self.old_path.as_path()),
             "RelinkAssetPath: stale old_path for layer_idx={}",
             self.layer_idx,
         );
@@ -758,6 +758,21 @@ impl ReverseStorage for RelinkAssetPath {
             }
             crate::project::schema::LayerKind::Svg { svg_path } => {
                 *svg_path = self.new_path.clone();
+            }
+            crate::project::schema::LayerKind::Video { path } => {
+                *path = self.new_path.clone();
+            }
+            crate::project::schema::LayerKind::FxLayer { .. }
+            | crate::project::schema::LayerKind::Ndi { .. } => {
+                // RelinkAssetPath is only emitted by the missing-asset
+                // audit (T1.38), which P0.1.2 gates on `asset_path()
+                // .is_some()`. Variants without an asset path are
+                // unreachable here; left explicit for exhaustiveness.
+                debug_assert!(
+                    false,
+                    "RelinkAssetPath dispatched against {:?} which has no asset path",
+                    layer.kind,
+                );
             }
         }
         RelinkAssetPath {
@@ -1875,7 +1890,11 @@ mod tests {
     fn relink_asset_path_round_trips() {
         let mut p = fresh_project();
         let before = serde_json::to_value(&p).unwrap();
-        let original = p.layers[0].kind.asset_path().to_path_buf();
+        let original = p.layers[0]
+            .kind
+            .asset_path()
+            .expect("fresh_project seeds a Svg layer with an asset path")
+            .to_path_buf();
 
         let new_path = std::path::PathBuf::from("/some/other/place.svg");
         let mutation = Mutation::RelinkAssetPath(RelinkAssetPath {
@@ -1886,7 +1905,7 @@ mod tests {
         let reverse = mutation.apply(&mut p);
         assert_eq!(
             p.layers[0].kind.asset_path(),
-            new_path.as_path(),
+            Some(new_path.as_path()),
             "apply should rewrite svg_path",
         );
 

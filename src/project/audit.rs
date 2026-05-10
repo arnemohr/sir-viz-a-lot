@@ -323,41 +323,46 @@ impl ProjectAudit {
             // project file's parent dir when one is supplied. Falls
             // back to the as-stored path if `project_path` is None
             // (in-memory project) or has no parent (path is bare).
-            let asset_path = layer.kind.asset_path();
-            let resolved = match project_path.and_then(|p| p.parent()) {
-                Some(dir) if asset_path.is_relative() => dir.join(asset_path),
-                _ => asset_path.to_path_buf(),
-            };
-            if !resolved.exists() {
-                // 003-T2.24 — downgraded from Critical to Warn so the
-                // project still opens. A Critical here would route to
-                // AppState::Failed, leaving no path to the relink
-                // toast. The new flow surfaces a Warn toast with a
-                // "Find this file…" action that emits
-                // `Command::OpenRelinkPicker` and then
-                // `Mutation::RelinkAssetPath`. The layer still won't
-                // render until relinked, but the operator stays in the
-                // editor and can fix it without quitting.
-                findings.push(AuditFinding {
-                    kind: AuditKind::MissingAsset {
-                        layer_idx,
-                        path: asset_path.to_path_buf(),
-                    },
-                    severity: Severity::Warn,
-                    message: format!(
-                        "Can't find {}. Find this file or remove the layer.",
-                        asset_path
-                            .file_name()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or_else(|| asset_path.to_str().unwrap_or("missing asset")),
-                    ),
-                    // The autofix slot stays None because the
-                    // replacement path comes from a file picker, not
-                    // from project state. The relink action is wired
-                    // at the toast-push site (app.rs) which has access
-                    // to both the layer index and the original path.
-                    autofix: None,
-                });
+            //
+            // P0.1.2 — variants without an asset path (`FxLayer`,
+            // `Ndi`) skip the missing-asset check entirely. NDI source-
+            // unavailable surfaces through P0.6.3's separate audit kind.
+            if let Some(asset_path) = layer.kind.asset_path() {
+                let resolved = match project_path.and_then(|p| p.parent()) {
+                    Some(dir) if asset_path.is_relative() => dir.join(asset_path),
+                    _ => asset_path.to_path_buf(),
+                };
+                if !resolved.exists() {
+                    // 003-T2.24 — downgraded from Critical to Warn so the
+                    // project still opens. A Critical here would route to
+                    // AppState::Failed, leaving no path to the relink
+                    // toast. The new flow surfaces a Warn toast with a
+                    // "Find this file…" action that emits
+                    // `Command::OpenRelinkPicker` and then
+                    // `Mutation::RelinkAssetPath`. The layer still won't
+                    // render until relinked, but the operator stays in the
+                    // editor and can fix it without quitting.
+                    findings.push(AuditFinding {
+                        kind: AuditKind::MissingAsset {
+                            layer_idx,
+                            path: asset_path.to_path_buf(),
+                        },
+                        severity: Severity::Warn,
+                        message: format!(
+                            "Can't find {}. Find this file or remove the layer.",
+                            asset_path
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .unwrap_or_else(|| asset_path.to_str().unwrap_or("missing asset")),
+                        ),
+                        // The autofix slot stays None because the
+                        // replacement path comes from a file picker, not
+                        // from project state. The relink action is wired
+                        // at the toast-push site (app.rs) which has access
+                        // to both the layer index and the original path.
+                        autofix: None,
+                    });
+                }
             }
         }
 
@@ -804,7 +809,10 @@ mod tests {
             .layers
             .first()
             .expect("demo carries at least one layer");
-        let rel = layer.kind.asset_path();
+        let rel = layer
+            .kind
+            .asset_path()
+            .expect("demo's first layer carries an asset path");
         let asset = project.resolve_asset(&demo_path, rel);
         let metadata = std::fs::metadata(&asset)
             .unwrap_or_else(|err| panic!("demo asset {} not on disk: {err}", asset.display()));
@@ -847,7 +855,10 @@ mod tests {
             .layers
             .first()
             .expect("film-strip demo carries at least one layer");
-        let rel = layer.kind.asset_path();
+        let rel = layer
+            .kind
+            .asset_path()
+            .expect("demo's first layer carries an asset path");
         let asset = project.resolve_asset(&demo_path, rel);
         let metadata = std::fs::metadata(&asset).unwrap_or_else(|err| {
             panic!(
@@ -892,7 +903,10 @@ mod tests {
             .layers
             .first()
             .expect("test-grid demo carries at least one layer");
-        let rel = layer.kind.asset_path();
+        let rel = layer
+            .kind
+            .asset_path()
+            .expect("demo's first layer carries an asset path");
         let asset = project.resolve_asset(&demo_path, rel);
         let metadata = std::fs::metadata(&asset).unwrap_or_else(|err| {
             panic!(

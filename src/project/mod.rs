@@ -173,7 +173,7 @@ impl Project {
     pub fn has_absolute_asset_paths(&self) -> bool {
         self.layers
             .iter()
-            .any(|l| l.kind.asset_path().is_absolute())
+            .any(|l| l.kind.asset_path().is_some_and(|p| p.is_absolute()))
     }
 }
 
@@ -200,6 +200,14 @@ fn relativize_layer_paths(project: &mut Project, project_dir: &Path) {
                 if let Some(rel) = relative_under(svg_path, &canon_dir) {
                     *svg_path = rel;
                 }
+            }
+            LayerKind::Video { path } => {
+                if let Some(rel) = relative_under(path, &canon_dir) {
+                    *path = rel;
+                }
+            }
+            LayerKind::FxLayer { .. } | LayerKind::Ndi { .. } => {
+                // Procedural / network sources have no asset path to relativize.
             }
             LayerKind::Image { path, .. } => {
                 if let Some(rel) = relative_under(path, &canon_dir) {
@@ -1021,7 +1029,10 @@ mod tests {
         );
 
         let loaded = Project::load(&project_path).expect("reload");
-        let stored = loaded.layers[0].kind.asset_path();
+        let stored = loaded.layers[0]
+            .kind
+            .asset_path()
+            .expect("Svg layer must carry an asset path");
         assert!(stored.is_relative(), "stored path must be relative");
 
         let resolved = loaded.resolve_asset(&project_path, stored);
@@ -1083,7 +1094,10 @@ mod tests {
         project.save_portable(&project_path).expect("save_portable");
 
         let loaded = Project::load(&project_path).expect("reload");
-        let stored = loaded.layers[0].kind.asset_path();
+        let stored = loaded.layers[0]
+            .kind
+            .asset_path()
+            .expect("Svg layer must carry an asset path");
         assert!(
             stored.is_absolute(),
             "non-descendant path must remain absolute, got {stored:?}"
