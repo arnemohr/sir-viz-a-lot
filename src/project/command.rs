@@ -783,6 +783,52 @@ impl ReverseStorage for RelinkAssetPath {
     }
 }
 
+/// Payload for [`Mutation::SetLayerKind`].
+///
+/// P0.5.1 — wholesale replace `LayerConfig.kind` for the layer at
+/// `layer_idx`. Used to switch FX layer presets, change `params` on
+/// an FxLayer, or relink an entire layer's source type. Whole-enum
+/// Reverse (rule 1 in `src/project/CLAUDE.md`) — the prior
+/// `LayerKind` is stored in `old` so a Sine → Static-style payload
+/// loss is impossible.
+///
+/// Asymmetric in spirit (it can change the variant) but symmetric
+/// in shape: the reverse is another `SetLayerKind` with values
+/// swapped, fitting the `ReverseStorage` trait without needing the
+/// AddLayer/RemoveLayer-style cross-variant exception.
+#[derive(Debug, Clone)]
+pub struct SetLayerKind {
+    /// Index into `Project.layers`.
+    pub layer_idx: usize,
+    /// New `LayerKind` to install.
+    pub new: crate::project::schema::LayerKind,
+    /// Pre-mutation `LayerKind`; `apply` `debug_assert!`s the layer's
+    /// current kind has the same shape (variant discriminant) so a
+    /// stale Reverse panics in tests rather than silently corrupts.
+    pub old: crate::project::schema::LayerKind,
+}
+
+impl ReverseStorage for SetLayerKind {
+    fn apply(self, project: &mut Project) -> Self {
+        let layer = project
+            .layers
+            .get_mut(self.layer_idx)
+            .expect("SetLayerKind: layer_idx out of range");
+        debug_assert_eq!(
+            std::mem::discriminant(&layer.kind),
+            std::mem::discriminant(&self.old),
+            "SetLayerKind stale Reverse: live discriminant != self.old discriminant for layer_idx={}",
+            self.layer_idx,
+        );
+        layer.kind = self.new;
+        SetLayerKind {
+            layer_idx: self.layer_idx,
+            new: self.old,
+            old: layer.kind.clone(),
+        }
+    }
+}
+
 /// Payload for [`Mutation::SetModulator`].
 ///
 /// Whole-enum Reverse (rule 1): stores the full old `Modulator` value so a
@@ -1172,6 +1218,12 @@ pub enum Mutation {
     /// 003-T2.24 — repoint a layer's asset path. Delegates to [`RelinkAssetPath`].
     RelinkAssetPath(RelinkAssetPath),
 
+    /// P0.5.1 — wholesale replace `LayerConfig.kind`. Used to switch
+    /// FX presets, mutate an FxLayer's `params` map, or change a
+    /// layer's source type. Whole-enum Reverse. Delegates to
+    /// [`SetLayerKind`].
+    SetLayerKind(SetLayerKind),
+
     /// Replace the modulator at `(layer_idx, effect_idx, field)`. Delegates to [`SetModulator`].
     SetModulator(SetModulator),
 
@@ -1254,6 +1306,7 @@ impl Mutation {
             Mutation::SetLayerEffects(s) => Mutation::SetLayerEffects(s.apply(project)),
             Mutation::SwapLayers(s) => Mutation::SwapLayers(s.apply(project)),
             Mutation::RelinkAssetPath(s) => Mutation::RelinkAssetPath(s.apply(project)),
+            Mutation::SetLayerKind(s) => Mutation::SetLayerKind(s.apply(project)),
             Mutation::SetModulator(s) => Mutation::SetModulator(s.apply(project)),
             Mutation::ResetLayerWarpMesh(s) => Mutation::ResetLayerWarpMesh(s.apply(project)),
             Mutation::SetLayerMaskPolygon(s) => Mutation::SetLayerMaskPolygon(s.apply(project)),
@@ -1377,7 +1430,8 @@ impl Mutation {
             | Mutation::SetProjectGammaOverride(_)
             | Mutation::SetProjectBrightnessOverride(_)
             | Mutation::SetProjectContrastOverride(_)
-            | Mutation::RelinkAssetPath(_) => false,
+            | Mutation::RelinkAssetPath(_)
+            | Mutation::SetLayerKind(_) => false,
             Mutation::ApplyProjectSnapshot(s) => s.non_undoable,
         }
     }
@@ -1402,7 +1456,8 @@ impl Mutation {
             Mutation::AddLayer { .. }
             | Mutation::RemoveLayer { .. }
             | Mutation::SwapLayers(_)
-            | Mutation::RelinkAssetPath(_) => true,
+            | Mutation::RelinkAssetPath(_)
+            | Mutation::SetLayerKind(_) => true,
             Mutation::ApplyProjectSnapshot(s) => !s.non_undoable,
             _ => false,
         }
@@ -1912,6 +1967,54 @@ mod tests {
         let _ = reverse.apply(&mut p);
         let after = serde_json::to_value(&p).unwrap();
         assert_eq!(before, after, "Reverse should restore byte-equal project",);
+    }
+
+    /// P0.5.1 — `SetLayerKind` round-trip restores the original
+    /// `LayerKind` byte-equal when applied + reversed. Exercises the
+    /// FxLayer params HashMap to confirm whole-enum Reverse covers
+    /// the new field.
+    #[test]
+    fn set_layer_kind_fx_round_trips() {
+        let mut p = fresh_project();
+        let before = serde_json::to_value(&p).unwrap();
+        let original_kind = p.layers[0].kind.clone();
+
+        let mut params = std::collections::HashMap::new();
+        params.insert("speed".to_string(), 1.5);
+        params.insert("falloff".to_string(), 0.3);
+        let new_kind = crate::project::schema::LayerKind::FxLayer {
+            preset_id: "ripple_wash".to_string(),
+            params,
+        };
+
+        // Apply: replaces the Svg kind with FxLayer.
+        // The discriminant check fires only on apply of the reverse,
+        // so we provide a matching `old` (Svg) for the forward apply.
+        let mutation = Mutation::SetLayerKind(SetLayerKind {
+            layer_idx: 0,
+            new: new_kind.clone(),
+            old: original_kind.clone(),
+        });
+        let reverse = mutation.apply(&mut p);
+        assert!(
+            matches!(
+                p.layers[0].kind,
+                crate::project::schema::LayerKind::FxLayer { .. }
+            ),
+            "apply should install FxLayer kind",
+        );
+        if let crate::project::schema::LayerKind::FxLayer { params, .. } = &p.layers[0].kind {
+            assert_eq!(params.len(), 2);
+            assert!((params["speed"] - 1.5).abs() < 1e-6);
+            assert!((params["falloff"] - 0.3).abs() < 1e-6);
+        }
+
+        let _ = reverse.apply(&mut p);
+        let after = serde_json::to_value(&p).unwrap();
+        assert_eq!(
+            before, after,
+            "Reverse should restore byte-equal project (whole-enum Reverse rule 1)",
+        );
     }
 
     /// V31.1.4 follow-up — `Mutation::ApplyProjectSnapshot` round-trips

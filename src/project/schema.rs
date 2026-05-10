@@ -2,6 +2,7 @@
 //! older saves keep loading after fields are added.
 
 use std::cell::Cell;
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -65,11 +66,18 @@ pub enum LayerKind {
         path: PathBuf,
     },
     /// v0.4 W5 — procedural FX layer driven by mask SDF. Real fields
-    /// (params HashMap) land in P0.5.1; the scaffold carries the
-    /// preset id only and renders a placeholder until P0.5.3 wires the
-    /// real shader dispatch.
+    /// landed in P0.5.1; the scaffold carries the preset id and a
+    /// string-keyed parameter map. P0.5.3 wires the real shader
+    /// dispatch and registers known presets.
+    ///
+    /// `params` is intentionally `HashMap<String, f32>` (not a typed
+    /// per-preset struct) so the schema doesn't churn as new presets
+    /// arrive in Phase 2; the registry validates known keys at
+    /// preset-pick time.
     FxLayer {
         preset_id: String,
+        #[serde(default)]
+        params: HashMap<String, f32>,
     },
     /// v0.4 W6 — live NDI input as a layer source. Real receiver lands
     /// in P0.6.2; the scaffold carries the source name only and renders

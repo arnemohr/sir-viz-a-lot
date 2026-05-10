@@ -1286,7 +1286,7 @@ fn show_layers_tab(
                         path.display().to_string()
                     }
                     crate::project::schema::LayerKind::Video { path } => path.display().to_string(),
-                    crate::project::schema::LayerKind::FxLayer { preset_id } => {
+                    crate::project::schema::LayerKind::FxLayer { preset_id, .. } => {
                         format!("FX preset: {preset_id}")
                     }
                     crate::project::schema::LayerKind::Ndi { source_name } => {
