@@ -227,18 +227,18 @@ impl ProjectAudit {
             });
         }
 
-        // T1.39: output_monitor_index >= monitor_count.
-        if (project.output_monitor_index as u32) >= env.monitor_count {
+        // T1.39: output_target.fallback_index >= monitor_count.
+        if (project.output_target.fallback_index as u32) >= env.monitor_count {
             findings.push(AuditFinding {
                 kind: AuditKind::MonitorOutOfRange {
-                    requested: project.output_monitor_index as u32,
+                    requested: project.output_target.fallback_index as u32,
                     available: env.monitor_count,
                 },
                 severity: Severity::Warn,
                 message: format!(
                     "Project requests monitor {} but only {} monitor(s) available. \
                      Falls back to monitor 0.",
-                    project.output_monitor_index, env.monitor_count,
+                    project.output_target.fallback_index, env.monitor_count,
                 ),
                 autofix: Some(project.set_output_monitor_index_mutation(0)),
             });
@@ -458,10 +458,10 @@ mod tests {
     use super::*;
 
     /// Build a project that passes all audit checks:
-    /// - schema_version = CURRENT (4)
+    /// - schema_version = CURRENT
     /// - one layer with a real on-disk asset (uses Cargo.toml, always present)
     /// - layer carries the identity warp (rows=1, cols=1, 2×2 grid)
-    /// - output_monitor_index = 0, AuditEnv::default() has monitor_count = 1
+    /// - output_target.fallback_index = 0, AuditEnv::default() has monitor_count = 1
     fn fresh_project() -> Project {
         let mut p = Project::default();
         // Add a layer with an asset that exists on disk so MissingAsset doesn't fire.
@@ -681,13 +681,13 @@ mod tests {
         std::fs::remove_file(&tmp).ok();
     }
 
-    /// 003-T1.39 — output_monitor_index >= AuditEnv.monitor_count triggers
+    /// 003-T1.39 — output_target.fallback_index >= AuditEnv.monitor_count triggers
     /// MonitorOutOfRange with a SetOutputMonitorIndex autofix that resets
     /// the index to 0.
     #[test]
     fn audit_monitor_out_of_range_emits_finding() {
         let mut p = fresh_project();
-        p.output_monitor_index = 99;
+        p.output_target.fallback_index = 99;
         let env = AuditEnv { monitor_count: 1 };
         let findings = ProjectAudit::run(&p, &env);
         let f = findings
@@ -700,7 +700,7 @@ mod tests {
         // Apply autofix; assert index reset to 0.
         let mutation = f.autofix.clone().unwrap();
         let _reverse = mutation.apply(&mut p);
-        assert_eq!(p.output_monitor_index, 0);
+        assert_eq!(p.output_target.fallback_index, 0);
     }
 
     /// 003-T2.21 — `first_run_canonical` half: load the bundled
@@ -728,7 +728,7 @@ mod tests {
         let project = crate::project::Project::load(&demo_path).expect("demo loads");
 
         let env = AuditEnv {
-            // The demo's `output_monitor_index = 0` is always valid
+            // The demo's `output_target.fallback_index = 0` is always valid
             // because rmap requires at least one display to run; if
             // CI ever runs without a display the audit would surface
             // MonitorOutOfRange. monitor_count = 1 keeps the test

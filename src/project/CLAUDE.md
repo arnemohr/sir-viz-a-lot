@@ -34,3 +34,4 @@ Every `Mutation::apply` opens with a `debug_assert!` that the carried `old` valu
 
 - Numeric fields default through serde; if a new optional field is added with a non-zero "identity" value (e.g. scale = 1.0, not 0.0), set the serde default explicitly. The repo has been bitten by `transform.scale = [0.0, 0.0]` collapsing layers to invisible; defaults need to round-trip to identity, not zero.
 - Bump `CURRENT_SCHEMA_VERSION` and add a step to `migrate.rs` for any breaking change. Old projects must continue to load.
+- **v5 → v6 (V31.2.1):** Replaced `output_monitor_index: usize` with `output_target: OutputTarget { uuid: Option<String>, fallback_index: usize }` for portable monitor matching. UUID capture lands in V31.2.3; loader UUID-then-index resolution lands in V31.2.2. All call sites currently read `output_target.fallback_index`, preserving v5 behaviour.

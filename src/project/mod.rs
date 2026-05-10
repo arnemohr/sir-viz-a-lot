@@ -342,7 +342,7 @@ mod tests {
         let path = dir.join(format!("rmap_round_trip_{}.rmap.json", std::process::id()));
 
         let mut original = Project::default();
-        original.output_monitor_index = 2;
+        original.output_target.fallback_index = 2;
         original.layers.push(LayerConfig {
             id: "layer_a".into(),
             kind: LayerKind::Svg {

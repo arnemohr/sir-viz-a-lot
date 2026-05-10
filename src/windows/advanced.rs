@@ -548,7 +548,7 @@ fn show_project_section(
     // (e.g. "BenQ TH685") so the operator can confirm the right display is
     // selected without memorising numeric indices.  Falls back to "monitor N"
     // when the live list is shorter than the stored index (display unplugged).
-    let idx = project.output_monitor_index;
+    let idx = project.output_target.fallback_index;
     let monitor_label = monitor_names
         .get(idx)
         .cloned()

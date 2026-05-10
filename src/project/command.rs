@@ -922,12 +922,12 @@ pub struct SetOutputMonitorIndex {
 impl ReverseStorage for SetOutputMonitorIndex {
     fn apply(self, project: &mut Project) -> Self {
         debug_assert!(
-            project.output_monitor_index == self.old,
-            "SetOutputMonitorIndex stale Reverse: project.output_monitor_index={}, expected old={}",
-            project.output_monitor_index,
+            project.output_target.fallback_index == self.old,
+            "SetOutputMonitorIndex stale Reverse: project.output_target.fallback_index={}, expected old={}",
+            project.output_target.fallback_index,
             self.old
         );
-        project.output_monitor_index = self.new;
+        project.output_target.fallback_index = self.new;
         SetOutputMonitorIndex {
             new: self.old,
             old: self.new,
@@ -1349,12 +1349,12 @@ impl Project {
     }
 
     /// Build a `SetOutputMonitorIndex` mutation (T-003-T1.39). Captures
-    /// the project's current `output_monitor_index` as `old`. Used by
+    /// the project's current `output_target.fallback_index` as `old`. Used by
     /// `ProjectAudit` to emit an autofix for `MonitorOutOfRange`.
     pub fn set_output_monitor_index_mutation(&self, new: usize) -> Mutation {
         Mutation::SetOutputMonitorIndex(SetOutputMonitorIndex {
             new,
-            old: self.output_monitor_index,
+            old: self.output_target.fallback_index,
         })
     }
 

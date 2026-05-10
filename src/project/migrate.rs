@@ -36,7 +36,7 @@ pub fn migrate(mut value: Value) -> Result<(Value, MigrationOutcome), ProjectErr
         // layer's new `warp` field. `Project.warps` is preserved during
         // T3.0a so the renderer + audit + mutations keep compiling; T3.0b
         // deletes it once the render graph reads per-layer warps.
-        0 | 1 | 2 | 3 | 4 => {
+        0 | 1 | 2 | 3 | 4 | 5 => {
             if version <= 2 {
                 migrate_v2_to_v3_layers(&mut value);
             }
@@ -45,6 +45,9 @@ pub fn migrate(mut value: Value) -> Result<(Value, MigrationOutcome), ProjectErr
             }
             if version <= 4 {
                 migrate_v4_to_v5_warp_as_placement(&mut value);
+            }
+            if version <= 5 {
+                migrate_v5_to_v6_output_target(&mut value);
             }
             value["schema_version"] = serde_json::json!(CURRENT_SCHEMA_VERSION);
             Ok((value, outcome))
@@ -316,6 +319,28 @@ fn reset_transform_placement(effects: Option<&mut Value>) {
     }
 }
 
+/// V31.2.1 — migrate v5 projects to v6: replace `output_monitor_index: usize`
+/// with `output_target: { uuid: null, fallback_index: <prior index> }`.
+///
+/// Defensive: if `output_monitor_index` is missing (malformed v5 save),
+/// defaults `fallback_index` to 0 and leaves the project loadable.
+fn migrate_v5_to_v6_output_target(value: &mut Value) {
+    let Some(obj) = value.as_object_mut() else {
+        return;
+    };
+    let fallback_index = obj
+        .remove("output_monitor_index")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as usize;
+    obj.insert(
+        "output_target".into(),
+        serde_json::json!({
+            "uuid": null,
+            "fallback_index": fallback_index,
+        }),
+    );
+}
+
 fn migrate_v2_to_v3_layers(value: &mut Value) {
     let Some(layers) = value.get_mut("layers").and_then(|v| v.as_array_mut()) else {
         return;
@@ -502,8 +527,8 @@ mod tests {
         assert!(p.layers[0].warp.mask_polygon.is_empty());
     }
 
-    /// T3.0a / T3.29 — v4-native projects flow through the v4 → v5
-    /// step. Empty-layers project bumps schema_version to 5 with no
+    /// T3.0a / T3.29 — v4-native projects flow through the v4 → v5 → v6
+    /// steps. Empty-layers project bumps schema_version to 6 with no
     /// other changes; outcome reports `previous_warp_count == 0` so
     /// the audit finding never fires for fresh projects.
     #[test]
@@ -514,7 +539,7 @@ mod tests {
             "warps": [],
         });
         let (out, outcome) = migrate(v).expect("migrate");
-        assert_eq!(out["schema_version"], serde_json::json!(5));
+        assert_eq!(out["schema_version"], serde_json::json!(6));
         assert_eq!(outcome.previous_warp_count, 0);
     }
 
@@ -555,8 +580,8 @@ mod tests {
             }]
         });
         let (out, _) = migrate(v).expect("migrate");
-        let p: Project = serde_json::from_value(out).expect("deserialize as v5");
-        assert_eq!(p.schema_version, 5);
+        let p: Project = serde_json::from_value(out).expect("deserialize as v6");
+        assert_eq!(p.schema_version, 6);
 
         // Synthesised quad: corners at (0.25 … 0.75) for scale 0.5.
         let g = &p.layers[0].warp.grid;
@@ -628,6 +653,74 @@ mod tests {
         let approx = |a: f32, b: f32| (a - b).abs() < 1e-4;
         assert!(approx(g[0][0][0], 0.25) && approx(g[0][0][1], 0.25));
         assert!(approx(g[1][1][0], 0.75) && approx(g[1][1][1], 0.75));
+    }
+
+    // --- V31.2.1 migration tests ---
+
+    fn minimal_v5_json(output_monitor_index: u64) -> serde_json::Value {
+        serde_json::json!({
+            "schema_version": 5,
+            "layers": [],
+            "output_monitor_index": output_monitor_index,
+        })
+    }
+
+    /// V31.2.1 — v5 project with `output_monitor_index: 2` migrates to
+    /// `output_target: { uuid: null, fallback_index: 2 }` at v6.
+    #[test]
+    fn v5_output_monitor_index_migrates_to_output_target_with_null_uuid() {
+        let v = minimal_v5_json(2);
+        let (out, _) = migrate(v).expect("migrate");
+        let p: Project = serde_json::from_value(out).expect("deserialize as v6");
+        assert_eq!(p.schema_version, CURRENT_SCHEMA_VERSION);
+        assert_eq!(p.output_target.uuid, None);
+        assert_eq!(p.output_target.fallback_index, 2);
+    }
+
+    /// V31.2.1 — v5 project with `output_monitor_index: 0` migrates correctly.
+    #[test]
+    fn v5_with_index_zero_migrates_correctly() {
+        let v = minimal_v5_json(0);
+        let (out, _) = migrate(v).expect("migrate");
+        let p: Project = serde_json::from_value(out).expect("deserialize as v6");
+        assert_eq!(p.schema_version, CURRENT_SCHEMA_VERSION);
+        assert_eq!(p.output_target.uuid, None);
+        assert_eq!(p.output_target.fallback_index, 0);
+    }
+
+    /// V31.2.1 — a native v6 project (with `output_target` already present)
+    /// is returned unchanged by the migration chain.
+    #[test]
+    fn v6_native_round_trips_unchanged() {
+        let v = serde_json::json!({
+            "schema_version": 6,
+            "layers": [],
+            "output_target": {
+                "uuid": null,
+                "fallback_index": 3,
+            },
+        });
+        let (out, _) = migrate(v).expect("migrate");
+        let p: Project = serde_json::from_value(out).expect("deserialize as v6");
+        assert_eq!(p.schema_version, 6);
+        assert_eq!(p.output_target.uuid, None);
+        assert_eq!(p.output_target.fallback_index, 3);
+    }
+
+    /// V31.2.1 — defensive: a malformed v5 project missing `output_monitor_index`
+    /// defaults to `fallback_index: 0`.
+    #[test]
+    fn v5_missing_output_monitor_index_defaults_to_zero() {
+        let v = serde_json::json!({
+            "schema_version": 5,
+            "layers": [],
+            // deliberately omit output_monitor_index
+        });
+        let (out, _) = migrate(v).expect("migrate");
+        let p: Project = serde_json::from_value(out).expect("deserialize as v6");
+        assert_eq!(p.schema_version, CURRENT_SCHEMA_VERSION);
+        assert_eq!(p.output_target.uuid, None);
+        assert_eq!(p.output_target.fallback_index, 0);
     }
 
     /// T3.29 — a v4 layer with a custom (non-identity) warp grid is

@@ -3811,10 +3811,10 @@ impl ApplicationHandler for App {
             }
         }
 
-        // `--monitor` overrides [`Project::output_monitor_index`] from the file.
+        // `--monitor` overrides [`Project::output_target`] fallback index from the file.
         let monitor_index = self
             .monitor_override
-            .unwrap_or(project.output_monitor_index);
+            .unwrap_or(project.output_target.fallback_index);
         let monitor = event_loop.available_monitors().nth(monitor_index);
         if monitor.is_none() {
             tracing::warn!(
@@ -3994,10 +3994,10 @@ impl ApplicationHandler for App {
                             return;
                         };
                         // Hot-swap projector to fullscreen. Look up the target monitor
-                        // from project.output_monitor_index; fall back to primary if
+                        // from project.output_target.fallback_index; fall back to primary if
                         // the index is out of range.
                         let monitor: Option<winit::monitor::MonitorHandle> = {
-                            let idx = editing.project.output_monitor_index;
+                            let idx = editing.project.output_target.fallback_index;
                             event_loop.available_monitors().nth(idx)
                         };
                         tracing::info!(

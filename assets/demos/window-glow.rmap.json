@@ -1,5 +1,5 @@
 {
-  "schema_version": 4,
+  "schema_version": 6,
   "layers": [
     {
       "id": "demo_window_glow",
@@ -38,7 +38,10 @@
     }
   ],
   "scenes": [],
-  "output_monitor_index": 0,
+  "output_target": {
+    "uuid": null,
+    "fallback_index": 0
+  },
   "output_windowed": true,
   "background_color": [0.0, 0.0, 0.0, 1.0],
   "gamma": 1.0,

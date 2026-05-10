@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 5;
+pub const CURRENT_SCHEMA_VERSION: u32 = 6;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Transform2D {
@@ -137,6 +137,25 @@ impl WarpMesh {
     }
 }
 
+/// V31.2.1 — portable monitor reference stored in the project.
+///
+/// A projector is identified by UUID when available (captured by V31.2.3 on
+/// save). `uuid: None` covers v5-migrated projects and platforms without UUID
+/// support. `fallback_index` is used when `uuid` is absent or no live monitor
+/// matches; it maps to the index reported by `--list-monitors`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct OutputTarget {
+    /// macOS `CGDisplayCreateUUIDFromDisplayID` value if known (V31.2.3
+    /// captures it on save). `None` for v5-migrated projects and on
+    /// platforms without UUID support.
+    #[serde(default)]
+    pub uuid: Option<String>,
+    /// Display index used as a fallback when `uuid` is absent or no live
+    /// monitor matches. Maps to the index reported by `--list-monitors`.
+    #[serde(default)]
+    pub fallback_index: usize,
+}
+
 /// 003-T4.1 — 192×108 RGBA8 thumbnail captured when a scene is saved.
 /// Stored as a flat `width * height * 4` byte array in row-major order.
 /// `#[serde(default)]` ensures existing v5 saves (without this field) load
@@ -167,9 +186,9 @@ pub struct Project {
     #[serde(default)]
     pub scenes: Vec<Scene>,
     #[serde(default)]
-    pub output_monitor_index: usize,
-    /// When true, draw output in a decorated window on `output_monitor_index`
-    /// instead of borderless fullscreen. Applied at startup (restart to toggle).
+    pub output_target: OutputTarget,
+    /// When true, draw output in a decorated window on `output_target`'s
+    /// monitor instead of borderless fullscreen. Applied at startup (restart to toggle).
     #[serde(default)]
     pub output_windowed: bool,
     #[serde(default)]
@@ -232,7 +251,7 @@ impl Default for Project {
             schema_version: CURRENT_SCHEMA_VERSION,
             layers: Vec::new(),
             scenes: Vec::new(),
-            output_monitor_index: 0,
+            output_target: OutputTarget::default(),
             output_windowed: false,
             output_resolution: None,
             background_color: default_bg(),
