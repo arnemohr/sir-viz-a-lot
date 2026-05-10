@@ -2535,13 +2535,16 @@ mod tests {
             /// 004-V31.1.2 — `SetCrossfadeDurationS` apply→undo restores the prior
             /// value with bit-exact (`f32::to_bits()`) equality.
             ///
-            /// Regression guard: this test would have failed against the
-            /// pre-V31.3.2 manual Reverse code if that code had captured the
-            /// wrong `old` value. After V31.3.2 migrated all variants to the
-            /// `ReverseStorage` trait, `SetCrossfadeDurationS::apply` is
-            /// structurally correct — this test lands as a compile-time-enforced
-            /// regression guard that would catch any future regression at the
-            /// `ReverseStorage::apply` level.
+            /// Regression guard against any future regression in
+            /// `SetCrossfadeDurationS::apply`. Verified meaningful via
+            /// discriminator: temporarily mutating `apply` to drop the
+            /// `new ↔ old` swap fails this proptest with the minimal
+            /// counterexample `prior = 0.0, new = -0.0` — the case bit-exact
+            /// `f32::to_bits()` comparison catches but a `(a-b).abs() < ε`
+            /// check would silently pass. The deferred audit T1.37 was
+            /// surfaced before the V31.3.2 trait migration; this test lands
+            /// as a regression guard rather than a reproduction of the
+            /// historical bug.
             ///
             /// Uses `f32::to_bits()` instead of an epsilon comparison because
             /// the spec requires bit-exact restoration of the prior value; an
