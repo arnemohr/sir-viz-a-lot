@@ -301,6 +301,18 @@ pub fn interpolate(a: &serde_json::Value, b: &serde_json::Value, t: f32) -> serd
     let t = t.clamp(0.0, 1.0);
     match (a, b) {
         (Number(na), Number(nb)) => {
+            // Integer-typed numbers snap at the midpoint instead of lerping.
+            // Schema u32 fields (`Project.schema_version`, `WarpMesh.rows`,
+            // `WarpMesh.cols`, `ThumbnailRgba.width/height`) cannot accept the
+            // f64-typed Number that a linear blend produces — the snapshot
+            // would fail `from_value::<u32>` (literally `floating point 1.0,
+            // expected u32`) and the entire crossfade tick gets dropped.
+            // Integer fields are also categorical for crossfade purposes:
+            // both endpoints share the same value or the projects aren't
+            // crossfade-compatible, so the snap is harmless.
+            if (na.is_u64() && nb.is_u64()) || (na.is_i64() && nb.is_i64()) {
+                return if t < 0.5 { a.clone() } else { b.clone() };
+            }
             let fa = na.as_f64().unwrap_or(0.0);
             let fb = nb.as_f64().unwrap_or(0.0);
             let v = fa + (fb - fa) * t as f64;
@@ -719,6 +731,51 @@ mod tests {
             2,
             "recall via Mutation::ApplyProjectSnapshot wiped cue strip",
         );
+    }
+
+    /// Bug reproducer: an interpolated snapshot must round-trip back through
+    /// `restore_scene` (which deserializes via `serde_json::from_value::<Project>`).
+    /// Before the integer-snap fix in `interpolate`, every u32 field
+    /// (`schema_version`, `WarpMesh.rows`/`cols`, `ThumbnailRgba.width`/`height`)
+    /// became a float-typed JSON Number after the lerp, and `from_value` rejected
+    /// them with `invalid type: floating point 1.0, expected u32`. That broke
+    /// the entire crossfade tick path (~40 errors/second visible in the
+    /// operator's rmap.log when crossfade_duration_s > 0).
+    #[cfg(feature = "v3")]
+    #[test]
+    fn interpolated_snapshot_deserializes_back_to_project() {
+        let mut p = Project::default();
+        p.layers.push(LayerConfig {
+            id: "a".into(),
+            kind: LayerKind::Svg {
+                svg_path: PathBuf::from("/tmp/x.svg"),
+            },
+            enabled: true,
+            transform: crate::project::schema::Transform2D::default(),
+            effects: Vec::new(),
+            blend_mode: BlendMode::Normal,
+            opacity: 1.0,
+            warp: WarpMesh::identity(),
+            muted: false,
+        });
+        let a = snapshot(&p);
+        // Modify a numeric float field so interpolate has something real to
+        // blend, but leave all u32 fields (schema_version, warp.rows, warp.cols)
+        // untouched — they must snap, not lerp.
+        p.gamma = 2.0;
+        let b = snapshot(&p);
+
+        // Sample the fade at three points; every sampled snapshot must
+        // deserialize back into a Project.
+        for &t in &[0.0_f32, 0.25, 0.5, 0.75, 1.0] {
+            let interp = interpolate(&a, &b, t);
+            let result: Result<Project, _> = serde_json::from_value(interp.clone());
+            assert!(
+                result.is_ok(),
+                "interpolated snapshot at t={t} failed to deserialize: {:?}",
+                result.err(),
+            );
+        }
     }
 
     /// Defensive guard: when the snapshot fails to deserialize (malformed,
