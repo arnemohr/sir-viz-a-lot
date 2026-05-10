@@ -1745,6 +1745,48 @@ mod tests {
         assert_eq!(before, after, "Reverse should restore byte-equal project",);
     }
 
+    /// V31.1.4 follow-up — `Mutation::ApplyProjectSnapshot` round-trips
+    /// a layer with `effects: vec![]` (empty) without silently filling
+    /// in `default_effect_chain()` on undo or redo. The `proptest_round_trip`
+    /// harness seeds the project via `fresh_project()`, which uses
+    /// `layer_from_svg_path` and the default 3-element effect chain — so
+    /// the empty-vec case is never exercised by the property tests. This
+    /// closes that gap directly through the v3 mutation pipeline.
+    #[test]
+    fn apply_project_snapshot_preserves_empty_effects_vec() {
+        let mut p = fresh_project();
+        p.layers[0].effects = Vec::new();
+        let before = serde_json::to_value(&p).unwrap();
+
+        let mut target = p.clone();
+        target.gamma = 2.0;
+        let snap_target = serde_json::to_value(&target).unwrap();
+
+        let forward = Mutation::ApplyProjectSnapshot(ApplyProjectSnapshot {
+            new: snap_target,
+            old: before.clone(),
+            non_undoable: false,
+        });
+        let reverse = forward.apply(&mut p);
+        assert!(
+            p.layers[0].effects.is_empty(),
+            "after forward apply, layer 0 effects should be empty; got {:?}",
+            p.layers[0].effects,
+        );
+
+        let _redo = reverse.apply(&mut p);
+        let after = serde_json::to_value(&p).unwrap();
+        assert_eq!(
+            before, after,
+            "ApplyProjectSnapshot apply→undo should be byte-equal even with empty effects vec",
+        );
+        assert!(
+            p.layers[0].effects.is_empty(),
+            "after undo, layer 0 effects should still be empty; got {:?}",
+            p.layers[0].effects,
+        );
+    }
+
     /// Stale Reverse storage triggers `debug_assert!` in test
     /// builds. Confirms the runtime safety net works.
     #[test]
