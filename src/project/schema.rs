@@ -449,4 +449,46 @@ mod tests {
         assert_eq!(scene.thumbnail, None);
         assert_eq!(scene.name, "old-scene");
     }
+
+    /// V31.1.4 — a JSON file that omits the `effects` field entirely must fail
+    /// loudly (missing required field), not silently populate effects from the
+    /// default chain. This documents the current serde behaviour: `effects` has
+    /// no `#[serde(default)]` so it is a required field and an older hypothetical
+    /// serialiser that emits `effects: []` (not absent) is the safe pattern.
+    ///
+    /// This is a sentinel test: if someone accidentally adds `#[serde(default)]`
+    /// to `effects` with a custom default function that returns `default_effect_chain()`,
+    /// this test will still pass (it won't catch that). The real guard is
+    /// `empty_effects_vec_survives_snapshot_round_trip` in `mod.rs`.
+    ///
+    /// If `#[serde(default)]` is ever added to `effects` to support loading
+    /// forward-compat JSON that omits the field, use `Vec::new` (empty) as the
+    /// default, NOT `default_effect_chain()`.
+    #[test]
+    fn layer_config_missing_effects_field_errors() {
+        // JSON with no effects field at all — not even an empty array.
+        let json = r#"{
+            "id": "test",
+            "kind": {"Svg": {"svg_path": "/tmp/x.svg"}},
+            "enabled": true,
+            "transform": {"translate": [0.0, 0.0], "rotate_deg": 0.0, "scale": [1.0, 1.0], "anchor": [0.0, 0.0]},
+            "blend_mode": "Normal",
+            "opacity": 1.0
+        }"#;
+        let result: Result<LayerConfig, _> = serde_json::from_str(json);
+        // Currently a missing `effects` field is a deserialization error because
+        // LayerConfig has no serde(default) on effects. If this ever changes to Ok,
+        // verify the deserialized effects vec is EMPTY (not default_effect_chain()).
+        match result {
+            Err(_) => { /* expected: missing required field */ }
+            Ok(lc) => assert_eq!(
+                lc.effects.len(),
+                0,
+                "If effects gains serde(default), the default MUST be empty vec (not default_effect_chain). \
+                 Got {} effects: {:?}",
+                lc.effects.len(),
+                lc.effects
+            ),
+        }
+    }
 }

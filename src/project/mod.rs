@@ -982,4 +982,206 @@ mod tests {
         });
         assert!(p.has_absolute_asset_paths());
     }
+
+    /// V31.1.4 — a layer with `effects: vec![]` must survive `snapshot → restore`
+    /// with the effects vec still empty (not replaced by the 3-element default chain).
+    /// Covers both Image and SVG layer kinds.
+    #[test]
+    fn empty_effects_vec_survives_snapshot_round_trip() {
+        // SVG layer
+        let mut p = Project::default();
+        p.layers.push(LayerConfig {
+            id: "svg_test".into(),
+            kind: LayerKind::Svg {
+                svg_path: PathBuf::from("x.svg"),
+            },
+            enabled: true,
+            transform: crate::project::schema::Transform2D::default(),
+            effects: vec![],
+            blend_mode: BlendMode::Normal,
+            opacity: 1.0,
+            warp: WarpMesh::identity(),
+        });
+        let snap = snapshot(&p);
+        let mut q = Project::default();
+        restore(&mut q, &snap).expect("restore");
+        assert_eq!(
+            q.layers[0].effects.len(),
+            0,
+            "SVG layer: empty effects vec became {:?}",
+            q.layers[0].effects
+        );
+
+        // Image layer
+        let mut p2 = Project::default();
+        p2.layers.push(LayerConfig {
+            id: "img_test".into(),
+            kind: LayerKind::Image {
+                path: PathBuf::from("x.png"),
+                fit: crate::project::schema::FitMode::Cover,
+                focal: [0.5, 0.5],
+            },
+            enabled: true,
+            transform: crate::project::schema::Transform2D::default(),
+            effects: vec![],
+            blend_mode: BlendMode::Normal,
+            opacity: 1.0,
+            warp: WarpMesh::identity(),
+        });
+        let snap2 = snapshot(&p2);
+        let mut q2 = Project::default();
+        restore(&mut q2, &snap2).expect("restore");
+        assert_eq!(
+            q2.layers[0].effects.len(),
+            0,
+            "Image layer: empty effects vec became {:?}",
+            q2.layers[0].effects
+        );
+    }
+
+    /// V31.1.4 — empty effects vec must survive `snapshot → restore_scene → snapshot`
+    /// with effects still empty.
+    #[test]
+    fn empty_effects_vec_survives_restore_scene_round_trip() {
+        let mut p = Project::default();
+        p.layers.push(LayerConfig {
+            id: "test".into(),
+            kind: LayerKind::Svg {
+                svg_path: PathBuf::from("x.svg"),
+            },
+            enabled: true,
+            transform: crate::project::schema::Transform2D::default(),
+            effects: vec![],
+            blend_mode: BlendMode::Normal,
+            opacity: 1.0,
+            warp: WarpMesh::identity(),
+        });
+        let snap = snapshot(&p);
+        // restore_scene: saves scenes, restores rest
+        restore_scene(&mut p, &snap).expect("restore_scene");
+        assert_eq!(
+            p.layers[0].effects.len(),
+            0,
+            "empty effects vec became {:?} after restore_scene",
+            p.layers[0].effects
+        );
+        // snapshot again — second hop
+        let snap2 = snapshot(&p);
+        let mut q = Project::default();
+        restore(&mut q, &snap2).expect("restore after restore_scene");
+        assert_eq!(
+            q.layers[0].effects.len(),
+            0,
+            "empty effects vec became {:?} after second snapshot hop",
+            q.layers[0].effects
+        );
+    }
+
+    /// V31.1.4 — empty effects vec must survive save-to-disk → load.
+    #[test]
+    fn empty_effects_vec_survives_save_load() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!(
+            "rmap_v311_empty_effects_{}.rmap.json",
+            std::process::id()
+        ));
+
+        let mut p = Project::default();
+        p.layers.push(LayerConfig {
+            id: "svg_test".into(),
+            kind: LayerKind::Svg {
+                svg_path: PathBuf::from("x.svg"),
+            },
+            enabled: true,
+            transform: crate::project::schema::Transform2D::default(),
+            effects: vec![],
+            blend_mode: BlendMode::Normal,
+            opacity: 1.0,
+            warp: WarpMesh::identity(),
+        });
+
+        p.save(&path).expect("save");
+        let loaded = Project::load(&path).expect("load");
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(
+            loaded.layers[0].effects.len(),
+            0,
+            "save→load: empty effects vec became {:?}",
+            loaded.layers[0].effects
+        );
+    }
+
+    /// V31.1.4 — empty effects vec must survive the migrate path.
+    /// A v5 project JSON with `"effects": []` must deserialize with empty effects
+    /// after running through migrate_to_current.
+    #[test]
+    fn empty_effects_vec_survives_migration() {
+        use crate::project::migrate::migrate;
+        use crate::project::schema::CURRENT_SCHEMA_VERSION;
+
+        let v = serde_json::json!({
+            "schema_version": 5,
+            "layers": [{
+                "id": "test",
+                "kind": { "Svg": { "svg_path": "x.svg" } },
+                "enabled": true,
+                "transform": { "translate": [0.0, 0.0], "rotate_deg": 0.0, "scale": [1.0, 1.0], "anchor": [0.0, 0.0] },
+                "effects": [],
+                "blend_mode": "Normal",
+                "opacity": 1.0,
+                "warp": {
+                    "rows": 1, "cols": 1,
+                    "grid": [[[0.0, 0.0], [1.0, 0.0]], [[0.0, 1.0], [1.0, 1.0]]],
+                    "mask_polygon": [],
+                    "mask_feather": 0.02
+                }
+            }],
+            "output_monitor_index": 0
+        });
+        let (out, _) = migrate(v).expect("migrate");
+        let p: Project = serde_json::from_value(out).expect("deserialize");
+        assert_eq!(p.schema_version, CURRENT_SCHEMA_VERSION);
+        assert_eq!(
+            p.layers[0].effects.len(),
+            0,
+            "migration: empty effects vec became {:?}",
+            p.layers[0].effects
+        );
+    }
+
+    /// V31.1.4 — interpolate between two snapshots with empty effects vecs
+    /// must produce a result with empty effects.
+    #[test]
+    fn empty_effects_vec_survives_interpolation() {
+        let layer_json = serde_json::json!({
+            "id": "test",
+            "kind": { "Svg": { "svg_path": "x.svg" } },
+            "enabled": true,
+            "transform": { "translate": [0.0, 0.0], "rotate_deg": 0.0, "scale": [1.0, 1.0], "anchor": [0.0, 0.0] },
+            "effects": [],
+            "blend_mode": "Normal",
+            "opacity": 1.0,
+            "warp": {
+                "rows": 1, "cols": 1,
+                "grid": [[[0.0, 0.0], [1.0, 0.0]], [[0.0, 1.0], [1.0, 1.0]]],
+                "mask_polygon": [],
+                "mask_feather": 0.02
+            }
+        });
+        let a = serde_json::json!({ "schema_version": 6, "layers": [layer_json.clone()] });
+        let b = serde_json::json!({ "schema_version": 6, "layers": [layer_json.clone()] });
+
+        for t in [0.0f32, 0.25, 0.5, 0.75, 1.0] {
+            let mid = interpolate(&a, &b, t);
+            let effects = mid["layers"][0]["effects"]
+                .as_array()
+                .expect("effects array");
+            assert_eq!(
+                effects.len(),
+                0,
+                "interpolate at t={t}: empty effects became {effects:?}"
+            );
+        }
+    }
 }
