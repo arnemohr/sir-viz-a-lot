@@ -1797,6 +1797,7 @@ fn modulator_slider(
             Modulator::Bpm { .. } => "bpm",
             Modulator::Audio { .. } => "audio",
             Modulator::OscBound { .. } => "osc",
+            Modulator::MidiBound { .. } => "midi",
         };
         egui::ComboBox::from_id_salt(salt)
             .selected_text(cur_label)
@@ -1864,6 +1865,7 @@ fn modulator_slider(
             Modulator::Bpm { .. } => "bpm",
             Modulator::Audio { .. } => "audio",
             Modulator::OscBound { .. } => "osc",
+            Modulator::MidiBound { .. } => "midi",
         };
         egui::ComboBox::from_id_salt(salt)
             .selected_text(cur_label)
@@ -1982,6 +1984,11 @@ fn modulator_slider_params(
             // address read-only so projects load without crashing.
             ui.label(format!("OSC: {addr}"));
         }
+        Modulator::MidiBound { cc, channel, .. } => {
+            // P0.2.2 — minimal placeholder UI. Full picker + learn
+            // workflow lands in P0.2.3a / P0.2.5.
+            ui.label(format!("MIDI CC {cc} / Ch {}", *channel + 1));
+        }
         Modulator::Audio {
             band,
             smoothing,
@@ -2060,6 +2067,9 @@ fn modulator_slider_params(
         }
         Modulator::OscBound { addr, .. } => {
             ui.label(format!("OSC: {addr}"));
+        }
+        Modulator::MidiBound { cc, channel, .. } => {
+            ui.label(format!("MIDI CC {cc} / Ch {}", *channel + 1));
         }
         Modulator::Audio {
             band,

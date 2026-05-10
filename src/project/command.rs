@@ -2936,6 +2936,16 @@ mod tests {
                         scale,
                         offset,
                     }),
+                // P0.2.2 — MidiBound covers the full CC × channel
+                // matrix with the same scale / offset shape.
+                (0u8..=127, 0u8..=15, -1.0_f32..=1.0, -1.0_f32..=1.0).prop_map(
+                    |(cc, channel, scale, offset)| Modulator::MidiBound {
+                        cc,
+                        channel,
+                        scale,
+                        offset,
+                    },
+                ),
             ]
         }
 

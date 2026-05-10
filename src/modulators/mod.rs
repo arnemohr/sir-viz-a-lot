@@ -2,6 +2,7 @@
 //! the time-driven variants; all variants read from the central `Clock`.
 
 pub mod audio;
+pub mod midi;
 pub mod osc;
 pub mod waveforms;
 
@@ -94,6 +95,18 @@ pub enum Modulator {
         scale: f32,
         offset: f32,
     },
+    /// P0.2.2 (W2.2) — reads the latest CC value for `(channel, cc)`
+    /// from the process-wide MIDI value registry. Resolved as
+    /// `midi::current_value(channel, cc) * scale + offset`. Variant
+    /// exists unconditionally; gated MIDI decoder (`controls::midi`,
+    /// `feature = "midi"`) populates the registry. Returns `0.0` when
+    /// no provider is installed or the CC has never been received.
+    MidiBound {
+        cc: u8,
+        channel: u8,
+        scale: f32,
+        offset: f32,
+    },
 }
 
 impl Modulator {
@@ -139,6 +152,12 @@ impl Modulator {
                 scale,
                 offset,
             } => osc::current_value(addr) * scale + offset,
+            Self::MidiBound {
+                cc,
+                channel,
+                scale,
+                offset,
+            } => midi::current_value(*channel, *cc) * scale + offset,
         }
     }
 }
