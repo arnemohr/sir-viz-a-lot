@@ -39,7 +39,10 @@ impl GammaPipeline {
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
-                        min_binding_size: std::num::NonZeroU64::new(16),
+                        // P0.8.2 — uniform extended from 16 to 64
+                        // bytes: tone vec4 + 3 RGB matrix rows
+                        // (each padded to 16 bytes per std140 rules).
+                        min_binding_size: std::num::NonZeroU64::new(64),
                     },
                     count: None,
                 },
@@ -91,7 +94,7 @@ impl GammaPipeline {
 
         let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("gamma uniforms"),
-            size: 16,
+            size: 64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -114,12 +117,25 @@ impl GammaPipeline {
         gamma: f32,
         brightness: f32,
         contrast: f32,
+        rgb_matrix: [[f32; 3]; 3],
         load: wgpu::LoadOp<wgpu::Color>,
     ) {
-        let u = [gamma.max(0.01), brightness, contrast, 0.0f32];
-        let mut b = [0u8; 16];
-        for (i, f) in u.iter().enumerate() {
+        // 64-byte uniform: 4×vec4 = tone + 3 matrix rows. Each row
+        // is `[f32; 3]` from the Rust side, padded to vec4 with a
+        // trailing 0.0 to satisfy std140 alignment rules.
+        let mut b = [0u8; 64];
+        let tone = [gamma.max(0.01), brightness, contrast, 0.0f32];
+        for (i, f) in tone.iter().enumerate() {
             b[i * 4..(i + 1) * 4].copy_from_slice(&f.to_le_bytes());
+        }
+        // Rows start at byte offsets 16, 32, 48.
+        for (row_idx, row) in rgb_matrix.iter().enumerate() {
+            let base = 16 * (row_idx + 1);
+            for (col_idx, f) in row.iter().enumerate() {
+                let off = base + col_idx * 4;
+                b[off..off + 4].copy_from_slice(&f.to_le_bytes());
+            }
+            // Padding word (the .w of the vec4) is left as 0.
         }
         queue.write_buffer(&self.uniform_buffer, 0, &b);
 
@@ -161,5 +177,61 @@ impl GammaPipeline {
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
         pass.draw(0..6, 0..1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::project::schema::rgb_matrix_identity;
+
+    /// P0.8.2 — pin the uniform-buffer layout for the identity
+    /// matrix. Tone occupies bytes 0..16; rows live at 16, 32, 48
+    /// (each padded to 16 bytes per std140). For identity:
+    /// row_r = (1,0,0), row_g = (0,1,0), row_b = (0,0,1).
+    ///
+    /// Tests the byte-layout helper logic that lives inside
+    /// `GammaPipeline::render`. We can't run the helper in
+    /// isolation (it's tied to a wgpu queue); we instead replicate
+    /// it here against the same shape and assert byte-equal.
+    #[test]
+    fn identity_matrix_packs_to_expected_bytes() {
+        let mut b = [0u8; 64];
+        let tone: [f32; 4] = [1.0, 0.0, 1.0, 0.0];
+        for (i, f) in tone.iter().enumerate() {
+            b[i * 4..(i + 1) * 4].copy_from_slice(&f.to_le_bytes());
+        }
+        let rgb_matrix = rgb_matrix_identity();
+        for (row_idx, row) in rgb_matrix.iter().enumerate() {
+            let base = 16 * (row_idx + 1);
+            for (col_idx, f) in row.iter().enumerate() {
+                let off = base + col_idx * 4;
+                b[off..off + 4].copy_from_slice(&f.to_le_bytes());
+            }
+        }
+
+        // Tone block.
+        assert_eq!(&b[0..4], &1.0_f32.to_le_bytes());
+        assert_eq!(&b[4..8], &0.0_f32.to_le_bytes());
+        assert_eq!(&b[8..12], &1.0_f32.to_le_bytes());
+        assert_eq!(&b[12..16], &0.0_f32.to_le_bytes());
+
+        // row_r at 16..28: (1, 0, 0).
+        assert_eq!(&b[16..20], &1.0_f32.to_le_bytes());
+        assert_eq!(&b[20..24], &0.0_f32.to_le_bytes());
+        assert_eq!(&b[24..28], &0.0_f32.to_le_bytes());
+        // pad 28..32 stays zero (we never write to it).
+        assert_eq!(&b[28..32], &[0u8; 4]);
+
+        // row_g at 32..44: (0, 1, 0).
+        assert_eq!(&b[32..36], &0.0_f32.to_le_bytes());
+        assert_eq!(&b[36..40], &1.0_f32.to_le_bytes());
+        assert_eq!(&b[40..44], &0.0_f32.to_le_bytes());
+        assert_eq!(&b[44..48], &[0u8; 4]);
+
+        // row_b at 48..60: (0, 0, 1).
+        assert_eq!(&b[48..52], &0.0_f32.to_le_bytes());
+        assert_eq!(&b[52..56], &0.0_f32.to_le_bytes());
+        assert_eq!(&b[56..60], &1.0_f32.to_le_bytes());
+        assert_eq!(&b[60..64], &[0u8; 4]);
     }
 }

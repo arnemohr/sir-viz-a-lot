@@ -3124,6 +3124,11 @@ fn render_m5_pipeline(
                 project.gamma_override.unwrap_or(project.gamma),
                 project.brightness_override.unwrap_or(project.brightness),
                 project.contrast_override.unwrap_or(project.contrast),
+                // P0.8.2 — per-projector RGB matrix from the project's
+                // OutputTarget. Identity by default (P0.1.2 set the
+                // serde default to identity), so existing v6 projects
+                // load + render byte-identical to pre-P0.8.2 builds.
+                project.output_target.rgb_matrix,
                 wgpu::LoadOp::Clear(wgpu::Color::BLACK),
             );
             // Editor overlay: paint per-layer outlines + mask polygons on

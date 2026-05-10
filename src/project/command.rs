@@ -1036,6 +1036,35 @@ impl ReverseStorage for SetLayerWarpCorner {
     }
 }
 
+/// Payload for [`Mutation::SetOutputRgbMatrix`].
+///
+/// P0.8.2 — wholesale replace `Project.output_target.rgb_matrix`.
+/// Per-cell edits flow through this single Mutation as
+/// whole-matrix replacements: simpler and matches the project's
+/// per-OutputTarget granularity (the W7.1 `Vec<OutputTarget>`
+/// rename will extend this with `output_index: usize`).
+#[derive(Debug, Clone)]
+pub struct SetOutputRgbMatrix {
+    /// 3×3 matrix to install. Row-major: row 0 maps RGB → R, etc.
+    pub new: [[f32; 3]; 3],
+    /// Pre-mutation matrix; `apply` `debug_assert!`s this matches.
+    pub old: [[f32; 3]; 3],
+}
+
+impl ReverseStorage for SetOutputRgbMatrix {
+    fn apply(self, project: &mut Project) -> Self {
+        debug_assert_eq!(
+            project.output_target.rgb_matrix, self.old,
+            "SetOutputRgbMatrix stale Reverse: live matrix != self.old",
+        );
+        project.output_target.rgb_matrix = self.new;
+        SetOutputRgbMatrix {
+            new: self.old,
+            old: self.new,
+        }
+    }
+}
+
 /// Payload for [`Mutation::SetProjectScenes`].
 ///
 /// Replaces `Project.scenes` wholesale (whole-Vec snapshot Reverse).
@@ -1224,6 +1253,11 @@ pub enum Mutation {
     /// [`SetLayerKind`].
     SetLayerKind(SetLayerKind),
 
+    /// P0.8.2 — wholesale replace `Project.output_target.rgb_matrix`.
+    /// Per-cell edits in the W8.3 calibration UI emit one of these
+    /// per change. Delegates to [`SetOutputRgbMatrix`].
+    SetOutputRgbMatrix(SetOutputRgbMatrix),
+
     /// Replace the modulator at `(layer_idx, effect_idx, field)`. Delegates to [`SetModulator`].
     SetModulator(SetModulator),
 
@@ -1307,6 +1341,7 @@ impl Mutation {
             Mutation::SwapLayers(s) => Mutation::SwapLayers(s.apply(project)),
             Mutation::RelinkAssetPath(s) => Mutation::RelinkAssetPath(s.apply(project)),
             Mutation::SetLayerKind(s) => Mutation::SetLayerKind(s.apply(project)),
+            Mutation::SetOutputRgbMatrix(s) => Mutation::SetOutputRgbMatrix(s.apply(project)),
             Mutation::SetModulator(s) => Mutation::SetModulator(s.apply(project)),
             Mutation::ResetLayerWarpMesh(s) => Mutation::ResetLayerWarpMesh(s.apply(project)),
             Mutation::SetLayerMaskPolygon(s) => Mutation::SetLayerMaskPolygon(s.apply(project)),
@@ -1431,7 +1466,8 @@ impl Mutation {
             | Mutation::SetProjectBrightnessOverride(_)
             | Mutation::SetProjectContrastOverride(_)
             | Mutation::RelinkAssetPath(_)
-            | Mutation::SetLayerKind(_) => false,
+            | Mutation::SetLayerKind(_)
+            | Mutation::SetOutputRgbMatrix(_) => false,
             Mutation::ApplyProjectSnapshot(s) => s.non_undoable,
         }
     }
@@ -2014,6 +2050,34 @@ mod tests {
         assert_eq!(
             before, after,
             "Reverse should restore byte-equal project (whole-enum Reverse rule 1)",
+        );
+    }
+
+    /// P0.8.2 — `SetOutputRgbMatrix` round-trips a non-identity
+    /// matrix bit-exact through apply + reverse. Confirms the
+    /// whole-matrix Reverse rule + the exact-match
+    /// `debug_assert_eq!` in `apply`.
+    #[test]
+    fn set_output_rgb_matrix_round_trips() {
+        let mut p = fresh_project();
+        let identity = crate::project::schema::rgb_matrix_identity();
+        assert_eq!(p.output_target.rgb_matrix, identity);
+
+        let new_matrix = [[0.95, 0.03, 0.02], [0.04, 0.96, 0.00], [0.01, 0.02, 0.97]];
+        let before = serde_json::to_value(&p).unwrap();
+
+        let mutation = Mutation::SetOutputRgbMatrix(SetOutputRgbMatrix {
+            new: new_matrix,
+            old: identity,
+        });
+        let reverse = mutation.apply(&mut p);
+        assert_eq!(p.output_target.rgb_matrix, new_matrix);
+
+        let _ = reverse.apply(&mut p);
+        let after = serde_json::to_value(&p).unwrap();
+        assert_eq!(
+            before, after,
+            "Reverse should restore the project byte-equal (whole-matrix Reverse)",
         );
     }
 
