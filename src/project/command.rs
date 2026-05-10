@@ -385,6 +385,70 @@ impl ReverseStorage for SetOutputWindowed {
     }
 }
 
+/// V31.6.1 — payload for [`Mutation::SetLayerMuted`].
+///
+/// Toggles a layer's `muted` flag and carries the prior value so the Reverse
+/// can restore it. Whole-bool Reverse: bools are categorical (no lerp).
+#[derive(Debug, Clone)]
+pub struct SetLayerMuted {
+    /// Index into `Project.layers`.
+    pub layer_idx: usize,
+    /// Value to write.
+    pub new: bool,
+    /// Pre-mutation value; `apply` `debug_assert!`s this matches the live state.
+    pub old: bool,
+}
+
+impl ReverseStorage for SetLayerMuted {
+    fn apply(self, project: &mut Project) -> Self {
+        let layer = project
+            .layers
+            .get_mut(self.layer_idx)
+            .expect("SetLayerMuted: layer_idx out of range");
+        debug_assert!(
+            layer.muted == self.old,
+            "SetLayerMuted stale Reverse: layer.muted={}, expected old={}",
+            layer.muted,
+            self.old
+        );
+        layer.muted = self.new;
+        SetLayerMuted {
+            layer_idx: self.layer_idx,
+            new: self.old,
+            old: self.new,
+        }
+    }
+}
+
+/// V31.6.1 — payload for [`Mutation::SetLayerSolo`].
+///
+/// Replaces `Project.solo` (a project-level `Option<usize>` pointing to the
+/// soloed layer index). Whole-`Option` Reverse so `None → Some(n) → None`
+/// and `Some(a) → Some(b)` both round-trip byte-equally.
+#[derive(Debug, Clone)]
+pub struct SetLayerSolo {
+    /// Value to write (`None` clears the solo; `Some(idx)` solos layer `idx`).
+    pub new: Option<usize>,
+    /// Pre-mutation value; `apply` `debug_assert!`s this matches the live state.
+    pub old: Option<usize>,
+}
+
+impl ReverseStorage for SetLayerSolo {
+    fn apply(self, project: &mut Project) -> Self {
+        debug_assert!(
+            project.solo == self.old,
+            "SetLayerSolo stale Reverse: project.solo={:?}, expected old={:?}",
+            project.solo,
+            self.old
+        );
+        project.solo = self.new;
+        SetLayerSolo {
+            new: self.old,
+            old: self.new,
+        }
+    }
+}
+
 /// Payload for [`Mutation::SetLayerMaskFeather`].
 #[derive(Debug, Clone)]
 pub struct SetLayerMaskFeather {
@@ -1015,6 +1079,10 @@ pub enum Mutation {
     SetLayerOpacity(SetLayerOpacity),
     /// Replace `LayerConfig.enabled`. Delegates to [`SetLayerEnabled`].
     SetLayerEnabled(SetLayerEnabled),
+    /// V31.6.1 — replace `LayerConfig.muted`. Delegates to [`SetLayerMuted`].
+    SetLayerMuted(SetLayerMuted),
+    /// V31.6.1 — replace `Project.solo`. Delegates to [`SetLayerSolo`].
+    SetLayerSolo(SetLayerSolo),
     /// Replace `LayerConfig.blend_mode`. Delegates to [`SetLayerBlendMode`].
     SetLayerBlendMode(SetLayerBlendMode),
     /// Replace a layer's effect chain wholesale. Delegates to [`SetLayerEffects`].
@@ -1121,6 +1189,8 @@ impl Mutation {
             }
             Mutation::SetLayerOpacity(s) => Mutation::SetLayerOpacity(s.apply(project)),
             Mutation::SetLayerEnabled(s) => Mutation::SetLayerEnabled(s.apply(project)),
+            Mutation::SetLayerMuted(s) => Mutation::SetLayerMuted(s.apply(project)),
+            Mutation::SetLayerSolo(s) => Mutation::SetLayerSolo(s.apply(project)),
             Mutation::SetLayerBlendMode(s) => Mutation::SetLayerBlendMode(s.apply(project)),
             Mutation::SetLayerEffects(s) => Mutation::SetLayerEffects(s.apply(project)),
             Mutation::SwapLayers(s) => Mutation::SwapLayers(s.apply(project)),
@@ -1161,6 +1231,8 @@ impl Mutation {
                     idx,
                     project.layers.len()
                 );
+                // TODO(V31.6.2): if project.solo == Some(idx), clear it on remove.
+                // Also shift solo index down when removed layer precedes the soloed one.
                 let layer = project.layers.remove(idx);
                 Mutation::AddLayer {
                     layer,
@@ -1226,6 +1298,8 @@ impl Mutation {
             | Mutation::SetLayerWarpDimensions(_)
             | Mutation::SetLayerOpacity(_)
             | Mutation::SetLayerEnabled(_)
+            | Mutation::SetLayerMuted(_)
+            | Mutation::SetLayerSolo(_)
             | Mutation::SetLayerBlendMode(_)
             | Mutation::SetLayerEffects(_)
             | Mutation::SetModulator(_)
@@ -1413,6 +1487,27 @@ impl Project {
             layer_idx,
             new,
             old: layer.enabled,
+        })
+    }
+
+    /// V31.6.1 — build a `SetLayerMuted` mutation. Captures the current
+    /// `muted` flag as `old`. Panics if `layer_idx` is out of range.
+    pub fn set_layer_muted_mutation(&self, layer_idx: usize, new: bool) -> Mutation {
+        let layer = &self.layers[layer_idx];
+        Mutation::SetLayerMuted(SetLayerMuted {
+            layer_idx,
+            new,
+            old: layer.muted,
+        })
+    }
+
+    /// V31.6.1 — build a `SetLayerSolo` mutation. Captures the current
+    /// `solo` value as `old`. `new = None` clears the solo;
+    /// `new = Some(idx)` solos that layer.
+    pub fn set_solo_mutation(&self, new: Option<usize>) -> Mutation {
+        Mutation::SetLayerSolo(SetLayerSolo {
+            new,
+            old: self.solo,
         })
     }
 
@@ -2032,6 +2127,156 @@ mod tests {
         }
     }
 
+    // ── V31.6.1 ── mute / solo Mutation tests ────────────────────────────────
+
+    /// V31.6.1 — `SetLayerMuted` apply + undo round-trips all four (start, target)
+    /// bool combinations and leaves the project byte-equal after undo.
+    #[test]
+    fn set_layer_muted_apply_undo_round_trip() {
+        for (start, target) in [(false, true), (true, false), (false, false), (true, true)] {
+            let mut p = fresh_project();
+            p.layers[0].muted = start;
+            let before = serde_json::to_value(&p).unwrap();
+            let m = p.set_layer_muted_mutation(0, target);
+            let reverse = m.apply(&mut p);
+            assert_eq!(
+                p.layers[0].muted, target,
+                "apply should write `target` for {start} → {target}"
+            );
+            reverse.apply(&mut p);
+            assert_eq!(
+                p.layers[0].muted, start,
+                "undo should restore `start` for {start} → {target}"
+            );
+            let after = serde_json::to_value(&p).unwrap();
+            assert_eq!(
+                before, after,
+                "byte-equal after undo for {start} → {target}"
+            );
+        }
+    }
+
+    /// V31.6.1 — `SetLayerSolo` apply + undo round-trips `None → Some`,
+    /// `Some → None`, and `Some(a) → Some(b)`.
+    #[test]
+    fn set_layer_solo_apply_undo_round_trip() {
+        // None → Some(0)
+        {
+            let mut p = fresh_project();
+            assert!(p.solo.is_none());
+            let before = serde_json::to_value(&p).unwrap();
+            let m = p.set_solo_mutation(Some(0));
+            let reverse = m.apply(&mut p);
+            assert_eq!(p.solo, Some(0));
+            reverse.apply(&mut p);
+            assert_eq!(p.solo, None);
+            let after = serde_json::to_value(&p).unwrap();
+            assert_eq!(before, after, "None → Some(0) round-trip byte-equal");
+        }
+        // Some(0) → None
+        {
+            let mut p = fresh_project();
+            p.solo = Some(0);
+            let before = serde_json::to_value(&p).unwrap();
+            let m = p.set_solo_mutation(None);
+            let reverse = m.apply(&mut p);
+            assert_eq!(p.solo, None);
+            reverse.apply(&mut p);
+            assert_eq!(p.solo, Some(0));
+            let after = serde_json::to_value(&p).unwrap();
+            assert_eq!(before, after, "Some(0) → None round-trip byte-equal");
+        }
+        // Some(0) → Some(0) (no-op) — still round-trips cleanly
+        {
+            let mut p = fresh_project();
+            p.solo = Some(0);
+            let m = p.set_solo_mutation(Some(0));
+            let reverse = m.apply(&mut p);
+            assert_eq!(p.solo, Some(0));
+            reverse.apply(&mut p);
+            assert_eq!(p.solo, Some(0));
+        }
+    }
+
+    /// V31.6.1 — stale Reverse for `SetLayerMuted` panics in debug builds.
+    #[test]
+    #[should_panic(expected = "SetLayerMuted stale Reverse")]
+    fn stale_set_layer_muted_panics_in_debug_builds() {
+        let mut p = fresh_project();
+        p.layers[0].muted = false;
+        // Claim old=true when it's actually false.
+        let stale = Mutation::SetLayerMuted(SetLayerMuted {
+            layer_idx: 0,
+            new: true,
+            old: true, // stale!
+        });
+        let _ = stale.apply(&mut p);
+    }
+
+    /// V31.6.1 — stale Reverse for `SetLayerSolo` panics in debug builds.
+    #[test]
+    #[should_panic(expected = "SetLayerSolo stale Reverse")]
+    fn stale_set_layer_solo_panics_in_debug_builds() {
+        let mut p = fresh_project();
+        assert!(p.solo.is_none());
+        // Claim old=Some(99) when it's actually None.
+        let stale = Mutation::SetLayerSolo(SetLayerSolo {
+            new: Some(0),
+            old: Some(99), // stale!
+        });
+        let _ = stale.apply(&mut p);
+    }
+
+    /// V31.6.1 — mute and solo mutations are undoable.
+    #[test]
+    fn mute_solo_mutations_are_undoable() {
+        let p = fresh_project();
+        assert!(!p.set_layer_muted_mutation(0, true).is_non_undoable());
+        assert!(!p.set_solo_mutation(Some(0)).is_non_undoable());
+        assert!(!p.set_solo_mutation(None).is_non_undoable());
+    }
+
+    /// V31.6.1 — render-graph visibility rule unit test.
+    ///
+    /// Three layers:
+    ///   0: unmuted,  1: muted,  2: unmuted
+    ///
+    /// Case A: no solo → 0 and 2 visible, 1 hidden.
+    /// Case B: solo=Some(0) → only 0 visible.
+    /// Case C: solo=Some(0), layers[0].muted=true → 0 still visible (soloed-and-muted edge case).
+    #[test]
+    fn render_visibility_rule() {
+        use std::path::PathBuf;
+        let mut p = Project::default();
+        for i in 0..3 {
+            p.layers.push(crate::project::schema::layer_from_svg_path(
+                format!("l{i}"),
+                PathBuf::from(format!("/tmp/l{i}.svg")),
+            ));
+        }
+        // Case A: no solo, layer 1 muted.
+        p.layers[1].muted = true;
+        assert!(p.layer_is_visible(0), "A: layer 0 should be visible");
+        assert!(
+            !p.layer_is_visible(1),
+            "A: layer 1 (muted) should be hidden"
+        );
+        assert!(p.layer_is_visible(2), "A: layer 2 should be visible");
+
+        // Case B: solo=Some(0) — only layer 0 visible.
+        p.solo = Some(0);
+        assert!(p.layer_is_visible(0), "B: soloed layer 0 should be visible");
+        assert!(!p.layer_is_visible(1), "B: layer 1 hidden by solo");
+        assert!(!p.layer_is_visible(2), "B: layer 2 hidden by solo");
+
+        // Case C: solo=Some(0) AND layers[0].muted=true — solo wins, layer 0 still visible.
+        p.layers[0].muted = true;
+        assert!(
+            p.layer_is_visible(0),
+            "C: soloed-and-muted layer should still be visible (solo takes precedence)"
+        );
+    }
+
     /// 003-T1.17 — property-based test for the Reverse-storage
     /// invariant (Risk R11 mitigation).
     ///
@@ -2135,6 +2380,10 @@ mod tests {
             ProjectBrightnessOverride(Option<f32>),
             /// T3.28 — set per-display contrast override.
             ProjectContrastOverride(Option<f32>),
+            /// V31.6.1 — toggle a layer's muted flag.
+            LayerMuted(bool),
+            /// V31.6.1 — set the project-level solo index (`None` to clear).
+            LayerSolo(Option<usize>),
         }
 
         fn to_mutation(kind: &MutationKind, project: &Project) -> Mutation {
@@ -2426,6 +2675,27 @@ mod tests {
                 MutationKind::ProjectContrastOverride(v) => {
                     project.set_project_contrast_override_mutation(*v)
                 }
+                // V31.6.1 — mute / solo coverage.
+                MutationKind::LayerMuted(v) => {
+                    if project.layers.is_empty() {
+                        project.set_gamma_mutation(project.gamma) // no-op fallback
+                    } else {
+                        project.set_layer_muted_mutation(0, *v)
+                    }
+                }
+                MutationKind::LayerSolo(v) => {
+                    // Clamp solo index to a valid layer index (or None).
+                    let clamped = v.and_then(|idx| {
+                        if idx < project.layers.len() {
+                            Some(idx)
+                        } else if !project.layers.is_empty() {
+                            Some(0)
+                        } else {
+                            None
+                        }
+                    });
+                    project.set_solo_mutation(clamped)
+                }
             }
         }
 
@@ -2577,6 +2847,11 @@ mod tests {
                     .prop_map(MutationKind::ProjectBrightnessOverride),
                 proptest::option::weighted(0.5, 0.0_f32..=4.0)
                     .prop_map(MutationKind::ProjectContrastOverride),
+                // V31.6.1 — mute / solo round-trip coverage.
+                any::<bool>().prop_map(MutationKind::LayerMuted),
+                // Solo index: None (clear) or Some(0..=2) (fresh_project has 1 layer;
+                // to_mutation clamps to a valid index or falls back to 0 when layers > 0).
+                proptest::option::weighted(0.5, 0usize..=2).prop_map(MutationKind::LayerSolo),
             ]
         }
 

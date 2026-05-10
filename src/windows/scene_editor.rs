@@ -1359,6 +1359,7 @@ mod tests {
             blend_mode: BlendMode::Normal,
             opacity: 1.0,
             warp: WarpMesh::identity(),
+            muted: false,
         }
     }
 
@@ -1423,6 +1424,7 @@ mod tests {
             blend_mode: BlendMode::Normal,
             opacity: 1.0,
             warp: WarpMesh::identity(),
+            muted: false,
         };
         mutate_transform_effect(&mut layer, |t, _r, _sx, _sy| {
             *t = [0.25, 0.0];

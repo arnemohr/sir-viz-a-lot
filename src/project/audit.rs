@@ -530,6 +530,7 @@ mod tests {
             blend_mode: crate::project::schema::BlendMode::Normal,
             opacity: 1.0,
             warp: crate::project::schema::WarpMesh::identity(),
+            muted: false,
         });
         p
     }
@@ -580,6 +581,7 @@ mod tests {
             blend_mode: crate::project::schema::BlendMode::Normal,
             opacity: 1.0,
             warp: crate::project::schema::WarpMesh::identity(),
+            muted: false,
         });
 
         let findings = ProjectAudit::run(&p, &AuditEnv::default());

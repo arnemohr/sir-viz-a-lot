@@ -29,7 +29,7 @@ pub enum BlendMode {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FitMode {
     /// Fill the layer rect; crop the texture's overhang. Default for photos —
-    /// matches the operator expectation that a wedding portrait fills the wall.
+    /// matches the operator expectation that a event portrait fills the wall.
     #[default]
     Cover,
     /// Fit the texture inside the layer rect; letterbox the remainder.
@@ -86,6 +86,14 @@ pub struct LayerConfig {
     /// for round-trip safety.
     #[serde(default = "WarpMesh::identity")]
     pub warp: WarpMesh,
+    /// V31.6.1 — when `true`, this layer is excluded from compositing.
+    /// `solo` on `Project` takes precedence: if any solo is active,
+    /// this flag is irrelevant for non-soloed layers (they are hidden
+    /// regardless) and is ignored for the soloed layer (it renders
+    /// regardless). Defaults to `false`; `#[serde(default)]` keeps v6
+    /// fixtures loading unchanged.
+    #[serde(default)]
+    pub muted: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -224,6 +232,14 @@ pub struct Project {
     /// differences fall back to instant snap.
     #[serde(default)]
     pub crossfade_duration_s: f32,
+    /// V31.6.1 — when `Some(idx)`, only the layer at `idx` is composited;
+    /// all other layers are hidden regardless of their `muted` flag. The
+    /// soloed layer renders even if its own `muted == true` (solo takes
+    /// precedence). `None` means no solo is active; all layers render
+    /// according to their own `muted` flags. Defaults to `None`; `#[serde(default)]`
+    /// keeps v6 fixtures loading unchanged.
+    #[serde(default)]
+    pub solo: Option<usize>,
     /// Side-channel state surfaced by [`migrate::migrate_v3_to_v4`] to the
     /// audit pass (T3.0d). `previous_warp_count > 1` triggers a one-shot
     /// `MultipleWarpsConsolidated` finding so the operator knows the
@@ -263,6 +279,7 @@ impl Default for Project {
             brightness_override: None,
             contrast_override: None,
             crossfade_duration_s: 0.0,
+            solo: None,
             transient_audit_signals: Cell::new(TransientAuditSignals::default()),
         }
     }
@@ -274,6 +291,27 @@ fn default_bg() -> [f32; 4] {
 
 fn default_one() -> f32 {
     1.0
+}
+
+impl Project {
+    /// V31.6.1 — compute whether the layer at `idx` should be composited
+    /// for this frame, given the current `solo` state.
+    ///
+    /// Rule: render iff `!muted && (solo.is_none() || solo == Some(idx))`.
+    /// Solo takes precedence: the soloed layer renders even if its own
+    /// `muted == true`; non-soloed layers hide when any solo is active.
+    pub fn layer_is_visible(&self, idx: usize) -> bool {
+        let layer = match self.layers.get(idx) {
+            Some(l) => l,
+            None => return false,
+        };
+        match self.solo {
+            // V31.6.1: solo'd layer renders even if muted; non-solo'd layers
+            // hide when any solo is active.
+            Some(solo_idx) => solo_idx == idx,
+            None => !layer.muted,
+        }
+    }
 }
 
 /// Bilinear-resample a mesh-warp grid to new `rows`/`cols` cell counts,
@@ -349,6 +387,7 @@ pub fn layer_from_svg_path(id: impl Into<String>, svg_path: PathBuf) -> LayerCon
         blend_mode: BlendMode::Normal,
         opacity: 1.0,
         warp: WarpMesh::default_placement(),
+        muted: false,
     }
 }
 
@@ -373,6 +412,7 @@ pub fn layer_from_image_path(id: impl Into<String>, path: PathBuf) -> LayerConfi
         blend_mode: BlendMode::Normal,
         opacity: 1.0,
         warp: WarpMesh::default_placement(),
+        muted: false,
     }
 }
 

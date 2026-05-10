@@ -2799,8 +2799,12 @@ fn render_m5_pipeline(
         //      `BlendMode` + `opacity`, writing the final image directly
         //      into `warp_rt_view` (the projector RT) so the gamma pass
         //      and the egui scene preview can both consume it.
-        for (cfg, ls) in project.layers.iter().zip(layers.iter_mut()) {
+        for (idx, (cfg, ls)) in project.layers.iter().zip(layers.iter_mut()).enumerate() {
             if !cfg.enabled {
+                continue;
+            }
+            // V31.6.1: solo'd layer renders even if muted; non-solo'd layers hide when any solo is active.
+            if !project.layer_is_visible(idx) {
                 continue;
             }
             let Some(tex_view) = ls.layer.texture_view() else {
