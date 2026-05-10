@@ -139,6 +139,63 @@ fn modulator_at_mut(
     }
 }
 
+/// V31.3.1 — type-level Reverse-storage guarantee for `Mutation` variants.
+///
+/// Each type that implements this trait carries enough state to apply
+/// itself to a `Project` and return a reverse that, when applied again,
+/// restores the prior state byte-equally. Returning `Self` (with `new`
+/// and `old` swapped) matches the existing `Mutation::apply`/reverse
+/// flow and makes the round-trip property trivially derivable per-
+/// variant rather than enforced by hand across the whole match.
+///
+/// **Pattern (A) — enum-of-structs:** each `Mutation` variant is its
+/// own struct implementing `ReverseStorage`; `Mutation` is a thin enum
+/// wrapping the structs. The compile-time guarantee comes from the
+/// `match` inside `Mutation::apply` requiring every arm to call
+/// `s.apply(project)` — the compiler rejects a new arm that omits the
+/// impl. V31.3.2 migrates the remaining variants.
+pub trait ReverseStorage {
+    /// Apply the mutation to `project` and return the reverse.
+    ///
+    /// The returned `Self` has `new` and `old` swapped so that calling
+    /// `apply` on it again restores the project to its pre-mutation
+    /// state. Implementations open with a `debug_assert!` verifying
+    /// that the carried `old` matches the live project field — stale
+    /// Reverse values panic in test/debug builds and compile out in
+    /// release.
+    fn apply(self, project: &mut Project) -> Self;
+}
+
+/// Payload for [`Mutation::SetGamma`].
+///
+/// Replaces `Project.gamma` with `new` and records the prior value in
+/// `old` so the Reverse can restore it.
+#[derive(Debug, Clone)]
+#[allow(dead_code)] // V31.3.2 will wire remaining call sites.
+pub struct SetGamma {
+    /// Value to write to `Project.gamma`.
+    pub new: f32,
+    /// Value read from `Project.gamma` at construction time;
+    /// `apply` `debug_assert!`s this matches the live state.
+    pub old: f32,
+}
+
+impl ReverseStorage for SetGamma {
+    fn apply(self, project: &mut Project) -> Self {
+        debug_assert!(
+            (project.gamma - self.old).abs() < 1e-6,
+            "SetGamma stale Reverse: project.gamma={}, expected old={}",
+            project.gamma,
+            self.old
+        );
+        project.gamma = self.new;
+        SetGamma {
+            new: self.old,
+            old: self.new,
+        }
+    }
+}
+
 /// 003-T1.14 — typed project mutations.
 ///
 /// Each variant carries the previous value of every field it
@@ -153,15 +210,10 @@ fn modulator_at_mut(
 #[non_exhaustive]
 #[allow(dead_code)] // T-003-T1.18+ wires call sites; foundation lives here from T1.14.
 pub enum Mutation {
-    /// Replace `Project.gamma`. Reverse: same variant with
-    /// `new` and `old` swapped.
-    SetGamma {
-        /// Value to write.
-        new: f32,
-        /// Value pulled from the project at construction time;
-        /// `apply` `debug_assert!`s this matches the live state.
-        old: f32,
-    },
+    /// Replace `Project.gamma`. Delegates to [`SetGamma`] which
+    /// implements [`ReverseStorage`]; Reverse is the same variant
+    /// with `new` and `old` swapped.
+    SetGamma(SetGamma),
     /// Replace `Project.brightness`. Same shape as `SetGamma`.
     SetBrightness {
         /// Value to write.
@@ -477,16 +529,7 @@ impl Mutation {
     /// errors that would otherwise corrupt undo history.
     pub fn apply(self, project: &mut Project) -> Mutation {
         match self {
-            Mutation::SetGamma { new, old } => {
-                debug_assert!(
-                    (project.gamma - old).abs() < 1e-6,
-                    "SetGamma stale Reverse: project.gamma={}, expected old={}",
-                    project.gamma,
-                    old
-                );
-                project.gamma = new;
-                Mutation::SetGamma { new: old, old: new }
-            }
+            Mutation::SetGamma(s) => Mutation::SetGamma(s.apply(project)),
             Mutation::SetBrightness { new, old } => {
                 debug_assert!(
                     (project.brightness - old).abs() < 1e-6,
@@ -1022,7 +1065,7 @@ impl Mutation {
     /// brightness / contrast slider edits are all undoable.
     pub fn is_non_undoable(&self) -> bool {
         match self {
-            Mutation::SetGamma { .. }
+            Mutation::SetGamma(_)
             | Mutation::SetBrightness { .. }
             | Mutation::SetContrast { .. }
             | Mutation::SetCrossfadeDurationS { .. }
@@ -1091,10 +1134,10 @@ impl Project {
     /// Build a `SetGamma` mutation whose Reverse will restore the
     /// project's current gamma.
     pub fn set_gamma_mutation(&self, new: f32) -> Mutation {
-        Mutation::SetGamma {
+        Mutation::SetGamma(SetGamma {
             new,
             old: self.gamma,
-        }
+        })
     }
 
     /// Build a `SetBrightness` mutation.
@@ -1437,6 +1480,43 @@ mod tests {
         assert_eq!(before, after, "round-trip should be byte-equal");
     }
 
+    /// V31.3.1 — exercises `ReverseStorage::apply` directly on the `SetGamma`
+    /// struct, bypassing `Mutation::apply`. This confirms that the trait impl
+    /// is self-consistent and that `Mutation::SetGamma(s) => s.apply(project)`
+    /// delegation is not hiding a bug in the wrapper path.
+    #[test]
+    fn set_gamma_round_trip_via_trait() {
+        let mut project = fresh_project();
+        project.gamma = 1.0;
+
+        // Apply forward: 1.0 → 2.5
+        let s = SetGamma { new: 2.5, old: 1.0 };
+        let reverse = s.apply(&mut project);
+        assert!(
+            (project.gamma - 2.5).abs() < 1e-6,
+            "after forward apply, gamma should be 2.5; got {}",
+            project.gamma
+        );
+        assert!(
+            (reverse.new - 1.0).abs() < 1e-6,
+            "reverse.new should be old value 1.0; got {}",
+            reverse.new
+        );
+        assert!(
+            (reverse.old - 2.5).abs() < 1e-6,
+            "reverse.old should be new value 2.5; got {}",
+            reverse.old
+        );
+
+        // Apply reverse: 2.5 → 1.0
+        let _second_reverse = reverse.apply(&mut project);
+        assert!(
+            (project.gamma - 1.0).abs() < 1e-6,
+            "after reverse apply, gamma should be restored to 1.0; got {}",
+            project.gamma
+        );
+    }
+
     /// 003-T3.28 — Apply/Reverse on the per-display tone overrides round-
     /// trips through every transition the operator exercises:
     ///   None → Some(v) → None  (toggle on then off)
@@ -1520,10 +1600,10 @@ mod tests {
     fn stale_old_value_panics_in_debug_builds() {
         let mut p = fresh_project();
         // Mismatched: claim old gamma is 99.0 when it's actually 1.0.
-        let stale = Mutation::SetGamma {
+        let stale = Mutation::SetGamma(SetGamma {
             new: 2.0,
             old: 99.0,
-        };
+        });
         let _ = stale.apply(&mut p);
     }
 
