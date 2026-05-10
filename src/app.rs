@@ -280,6 +280,12 @@ struct LauncherState {
     /// dropdown click handler. Threads into `Command::Launch.monitor`
     /// when the operator clicks any start button.
     selected_monitor: usize,
+    /// P0.7.1 — additional monitors selected for multi-output. v0.4
+    /// caps the total at 2 (one primary in `selected_monitor` + at
+    /// most one secondary here); Phase 7 grows beyond two. Empty for
+    /// single-projector setups. The secondary entry, when present,
+    /// becomes `output_targets[1]` after launch via W7.2.
+    selected_secondary_monitor: Option<usize>,
     /// 003-T2.6 — in-flight 5-second projector-test session. `Some`
     /// while the temporary output window is open + rendering the test
     /// pattern; `None` when the launcher is idle. Drop closes the
@@ -1854,6 +1860,7 @@ fn apply_launch_command(
         recents_open: _,
         monitors,
         selected_monitor: _,
+        selected_secondary_monitor: _,
         test_session: _,
         last_error: _,
     } = launcher;
@@ -1976,7 +1983,11 @@ fn start_test_session(
         test_renderer,
         started_at: std::time::Instant::now(),
         _sleep_assertion: sleep_assertion,
-        pattern: TestPattern::Crosshair,
+        // P0.7.1 / P0.7.4 — use AlignmentCross so the operator sees the
+        // two-projector calibration pattern (centre cross + 25/75%
+        // reference ticks + edge frame) rather than the v3 plain
+        // crosshair.
+        pattern: TestPattern::AlignmentCross,
     })
 }
 
@@ -2110,6 +2121,7 @@ fn init_launcher(event_loop: &ActiveEventLoop) -> Result<LauncherState> {
         recents_open: false,
         monitors,
         selected_monitor,
+        selected_secondary_monitor: None,
         test_session: None,
         last_error: None,
     })
@@ -2164,8 +2176,13 @@ fn launcher_render(
     let recents_open = &mut state.recents_open;
     let monitors = &state.monitors;
     let selected_monitor = &mut state.selected_monitor;
+    let selected_secondary_monitor = &mut state.selected_secondary_monitor;
     let test_session_active = state.test_session.is_some();
-    let mut test_session_request = false;
+    // P0.7.1 — request to identify a specific monitor (flash the alignment
+    // cross on it for 5 s via the existing TestSession). `None` when no
+    // request this frame; `Some(idx)` when the operator clicked an
+    // identify button.
+    let mut identify_request: Option<usize> = None;
     let last_error_label = state.last_error.as_ref();
     let mut action: Option<LauncherAction> = None;
     // Snapshot `now` once outside the closure so each entry's relative
@@ -2283,50 +2300,111 @@ fn launcher_render(
                     }
                 }
 
-                // 003-T2.5 — projector picker. Sits below the start
-                // buttons so the operator can scan it once they've
-                // chosen what to launch. ComboBox surfaces the
-                // human-readable name from `MonitorInfo.name` (which
-                // T-003-T2.7 populates from NSScreen::localizedName
-                // on macOS).
+                // 003-T2.5 / P0.7.1 — projector picker. Single-display
+                // setup gets a static label; multi-display gets a
+                // checkbox per monitor with a max-2 selection limit
+                // (one primary + at most one secondary) per the v0.4
+                // two-projector cap; Phase 7 grows beyond that. Each
+                // checkbox has an "Identify" button that flashes the
+                // alignment cross on that physical display for 5 s.
                 center_ui.add_space(20.0);
                 if monitors.is_empty() {
-                    // No monitors reported — extremely rare, but the
-                    // dropdown would be empty. Surface a static hint
-                    // so the operator isn't staring at a phantom
-                    // dropdown.
                     center_ui.weak("No displays detected");
                 } else if monitors.len() == 1 {
-                    // Single-display fallback per acceptance #3 —
-                    // dropdown collapses to a static label rather
-                    // than a one-option ComboBox.
-                    center_ui.label(format!("Projector: {}", monitors[0].name));
-                } else {
-                    let current_idx = (*selected_monitor).min(monitors.len() - 1);
-                    let current_name = monitors[current_idx].name.as_str();
                     center_ui.horizontal(|row| {
-                        egui::ComboBox::from_label("Projector")
-                            .selected_text(current_name)
-                            .show_ui(row, |combo| {
-                                for (idx, m) in monitors.iter().enumerate() {
-                                    combo.selectable_value(selected_monitor, idx, &m.name);
-                                }
-                            });
-                        // 003-T2.6 — Test button. Opens a 1280×720
-                        // windowed OutputWindow on the chosen monitor
-                        // for 5 seconds rendering TestPattern::Crosshair.
-                        // The button is disabled while a test session
-                        // is already active so a double-click doesn't
-                        // try to open two surfaces at once.
-                        let test_active = test_session_active;
-                        let test_label = if test_active { "Testing…" } else { "Test" };
+                        row.label(format!("Projector: {}", monitors[0].name));
+                        let identify_label =
+                            if test_session_active { "Identifying…" } else { "Identify" };
                         if row
-                            .add_enabled(!test_active, egui::Button::new(test_label))
+                            .add_enabled(
+                                !test_session_active,
+                                egui::Button::new(identify_label),
+                            )
                             .clicked()
                         {
-                            test_session_request = true;
+                            identify_request = Some(0);
                         }
                     });
+                } else {
+                    center_ui.label("Projector(s) — pick up to 2:");
+                    for (idx, m) in monitors.iter().enumerate() {
+                        let is_primary = *selected_monitor == idx;
+                        let is_secondary = *selected_secondary_monitor == Some(idx);
+                        let mut selected = is_primary || is_secondary;
+                        center_ui.horizontal(|row| {
+                            // Checkbox: respects the max-2 invariant.
+                            // Toggling logic:
+                            //   • If currently primary and operator
+                            //     unticks: promote secondary (if any)
+                            //     to primary; clear secondary.
+                            //   • If currently secondary and operator
+                            //     unticks: clear secondary.
+                            //   • If currently unselected and operator
+                            //     ticks: if no secondary yet, become
+                            //     secondary; otherwise no-op (max
+                            //     reached — show a subdued hint below).
+                            let was_selected = selected;
+                            let resp = row.checkbox(&mut selected, &m.name);
+                            if resp.changed() {
+                                if was_selected {
+                                    // Untick.
+                                    if is_primary {
+                                        if let Some(sec_idx) = *selected_secondary_monitor {
+                                            *selected_monitor = sec_idx;
+                                            *selected_secondary_monitor = None;
+                                        }
+                                        // else: refuse to leave zero
+                                        // primaries — reselect to true.
+                                        else {
+                                            selected = true;
+                                        }
+                                    } else if is_secondary {
+                                        *selected_secondary_monitor = None;
+                                    }
+                                } else {
+                                    // Tick.
+                                    if selected_secondary_monitor.is_none()
+                                        && *selected_monitor != idx
+                                    {
+                                        *selected_secondary_monitor = Some(idx);
+                                    } else {
+                                        // Max reached — revert.
+                                        selected = false;
+                                    }
+                                }
+                                // selected variable is only used for
+                                // local revert logic above; the egui
+                                // checkbox bound it as &mut so
+                                // assigning false reverts the visual
+                                // state next paint.
+                                let _ = selected;
+                            }
+                            if is_primary {
+                                row.weak("primary");
+                            } else if is_secondary {
+                                row.weak("secondary");
+                            }
+                            let identify_label = if test_session_active && identify_request == Some(idx) {
+                                "Identifying…"
+                            } else {
+                                "Identify"
+                            };
+                            if row
+                                .add_enabled(
+                                    !test_session_active,
+                                    egui::Button::new(identify_label),
+                                )
+                                .clicked()
+                            {
+                                identify_request = Some(idx);
+                            }
+                        });
+                    }
+                    if monitors.len() >= 3 && selected_secondary_monitor.is_some() {
+                        center_ui.weak(
+                            "Max 2 projectors in v0.4. Untick one to swap; Phase 7 grows beyond two.",
+                        );
+                    }
                 }
 
                 // 003-T2.6 — error banner. Renders below the dropdown
@@ -2342,10 +2420,19 @@ fn launcher_render(
         tracing::error!(?err, "launcher render frame failed");
     }
 
-    // 003-T2.6 — open the test session if the button was clicked
-    // this frame. Done after the render closure returns so we don't
-    // hold the egui borrow while creating a sibling winit Window.
-    if test_session_request {
+    // 003-T2.6 / P0.7.1 — open the test session if a Test or
+    // Identify button was clicked this frame. Done after the render
+    // closure returns so we don't hold the egui borrow while
+    // creating a sibling winit Window.
+    //
+    // Identify (P0.7.1) overrides `state.selected_monitor` to the
+    // specific row clicked, then runs the same launch_test_session
+    // path — the test session uses `state.selected_monitor` as the
+    // target. Identify uses `TestPattern::AlignmentCross` (added by
+    // P0.7.4) rather than the v3 `Crosshair` so operators see the
+    // calibration pattern they need for the two-projector workflow.
+    if let Some(idx) = identify_request {
+        state.selected_monitor = idx;
         launch_test_session(state, event_loop);
     }
 
