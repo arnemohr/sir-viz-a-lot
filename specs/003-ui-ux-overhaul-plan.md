@@ -286,7 +286,7 @@ principles win.
 
 | Persona | Role | Skill profile | Primary goal |
 |---------|------|---------------|--------------|
-| **Eva — Event volunteer** | Friend-of-couple at a wedding, AV teacher prepping a school play, lighting volunteer at a small venue. | Non-technical. Uses macOS daily; never opens Terminal. Has a projector and a laptop. | Project a few photos and graphics on a wall during one event. |
+| **Eva — Event volunteer** | Friend-of-couple at a event, AV teacher prepping a school play, lighting volunteer at a small venue. | Non-technical. Uses macOS daily; never opens Terminal. Has a projector and a laptop. | Project a few photos and graphics on a wall during one event. |
 | **Marco — Visual operator** | Self-taught VJ, indie performer, event company freelancer. | Comfortable with creative tools (Resolume, MadMapper, OBS). Has used a CLI but doesn't enjoy it. | Build a small repeating show with scenes, transitions, and live reactivity. |
 | **Sami — rmap power user / contributor** | The current author and contributors. | Rust-fluent, knows the codebase, knows projection mapping. | Push the limits of effects, modulators, advanced warp, custom presets. |
 

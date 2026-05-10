@@ -22,7 +22,7 @@ the backlog:
 
 2. **Asset portability is a real-world workflow gap.** Today
    project files store absolute asset paths (per the
-   `~/p1.rmap.json` fixture). Wedding/small-event operators move
+   `~/p1.rmap.json` fixture). event/small-event operators move
    between machines (laptop A dies, second laptop takes over). The
    original audit (WP-15) catches missing assets but doesn't fix
    the underlying portability story. Now: project-relative paths,
@@ -69,7 +69,7 @@ the backlog:
    differ). Small Advanced-section addition; new T3.28.
 
 6. **Practitioner field validation absent.** Internal dogfooding
-   (T5.1) is engineering-focused. A wedding DJ / AV teacher
+   (T5.1) is engineering-focused. A event DJ / AV teacher
    field-using the tool on a real event is a different signal.
    New T5.16 adds this as a pre-GA gate.
 
@@ -117,7 +117,7 @@ the backlog:
 - **Live MIDI / OSC binding UI.** M7 plumbing exists; the binding
   UX is roadmap-deferred. Decision-task **D14** confirms.
 
-- **Reposition entire spec as "wedding-only tool."** This is a
+- **Reposition entire spec as "event-only tool."** This is a
   positioning / marketing decision, not a backlog one. Reflected
   in T5.11 (README rewrite) and the capability roadmap (T4.23)
   but no spec rewrite.
@@ -149,19 +149,19 @@ academic-usability-grounded (n ≥ 5 lab sessions).
 | # | Feedback item | Source concern | Assessment | Action | Why | Scope impact | Sequencing impact |
 |---|---------------|----------------|-----------|--------|-----|--------------|-------------------|
 | F1 | Output preview during Go live | "Operator can't see what the projector shows" | **Critical to incorporate now** | Amend T4.16, T4.17; add T4.16a | Show-day-blocking gap | +1 day Phase 4 | Must land before M4 |
-| F2 | Asset portability + missing-media relink | Cross-machine workflow break | **Critical to incorporate now** | New T2.23, T2.24; amend T1.38 | Real-world wedding-DJ failover scenario | +3 days Phases 1+2 | Phase 2 cannot ship M2 without it |
+| F2 | Asset portability + missing-media relink | Cross-machine workflow break | **Critical to incorporate now** | New T2.23, T2.24; amend T1.38 | Real-world event-DJ failover scenario | +3 days Phases 1+2 | Phase 2 cannot ship M2 without it |
 | F3 | External usability test moved out of GA gate | Calendar blocker; weak GA signal | **Critical to incorporate now** | T5.6 rescoped; new T5.16 (field beta) | Faster, more relevant GA validation | +3 calendar days, −1 week from gate | M5 gate composition changes |
 | F4 | Per-display gamma / brightness override | Mixed colour-space single-projector setups | **Important; phase 3** | New T3.28 | Cheap fix; high real-world value | +0.5 day Phase 3 | None |
 | F5 | Compile-time Reverse-storage machinery friction | Future-contributor cost | **Important; soften now** | Amend T1.14 (debug_assert + invariant) | Same safety; lower onboarding cost | −1 day Phase 1 | None |
-| F6 | 6 audit findings → 2 P0 | Over-engineering for wedding-scale audience | **Important; reduce now** | T1.35 + T1.38 stay P0; T1.36, T1.37, T1.39, T1.40 stay in Phase 1 but drop to "ship if slack" with v3.1 fallback | Right-size Phase 1; preserve safety net | −1 day Phase 1 if dropped | None |
+| F6 | 6 audit findings → 2 P0 | Over-engineering for event-scale audience | **Important; reduce now** | T1.35 + T1.38 stay P0; T1.36, T1.37, T1.39, T1.40 stay in Phase 1 but drop to "ship if slack" with v3.1 fallback | Right-size Phase 1; preserve safety net | −1 day Phase 1 if dropped | None |
 | F7 | Capability scope statement (v0.4 forward plan) | Practitioner-honest expectations + contributor clarity | **Critical to incorporate now** | New T4.23 publishes roadmap; new decision-tasks D11–D14 | Avoids "iPad-like for projection mapping" overselling | +0.5 day Phase 4 | None |
 | F8 | Drop native menu bar to v3.1 if Phase 4 slips | Phase 4 over-scoped | **Already covered**; mark T4.19 deferrable | Annotate T4.19 priority | Schedule resilience | 0 days, defer-only | None unless triggered |
-| F9 | Schema v5 portable monitor deferred to v3.1 | Wedding operators don't move projects | **Defer** | Mark T4.12, T4.13 v3.1; remove from M4 gate | Real audience doesn't need it | −2 days Phase 4 | None |
+| F9 | Schema v5 portable monitor deferred to v3.1 | event operators don't move projects | **Defer** | Mark T4.12, T4.13 v3.1; remove from M4 gate | Real audience doesn't need it | −2 days Phase 4 | None |
 | F10 | Video layer support | Largest capability gap practitioner cited | **Not adopted in 003**; decision-task D11; capability-roadmap T4.23 | v3 is still-image; v0.4 owns video | Out of scope by design (would 2.5×-Phase-1) | New v0.4 spec (post-003) | None |
 | F11 | NDI / Syphon input layer | Integration with rest of practitioner rig | **Not adopted in 003**; decision-task D12 | v0.4 owns | Out of scope by design | New v0.4 spec | None |
 | F12 | Edge-blend stub | 2-adjacent-projector real-world case | **Not adopted in 003**; decision-task D13 | v0.4 owns | Multi-projector renderer change | New v0.4 spec | None |
 | F13 | OSC live parameter binding UI | M7 stubs exist; binding UX missing | **Not adopted in 003**; decision-task D14 | Roadmap-confirmed deferral | M7 plumbing already accounted for | None | None |
-| F14 | "Reposition product as wedding tool" | "iPad-like projection mapping" overselling | **Partial**: capability-roadmap (T4.23) + README rewrite (T5.11) tone shift; no spec rewrite | Honest positioning is content work, not engineering | 0 days | None |
+| F14 | "Reposition product as event tool" | "iPad-like projection mapping" overselling | **Partial**: capability-roadmap (T4.23) + README rewrite (T5.11) tone shift; no spec rewrite | Honest positioning is content work, not engineering | 0 days | None |
 | F15 | Field beta before GA | Practitioner-grounded validation | **Critical to incorporate now** | New T5.16 | More relevant GA signal than n=5 lab tests | +3 calendar days; 0 eng days | M5 gate gains a step |
 | F16 | "Find missing media" toast on Open Recent | Asset-portability adjacent | **Already covered by F2 fix** | T2.10 amended | Cheap; obvious | 0 incremental days | None |
 | F17 | Per-layer warp + mask + effects (each layer mapped individually) | "Each layer should be warped and mapped individually" — current shared-warp model contradicts the per-layer thumbnail UX coming in Phase 3 | **Critical to incorporate now** | New T3.0a–T3.0d at the front of Phase 3 | Structural shift: layer thumbnails + warp-on-canvas only make sense once mapping is per-layer. Without it, T3.1+ ships a contradictory product. | +5–7 days Phase 3 (schema bump + render-graph rewrite + mutation rename + audit rename) | Phase 3 cannot ship M3 without it; T3.5 / T3.7 / T3.15 acceptance criteria changed |
@@ -185,7 +185,7 @@ academic-usability-grounded (n ≥ 5 lab sessions).
 | T3.28 | Advanced > Selected output > per-display gamma + brightness override | 3 | F4 — mixed colour-space setups |
 | T4.16a | Pre-show "Preview as projector" mode (windowed, scaled to projector aspect) | 4 | F1 + practitioner offsite-preview ask |
 | T4.23 | Capability roadmap doc — v3 scope + v0.4 forward plan | 4 | F7 — practitioner-honest expectations |
-| T5.16 | Practitioner field beta (1 wedding-DJ + 1 AV teacher minimum) | 5 | F15 — practitioner-grounded GA gate |
+| T5.16 | Practitioner field beta (1 event-DJ + 1 AV teacher minimum) | 5 | F15 — practitioner-grounded GA gate |
 
 ### Tasks rewritten
 
@@ -213,7 +213,7 @@ academic-usability-grounded (n ≥ 5 lab sessions).
 | T1.37 (mask <3 vertices audit) | P0-must-ship | **P1-ship-if-slack-else-v3.1** | F6 |
 | T1.39 (out-of-range monitor audit) | P0-must-ship | **P1-ship-if-slack-else-v3.1** | F6 |
 | T1.40 (schema-too-new audit) | P0-must-ship | **P1-ship-if-slack-else-v3.1** | F6 |
-| T4.12 (per-projector UUID schema v5) | M4 gate | **v3.1 backlog** | F9 — wedding operators don't move projects |
+| T4.12 (per-projector UUID schema v5) | M4 gate | **v3.1 backlog** | F9 — event operators don't move projects |
 | T4.13 (output_monitor migration v5) | M4 gate | **v3.1 backlog** | F9 |
 | T4.19 (native macOS menu bar) | M4 gate | **M4 gate, deferrable to v3.1 if Phase 4 slips** | F8 — schedule resilience |
 
@@ -528,7 +528,7 @@ backlog priorities. **Not a release blocker.**
 #### T5.16 — new (Phase 5)
 
 **Practitioner field beta.** Before `v0.3.0` tag, recruit one
-wedding-DJ-style operator and one AV-teacher-style operator. Each
+event-DJ-style operator and one AV-teacher-style operator. Each
 runs the tool through a real (or simulated-real) one-event use:
 a small ceremony, a school assembly, a gallery opening — single
 projector, real photos, real venue. Sessions are observed and
@@ -608,7 +608,7 @@ implementation work can begin.
 ### D13. Edge-blend stub for two adjacent projectors in v3?
 
 - **Question.** Does v3 ship any multi-projector capability?
-- **Why it matters.** Practitioner-flagged as "closer to wedding
+- **Why it matters.** Practitioner-flagged as "closer to event
   scope than full architectural mapping." Realistically requires
   a second `OutputWindow` + soft-edge alpha mask + output
   identification — a real Phase scope.

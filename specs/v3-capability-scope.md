@@ -106,7 +106,7 @@ benefit at the v0.3.0 milestone.
 
 These capabilities require new subsystems, external dependencies, or
 GPU pipeline work that would be unsafe to land in a patch release.
-None of them are operator-visible blockers for wedding-scale single-projector
+None of them are operator-visible blockers for event-scale single-projector
 shows, which is rmap v3's stated target.
 
 **Video playback**

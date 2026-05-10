@@ -93,6 +93,7 @@ Marco) test that Advanced houses every v2 capability they used.
 | T3.26 | Phase 3 test harness additions | RUST + QA | M | T3.21, T3.23 |
 | T3.27 | Remove old `ControlPanelState::tab` + tab strip rendering | RUST | S | T3.6, T3.18 |
 | **T3.28** | **Per-display gamma + brightness + contrast override** *(NEW — practitioner-driven)* | RUST | S | T3.11 |
+| **T3.29** | **Warp model amendment: warp-as-placement (Resolume-style)** *(NEW — practitioner-driven; amends T3.0a/T3.0b)* | RUST + DES + PO | L | T3.0a, T3.0b, T3.5 |
 
 ---
 
@@ -1671,6 +1672,209 @@ RUST.
 
 **Estimated scope**
 S.
+
+---
+
+## Warp model amendment *(NEW — practitioner-driven)*
+
+### Task T3.29: Warp-as-placement (Resolume-style) — amend T3.0a/T3.0b
+
+**Purpose**
+Amend the v4 warp model so the **warp grid corners are the layer's
+placement on the projector**, not a separate fine-tune layered on top
+of `Transform`. This matches the projection-mapping mental model
+operators bring from Resolume / MadMapper / HeavyM and resolves a
+practitioner-flagged surprise where, after scaling a layer down via
+`Transform`, the warp corners stay at the projector-framebuffer edges
+instead of tracking the visible layer bounding box.
+
+**Problem addressed**
+T3.0a/T3.0b deliberately chose a model where `WarpMesh.grid` lives in
+projector [0, 1]² space and is independent of the layer's `Transform`.
+That model is internally consistent but contradicts the convention in
+every other projection-mapping tool the operator is likely to have
+used. After T3.5 made the corners directly draggable on the canvas
+(per-layer), the disconnect is visually obvious: the operator selects
+a small layer, switches to Warp mode, and four handles appear at the
+*projector* corners. The handles aren't on the layer.
+
+This task amends the model so:
+
+1. The warp grid IS the layer's projector-space quad placement.
+2. Default identity warp corners track the layer's natural placement
+   (a sensible centered fit, not the projector-framebuffer edges).
+3. Dragging a corner directly resizes / repositions / distorts the
+   layer on the projector — no `Transform` round-trip required.
+4. `LayerConfig.transform` (and the corresponding `Effect::Transform`
+   variant) becomes **animation-only** (a modulator-driven offset on
+   top of the warp's static placement), not the placement mechanism.
+5. Existing v4 projects migrate transparently.
+
+**Scope of design decisions** *(must be resolved before code lands)*
+
+The big judgment calls — written here so they can't get re-litigated
+during implementation:
+
+a. **Default identity warp for a newly-added layer.** Two viable
+   defaults:
+   - **Half-size centered**: corners at `(0.25, 0.25), (0.75, 0.25),
+     (0.75, 0.75), (0.25, 0.75)`. Predictable, aspect-ratio-agnostic.
+     Recommended.
+   - **Image-aspect-ratio-fit centered**: layer's image aspect ratio
+     determines the quad. More work; opens a tricky question for SVG
+     (no intrinsic raster size) and effect-modified content.
+
+   Recommend half-size centered for v4; revisit aspect-fit in a later
+   task if practitioners report it.
+
+b. **Migration of existing v4 projects.** Two viable strategies:
+   - **Bump to schema_version 5** with a `migrate_v4_to_v5` step that
+     reads the layer's existing `Transform.translate/scale` and
+     synthesises warp corners that approximate the same on-screen
+     placement. Drop the placement portion of `Transform`.
+   - **Leave v4 schema unchanged**, only flip behaviour. Existing
+     projects with `(0, 0)..(1, 1)` warp grids show four corners at
+     the framebuffer edges (current behaviour) and the operator
+     manually re-pulls the corners to the layer. Simpler; pushes
+     work to operators.
+
+   Recommend the migration approach. The cost is mostly authoring the
+   migration once; the operator cost of remapping every layer in every
+   stored project is paid permanently.
+
+c. **`Effect::Transform` fate.** Three options:
+   - Keep the variant; document it as animation-only. Operators who
+     want a static placement use the warp; operators who want a
+     modulator on translate/scale use the effect. Two paths to a
+     similar outcome but each has a clear use.
+   - Delete the variant entirely. Animation moves into a future
+     `Effect::AnimateWarp` or similar that modulates warp corners.
+   - Rename `Transform` → `AnimateTransform` and gate its UI behind
+     "show animation effects".
+
+   Recommend keeping the variant unchanged for v4; the placement-vs-
+   animation distinction can ride on documentation and inspector
+   copy. Renaming or deleting is a v0.4 task.
+
+d. **Render-pipeline change.** The current per-layer pipeline (T3.0b)
+   already samples the layer's pre-warp texture into `warp_scratch`
+   using grid corners as projector-space coords. Under the amendment:
+   - The pre-warp texture continues to contain the layer's full image
+     (scaled to the framebuffer-sized texture as today).
+   - The warp pass continues to map the pre-warp texture into
+     `warp_scratch` using the grid as projector-space corners.
+   - **No render-pipeline math changes.** The whole amendment is
+     "default the grid to a smaller centered quad on layer add."
+     The hard work is in defaults, migration, and UX copy.
+
+   The render path's existing assumption — that the pre-warp texture
+   represents "the layer's source content laid out on a unit canvas"
+   — survives. The change is what we put into the grid by default.
+
+**Implementation details**
+
+- `WarpMesh::identity()` is renamed to `WarpMesh::full_canvas()` and
+  retained for migration / tests / explicit "make this layer fill the
+  whole projector" actions.
+- New `WarpMesh::default_placement()` returns the half-size centered
+  grid (rows = cols = 1, four corners at the centered quad). Used by:
+  - `Project::set_add_layer_mutation` callers in `app.rs` /
+    `windows/layer_strip.rs` / `windows/file_dialogs.rs` (T2.13/T2.15
+    drop-handlers).
+  - `Project::default()` for any synthetic seed layers.
+- `migrate_v4_to_v5` (new step in `migrate.rs`):
+  - For each layer with a `(0, 0)..(1, 1)` identity grid AND a
+    non-identity `Transform.translate/scale`: synthesise warp
+    corners that reproduce the same on-screen quad. Reset the
+    Transform's translate to `[0, 0]` and scale to `[1, 1]`. Rotate
+    is preserved (warp-grid rotation is awkward; better to keep
+    rotation as a separate channel until the later AnimateWarp work).
+  - For each layer with a `(0, 0)..(1, 1)` identity grid AND identity
+    Transform: replace the grid with `WarpMesh::default_placement()`
+    so the operator sees the new mental model immediately.
+  - For each layer with a non-identity grid: leave unchanged. The
+    operator already authored a custom warp; we don't second-guess.
+- Bump `CURRENT_SCHEMA_VERSION = 5`.
+- `assets/demos/window-glow.rmap.json` rewritten in v5 form.
+- Inspector copy (T3.3) updates: the "Mapping" sub-section heading
+  changes from "Mapping" → "Placement / Warp"; the action button
+  label "Edit warp" stays.
+- Mode-banner copy (T3.8) for `EditMode::Warp` updates from
+  *"Drag the corners to fit the wall."* to a phrasing that names
+  what's happening: e.g. *"Drag the corners to position the layer on
+  the wall. Each corner is a point in projector space."*
+- Glossary entry (T3.20 `GlossaryTerm::Warp`) body rewritten for the
+  new model. The current copy is technically correct under both
+  models; the new copy should make the placement nature explicit.
+
+**Dependencies**
+T3.0a (schema), T3.0b (render pipeline), T3.5 (corner-on-canvas
+direct manipulation).
+
+**Cannot run in parallel**
+With T3.0a–T3.0b — those tasks define the model T3.29 amends. With
+T3.5 — T3.29 changes what corner positions *mean*; T3.5's hit-test
+logic is unchanged but the visual interpretation flips.
+
+Can run in parallel with T3.6, T3.27, the show-day strip work
+(T3.23–T3.25), and T3.28.
+
+**Acceptance criteria**
+
+1. Newly-added layers (via launcher demo, drag-drop, "+ Add image",
+   file picker) show four warp handles at a centered half-size quad,
+   not at the projector-framebuffer edges.
+2. Dragging a warp corner directly resizes / distorts the layer on
+   the projector. No `Transform` mutation is emitted.
+3. `Transform.translate / scale` modulators continue to function as
+   animation channels on top of the warp's static placement.
+4. v4 fixture loads under v5: each layer's pre-migration on-screen
+   placement is preserved (not byte-equal at the schema level — the
+   placement now lives on the warp grid — but pixel-equivalent at
+   the render layer to within the v3 golden tolerance).
+5. `cargo nextest run --features v3 gpu-tests` green; new test
+   `migrate_v4_to_v5_warp_as_placement` covers the three migration
+   cases.
+6. `assets/demos/window-glow.rmap.json` is rewritten in v5 form by
+   the same commit.
+7. Mode-banner copy + glossary entry for `Warp` updated.
+
+**Verification**
+
+- Manual: open the demo, drop a photo, verify four corners appear
+  centered on the dropped layer, drag a corner, see the layer move
+  on the wall without touching Advanced.
+- Unit: `migrate_v4_to_v5` cases (identity grid + identity transform,
+  identity grid + scaled transform, custom grid).
+- Golden image: pre-migration v4 fixture and post-migration v5
+  fixture produce visually equivalent renders.
+
+**Risks / notes**
+
+- **Spec amendment, not a fix.** This rewrites a load-bearing T3.0a/
+  T3.0b decision. PO sign-off required before code lands.
+- **M3 impact.** This task ships *before* M3 declaration or M3 ships
+  with the current model. Recommend before — the canonical 7-step
+  flow (T3.26) implicitly assumes warp corners are on the layer; an
+  Eva-style operator stumbling over corners at the projector edges
+  on first use is exactly the regression M3 is supposed to catch.
+- **Existing user projects on developer machines** migrate
+  transparently. The migration is conservative (only acts on
+  identity-grid layers); operators who already authored custom
+  warps see no surprise.
+- **`Effect::Transform` semantics shift but variant is unchanged.**
+  No proptest harness updates needed. Existing modulators on
+  Transform continue to work.
+- **Practitioner relevance.** The current model contradicts every
+  comparable tool. The fix is small in code and large in
+  approachability.
+
+**Suggested owner**
+RUST primary; PO + DES on copy and acceptance walkthrough.
+
+**Estimated scope**
+L (justified — schema bump, migration code, fixture rewrite, test
+matrix, copy work, M3 impact).
 
 ---
 

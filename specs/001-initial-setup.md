@@ -4,7 +4,7 @@
 
 ## Goal
 
-A standalone Rust application that loads SVG content, applies basic visual effects, lets the user warp/map the output to physical surfaces, and projects the result fullscreen to a selected monitor (the beamer). Designed as a lightweight alternative to TouchDesigner for simple projection mapping scenarios — wedding-scale, single-projector, single-machine.
+A standalone Rust application that loads SVG content, applies basic visual effects, lets the user warp/map the output to physical surfaces, and projects the result fullscreen to a selected monitor (the beamer). Designed as a lightweight alternative to TouchDesigner for simple projection mapping scenarios — event-scale, single-projector, single-machine.
 
 Distributed as a single static `rmap` binary (or `.app` bundle on macOS), no runtime to install on the show-day machine.
 
@@ -12,7 +12,7 @@ Distributed as a single static `rmap` binary (or `.app` bundle on macOS), no run
 
 Two trade-offs to be honest about, not one.
 
-**Build vs. buy.** Commercial tools already solve wedding-scale projection mapping: MadMapper Express (~$99), HeavyM, MapMap (free, GTK-based, open source). Building this is an explicit choice. The justification needs to be one of:
+**Build vs. buy.** Commercial tools already solve event-scale projection mapping: MadMapper Express (~$99), HeavyM, MapMap (free, GTK-based, open source). Building this is an explicit choice. The justification needs to be one of:
 
 - **A tool I trust because I wrote it** — show-day reliability comes from understanding every code path.
 - **Customization** — bespoke effects, integrations, or content pipelines that no off-the-shelf tool exposes.
@@ -20,12 +20,12 @@ Two trade-offs to be honest about, not one.
 
 **Rust vs. Python.** A previous revision of this spec targeted Python. Retargeting to Rust costs roughly 2× upfront velocity (compile times, ceremony, learning wgpu/WGSL if new) but pays back on the things that matter for live use:
 
-- **Single static binary** — no runtime, no `pip`, no "wheels missing for Python 3.14" failure mode on the wedding-day laptop.
+- **Single static binary** — no runtime, no `pip`, no "wheels missing for Python 3.14" failure mode on the event-day laptop.
 - **No GC pauses** — frame timing is predictable; nothing stutters because some background allocation triggered a major collection.
 - **Memory safety in unsafe situations** — show-day, sleep-deprived, plugging/unplugging projectors, opening/closing the lid: the class of crashes Rust prevents (use-after-free in GPU resource handling, data races on hot-reload threads) is exactly the class that bites at venues.
 - **`wgpu`** is arguably the cleanest cross-platform GPU abstraction available today — Metal on macOS, Vulkan on Linux, DX12 on Windows, WebGPU in browsers. One shader pipeline, four target platforms.
 
-If the answer to "build vs. buy" becomes "I just need it to work for one wedding," buy MadMapper. If "build" stands but Rust feels heavy, the Python version of this spec is in `git log`.
+If the answer to "build vs. buy" becomes "I just need it to work for one event," buy MadMapper. If "build" stands but Rust feels heavy, the Python version of this spec is in `git log`.
 
 ## Non-goals
 
@@ -33,7 +33,7 @@ If the answer to "build vs. buy" becomes "I just need it to work for one wedding
 - Not a multi-projector tool: no edge blending, no multi-output sync.
 - Not for low-latency live VJ performance with audio-rate input.
 - No advanced color calibration, no automatic projector calibration.
-- No web target in v1, even though `wgpu` would allow it. Adds complexity for no wedding-day benefit.
+- No web target in v1, even though `wgpu` would allow it. Adds complexity for no event-day benefit.
 
 ---
 
@@ -45,7 +45,7 @@ If the answer to "build vs. buy" becomes "I just need it to work for one wedding
 - Parse vector content (paths, shapes, fills, strokes) and rasterize on demand at the output resolution via `resvg`.
 - Hot-reload: if the SVG file changes on disk, re-render automatically (debounced — designers' save operations fire multiple FS events).
 - Multiple SVG layers, toggleable, reorderable, individually transformable.
-- SVG paths stored relative to the project file so `wedding.rmap.json + assets/` is portable on a USB stick.
+- SVG paths stored relative to the project file so `event.rmap.json + assets/` is portable on a USB stick.
 
 ### 2. Effects pipeline
 
@@ -137,7 +137,7 @@ v1 out-of-scope but architecturally reserved:
 - Project state stored as a single JSON file: SVG paths (relative to project root), layer settings, effect parameters, modulators, scenes, mapping mesh + masks, output monitor choice.
 - `serde` derive on every config struct. Schema is **versioned from day one** (`schema_version: u32`) with a `migrate(json: Value) -> Result<Project>` function — even if v1 is the only version, the migration entry point exists.
 - Save / Load / "Save As" from the control window.
-- CLI flag (`clap`) to launch directly into a saved project — `rmap wedding.rmap.json --autostart` is the show-day entry point.
+- CLI flag (`clap`) to launch directly into a saved project — `rmap event.rmap.json --autostart` is the show-day entry point.
 
 ---
 
@@ -352,8 +352,8 @@ A short `docs/show-day-checklist.md` is part of M6.
 4. User adds an SVG layer via "Add Layer" → file picker.
 5. SVG appears on the projector. User adjusts transform, effects, and modulators in the control window; output updates live.
 6. User saves snapshots as **scenes** for the ceremony, dinner, and party — recallable via `1`/`2`/`3`.
-7. User saves the project as `wedding.rmap.json`. Assets stored next to it.
-8. On the day: `rmap wedding.rmap.json --autostart` opens directly into the saved state, on the saved monitor, with display-sleep prevention active.
+7. User saves the project as `event.rmap.json`. Assets stored next to it.
+8. On the day: `rmap event.rmap.json --autostart` opens directly into the saved state, on the saved monitor, with display-sleep prevention active.
 
 ---
 
@@ -368,7 +368,7 @@ A short `docs/show-day-checklist.md` is part of M6.
 
 ### M1.5 — Venue dry-run (½ day, calendar-blocking)
 
-- Take the M1 binary to the actual wedding venue (or any room with a real HDMI projector).
+- Take the M1 binary to the actual event venue (or any room with a real HDMI projector).
 - Verify: borderless fullscreen lands on the projector, no display sleep, no Mission Control glitches, Esc closes cleanly, no flicker on extended-display reconfiguration.
 - **If M1.5 fails, the entire project is at risk.** Find out in week 1, not week 6.
 
@@ -425,11 +425,11 @@ A short `docs/show-day-checklist.md` is part of M6.
 
 ## Build & distribution
 
-- **Development**: `cargo run`. Use `cargo-watch -x "run -- wedding.rmap.json"` for hot-restart on save during M3+.
+- **Development**: `cargo run`. Use `cargo-watch -x "run -- event.rmap.json"` for hot-restart on save during M3+.
 - **Show-day build profile**: a custom `[profile.release-show]` inheriting `release` with `lto = "fat"`, `codegen-units = 1`, `panic = "abort"`, `strip = true`. Slower compile, faster cold-start, smaller binary, no panic-unwind machinery (panic still goes through `catch_unwind` for renderer recovery before the abort path).
 - **macOS .app bundle** via `cargo-bundle` or `cargo-packager`. Embeds the binary, an `Info.plist` with high-DPI hints, and an icon.
 - **Code signing** is not required for personal use, but document the macOS Gatekeeper "right-click → Open" workaround for first launch. If wider distribution is ever wanted, `cargo-packager` supports the notarization flow.
-- The wedding-day machine runs the bundled `.app` (or the static binary directly), not a `cargo run` against a dev checkout.
+- The event-day machine runs the bundled `.app` (or the static binary directly), not a `cargo run` against a dev checkout.
 - **Cross-compilation**: not in v1. Build natively on the show-day machine architecture (Apple Silicon).
 
 ---
@@ -455,7 +455,7 @@ One day of testing setup; saves ten hours of mystery debugging at the venue.
 These need answers before or during M3 — they don't block M1/M1.5/M2:
 
 1. **Build vs. buy** is settled by the "Why this exists" section above — but worth re-confirming honestly: is the answer still "build", or has scope drift made MadMapper Express the better call?
-2. **Rust vs. Python** is settled, but if the compile-time hit slows iteration enough to threaten the wedding date, the Python branch is in `git log` and is shorter. Re-evaluate at end of M3 if velocity feels wrong.
+2. **Rust vs. Python** is settled, but if the compile-time hit slows iteration enough to threaten the event date, the Python branch is in `git log` and is shorter. Re-evaluate at end of M3 if velocity feels wrong.
 3. **One projector, definitely?** Multi-projector requires a different output architecture (sync, edge blending). v1 is single-output; switching later is a near-rewrite.
 4. **SVG-only?** Or PNG / MP4 / HAP video too? Video adds `ffmpeg-next` (FFI to libav) and uploads to GPU textures via `wgpu::Queue::write_texture`. Doable but a real chunk of work.
 5. **Audio reactivity, really never?** A microphone-driven brightness modulator is a 1–2 day add (`cpal` for capture, FFT via `rustfft`, feed into `Modulator::Audio`). Dramatically lifts the result. Hooks already in v1.

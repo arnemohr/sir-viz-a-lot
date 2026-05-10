@@ -175,7 +175,7 @@ updates every frame.
 
 - **Files**: `src/windows/control.rs`
 - **Scope**: The preview draws every redraw of the control window
-  (currently every vsync per `about_to_wait`). For wedding-rig CPU
+  (currently every vsync per `about_to_wait`). For event-rig CPU
   budgets, halve the control-window redraw rate via a frame counter.
   Output window stays at vsync; preview at ~30 fps.
 - **Acceptance**: Manual: `RUST_LOG=trace` shows preview-frame logs at

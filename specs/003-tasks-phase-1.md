@@ -1613,7 +1613,7 @@ within Phase 1. If Phase 1 has slack (calendar or engineering),
 ship; otherwise defer to v3.1.
 
 **Background**
-Practitioner review: the wedding-scale audience rarely produces a
+Practitioner review: the event-scale audience rarely produces a
 degenerate warp grid through normal use. Two P0 audit findings
 (zero-scale, missing-asset) cover the headline failures. This and
 the next three findings are useful but not ship-blocking.
@@ -1680,7 +1680,7 @@ S.
 **Background**
 Original task offered "remove this layer" as the only autofix.
 Practitioner review: cross-machine project portability is a real
-wedding-DJ workflow ("laptop A's path doesn't exist on laptop B").
+event-DJ workflow ("laptop A's path doesn't exist on laptop B").
 The autofix needs a **relink** option, not just a remove option.
 Implementation links to T2.24 (missing-media relink flow).
 
@@ -1718,7 +1718,7 @@ is feature-flagged behind T2.24 readiness).
 - Manual: move an asset on disk after saving the project; reopen.
 
 **Practitioner relevance**
-The wedding-DJ "second laptop" failover scenario specifically
+The event-DJ "second laptop" failover scenario specifically
 needs this. Without it, every cross-machine project load is a
 wall.
 

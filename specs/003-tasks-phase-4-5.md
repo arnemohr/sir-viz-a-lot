@@ -86,7 +86,7 @@ in v0.3.1).
 | T5.4 | Show-day rehearsal with panic injection | RUST + QA | M | T5.1 |
 | T5.5 | Stress test: large project (≥ 20 layers) | RUST + QA | S | T5.1 |
 | T5.6 | External usability test (n ≥ 5) **(RESCOPED: post-GA validation cycle, not GA gate)** | PO | L (justified) | post-GA |
-| **T5.16** | **Practitioner field beta (1 wedding-DJ + 1 AV teacher)** *(NEW — replaces T5.6 as M5 gate)* | PO + QA | L (justified) | T5.4 |
+| **T5.16** | **Practitioner field beta (1 event-DJ + 1 AV teacher)** *(NEW — replaces T5.6 as M5 gate)* | PO + QA | L (justified) | T5.4 |
 | T5.7 | Privacy review final sign-off | PO | S | T5.6 |
 | T5.8 | Asset license register sign-off | PO | S | T5.6 |
 | T5.9 | Section 5 metrics measurement | RUST + PO | S | T5.6 |
@@ -455,7 +455,7 @@ S.
 ### Task T4.12: Per-projector identifier for project portability *(DEFERRED to v3.1)*
 
 **Status post-revision:** Deferred from M4 gate to v3.1 backlog.
-Practitioner review: wedding-scale operators rarely move projects
+Practitioner review: event-scale operators rarely move projects
 between machines on a per-monitor basis, and the existing T2.20
 "remember last-used projector" prefs already covers the most
 common case. Schema v5 churn does not justify v3 inclusion.
@@ -735,7 +735,7 @@ With T4.16 (different surfaces).
 
 **Practitioner relevance**
 Cheap addition; meaningful for offsite content rehearsal. A
-wedding DJ practising at home before the gig now has a real
+event DJ practising at home before the gig now has a real
 preview tool. This is the kind of feature MadMapper / Resolume
 have but rarely match in indie tools.
 
@@ -1501,14 +1501,14 @@ single-event use *before* the public tag.
 
 **Background**
 Practitioner review: a 5-tester academic usability lab is the
-wrong gate signal for a tool whose real test is "did the wedding
+wrong gate signal for a tool whose real test is "did the event
 DJ get through the night?" Field-validation by two operators
 running a real (or simulated-real) event is a tighter, more
 honest signal.
 
 **Implementation details**
 - Recruit two practitioners:
-  - One **wedding DJ-style** operator (small ceremony, photos +
+  - One **event DJ-style** operator (small ceremony, photos +
     SVG, single projector, 1–2 hours of show).
   - One **AV teacher-style** operator (school assembly, gallery
     opening, classroom demo).

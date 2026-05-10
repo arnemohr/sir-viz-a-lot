@@ -242,7 +242,7 @@ this spec assumes that one experience is the floor, not the ceiling.
 
 ## C. 11-star experience ladder
 
-Imagined first-use of rmap by a non-technical operator (a wedding
+Imagined first-use of rmap by a non-technical operator (a event
 host's friend, a small-event lighting volunteer, a school AV teacher
 setting up for a play).
 
@@ -376,7 +376,7 @@ The default canvas should fit on a 13" laptop without scrolling.
 **D4. Ship three demo projects.** Bundled in `assets/demos/`:
 
 - **"Window glow"** — a portrait photo in a window-rectangle mask,
-  with a soft warm wash. Wedding-relevant.
+  with a soft warm wash. event-relevant.
 - **"Slow film strip"** — three landscape photos cycling with a 4s
   crossfade. Shows scenes + transitions.
 - **"Test grid"** — a calibration target with corner labels. Shows

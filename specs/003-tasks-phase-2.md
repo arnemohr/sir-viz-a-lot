@@ -957,7 +957,7 @@ S.
 
 **Purpose**
 Today projects store absolute asset paths (verifiable in
-`~/p1.rmap.json` fixture). The wedding-DJ "second laptop" failover
+`~/p1.rmap.json` fixture). The event-DJ "second laptop" failover
 scenario fails on absolute paths. Spike + implement a portability
 convention that survives cross-machine moves.
 
@@ -1087,7 +1087,7 @@ After T2.23.
 - Manual: move an asset on disk, reopen the project, relink.
 
 **Practitioner relevance**
-The wedding-DJ second-laptop failover relies on this. Beyond
+The event-DJ second-laptop failover relies on this. Beyond
 that, every operator who reorganises their `~/Documents/`
 benefits — and every collaborator who shares a project folder.
 

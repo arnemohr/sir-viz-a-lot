@@ -116,7 +116,7 @@ named mask polygon templates: `window-rectangle`, `arch-portal`,
 `WarpMesh.mask_polygon` that the operator then drag-edits.
 
 This is *not* a generic shape library — it's a curated set of four
-to six wedding-relevant zones. The roadmap's "small semantic palette"
+to six event-relevant zones. The roadmap's "small semantic palette"
 rule constrains the count.
 
 ### 5. Asset drop targets
