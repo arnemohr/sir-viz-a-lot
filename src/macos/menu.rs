@@ -16,7 +16,14 @@
 //! | V31.4.4  | Window menu via `setWindowsMenu`; Help menu (`rmap Help`   |
 //! |          | via `open_help_url`); App-submenu About + Quit; standard   |
 //! |          | about panel.                                               |
-//! | V31.4.5  | Audit cfg-gating across the entire `src/macos/` directory. |
+//! | V31.4.5  | Audited cfg-gating across `src/macos/`. The parent module is |
+//! |          | `#[cfg(target_os = "macos")]`-gated at the declaration in    |
+//! |          | both `src/main.rs` and `src/lib.rs`, so children inherit the |
+//! |          | gate transparently — no per-symbol `cfg` annotations needed   |
+//! |          | inside this directory. Call sites in `src/app.rs` carry the  |
+//! |          | gate explicitly. `cargo check --workspace --all-targets`     |
+//! |          | clean on macOS; non-macOS builds exclude the directory       |
+//! |          | entirely from the build graph.                                |
 //!
 //! ## Layout
 //!
@@ -58,8 +65,10 @@
 //!
 //! The parent module (`src/macos/mod.rs`) is declared with
 //! `#[cfg(target_os = "macos")]` in both `src/main.rs` and `src/lib.rs`, so
-//! this file is never compiled on Linux or Windows. V31.4.5 will audit this
-//! gating end-to-end.
+//! this file is never compiled on Linux or Windows. V31.4.5 audited this
+//! end-to-end: the inherited gate makes per-symbol `cfg` annotations
+//! redundant inside this file (and they were removed from the test fns in
+//! that pass).
 
 use std::sync::{Mutex, OnceLock};
 
@@ -504,7 +513,6 @@ mod tests {
     /// `None` in that case). Tests running on the main thread will exercise the
     /// full path.
     #[test]
-    #[cfg(target_os = "macos")]
     fn install_main_menu_has_expected_submenus() {
         // Gracefully skip if off-thread.
         let Some(mtm) = MainThreadMarker::new() else {
@@ -545,7 +553,6 @@ mod tests {
     ///
     /// Skips gracefully when not on the main thread (same pattern as above).
     #[test]
-    #[cfg(target_os = "macos")]
     fn file_menu_has_three_items() {
         let Some(mtm) = MainThreadMarker::new() else {
             return;
@@ -613,7 +620,6 @@ mod tests {
     ///
     /// Skips gracefully when not on the main thread.
     #[test]
-    #[cfg(target_os = "macos")]
     fn app_menu_has_about_and_quit() {
         let Some(mtm) = MainThreadMarker::new() else {
             return;
@@ -680,7 +686,6 @@ mod tests {
     ///
     /// Skips gracefully when not on the main thread.
     #[test]
-    #[cfg(target_os = "macos")]
     fn help_menu_has_one_item() {
         let Some(mtm) = MainThreadMarker::new() else {
             return;
@@ -736,7 +741,6 @@ mod tests {
     ///
     /// Skips gracefully when not on the main thread.
     #[test]
-    #[cfg(target_os = "macos")]
     fn window_menu_assigned() {
         let Some(mtm) = MainThreadMarker::new() else {
             return;
@@ -756,7 +760,6 @@ mod tests {
     ///
     /// Skips gracefully when not on the main thread (same pattern as above).
     #[test]
-    #[cfg(target_os = "macos")]
     fn edit_menu_has_two_items() {
         let Some(mtm) = MainThreadMarker::new() else {
             return;

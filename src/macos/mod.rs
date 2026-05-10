@@ -8,8 +8,11 @@
 //! ## Module layout
 //!
 //! - `menu` — native `NSMenu` / `NSMenuItem` skeleton installed at app boot
-//!   (V31.4.1). Actions are wired in V31.4.2 – V31.4.4. V31.4.5 audits
-//!   cfg-gating across the entire directory.
+//!   (V31.4.1). Actions wired in V31.4.2 – V31.4.4 (File / Edit / App / Help
+//!   submenus, About panel, AppKit-managed Window menu). V31.4.5 audited
+//!   cfg-gating across the directory: no per-symbol guards needed inside
+//!   children — the parent's `cfg` at declaration excludes the whole
+//!   subtree from non-macOS builds.
 //!
 //! ## Philosophy
 //!
