@@ -264,18 +264,46 @@ pub fn restore_scene(
 ) -> Result<(), serde_json::Error> {
     let saved_scenes = std::mem::take(&mut project.scenes);
     let saved_crossfade = project.crossfade_duration_s;
-    // If `restore` fails (malformed or cross-schema snapshot), the early
-    // `?` would drop `saved_scenes` and leave `project.scenes` empty —
-    // the operator's cue strip would silently vanish. Match-and-restore
-    // both the success and failure paths so scenes are always put back,
-    // and the caller still sees the underlying error.
+
+    // Operator UX rule: layers added AFTER a cue was saved persist across
+    // recall of that cue. Otherwise the operator's mental model — cues are
+    // configurations of the layer set, not the set itself — breaks the
+    // moment they add a layer mid-programming. Identify those layers by
+    // `id`: any current layer whose id is NOT in the snapshot.layers is a
+    // post-save addition.
+    let snapshot_ids: std::collections::HashSet<String> = snap
+        .get("layers")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|l| l.get("id").and_then(|id| id.as_str().map(String::from)))
+                .collect()
+        })
+        .unwrap_or_default();
+    let original_layers = std::mem::take(&mut project.layers);
+    let (preserved_layers, original_snapshot_layers): (Vec<_>, Vec<_>) = original_layers
+        .into_iter()
+        .partition(|l| !snapshot_ids.contains(&l.id));
+
+    // If `restore` fails (malformed or cross-schema snapshot), match-and-
+    // restore both arms so saved_scenes / preserved_layers are never
+    // dropped — the cue strip and post-save layers stay visible even on
+    // a bad recall. The caller still sees the underlying error.
     match restore(project, snap) {
         Ok(()) => {
             project.scenes = saved_scenes;
             project.crossfade_duration_s = saved_crossfade;
+            // Append post-save additions at the end of the restored layer
+            // order. Operator can reorder via the left-rail arrows if the
+            // default position isn't right.
+            project.layers.extend(preserved_layers);
             Ok(())
         }
         Err(e) => {
+            // Reassemble the original layer set (snapshot-time + post-save)
+            // since restore() didn't touch *project on the error path.
+            project.layers = original_snapshot_layers;
+            project.layers.extend(preserved_layers);
             project.scenes = saved_scenes;
             project.crossfade_duration_s = saved_crossfade;
             Err(e)
@@ -730,6 +758,62 @@ mod tests {
             p.scenes.len(),
             2,
             "recall via Mutation::ApplyProjectSnapshot wiped cue strip",
+        );
+    }
+
+    /// Operator-reported bug: save cue with 1 layer, add a 2nd layer, click
+    /// the cue — the freshly added layer must NOT disappear. Cues are
+    /// configurations of the layer set, not the set itself; a layer added
+    /// after the cue was saved persists across recall in its current state.
+    #[test]
+    fn recall_preserves_layers_added_after_save() {
+        let mut p = Project::default();
+        p.layers.push(LayerConfig {
+            id: "lyr_1".into(),
+            kind: LayerKind::Svg {
+                svg_path: PathBuf::from("/tmp/a.svg"),
+            },
+            enabled: true,
+            transform: crate::project::schema::Transform2D::default(),
+            effects: Vec::new(),
+            blend_mode: BlendMode::Normal,
+            opacity: 1.0,
+            warp: WarpMesh::identity(),
+            muted: false,
+        });
+        // Save cue 0 with 1 layer.
+        let cue0 = snapshot(&p);
+
+        // Add a 2nd layer AFTER the cue.
+        p.layers.push(LayerConfig {
+            id: "lyr_2".into(),
+            kind: LayerKind::Svg {
+                svg_path: PathBuf::from("/tmp/b.svg"),
+            },
+            enabled: true,
+            transform: crate::project::schema::Transform2D::default(),
+            effects: Vec::new(),
+            blend_mode: BlendMode::Normal,
+            opacity: 0.5,
+            warp: WarpMesh::identity(),
+            muted: false,
+        });
+
+        // Recall cue 0 via restore_scene — the freshly added lyr_2 must
+        // still be there (in its current state, opacity 0.5).
+        restore_scene(&mut p, &cue0).expect("restore_scene");
+        assert_eq!(p.layers.len(), 2, "lyr_2 was wiped on recall");
+        assert!(
+            p.layers.iter().any(|l| l.id == "lyr_2"),
+            "lyr_2 missing after recall: ids={:?}",
+            p.layers.iter().map(|l| &l.id).collect::<Vec<_>>(),
+        );
+        // lyr_2 retains its current opacity (0.5), not the cue's (which had no lyr_2).
+        let lyr_2 = p.layers.iter().find(|l| l.id == "lyr_2").unwrap();
+        assert!(
+            (lyr_2.opacity - 0.5).abs() < 1e-6,
+            "lyr_2 opacity changed on recall: got {}",
+            lyr_2.opacity,
         );
     }
 
