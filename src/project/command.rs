@@ -1045,7 +1045,19 @@ pub struct ApplyProjectSnapshot {
 
 impl ReverseStorage for ApplyProjectSnapshot {
     fn apply(self, project: &mut Project) -> Self {
-        let _ = crate::project::restore_scene(project, &self.new);
+        // Errors from restore_scene used to be silenced (`let _ = ...`),
+        // which masked any malformed-snapshot failure. The defensive
+        // restore_scene fix preserves project.scenes across failure too,
+        // but log loudly here so a future occurrence is visible in
+        // ~/Library/Logs/rmap/rmap.log instead of silent.
+        if let Err(e) = crate::project::restore_scene(project, &self.new) {
+            tracing::error!(
+                ?e,
+                "ApplyProjectSnapshot::apply: restore_scene failed; \
+                 project.scenes preserved by the defensive guard but other \
+                 fields may be in inconsistent state",
+            );
+        }
         ApplyProjectSnapshot {
             new: self.old,
             old: self.new,

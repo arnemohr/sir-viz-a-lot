@@ -264,10 +264,23 @@ pub fn restore_scene(
 ) -> Result<(), serde_json::Error> {
     let saved_scenes = std::mem::take(&mut project.scenes);
     let saved_crossfade = project.crossfade_duration_s;
-    restore(project, snap)?;
-    project.scenes = saved_scenes;
-    project.crossfade_duration_s = saved_crossfade;
-    Ok(())
+    // If `restore` fails (malformed or cross-schema snapshot), the early
+    // `?` would drop `saved_scenes` and leave `project.scenes` empty —
+    // the operator's cue strip would silently vanish. Match-and-restore
+    // both the success and failure paths so scenes are always put back,
+    // and the caller still sees the underlying error.
+    match restore(project, snap) {
+        Ok(()) => {
+            project.scenes = saved_scenes;
+            project.crossfade_duration_s = saved_crossfade;
+            Ok(())
+        }
+        Err(e) => {
+            project.scenes = saved_scenes;
+            project.crossfade_duration_s = saved_crossfade;
+            Err(e)
+        }
+    }
 }
 
 /// Linear-interpolate two snapshots field-by-field.
@@ -585,6 +598,73 @@ mod tests {
         );
     }
 
+    /// Bug reproducer #2: full Save → Save → Recall flow through the
+    /// `UndoStack` (the runtime path the v3 SceneSave + cue-strip-click
+    /// dispatchers actually take). Catches anything subtle that gets
+    /// missed when calling `mutation.apply` directly.
+    #[cfg(feature = "v3")]
+    #[test]
+    fn save_save_recall_through_undo_stack_preserves_cue_strip() {
+        use crate::project::command::{ApplyProjectSnapshot, Mutation};
+        use crate::project::undo::UndoStack;
+
+        let mut p = Project::default();
+        p.layers.push(LayerConfig {
+            id: "a".into(),
+            kind: LayerKind::Svg {
+                svg_path: PathBuf::from("/tmp/x.svg"),
+            },
+            enabled: true,
+            transform: crate::project::schema::Transform2D::default(),
+            effects: Vec::new(),
+            blend_mode: BlendMode::Normal,
+            opacity: 1.0,
+            warp: WarpMesh::identity(),
+            muted: false,
+        });
+        let mut stack = UndoStack::new();
+
+        // Save cue 1 — exact mirror of Command::SceneSave in src/app.rs:1010.
+        let snap1 = snapshot(&p);
+        let mut new_scenes = p.scenes.clone();
+        new_scenes.push(Scene {
+            name: "Cue 1".into(),
+            snapshot: snap1,
+            thumbnail: None,
+        });
+        let mut1 = p.set_project_scenes_mutation(new_scenes);
+        stack.push(mut1, &mut p);
+        assert_eq!(p.scenes.len(), 1, "after save cue 1");
+
+        // Save cue 2.
+        let snap2 = snapshot(&p);
+        let mut new_scenes = p.scenes.clone();
+        new_scenes.push(Scene {
+            name: "Cue 2".into(),
+            snapshot: snap2,
+            thumbnail: None,
+        });
+        let mut2 = p.set_project_scenes_mutation(new_scenes);
+        stack.push(mut2, &mut p);
+        assert_eq!(p.scenes.len(), 2, "after save cue 2");
+
+        // Recall cue 1 — exact mirror of schedule_scene_recall's v3 arm.
+        let target = p.scenes[0].snapshot.clone();
+        let cur = snapshot(&p);
+        let recall_mut = Mutation::ApplyProjectSnapshot(ApplyProjectSnapshot {
+            new: target,
+            old: cur,
+            non_undoable: false,
+        });
+        stack.push(recall_mut, &mut p);
+
+        assert_eq!(
+            p.scenes.len(),
+            2,
+            "Recall via undo_stack.push wiped cue strip (operator-reported bug)",
+        );
+    }
+
     /// Bug reproducer: clicking an already-created cue tile must not
     /// wipe the cue strip. Simulates the v3 cue-recall path end-to-end:
     /// save cue, save cue, recall cue 0 via `Mutation::ApplyProjectSnapshot`.
@@ -639,6 +719,39 @@ mod tests {
             2,
             "recall via Mutation::ApplyProjectSnapshot wiped cue strip",
         );
+    }
+
+    /// Defensive guard: when the snapshot fails to deserialize (malformed,
+    /// cross-schema with a missing required field, etc.), restore_scene must
+    /// still preserve project.scenes — otherwise the operator's cue strip
+    /// silently vanishes on a single bad recall.
+    #[test]
+    fn restore_scene_preserves_scenes_on_deserialize_error() {
+        let mut p = Project::default();
+        p.scenes.push(Scene {
+            name: "alpha".into(),
+            snapshot: serde_json::json!({}),
+            thumbnail: None,
+        });
+        p.scenes.push(Scene {
+            name: "beta".into(),
+            snapshot: serde_json::json!({}),
+            thumbnail: None,
+        });
+
+        // A snapshot that does not deserialize as a Project (e.g. a bare
+        // string or a missing required `schema_version` field).
+        let bad = serde_json::json!("not a project");
+
+        let res = restore_scene(&mut p, &bad);
+        assert!(res.is_err(), "deliberately malformed snapshot must error");
+        assert_eq!(
+            p.scenes.len(),
+            2,
+            "restore_scene wiped scenes on deserialize error",
+        );
+        assert_eq!(p.scenes[0].name, "alpha");
+        assert_eq!(p.scenes[1].name, "beta");
     }
 
     /// `restore_scene` should also leave the live crossfade-duration
