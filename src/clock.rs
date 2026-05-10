@@ -113,6 +113,15 @@ impl Clock {
             last_tap_source: None,
         }
     }
+
+    /// V31.7.3 — advance the clock so `elapsed()` returns approximately
+    /// `elapsed`. Updates `started = Instant::now() - elapsed`. Used
+    /// by bar-boundary integration tests to step the clock across
+    /// multiple bar markers without creating a new `Clock` instance
+    /// (which would reset `bpm` and `last_tap`).
+    pub fn set_elapsed(&mut self, elapsed: std::time::Duration) {
+        self.started = std::time::Instant::now() - elapsed;
+    }
 }
 
 #[cfg(test)]
@@ -210,5 +219,35 @@ mod tests {
         clock.tap_at(t0 + Duration::from_millis(500), TapSource::Osc);
         clock.tap_at(t0 + Duration::from_millis(1000), TapSource::Osc);
         assert_eq!(clock.telemetry().current_bpm, clock.bpm());
+    }
+
+    /// V31.7.3 — `set_elapsed` should make `elapsed()` return the target
+    /// duration within a 1 ms tolerance (wall-clock drift between the two
+    /// `Instant::now()` calls inside `set_elapsed` and `elapsed()`).
+    #[test]
+    fn set_elapsed_round_trips_within_tolerance() {
+        let mut clock = Clock::for_test(Duration::ZERO, 120.0);
+        let target = Duration::from_secs(8);
+        clock.set_elapsed(target);
+        let got = clock.elapsed();
+        let diff = got.abs_diff(target);
+        assert!(
+            diff < Duration::from_millis(1),
+            "elapsed() should match set_elapsed() target within 1 ms; got diff {diff:?}"
+        );
+    }
+
+    /// `set_elapsed` must not disturb `bpm` or tap state.
+    #[test]
+    fn set_elapsed_preserves_bpm_and_tap_state() {
+        let t0 = Instant::now();
+        let mut clock = Clock::for_test(Duration::ZERO, 137.0);
+        clock.tap_at(t0, TapSource::Keyboard);
+        clock.set_elapsed(Duration::from_secs(4));
+        assert!(
+            (clock.bpm() - 137.0).abs() < 1e-3,
+            "bpm should be unaffected by set_elapsed"
+        );
+        assert_eq!(clock.telemetry().last_tap_source, Some(TapSource::Keyboard));
     }
 }

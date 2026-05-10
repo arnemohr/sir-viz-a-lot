@@ -395,6 +395,13 @@ pub struct ControlPanelInputs {
     /// source, and last tap timestamp. Used by the toolbar BPM HUD badge.
     #[cfg(feature = "v3")]
     pub bpm_telemetry: crate::clock::BpmTelemetry,
+    /// V31.7.3 — index of the cue currently armed-and-waiting for a
+    /// quantize boundary, if any. `None` when no cue is pending or when
+    /// quantize is off. The cue strip renders the pending tile with the
+    /// same "armed" (accent-border) visual used for a crossfade target so
+    /// the operator can see the pending-fire at a glance.
+    #[cfg(feature = "v3")]
+    pub pending_cue: Option<usize>,
 }
 
 /// Render the control panel. Mutates `project` in place.
@@ -544,6 +551,9 @@ pub fn show(
                 project,
                 &mut st.thumbnail_cache,
                 inputs.crossfade_progress,
+                // V31.7.3: pending-quantize cue index for armed-tile visual.
+                #[cfg(feature = "v3")]
+                inputs.pending_cue,
             ) {
                 action = ControlPanelAction::EmitCommand(cmd);
             }

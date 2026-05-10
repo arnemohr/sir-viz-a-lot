@@ -141,11 +141,17 @@ fn load_thumbnail_texture(
 /// - `cache` — per-session texture handle map; updated in place.
 /// - `crossfade_progress` — `Some((target_idx, 0.0..=1.0))` while a
 ///   crossfade is in progress.
+/// - `pending_cue` — V31.7.3: index of a cue armed-and-waiting for the
+///   next quantize boundary (`None` when quantize is off or no cue is
+///   pending). The tile renders with an accent border (same visual as the
+///   crossfade target) so the operator can see the pending fire.
+#[cfg_attr(not(feature = "v3"), allow(unused_variables))]
 pub fn show(
     ui: &mut Ui,
     project: &Project,
     cache: &mut ThumbnailCache,
     crossfade_progress: Option<(usize, f32)>,
+    #[cfg(feature = "v3")] pending_cue: Option<usize>,
 ) -> Option<Command> {
     let mut out: Option<Command> = None;
 
@@ -181,7 +187,20 @@ pub fn show(
                 ui.add_space(8.0);
 
                 for (idx, scene) in project.scenes.iter().enumerate() {
-                    let tile_resp = scene_tile(ui, idx, scene, cache, crossfade_progress);
+                    let tile_resp = scene_tile(
+                        ui,
+                        idx,
+                        scene,
+                        cache,
+                        crossfade_progress,
+                        // V31.7.3: armed-pending-quantize visual reuses the
+                        // accent-border state. For V31.7.3 the pending tile
+                        // is visually indistinguishable from a crossfade
+                        // target; a future task can add a distinct pulse or
+                        // badge if operators request it.
+                        #[cfg(feature = "v3")]
+                        pending_cue,
+                    );
                     if tile_resp.clicked() {
                         out = Some(Command::SceneRecall(idx));
                     }
@@ -198,12 +217,18 @@ pub fn show(
 }
 
 /// Render one scene tile. Returns the `Response` for the clickable area.
+///
+/// `pending_cue` (V31.7.3): index of the pending-quantize cue, if any.
+/// The pending tile is rendered with an accent border matching the
+/// crossfade-target visual so the operator can see the armed state.
+#[cfg_attr(not(feature = "v3"), allow(unused_variables))]
 fn scene_tile(
     ui: &mut Ui,
     idx: usize,
     scene: &crate::project::schema::Scene,
     cache: &mut ThumbnailCache,
     crossfade_progress: Option<(usize, f32)>,
+    #[cfg(feature = "v3")] pending_cue: Option<usize>,
 ) -> Response {
     let (rect, resp) = ui.allocate_exact_size(vec2(TILE_W, TILE_H), Sense::click());
 
@@ -212,7 +237,13 @@ fn scene_tile(
 
         // Background.
         let bg = theme::BG_PANEL.linear_multiply(1.5);
+        // V31.7.3: armed-pending-quantize uses the same accent border as a
+        // crossfade target. This gives the operator immediate visual feedback
+        // that the cue will fire at the next bar boundary. A future task may
+        // add a distinct pulsing badge to differentiate the two states.
         let highlight = crossfade_progress.is_some_and(|(t, _)| t == idx);
+        #[cfg(feature = "v3")]
+        let highlight = highlight || pending_cue == Some(idx);
         let border_col = if highlight {
             theme::ACCENT
         } else if resp.hovered() {
@@ -365,8 +396,8 @@ mod tests {
 
     #[test]
     fn same_name_produces_stable_thumbnail() {
-        let a = placeholder_thumbnail_for_name("wedding");
-        let b = placeholder_thumbnail_for_name("wedding");
+        let a = placeholder_thumbnail_for_name("event");
+        let b = placeholder_thumbnail_for_name("event");
         assert_eq!(a.data, b.data);
     }
 
