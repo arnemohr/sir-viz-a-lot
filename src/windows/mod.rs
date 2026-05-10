@@ -3,7 +3,11 @@
 
 #[cfg(feature = "v3")]
 pub mod advanced;
+// 004-V31.9.2: audio bands strip — gated on both v3 and audio features so the
+// module is entirely absent from the build graph when either is off.
 pub mod anim;
+#[cfg(all(feature = "v3", feature = "audio"))]
+pub mod audio_bands_strip;
 pub mod control;
 pub mod control_panel;
 #[cfg(feature = "v3")]

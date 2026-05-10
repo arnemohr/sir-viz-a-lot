@@ -543,6 +543,31 @@ pub fn show(
             }
         });
 
+    // 004-V31.9.2: audio bands strip — 8 vertical FFT-magnitude bars visible
+    // only when an audio source is active.  Declared after show_day_strip
+    // (so it sits above show-day) and before cue_strip (so cue strip sits
+    // above it), per roadmap.md §8 ideal layout.
+    //
+    // The TopBottomPanel is only claimed when is_audio_active() is true so
+    // no vertical space is wasted when audio is inactive (choice A per spec).
+    #[cfg(all(feature = "v3", feature = "audio"))]
+    if crate::modulators::audio::is_audio_active() {
+        egui::TopBottomPanel::bottom("rmap_audio_bands_strip")
+            .resizable(false)
+            .exact_size(crate::windows::audio_bands_strip::STRIP_HEIGHT)
+            .show_inside(ui, |ui| {
+                if let Some(band_idx) = crate::windows::audio_bands_strip::show(ui) {
+                    // V31.9.2: drag-source emit. No target accepts the drop in
+                    // v3.1 — the parameter-binding picker ships in v0.4.
+                    tracing::info!(
+                        target: "rmap::ux",
+                        event = "audio_band_drag_started",
+                        band = band_idx,
+                    );
+                }
+            });
+    }
+
     // 003-T4.2–T4.5: cue strip — horizontal row of scene tiles above the
     // show-day strip. Declared after show_day_strip so egui places it
     // between show_day_strip and the canvas (inner panel).
