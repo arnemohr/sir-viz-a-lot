@@ -12,10 +12,34 @@
 //! a generic spectrum-analyser; that's the right side of "supports scene
 //! design" for the event-scale target.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
 #[cfg(feature = "audio")]
 use std::sync::RwLock;
+
+/// Process-wide counter of audio chunks dropped on the cpal callback's
+/// `try_send` overflow path (P0.3.2). Read by the diagnostics surface
+/// alongside the texture-upload queue's dropped counter for the
+/// aggregated "dropped: N" badge.
+static DROPPED: AtomicU64 = AtomicU64::new(0);
+
+/// Total audio chunks dropped since process start. The cpal worker's
+/// bounded channel (`tx.try_send` at the cpal callback site) prefers
+/// dropping over blocking the audio thread; every drop bumps this
+/// counter so the operator can see when audio capture is starving.
+pub fn dropped_count() -> u64 {
+    DROPPED.load(Ordering::Relaxed)
+}
+
+/// Increment the dropped counter. Called by the cpal callback (gated
+/// on `feature = "audio"`); exposed for tests in non-audio builds so
+/// the diagnostics surface can be exercised without a live audio
+/// stack.
+#[cfg_attr(not(feature = "audio"), allow(dead_code))]
+pub fn record_drop() {
+    DROPPED.fetch_add(1, Ordering::Relaxed);
+}
 
 /// Number of log-spaced bands the provider exposes. Each band averages
 /// the magnitude across a half-octave-ish slice of the spectrum.
@@ -166,8 +190,11 @@ mod cpal_impl {
                     &cfg,
                     move |data: &[f32], _: &_| {
                         // try_send: drop on overflow rather than block the audio
-                        // callback.
-                        let _ = tx.try_send(data.to_vec());
+                        // callback. P0.3.2: count drops so the diagnostics
+                        // surface can warn when audio capture is starving.
+                        if tx.try_send(data.to_vec()).is_err() {
+                            super::record_drop();
+                        }
                     },
                     |err| tracing::warn!(?err, "cpal input stream error"),
                     None,

@@ -59,6 +59,8 @@ pub enum GlossaryTerm {
     RgbMatrix,
     /// P0.1.4 (W2) — right-click → bind next MIDI CC workflow.
     MidiLearn,
+    /// P0.3.2 (W3) — frames dropped due to bounded-queue overflow.
+    DroppedFrames,
 }
 
 /// A single glossary entry: a short headline and a 1–2 sentence body.
@@ -228,6 +230,14 @@ pub fn entry(t: GlossaryTerm) -> GlossaryEntry {
                    The next incoming control-change message binds to that \
                    parameter; press ESC to cancel before a CC arrives.",
         },
+        GlossaryTerm::DroppedFrames => GlossaryEntry {
+            headline: "Dropped Frames",
+            body: "How many audio / video / NDI frames the renderer had to \
+                   discard because a bounded queue was full.  A non-zero \
+                   value during a show means a producer is outpacing the \
+                   render thread; investigate before it becomes visible \
+                   on the projector.",
+        },
     }
 }
 
@@ -269,6 +279,7 @@ pub fn all_terms() -> &'static [GlossaryTerm] {
         GlossaryTerm::EdgeBlendRegion,
         GlossaryTerm::RgbMatrix,
         GlossaryTerm::MidiLearn,
+        GlossaryTerm::DroppedFrames,
     ]
 }
 
@@ -345,7 +356,7 @@ mod tests {
     #[test]
     fn all_terms_covers_every_variant() {
         // Bump this when you add a new GlossaryTerm variant.
-        const EXPECTED_VARIANT_COUNT: usize = 25;
+        const EXPECTED_VARIANT_COUNT: usize = 26;
         assert_eq!(
             super::all_terms().len(),
             EXPECTED_VARIANT_COUNT,

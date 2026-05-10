@@ -229,13 +229,32 @@ pub fn show(
             ui.add_space(4.0);
 
             // ----------------------------------------------------------------
-            // 4. Diagnostics stub (T3.11)
+            // 4. Diagnostics stub (T3.11) + P0.3.2 dropped-frames counter
             // ----------------------------------------------------------------
             egui::CollapsingHeader::new("Diagnostics")
                 .id_salt(HDR_DIAGNOSTICS)
                 .default_open(false)
                 .show(ui, |ui| {
                     ui.label("Audit findings and re-runnable checks will appear here.");
+                    // P0.3.2 — aggregate dropped-frame counter. Currently
+                    // the audio path (P0.3.2) feeds it; the texture-upload
+                    // queue's per-instance counter (P0.3.1) joins once
+                    // P0.4.2 wires it into `EditingState`.
+                    let audio_dropped = crate::modulators::audio::dropped_count();
+                    ui.horizontal(|ui| {
+                        crate::windows::glossary::glossary_label(
+                            ui,
+                            crate::windows::glossary::GlossaryTerm::DroppedFrames,
+                        );
+                        if audio_dropped == 0 {
+                            ui.weak("0");
+                        } else {
+                            ui.colored_label(
+                                egui::Color32::from_rgb(0xc0, 0x80, 0x40),
+                                format!("{audio_dropped}"),
+                            );
+                        }
+                    });
                 });
         });
 
