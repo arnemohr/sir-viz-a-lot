@@ -13,8 +13,9 @@
 //! |          | `App::about_to_wait` each frame.                           |
 //! | V31.4.3  | Wire Edit menu actions (Undo Cmd-Z, Redo Cmd-Shift-Z).     |
 //! |          | Cut/Copy/Paste are explicitly out of scope per the spec.   |
-//! | V31.4.4  | Wire Window / Help menu actions; call `setWindowsMenu` to  |
-//! |          | enable macOS-managed Minimise / Zoom items.                |
+//! | V31.4.4  | Window menu via `setWindowsMenu`; Help menu (`rmap Help`   |
+//! |          | via `open_help_url`); App-submenu About + Quit; standard   |
+//! |          | about panel.                                               |
 //! | V31.4.5  | Audit cfg-gating across the entire `src/macos/` directory. |
 //!
 //! ## Layout
@@ -65,15 +66,16 @@ use std::sync::{Mutex, OnceLock};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject};
 use objc2::{ClassType, MainThreadMarker, define_class, sel};
-use objc2_app_kit::{NSApplication, NSEventModifierFlags, NSMenu, NSMenuItem};
-use objc2_foundation::NSString;
+use objc2_app_kit::{
+    NSAboutPanelOptionApplicationName, NSAboutPanelOptionApplicationVersion,
+    NSAboutPanelOptionVersion, NSApplication, NSEventModifierFlags, NSMenu, NSMenuItem,
+};
+use objc2_foundation::{NSDictionary, NSString};
 
 // ── Action queue ──────────────────────────────────────────────────────────────
 
 /// An action emitted by a menu item. Pushed by the NSObject selector
 /// callback; drained each `about_to_wait` tick.
-///
-/// V31.4.4 will add `OpenHelp`, `ShowAbout`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MenuAction {
     Save,
@@ -82,6 +84,8 @@ pub enum MenuAction {
     Quit,
     Undo,
     Redo,
+    OpenHelp,
+    ShowAbout,
 }
 
 /// Process-wide pending-action queue.
@@ -155,6 +159,16 @@ define_class!(
         fn redo_action(&self, _sender: *mut AnyObject) {
             push(MenuAction::Redo);
         }
+
+        #[unsafe(method(helpAction:))]
+        fn help_action(&self, _sender: *mut AnyObject) {
+            push(MenuAction::OpenHelp);
+        }
+
+        #[unsafe(method(aboutAction:))]
+        fn about_action(&self, _sender: *mut AnyObject) {
+            push(MenuAction::ShowAbout);
+        }
     }
 );
 
@@ -194,6 +208,9 @@ fn menu_target_ref() -> &'static AnyObject {
 /// Build and install the application's main menu bar.
 ///
 /// V31.4.2: populates the File submenu with Save, Save as…, Open, and Quit.
+/// V31.4.3: adds Undo/Redo to the Edit submenu.
+/// V31.4.4: populates the App submenu (About + Quit, per macOS HIG), the Help
+/// submenu (rmap Help), and registers the Window submenu via `setWindowsMenu`.
 /// Actions are routed via a static `Mutex<Vec<MenuAction>>` queue that
 /// `App::about_to_wait` drains each tick.
 ///
@@ -219,15 +236,49 @@ pub fn install_main_menu(mtm: MainThreadMarker) {
     // uses the *submenu's* title for display. The top-level item title is
     // conventionally left empty or set to the app name; we match what Apple's
     // MainMenu.xib templates do: empty top-level title, app-name submenu title.
-    // V31.4.2 will populate this with About, Services, Hide, Quit, etc.
-    let app_item = NSMenuItem::new(mtm);
-    let app_submenu = NSMenu::new(mtm);
-    app_submenu.setTitle(&NSString::from_str("rmap"));
-    app_item.setSubmenu(Some(&app_submenu));
-    menu_bar.addItem(&app_item);
+    //
+    // V31.4.4: populated per macOS HIG — About at the top, Quit at the bottom.
+    // Quit lives here (not in File) per the macOS Human Interface Guidelines.
+    {
+        let app_item = NSMenuItem::new(mtm);
+        let app_submenu = NSMenu::new(mtm);
+        app_submenu.setTitle(&NSString::from_str("rmap"));
+
+        let target: &AnyObject = menu_target_ref();
+
+        // About rmap — no key equivalent (macOS convention)
+        {
+            let item = NSMenuItem::new(mtm);
+            item.setTitle(&NSString::from_str("About rmap"));
+            unsafe {
+                item.setTarget(Some(target));
+                item.setAction(Some(sel!(aboutAction:)));
+            }
+            app_submenu.addItem(&item);
+        }
+
+        app_submenu.addItem(&NSMenuItem::separatorItem(mtm));
+
+        // Quit rmap — Cmd-Q (moved from File submenu per macOS HIG)
+        {
+            let item = NSMenuItem::new(mtm);
+            item.setTitle(&NSString::from_str("Quit rmap"));
+            item.setKeyEquivalent(&NSString::from_str("q"));
+            item.setKeyEquivalentModifierMask(NSEventModifierFlags::Command);
+            unsafe {
+                item.setTarget(Some(target));
+                item.setAction(Some(sel!(quitAction:)));
+            }
+            app_submenu.addItem(&item);
+        }
+
+        app_item.setSubmenu(Some(&app_submenu));
+        menu_bar.addItem(&app_item);
+    }
 
     // ── File submenu ───────────────────────────────────────────────────────
-    // V31.4.2: wire Save, Save as…, Open, Quit.
+    // V31.4.2: wire Save, Save as…, Open.
+    // Note: Quit moved to the App submenu in V31.4.4 per macOS HIG.
     {
         let file_item = NSMenuItem::new(mtm);
         let file_title = NSString::from_str("File");
@@ -274,19 +325,6 @@ pub fn install_main_menu(mtm: MainThreadMarker) {
             unsafe {
                 item.setTarget(Some(target));
                 item.setAction(Some(sel!(openAction:)));
-            }
-            file_submenu.addItem(&item);
-        }
-
-        // Quit — Cmd-Q
-        {
-            let item = NSMenuItem::new(mtm);
-            item.setTitle(&NSString::from_str("Quit"));
-            item.setKeyEquivalent(&NSString::from_str("q"));
-            item.setKeyEquivalentModifierMask(NSEventModifierFlags::Command);
-            unsafe {
-                item.setTarget(Some(target));
-                item.setAction(Some(sel!(quitAction:)));
             }
             file_submenu.addItem(&item);
         }
@@ -340,34 +378,118 @@ pub fn install_main_menu(mtm: MainThreadMarker) {
     }
 
     // ── Window submenu ─────────────────────────────────────────────────────
-    // V31.4.4 will call `setWindowsMenu` to enable macOS-managed items
-    // (Minimise, Zoom, Bring All to Front). For now an empty submenu suffices.
-    add_empty_submenu(&menu_bar, "Window", mtm);
+    // V31.4.4: register via `setWindowsMenu` so AppKit auto-populates
+    // Minimise, Zoom, and Bring All to Front.
+    {
+        let window_item = NSMenuItem::new(mtm);
+        let window_title = NSString::from_str("Window");
+        window_item.setTitle(&window_title);
+        let window_submenu = NSMenu::new(mtm);
+        window_submenu.setTitle(&window_title);
+        window_item.setSubmenu(Some(&window_submenu));
+        menu_bar.addItem(&window_item);
+        // Registering the submenu with NSApplication lets AppKit manage the
+        // standard window items (Minimise, Zoom, Bring All to Front) for free.
+        NSApplication::sharedApplication(mtm).setWindowsMenu(Some(&window_submenu));
+    }
 
     // ── Help submenu ───────────────────────────────────────────────────────
-    add_empty_submenu(&menu_bar, "Help", mtm);
+    // V31.4.4: wire "rmap Help" (Cmd-Shift-?) to the same handler as the
+    // v3 `?` toolbar button (`open_help_url` via `MenuAction::OpenHelp`).
+    {
+        let help_item = NSMenuItem::new(mtm);
+        let help_title = NSString::from_str("Help");
+        help_item.setTitle(&help_title);
+        let help_submenu = NSMenu::new(mtm);
+        help_submenu.setTitle(&help_title);
+
+        let target: &AnyObject = menu_target_ref();
+
+        // rmap Help — Cmd-Shift-?
+        {
+            let item = NSMenuItem::new(mtm);
+            item.setTitle(&NSString::from_str("rmap Help"));
+            item.setKeyEquivalent(&NSString::from_str("?"));
+            item.setKeyEquivalentModifierMask(NSEventModifierFlags(
+                NSEventModifierFlags::Command.0 | NSEventModifierFlags::Shift.0,
+            ));
+            unsafe {
+                item.setTarget(Some(target));
+                item.setAction(Some(sel!(helpAction:)));
+            }
+            help_submenu.addItem(&item);
+        }
+
+        help_item.setSubmenu(Some(&help_submenu));
+        menu_bar.addItem(&help_item);
+    }
 
     // Install as the application's main menu.
     NSApplication::sharedApplication(mtm).setMainMenu(Some(&menu_bar));
 
     tracing::debug!(
-        "004-V31.4.3: main menu installed (File: Save/Save as\u{2026}/Open/Quit; Edit: Undo/Redo + App/Window/Help)"
+        "004-V31.4.4: main menu installed (App: About/Quit; File: Save/Save as\u{2026}/Open; Edit: Undo/Redo; Window: setWindowsMenu; Help: rmap Help)"
     );
 }
 
-/// Create an `NSMenuItem` whose submenu is an empty `NSMenu` named `title`,
-/// and append it to `bar`.
+// ── About panel ───────────────────────────────────────────────────────────────
+
+/// Display the standard macOS About panel, populated with rmap metadata.
 ///
-/// The top-level menu item's title must match the submenu's title for macOS
-/// to render the label in the menu bar correctly.
-fn add_empty_submenu(bar: &NSMenu, title: &str, mtm: MainThreadMarker) {
-    let item = NSMenuItem::new(mtm);
-    let submenu = NSMenu::new(mtm);
-    let ns_title = NSString::from_str(title);
-    item.setTitle(&ns_title);
-    submenu.setTitle(&ns_title);
-    item.setSubmenu(Some(&submenu));
-    bar.addItem(&item);
+/// Version and license strings are read at compile time from `Cargo.toml`
+/// via `env!`. No `LICENSE` file is needed at runtime.
+///
+/// The panel is owned by AppKit after this call; no reference is kept.
+pub fn show_about_panel(mtm: MainThreadMarker) {
+    // Build the options dictionary.
+    //
+    // Keys are `NSAboutPanelOptionKey` (type alias for `NSString`). Values
+    // are heterogeneous NSObjects, so the dictionary is typed as
+    // `NSDictionary<NSString, AnyObject>`.
+    //
+    // NOTE: "Copyright" is not a public `NSAboutPanelOptionKey` constant in
+    // the AppKit headers, but AppKit honors it as a stable undocumented key.
+    // We construct it by hand rather than relying on a missing constant.
+    let version_str = NSString::from_str(env!("CARGO_PKG_VERSION"));
+    let copyright_str = NSString::from_str("Licensed under MIT OR Apache-2.0");
+
+    // SAFETY: Each `Retained<NSString>` is a subclass of `AnyObject`; the
+    // cast reinterprets the pointer with the wider type without any ABI
+    // difference. We do not expose the cast outside this block.
+    let version_obj: Retained<AnyObject> = unsafe { Retained::cast_unchecked(version_str.clone()) };
+    let version_obj2: Retained<AnyObject> =
+        unsafe { Retained::cast_unchecked(version_str.clone()) };
+    let copyright_obj: Retained<AnyObject> = unsafe { Retained::cast_unchecked(copyright_str) };
+
+    // SAFETY: The three `extern "C" pub static` option-key pointers are
+    // valid for the process lifetime (they are lazily resolved linker
+    // symbols backed by AppKit). Reading them requires `unsafe` on Rust's
+    // side because the compiler cannot verify they are properly initialised
+    // before first use; AppKit guarantees that for all framework statics.
+    let name_key: &NSString = unsafe { NSAboutPanelOptionApplicationName };
+    let app_version_key: &NSString = unsafe { NSAboutPanelOptionApplicationVersion };
+    let version_key: &NSString = unsafe { NSAboutPanelOptionVersion };
+    let copyright_key = NSString::from_str("Copyright");
+
+    let keys: &[&NSString] = &[name_key, app_version_key, version_key, &copyright_key];
+
+    // Application name: use "rmap" (matches the App submenu title and
+    // CFBundleName; AppKit would otherwise fall back to the process name
+    // which may be the binary path in a non-bundled build).
+    let name_str = NSString::from_str("rmap");
+    let name_obj: Retained<AnyObject> = unsafe { Retained::cast_unchecked(name_str) };
+
+    let values: &[Retained<AnyObject>] = &[name_obj, version_obj, version_obj2, copyright_obj];
+
+    let opts = NSDictionary::<NSString, AnyObject>::from_retained_objects(keys, values);
+
+    // SAFETY: The dictionary has the correct key/value types:
+    // - Keys are `NSString` (= `NSAboutPanelOptionKey`).
+    // - Values are `NSString` objects cast to `AnyObject`, which satisfies
+    //   the heterogeneous-value contract of `orderFrontStandardAboutPanelWithOptions:`.
+    unsafe {
+        NSApplication::sharedApplication(mtm).orderFrontStandardAboutPanelWithOptions(&opts);
+    }
 }
 
 #[cfg(test)]
@@ -418,13 +540,13 @@ mod tests {
         }
     }
 
-    /// V31.4.2 acceptance: the File submenu must contain exactly the four
-    /// expected items with the right titles and key equivalents.
+    /// V31.4.2 / V31.4.4 acceptance: the File submenu must contain exactly
+    /// three items (Save, Save as…, Open). Quit moved to the App submenu.
     ///
     /// Skips gracefully when not on the main thread (same pattern as above).
     #[test]
     #[cfg(target_os = "macos")]
-    fn file_menu_has_four_items() {
+    fn file_menu_has_three_items() {
         let Some(mtm) = MainThreadMarker::new() else {
             return;
         };
@@ -455,8 +577,8 @@ mod tests {
         // Collect (title, key_equivalent) pairs.
         let item_count = file_submenu.numberOfItems();
         assert_eq!(
-            item_count, 4,
-            "File submenu must have exactly 4 items, found {}",
+            item_count, 3,
+            "File submenu must have exactly 3 items, found {}",
             item_count
         );
 
@@ -464,7 +586,6 @@ mod tests {
             ("Save", "s"),
             ("Save as\u{2026}", "S"),
             ("Open\u{2026}", "o"),
-            ("Quit", "q"),
         ];
 
         for (i, &(exp_title, exp_key)) in expected.iter().enumerate() {
@@ -484,6 +605,150 @@ mod tests {
                 exp_key, key
             );
         }
+    }
+
+    /// V31.4.4 acceptance: the App submenu (titled "rmap") must contain at
+    /// least 3 items — About rmap / separator / Quit rmap — with the correct
+    /// titles and key equivalents.
+    ///
+    /// Skips gracefully when not on the main thread.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn app_menu_has_about_and_quit() {
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
+
+        install_main_menu(mtm);
+
+        let app = NSApplication::sharedApplication(mtm);
+        let main_menu = app
+            .mainMenu()
+            .expect("mainMenu must be Some after install_main_menu");
+
+        // Find the App submenu (submenu titled "rmap").
+        let count = main_menu.numberOfItems();
+        let mut app_submenu = None;
+        for i in 0..count {
+            if let Some(item) = main_menu.itemAtIndex(i) {
+                if let Some(submenu) = item.submenu() {
+                    if submenu.title().to_string() == "rmap" {
+                        app_submenu = Some(submenu);
+                        break;
+                    }
+                }
+            }
+        }
+
+        let app_submenu = app_submenu.expect("App submenu titled 'rmap' must exist");
+
+        let item_count = app_submenu.numberOfItems();
+        assert!(
+            item_count >= 3,
+            "App submenu must have at least 3 items (About / separator / Quit), found {}",
+            item_count
+        );
+
+        // First item: About rmap
+        let about_item = app_submenu
+            .itemAtIndex(0)
+            .expect("item 0 must exist in App submenu");
+        assert_eq!(
+            about_item.title().to_string(),
+            "About rmap",
+            "item 0 must be 'About rmap'"
+        );
+
+        // Last item: Quit rmap with key equivalent "q"
+        let quit_item = app_submenu
+            .itemAtIndex(item_count - 1)
+            .expect("last item must exist in App submenu");
+        assert_eq!(
+            quit_item.title().to_string(),
+            "Quit rmap",
+            "last item must be 'Quit rmap'"
+        );
+        assert_eq!(
+            quit_item.keyEquivalent().to_string(),
+            "q",
+            "Quit rmap must have key equivalent 'q'"
+        );
+    }
+
+    /// V31.4.4 acceptance: the Help submenu must contain exactly one item
+    /// ("rmap Help") with key equivalent "?".
+    ///
+    /// Skips gracefully when not on the main thread.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn help_menu_has_one_item() {
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
+
+        install_main_menu(mtm);
+
+        let app = NSApplication::sharedApplication(mtm);
+        let main_menu = app
+            .mainMenu()
+            .expect("mainMenu must be Some after install_main_menu");
+
+        // Find the Help submenu.
+        let count = main_menu.numberOfItems();
+        let mut help_submenu = None;
+        for i in 0..count {
+            if let Some(item) = main_menu.itemAtIndex(i) {
+                if let Some(submenu) = item.submenu() {
+                    if submenu.title().to_string() == "Help" {
+                        help_submenu = Some(submenu);
+                        break;
+                    }
+                }
+            }
+        }
+
+        let help_submenu = help_submenu.expect("Help submenu must exist after install_main_menu");
+
+        let item_count = help_submenu.numberOfItems();
+        assert_eq!(
+            item_count, 1,
+            "Help submenu must have exactly 1 item, found {}",
+            item_count
+        );
+
+        let item = help_submenu
+            .itemAtIndex(0)
+            .expect("item 0 must exist in Help submenu");
+        assert_eq!(
+            item.title().to_string(),
+            "rmap Help",
+            "Help submenu item 0 must be 'rmap Help'"
+        );
+        assert_eq!(
+            item.keyEquivalent().to_string(),
+            "?",
+            "rmap Help must have key equivalent '?'"
+        );
+    }
+
+    /// V31.4.4 acceptance: `setWindowsMenu` must have been called, so
+    /// `NSApplication::windowsMenu()` returns Some after `install_main_menu`.
+    ///
+    /// Skips gracefully when not on the main thread.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn window_menu_assigned() {
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
+
+        install_main_menu(mtm);
+
+        let app = NSApplication::sharedApplication(mtm);
+        assert!(
+            app.windowsMenu().is_some(),
+            "NSApplication::windowsMenu() must return Some after install_main_menu calls setWindowsMenu"
+        );
     }
 
     /// V31.4.3 acceptance: the Edit submenu must contain exactly two items

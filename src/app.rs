@@ -4242,6 +4242,16 @@ impl ApplicationHandler for App {
                             }
                         }
                     }
+                    MenuAction::OpenHelp => {
+                        // Unconditional — help is available from any app state.
+                        crate::windows::control_panel::open_help_url();
+                    }
+                    MenuAction::ShowAbout => {
+                        // Unconditional — About panel is always relevant.
+                        if let Some(mtm) = objc2::MainThreadMarker::new() {
+                            crate::macos::menu::show_about_panel(mtm);
+                        }
+                    }
                 }
             }
         }
