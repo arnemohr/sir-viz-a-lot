@@ -86,10 +86,10 @@ impl Project {
         monitors: &[crate::monitors::MonitorInfo],
     ) -> Result<(), ProjectError> {
         let mut staged = self.clone();
-        if let Some(live) = monitors.get(staged.output_target.fallback_index) {
+        if let Some(live) = monitors.get(staged.primary_output_target().fallback_index) {
             if let Some(ref uuid) = live.uuid {
                 // Live monitor has a UUID — always prefer the fresh value.
-                staged.output_target.uuid = Some(uuid.clone());
+                staged.primary_output_target_mut().uuid = Some(uuid.clone());
             }
             // live.uuid == None: preserve whatever is already in staged.output_target.uuid.
         }
@@ -448,7 +448,7 @@ mod tests {
         let path = dir.join(format!("rmap_round_trip_{}.rmap.json", std::process::id()));
 
         let mut original = Project::default();
-        original.output_target.fallback_index = 2;
+        original.primary_output_target_mut().fallback_index = 2;
         original.layers.push(LayerConfig {
             id: "layer_a".into(),
             kind: LayerKind::Svg {
@@ -1210,8 +1210,11 @@ mod tests {
         ));
 
         let mut project = Project::default();
-        project.output_target.fallback_index = 0;
-        project.output_target.uuid = None;
+        {
+            let pot = project.primary_output_target_mut();
+            pot.fallback_index = 0;
+            pot.uuid = None;
+        }
 
         let monitors = vec![MonitorInfo {
             index: 0,
@@ -1230,7 +1233,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
 
         assert_eq!(
-            loaded.output_target.uuid,
+            loaded.primary_output_target().uuid,
             Some("6F24E84B-D34F-4F66-93D9-EE7A4D9C9F4C".to_string()),
             "UUID must be persisted to disk by save_with_live_monitors",
         );
@@ -1250,9 +1253,12 @@ mod tests {
         ));
 
         let mut project = Project::default();
-        project.output_target.fallback_index = 0;
-        // Pre-existing UUID from a previous macOS save.
-        project.output_target.uuid = Some("PRESERVED-UUID-UNCHANGED".to_string());
+        {
+            let pot = project.primary_output_target_mut();
+            pot.fallback_index = 0;
+            // Pre-existing UUID from a previous macOS save.
+            pot.uuid = Some("PRESERVED-UUID-UNCHANGED".to_string());
+        }
 
         let monitors = vec![MonitorInfo {
             index: 0,
@@ -1271,7 +1277,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
 
         assert_eq!(
-            loaded.output_target.uuid,
+            loaded.primary_output_target().uuid,
             Some("PRESERVED-UUID-UNCHANGED".to_string()),
             "existing UUID must be preserved when live monitor UUID is None",
         );

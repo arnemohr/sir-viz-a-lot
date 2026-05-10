@@ -1054,10 +1054,11 @@ pub struct SetOutputRgbMatrix {
 impl ReverseStorage for SetOutputRgbMatrix {
     fn apply(self, project: &mut Project) -> Self {
         debug_assert_eq!(
-            project.output_target.rgb_matrix, self.old,
+            project.primary_output_target().rgb_matrix,
+            self.old,
             "SetOutputRgbMatrix stale Reverse: live matrix != self.old",
         );
-        project.output_target.rgb_matrix = self.new;
+        project.primary_output_target_mut().rgb_matrix = self.new;
         SetOutputRgbMatrix {
             new: self.old,
             old: self.new,
@@ -1105,12 +1106,12 @@ pub struct SetOutputMonitorIndex {
 impl ReverseStorage for SetOutputMonitorIndex {
     fn apply(self, project: &mut Project) -> Self {
         debug_assert!(
-            project.output_target.fallback_index == self.old,
-            "SetOutputMonitorIndex stale Reverse: project.output_target.fallback_index={}, expected old={}",
-            project.output_target.fallback_index,
+            project.primary_output_target().fallback_index == self.old,
+            "SetOutputMonitorIndex stale Reverse: project.primary_output_target().fallback_index={}, expected old={}",
+            project.primary_output_target().fallback_index,
             self.old
         );
-        project.output_target.fallback_index = self.new;
+        project.primary_output_target_mut().fallback_index = self.new;
         SetOutputMonitorIndex {
             new: self.old,
             old: self.new,
@@ -1579,7 +1580,7 @@ impl Project {
     pub fn set_output_monitor_index_mutation(&self, new: usize) -> Mutation {
         Mutation::SetOutputMonitorIndex(SetOutputMonitorIndex {
             new,
-            old: self.output_target.fallback_index,
+            old: self.primary_output_target().fallback_index,
         })
     }
 
@@ -2061,7 +2062,7 @@ mod tests {
     fn set_output_rgb_matrix_round_trips() {
         let mut p = fresh_project();
         let identity = crate::project::schema::rgb_matrix_identity();
-        assert_eq!(p.output_target.rgb_matrix, identity);
+        assert_eq!(p.primary_output_target().rgb_matrix, identity);
 
         let new_matrix = [[0.95, 0.03, 0.02], [0.04, 0.96, 0.00], [0.01, 0.02, 0.97]];
         let before = serde_json::to_value(&p).unwrap();
@@ -2071,7 +2072,7 @@ mod tests {
             old: identity,
         });
         let reverse = mutation.apply(&mut p);
-        assert_eq!(p.output_target.rgb_matrix, new_matrix);
+        assert_eq!(p.primary_output_target().rgb_matrix, new_matrix);
 
         let _ = reverse.apply(&mut p);
         let after = serde_json::to_value(&p).unwrap();

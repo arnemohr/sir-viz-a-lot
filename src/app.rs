@@ -1097,12 +1097,12 @@ fn rebuild_layers_for_state(state: &mut EditingState) {
     }
 }
 
-/// V31.2.3 — capture the live monitor UUID into `project.output_target.uuid`
+/// V31.2.3 — capture the live monitor UUID into `project.primary_output_target().uuid`
 /// ahead of a save operation.
 ///
 /// Enumerates live monitors via `event_loop`, then looks up the monitor at
-/// `project.output_target.fallback_index`. When that monitor has a `Some(uuid)`
-/// (macOS only today), writes it into `project.output_target.uuid`. When the
+/// `project.primary_output_target().fallback_index`. When that monitor has a `Some(uuid)`
+/// (macOS only today), writes it into `project.primary_output_target().uuid`. When the
 /// live monitor's UUID is `None` (non-macOS or headless), the existing
 /// `output_target.uuid` is left untouched — a previously captured UUID must
 /// not be overwritten with `None` across platforms.
@@ -1111,11 +1111,11 @@ fn rebuild_layers_for_state(state: &mut EditingState) {
 #[cfg(feature = "v3")]
 fn capture_uuid_into_project(state: &mut EditingState, event_loop: &ActiveEventLoop) {
     let monitors = crate::monitors::list(event_loop);
-    if let Some(live) = monitors.get(state.project.output_target.fallback_index) {
+    if let Some(live) = monitors.get(state.project.primary_output_target().fallback_index) {
         if let Some(ref uuid) = live.uuid {
-            state.project.output_target.uuid = Some(uuid.clone());
+            state.project.primary_output_target_mut().uuid = Some(uuid.clone());
         }
-        // live.uuid == None: leave state.project.output_target.uuid unchanged.
+        // live.uuid == None: leave state.project.primary_output_target().uuid unchanged.
     }
 }
 
@@ -3128,7 +3128,7 @@ fn render_m5_pipeline(
                 // OutputTarget. Identity by default (P0.1.2 set the
                 // serde default to identity), so existing v6 projects
                 // load + render byte-identical to pre-P0.8.2 builds.
-                project.output_target.rgb_matrix,
+                project.primary_output_target().rgb_matrix,
                 wgpu::LoadOp::Clear(wgpu::Color::BLACK),
             );
             // Editor overlay: paint per-layer outlines + mask polygons on
@@ -4102,15 +4102,17 @@ impl ApplicationHandler for App {
         let monitor_index = if let Some(override_idx) = self.monitor_override {
             override_idx
         } else if live_monitors.is_empty() {
-            project.output_target.fallback_index
+            project.primary_output_target().fallback_index
         } else {
-            let outcome =
-                crate::monitors::resolve_output_target(&project.output_target, &live_monitors);
+            let outcome = crate::monitors::resolve_output_target(
+                project.primary_output_target(),
+                &live_monitors,
+            );
             match &outcome {
                 crate::monitors::ResolveOutcome::UuidMatch(m) => {
                     tracing::info!(
                         index = m.index,
-                        uuid = ?project.output_target.uuid,
+                        uuid = ?project.primary_output_target().uuid,
                         "output target resolved via UUID match",
                     );
                 }
@@ -4312,7 +4314,7 @@ impl ApplicationHandler for App {
                         let monitor: Option<winit::monitor::MonitorHandle> = {
                             let live = crate::monitors::list(event_loop);
                             let outcome = crate::monitors::resolve_output_target(
-                                &editing.project.output_target,
+                                editing.project.primary_output_target(),
                                 &live,
                             );
                             let idx = outcome.monitor().index;

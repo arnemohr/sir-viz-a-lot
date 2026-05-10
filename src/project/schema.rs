@@ -223,6 +223,14 @@ pub fn rgb_matrix_identity() -> [[f32; 3]; 3] {
     [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
 }
 
+/// Serde default for [`Project::output_targets`] — a single-element vec
+/// holding the default `OutputTarget`. Preserves the
+/// "always non-empty" invariant for projects that omit the field
+/// (fresh projects, malformed JSON, post-migration v6 projects).
+pub fn default_output_targets() -> Vec<OutputTarget> {
+    vec![OutputTarget::default()]
+}
+
 /// 003-T4.1 — 192×108 RGBA8 thumbnail captured when a scene is saved.
 /// Stored as a flat `width * height * 4` byte array in row-major order.
 /// `#[serde(default)]` ensures existing v5 saves (without this field) load
@@ -252,10 +260,17 @@ pub struct Project {
     pub layers: Vec<LayerConfig>,
     #[serde(default)]
     pub scenes: Vec<Scene>,
-    #[serde(default)]
-    pub output_target: OutputTarget,
-    /// When true, draw output in a decorated window on `output_target`'s
-    /// monitor instead of borderless fullscreen. Applied at startup (restart to toggle).
+    /// P0.7.1 (W7) — multi-projector output targets. v0.4 ships at most
+    /// two entries (the second-projector edge-blend stub); Phase 7
+    /// grows beyond two. **Invariant: always non-empty.** The
+    /// migration / serde default ensures `output_targets[0]` is
+    /// always a valid index, so [`Self::primary_output_target`] is
+    /// guaranteed not to panic.
+    #[serde(default = "default_output_targets")]
+    pub output_targets: Vec<OutputTarget>,
+    /// When true, draw output in a decorated window on the primary
+    /// output target's monitor instead of borderless fullscreen.
+    /// Applied at startup (restart to toggle).
     #[serde(default)]
     pub output_windowed: bool,
     #[serde(default)]
@@ -334,7 +349,7 @@ impl Default for Project {
             schema_version: CURRENT_SCHEMA_VERSION,
             layers: Vec::new(),
             scenes: Vec::new(),
-            output_target: OutputTarget::default(),
+            output_targets: default_output_targets(),
             output_windowed: false,
             output_resolution: None,
             background_color: default_bg(),
@@ -350,6 +365,42 @@ impl Default for Project {
             quantize_bars: None,
             transient_audit_signals: Cell::new(TransientAuditSignals::default()),
         }
+    }
+}
+
+impl Project {
+    /// Read the project's primary output target. Always returns the
+    /// `[0]` element — the schema invariant guarantees
+    /// `output_targets` is non-empty (the migration + serde default
+    /// + `Project::default` all populate at least one entry).
+    ///
+    /// In debug builds, an empty vec triggers a `debug_assert!`
+    /// panic so the violation surfaces immediately. In release the
+    /// helper still returns a reasonable result by re-populating
+    /// the vec — show-day reliability prefers a degraded render
+    /// over a crash.
+    pub fn primary_output_target(&self) -> &OutputTarget {
+        debug_assert!(
+            !self.output_targets.is_empty(),
+            "Project::output_targets is empty — schema invariant violated",
+        );
+        // The invariant should hold; the unwrap_or branch is defensive
+        // for release builds.
+        self.output_targets.first().unwrap_or_else(|| {
+            static FALLBACK: std::sync::OnceLock<OutputTarget> = std::sync::OnceLock::new();
+            FALLBACK.get_or_init(OutputTarget::default)
+        })
+    }
+
+    /// Mutable sibling of [`Self::primary_output_target`]. If the vec
+    /// is somehow empty (release-build path that should never fire),
+    /// pushes a default and returns a ref to it so callers can write
+    /// without an extra check.
+    pub fn primary_output_target_mut(&mut self) -> &mut OutputTarget {
+        if self.output_targets.is_empty() {
+            self.output_targets.push(OutputTarget::default());
+        }
+        &mut self.output_targets[0]
     }
 }
 

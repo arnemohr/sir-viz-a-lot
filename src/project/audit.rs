@@ -247,17 +247,18 @@ impl ProjectAudit {
         }
 
         // T1.39: output_target.fallback_index >= monitor_count.
-        if (project.output_target.fallback_index as u32) >= env.monitor_count {
+        if (project.primary_output_target().fallback_index as u32) >= env.monitor_count {
             findings.push(AuditFinding {
                 kind: AuditKind::MonitorOutOfRange {
-                    requested: project.output_target.fallback_index as u32,
+                    requested: project.primary_output_target().fallback_index as u32,
                     available: env.monitor_count,
                 },
                 severity: Severity::Warn,
                 message: format!(
                     "Project requests monitor {} but only {} monitor(s) available. \
                      Falls back to monitor 0.",
-                    project.output_target.fallback_index, env.monitor_count,
+                    project.primary_output_target().fallback_index,
+                    env.monitor_count,
                 ),
                 autofix: Some(project.set_output_monitor_index_mutation(0)),
             });
@@ -268,7 +269,7 @@ impl ProjectAudit {
         // `live_monitor_uuids` is non-empty (i.e. the caller passed live
         // monitor data) so that callers that only populate `monitor_count`
         // (older call sites, non-v3 paths) don't produce spurious findings.
-        if let Some(ref uuid) = project.output_target.uuid {
+        if let Some(ref uuid) = project.primary_output_target().uuid {
             if !env.live_monitor_uuids.is_empty() {
                 let uuid_found = env
                     .live_monitor_uuids
@@ -278,13 +279,13 @@ impl ProjectAudit {
                     findings.push(AuditFinding {
                         kind: AuditKind::OutputTargetUuidNotFound {
                             uuid: uuid.clone(),
-                            fallback_index: project.output_target.fallback_index,
+                            fallback_index: project.primary_output_target().fallback_index,
                         },
                         severity: Severity::Warn,
                         message: format!(
                             "Saved projector (UUID {uuid}) isn't connected. \
                              Falling back to monitor {}.",
-                            project.output_target.fallback_index,
+                            project.primary_output_target().fallback_index,
                         ),
                         autofix: None,
                     });
@@ -742,7 +743,7 @@ mod tests {
     #[test]
     fn audit_monitor_out_of_range_emits_finding() {
         let mut p = fresh_project();
-        p.output_target.fallback_index = 99;
+        p.primary_output_target_mut().fallback_index = 99;
         let env = AuditEnv {
             monitor_count: 1,
             live_monitor_uuids: Vec::new(),
@@ -758,7 +759,7 @@ mod tests {
         // Apply autofix; assert index reset to 0.
         let mutation = f.autofix.clone().unwrap();
         let _reverse = mutation.apply(&mut p);
-        assert_eq!(p.output_target.fallback_index, 0);
+        assert_eq!(p.primary_output_target().fallback_index, 0);
     }
 
     /// 003-T2.21 — `first_run_canonical` half: load the bundled
@@ -1019,8 +1020,11 @@ mod tests {
     #[test]
     fn audit_output_target_uuid_not_found_emits_warning() {
         let mut p = fresh_project();
-        p.output_target.uuid = Some("DEAD-BEEF-1234".to_string());
-        p.output_target.fallback_index = 0;
+        {
+            let pot = p.primary_output_target_mut();
+            pot.uuid = Some("DEAD-BEEF-1234".to_string());
+            pot.fallback_index = 0;
+        }
 
         let env = AuditEnv {
             monitor_count: 1,
@@ -1054,7 +1058,7 @@ mod tests {
     #[test]
     fn audit_output_target_uuid_found_no_finding() {
         let mut p = fresh_project();
-        p.output_target.uuid = Some("MATCH-ME".to_string());
+        p.primary_output_target_mut().uuid = Some("MATCH-ME".to_string());
 
         let env = AuditEnv {
             monitor_count: 1,
@@ -1076,7 +1080,7 @@ mod tests {
     #[test]
     fn audit_output_target_uuid_not_found_skips_when_uuids_unpopulated() {
         let mut p = fresh_project();
-        p.output_target.uuid = Some("SOME-UUID".to_string());
+        p.primary_output_target_mut().uuid = Some("SOME-UUID".to_string());
 
         // AuditEnv::default() has live_monitor_uuids: vec![]
         let findings = ProjectAudit::run(&p, &AuditEnv::default());

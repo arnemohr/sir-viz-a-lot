@@ -49,11 +49,21 @@ pub fn migrate(mut value: Value) -> Result<(Value, MigrationOutcome), ProjectErr
             if version <= 5 {
                 migrate_v5_to_v6_output_target(&mut value);
             }
-            // v6 → v7 (P0.1.2): adds `OutputTarget.rgb_matrix` (defaulted
-            // to identity by serde) and three new `LayerKind` variants
-            // (`Video`, `FxLayer`, `Ndi`) used by W4 / W5 / W6. Existing
-            // v6 fields are unchanged; the migration is a version-bump
-            // only — defaults populate `rgb_matrix` on deserialise.
+            // v6 → v7 (P0.1.2 + P0.7.1):
+            //   • Adds `OutputTarget.rgb_matrix` (identity default via serde).
+            //   • Adds `LayerKind::Video / FxLayer / Ndi` placeholder
+            //     variants for W4 / W5 / W6.
+            //   • **Renames `output_target: OutputTarget` →
+            //     `output_targets: Vec<OutputTarget>`.** Wraps the
+            //     prior singular value into a single-element vec so
+            //     v6 projects load with a non-empty vec — the schema
+            //     invariant `Project::primary_output_target()` relies
+            //     on. Defensive: if `output_target` is missing, the
+            //     serde default for `output_targets` populates a
+            //     fresh single-element vec.
+            if version <= 6 {
+                migrate_v6_to_v7_output_targets(&mut value);
+            }
             value["schema_version"] = serde_json::json!(CURRENT_SCHEMA_VERSION);
             Ok((value, outcome))
         }
@@ -322,6 +332,23 @@ fn reset_transform_placement(effects: Option<&mut Value>) {
         t_obj.insert("scale_y".into(), serde_json::json!({ "Static": 1.0 }));
         return;
     }
+}
+
+/// P0.7.1 — migrate v6 projects to v7: replace the singular
+/// `output_target: OutputTarget` with `output_targets:
+/// Vec<OutputTarget>` (single-element wrap).
+///
+/// Defensive: if `output_target` is missing (already on v7 by some
+/// other path, or malformed v6), serde's `default_output_targets`
+/// populates a single default-target vec on deserialise.
+fn migrate_v6_to_v7_output_targets(value: &mut Value) {
+    let Some(obj) = value.as_object_mut() else {
+        return;
+    };
+    let Some(legacy) = obj.remove("output_target") else {
+        return;
+    };
+    obj.insert("output_targets".into(), Value::Array(vec![legacy]));
 }
 
 /// V31.2.1 — migrate v5 projects to v6: replace `output_monitor_index: usize`
@@ -681,8 +708,8 @@ mod tests {
         let (out, _) = migrate(v).expect("migrate");
         let p: Project = serde_json::from_value(out).expect("deserialize as v6");
         assert_eq!(p.schema_version, CURRENT_SCHEMA_VERSION);
-        assert_eq!(p.output_target.uuid, None);
-        assert_eq!(p.output_target.fallback_index, 2);
+        assert_eq!(p.primary_output_target().uuid, None);
+        assert_eq!(p.primary_output_target().fallback_index, 2);
     }
 
     /// V31.2.1 — v5 project with `output_monitor_index: 0` migrates correctly.
@@ -692,8 +719,49 @@ mod tests {
         let (out, _) = migrate(v).expect("migrate");
         let p: Project = serde_json::from_value(out).expect("deserialize as v6");
         assert_eq!(p.schema_version, CURRENT_SCHEMA_VERSION);
-        assert_eq!(p.output_target.uuid, None);
-        assert_eq!(p.output_target.fallback_index, 0);
+        assert_eq!(p.primary_output_target().uuid, None);
+        assert_eq!(p.primary_output_target().fallback_index, 0);
+    }
+
+    /// P0.7.1 — v6 → v7 migration wraps the singular `output_target`
+    /// into a `output_targets` single-element vec.
+    #[test]
+    fn v6_to_v7_wraps_output_target_into_vec() {
+        let v = serde_json::json!({
+            "schema_version": 6,
+            "layers": [],
+            "output_target": {
+                "uuid": "TEST-UUID",
+                "fallback_index": 1,
+            },
+        });
+        let (out, _) = migrate(v).expect("migrate");
+        // Raw JSON form: `output_target` is gone, `output_targets`
+        // is a single-element array carrying the prior values.
+        assert!(out.get("output_target").is_none(), "singular field removed");
+        let arr = out
+            .get("output_targets")
+            .and_then(|v| v.as_array())
+            .expect("output_targets is an array");
+        assert_eq!(arr.len(), 1, "single-element wrap");
+        assert_eq!(arr[0]["uuid"], "TEST-UUID");
+        assert_eq!(arr[0]["fallback_index"], 1);
+    }
+
+    /// P0.7.1 — defensive: v6 project with `output_target` missing
+    /// (malformed save) loads via the serde default (single default
+    /// target), preserving the schema invariant
+    /// `output_targets` is non-empty.
+    #[test]
+    fn v6_with_missing_output_target_falls_back_to_default() {
+        let v = serde_json::json!({
+            "schema_version": 6,
+            "layers": [],
+            // deliberately omit output_target
+        });
+        let (out, _) = migrate(v).expect("migrate");
+        let p: Project = serde_json::from_value(out).expect("deserialize");
+        assert_eq!(p.output_targets.len(), 1, "default populates one target");
     }
 
     /// V31.2.1 — a v6 project with `output_target` already present is
@@ -713,10 +781,10 @@ mod tests {
         let (out, _) = migrate(v).expect("migrate");
         let p: Project = serde_json::from_value(out).expect("deserialize as v7");
         assert_eq!(p.schema_version, CURRENT_SCHEMA_VERSION);
-        assert_eq!(p.output_target.uuid, None);
-        assert_eq!(p.output_target.fallback_index, 3);
+        assert_eq!(p.primary_output_target().uuid, None);
+        assert_eq!(p.primary_output_target().fallback_index, 3);
         assert_eq!(
-            p.output_target.rgb_matrix,
+            p.primary_output_target().rgb_matrix,
             crate::project::schema::rgb_matrix_identity(),
             "v6 → v7 migration must default rgb_matrix to identity",
         );
@@ -822,8 +890,8 @@ mod tests {
         let (out, _) = migrate(v).expect("migrate");
         let p: Project = serde_json::from_value(out).expect("deserialize as v6");
         assert_eq!(p.schema_version, CURRENT_SCHEMA_VERSION);
-        assert_eq!(p.output_target.uuid, None);
-        assert_eq!(p.output_target.fallback_index, 0);
+        assert_eq!(p.primary_output_target().uuid, None);
+        assert_eq!(p.primary_output_target().fallback_index, 0);
     }
 
     /// T3.29 — a v4 layer with a custom (non-identity) warp grid is

@@ -548,7 +548,7 @@ fn show_rgb_matrix_editor(ui: &mut Ui, project: &mut Project, st: &mut ControlPa
     use crate::project::schema::rgb_matrix_identity;
 
     let identity = rgb_matrix_identity();
-    let is_identity = project.output_target.rgb_matrix == identity;
+    let is_identity = project.primary_output_target().rgb_matrix == identity;
 
     ui.horizontal(|ui| {
         glossary_label(ui, GlossaryTerm::RgbMatrix);
@@ -557,7 +557,7 @@ fn show_rgb_matrix_editor(ui: &mut Ui, project: &mut Project, st: &mut ControlPa
         }
     });
 
-    let mut new_matrix = project.output_target.rgb_matrix;
+    let mut new_matrix = project.primary_output_target().rgb_matrix;
     let mut changed = false;
     let row_labels = ["R out", "G out", "B out"];
     let col_labels = ["·R", "·G", "·B"];
@@ -590,11 +590,11 @@ fn show_rgb_matrix_editor(ui: &mut Ui, project: &mut Project, st: &mut ControlPa
             }
         });
 
-    if changed && new_matrix != project.output_target.rgb_matrix {
+    if changed && new_matrix != project.primary_output_target().rgb_matrix {
         st.pending_mutations
             .push(Mutation::SetOutputRgbMatrix(SetOutputRgbMatrix {
                 new: new_matrix,
-                old: project.output_target.rgb_matrix,
+                old: project.primary_output_target().rgb_matrix,
             }));
     }
 
@@ -604,7 +604,7 @@ fn show_rgb_matrix_editor(ui: &mut Ui, project: &mut Project, st: &mut ControlPa
             st.pending_mutations
                 .push(Mutation::SetOutputRgbMatrix(SetOutputRgbMatrix {
                     new: identity,
-                    old: project.output_target.rgb_matrix,
+                    old: project.primary_output_target().rgb_matrix,
                 }));
         }
         ui.add_enabled(false, egui::Button::new("Calibrate…"))
@@ -667,7 +667,7 @@ fn show_project_section(
     // (e.g. "BenQ TH685") so the operator can confirm the right display is
     // selected without memorising numeric indices.  Falls back to "monitor N"
     // when the live list is shorter than the stored index (display unplugged).
-    let idx = project.output_target.fallback_index;
+    let idx = project.primary_output_target().fallback_index;
     let monitor_label = monitor_names
         .get(idx)
         .cloned()
