@@ -10,7 +10,7 @@
 //! it supports scene design rather than adding chaos." Eight log-spaced
 //! bands smoothed with a one-pole low-pass is intentionally simple, far from
 //! a generic spectrum-analyser; that's the right side of "supports scene
-//! design" for the wedding-scale target.
+//! design" for the event-scale target.
 
 use std::sync::{Arc, OnceLock};
 
@@ -30,6 +30,18 @@ pub trait AudioProvider: Send + Sync {
     /// Magnitude in `[0, 1]` for the given band index. Out-of-range
     /// indices clamp to the last band rather than panic.
     fn band(&self, idx: u8) -> f32;
+
+    /// Bulk read: fill `out` with all 8 bands in a single operation.
+    /// Default impl falls back to per-band reads; `CpalAudioProvider`
+    /// overrides for a single read-lock take (32 bytes, one atomic CAS).
+    ///
+    /// V31.9.1: called by `current_bands_snapshot` so the UI thread
+    /// acquires the lock only once per frame.
+    fn bands(&self, out: &mut [f32; NUM_BANDS]) {
+        for (i, slot) in out.iter_mut().enumerate() {
+            *slot = self.band(i as u8);
+        }
+    }
 }
 
 /// Process-wide audio provider, set once at app startup. `Modulator::Audio`
@@ -48,6 +60,36 @@ pub fn install(provider: Arc<dyn AudioProvider>) {
 /// provider was installed (e.g. no input device, audio init failed).
 pub fn current_band(idx: u8) -> f32 {
     PROVIDER.get().map(|p| p.band(idx)).unwrap_or(0.0)
+}
+
+/// Snapshot of all 8 bands as a `Copy` array, in one operation.
+/// Returns `[0.0; 8]` when no provider is installed (audio feature off,
+/// init failed, or no input device).
+///
+/// V31.9.1: the per-frame UI read path. The UI thread polls this once per
+/// frame; the strip (V31.9.2) renders 8 vertical bars from the result.
+/// Allocation-free; uses the bulk [`AudioProvider::bands`] method so
+/// `CpalAudioProvider` satisfies the read with a single lock acquisition.
+pub fn current_bands_snapshot() -> [f32; NUM_BANDS] {
+    PROVIDER
+        .get()
+        .map(|p| {
+            let mut buf = [0.0f32; NUM_BANDS];
+            p.bands(&mut buf);
+            buf
+        })
+        .unwrap_or([0.0; NUM_BANDS])
+}
+
+/// Returns `true` when an [`AudioProvider`] is installed.
+///
+/// V31.9.1: used by the UI strip (V31.9.2) to decide whether to render
+/// the bands meter at all — when no audio source is active the strip is
+/// hidden entirely. A provider is set once at app startup if and only if
+/// audio capture started successfully, so this is a reliable proxy for
+/// "audio is running".
+pub fn is_audio_active() -> bool {
+    PROVIDER.get().is_some()
 }
 
 #[cfg(feature = "audio")]
@@ -70,6 +112,16 @@ mod cpal_impl {
         fn band(&self, idx: u8) -> f32 {
             let i = (idx as usize).min(NUM_BANDS - 1);
             self.bands.read().map(|b| b[i]).unwrap_or(0.0)
+        }
+
+        /// Override: acquire the read-lock once, copy all 8 bands in a
+        /// single 32-byte `*out = *guard` assignment.
+        /// V31.9.1: this is the "no lock contention" path for UI reads.
+        fn bands(&self, out: &mut [f32; NUM_BANDS]) {
+            if let Ok(guard) = self.bands.read() {
+                *out = *guard;
+            }
+            // If poisoned, `out` keeps its caller-provided default ([0.0; 8]).
         }
     }
 
@@ -174,7 +226,7 @@ mod cpal_impl {
                     }
                     let avg = sum / (hi - lo) as f32;
                     // Normalize: divide by sqrt(fft_size). Squash to [0, 1] —
-                    // wedding-PA peaks are usually < 1 after this scaling;
+                    // event-PA peaks are usually < 1 after this scaling;
                     // clamp covers the rest.
                     new_bands[b] = (avg / (fft_size as f32).sqrt()).clamp(0.0, 1.0);
                 }
@@ -189,6 +241,33 @@ mod cpal_impl {
             }
         }
     }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// V31.9.1: bulk `bands` and per-band `band(i)` agree for
+        /// `CpalAudioProvider` when the backing RwLock holds known values.
+        /// Constructs the provider without a live cpal stream; tests the
+        /// trait implementation directly.
+        #[test]
+        fn bulk_bands_matches_per_band_reads() {
+            let known: [f32; NUM_BANDS] = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8];
+            let provider = CpalAudioProvider {
+                bands: Arc::new(RwLock::new(known)),
+            };
+
+            // Per-band reads.
+            let per_band: [f32; NUM_BANDS] = std::array::from_fn(|i| provider.band(i as u8));
+
+            // Bulk read.
+            let mut bulk = [0.0f32; NUM_BANDS];
+            provider.bands(&mut bulk);
+
+            assert_eq!(bulk, per_band, "bulk and per-band reads must agree");
+            assert_eq!(bulk, known, "values must match what was written");
+        }
+    }
 }
 
 #[cfg(feature = "audio")]
@@ -196,3 +275,74 @@ pub use cpal_impl::{AudioCaptureGuard, start_default};
 // `CpalAudioProvider` is constructed inside `start_default` and erased into
 // the `Arc<dyn AudioProvider>` registered with `install`; no external caller
 // names the type, so there is no re-export.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---------------------------------------------------------------------------
+    // V31.9.1 tests
+    // ---------------------------------------------------------------------------
+
+    /// `current_bands_snapshot` returns zeros when no provider is installed.
+    ///
+    /// Safe to run unconditionally: `audio::install` is only called at app
+    /// startup (`src/app.rs`) and never in any test, so `PROVIDER` is
+    /// guaranteed to be unset in the test process.
+    #[test]
+    fn snapshot_zeros_when_no_provider() {
+        // PROVIDER is a OnceLock that has not been set in any test.
+        let snap = current_bands_snapshot();
+        assert_eq!(
+            snap, [0.0f32; NUM_BANDS],
+            "snapshot must be all zeros when no provider is installed"
+        );
+    }
+
+    /// `is_audio_active` returns `false` when no provider is installed.
+    #[test]
+    fn is_audio_active_false_when_no_provider() {
+        assert!(
+            !is_audio_active(),
+            "is_audio_active must be false when no provider is installed"
+        );
+    }
+
+    /// Stub provider that returns canned values. Tests the `AudioProvider`
+    /// trait — both the single-band and bulk paths — without touching the
+    /// process-global `PROVIDER`.
+    struct StubProvider([f32; NUM_BANDS]);
+
+    impl AudioProvider for StubProvider {
+        fn band(&self, idx: u8) -> f32 {
+            let i = (idx as usize).min(NUM_BANDS - 1);
+            self.0[i]
+        }
+        // Uses the default `bands` impl (per-band loop) — exercises that path.
+    }
+
+    /// Calling `bands` on a stub provider via the default impl returns the
+    /// same values as per-band `band(i)` calls.
+    #[test]
+    fn snapshot_returns_provider_values() {
+        let canned: [f32; NUM_BANDS] = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8];
+        let provider = StubProvider(canned);
+
+        // Test the trait directly — no global indirection.
+        let mut out = [0.0f32; NUM_BANDS];
+        provider.bands(&mut out);
+        assert_eq!(
+            out, canned,
+            "bulk bands via default impl must match canned values"
+        );
+
+        // Also verify per-band path.
+        for (i, &expected) in canned.iter().enumerate() {
+            assert_eq!(
+                provider.band(i as u8),
+                expected,
+                "band({i}) must match canned[{i}]"
+            );
+        }
+    }
+}
