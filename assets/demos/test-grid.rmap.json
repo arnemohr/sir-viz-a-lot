@@ -1,0 +1,84 @@
+{
+  "schema_version": 6,
+  "layers": [
+    {
+      "id": "demo_test_grid_svg",
+      "kind": {
+        "Svg": {
+          "svg_path": "test-grid/test-grid.svg"
+        }
+      },
+      "enabled": true,
+      "transform": {
+        "translate": [0.0, 0.0],
+        "rotate_deg": 0.0,
+        "scale": [1.0, 1.0],
+        "anchor": [0.5, 0.5]
+      },
+      "effects": [],
+      "blend_mode": "Normal",
+      "opacity": 1.0,
+      "warp": {
+        "rows": 1,
+        "cols": 1,
+        "grid": [
+          [[0.0, 0.0], [1.0, 0.0]],
+          [[0.0, 1.0], [1.0, 1.0]]
+        ],
+        "mask_polygon": [
+          [0.0, 0.0],
+          [1.0, 0.0],
+          [1.0, 1.0],
+          [0.0, 1.0]
+        ],
+        "mask_feather": 0.0
+      }
+    },
+    {
+      "id": "demo_test_grid_verifier",
+      "kind": {
+        "Image": {
+          "path": "window-glow/photo.jpg",
+          "fit": "Cover",
+          "focal": [0.5, 0.5]
+        }
+      },
+      "enabled": true,
+      "transform": {
+        "translate": [0.78, 0.22],
+        "rotate_deg": 0.0,
+        "scale": [0.18, 0.32],
+        "anchor": [0.5, 0.5]
+      },
+      "effects": [],
+      "blend_mode": "Normal",
+      "opacity": 1.0,
+      "warp": {
+        "rows": 1,
+        "cols": 1,
+        "grid": [
+          [[0.0, 0.0], [1.0, 0.0]],
+          [[0.0, 1.0], [1.0, 1.0]]
+        ],
+        "mask_polygon": [
+          [0.05, 0.05],
+          [0.95, 0.05],
+          [0.95, 0.95],
+          [0.05, 0.95]
+        ],
+        "mask_feather": 0.0
+      }
+    }
+  ],
+  "scenes": [],
+  "output_target": {
+    "uuid": null,
+    "fallback_index": 0
+  },
+  "output_windowed": true,
+  "background_color": [0.0, 0.0, 0.0, 1.0],
+  "gamma": 1.0,
+  "brightness": 0.0,
+  "contrast": 1.0,
+  "crossfade_duration_s": 0.0
+}

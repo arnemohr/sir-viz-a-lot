@@ -860,6 +860,51 @@ mod tests {
         );
     }
 
+    /// 004-V31.5.2 — `test_grid_demo_audits_clean`: load the bundled
+    /// `assets/demos/test-grid.rmap.json` demo and assert
+    /// [`ProjectAudit::run_with_path`] returns zero findings. Mirrors the
+    /// `film_strip_demo_audits_clean` test for the test-grid demo.
+    #[test]
+    fn test_grid_demo_audits_clean() {
+        let demo_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("assets/demos/test-grid.rmap.json");
+        assert!(
+            demo_path.exists(),
+            "bundled test-grid demo missing at {}; 004-V31.5.2 ships it",
+            demo_path.display(),
+        );
+        let project = crate::project::Project::load(&demo_path).expect("test-grid demo loads");
+
+        let env = AuditEnv {
+            monitor_count: 1,
+            live_monitor_uuids: Vec::new(),
+        };
+        let findings = ProjectAudit::run_with_path(&project, &env, Some(&demo_path));
+        assert!(
+            findings.is_empty(),
+            "004-V31.5.2 test-grid demo should audit clean; got {findings:?}",
+        );
+
+        // SVG layer asset must resolve and have non-zero size.
+        let layer = project
+            .layers
+            .first()
+            .expect("test-grid demo carries at least one layer");
+        let rel = layer.kind.asset_path();
+        let asset = project.resolve_asset(&demo_path, rel);
+        let metadata = std::fs::metadata(&asset).unwrap_or_else(|err| {
+            panic!(
+                "test-grid demo asset {} not on disk: {err}",
+                asset.display()
+            )
+        });
+        assert!(
+            metadata.len() > 0,
+            "test-grid demo asset {} is a zero-byte placeholder",
+            asset.display(),
+        );
+    }
+
     /// 003-T1.40 — schema_version > CURRENT triggers Critical SchemaTooNew.
     /// Current version does not.
     #[test]

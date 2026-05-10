@@ -2114,8 +2114,11 @@ fn launcher_render(
                 // 004-V31.5.1: extended from a single hard-wired button
                 // to a list driven by DEMO_LIST so adding a new demo
                 // only requires one line in the const.
-                const DEMO_LIST: &[(&str, &str)] =
-                    &[("window-glow", "Window Glow"), ("film-strip", "Film Strip")];
+                const DEMO_LIST: &[(&str, &str)] = &[
+                    ("window-glow", "Window Glow"),
+                    ("film-strip", "Film Strip"),
+                    ("test-grid", "Test Grid"),
+                ];
 
                 let badge = !prefs.first_launch_completed;
                 center_ui.weak("Try a demo");
@@ -4707,6 +4710,85 @@ mod tests {
                 layer.transform.scale,
             );
         }
+        assert!(project.output_windowed, "demo opens windowed for safety");
+    }
+
+    /// 004-V31.5.2 — test-grid demo presence and shape. Mirrors
+    /// `demo_loads_film_strip` for the `test-grid` demo: verifies the file
+    /// resolves via `ProjectSource::Demo`, audits clean, has 2 layers
+    /// (SVG test grid + masked image verifier), and opens windowed.
+    #[cfg(feature = "v3")]
+    #[test]
+    fn demo_loads_test_grid() {
+        use crate::controls::ProjectSource;
+        let demo_path = std::path::PathBuf::from("assets/demos/test-grid.rmap.json");
+        if !demo_path.exists() {
+            eprintln!(
+                "demo_loads_test_grid: skipping — `{}` not present (004-V31.5.2 bundle).",
+                demo_path.display(),
+            );
+            return;
+        }
+
+        let (project, returned_path) = resolve_project_source(&ProjectSource::Demo("test-grid"))
+            .expect("test-grid demo project loads");
+        assert!(
+            returned_path
+                .as_deref()
+                .map(|p| p == demo_path.as_path())
+                .unwrap_or(false),
+            "Demo source should return the bundled path"
+        );
+
+        let env = crate::project::audit::AuditEnv {
+            monitor_count: 1,
+            live_monitor_uuids: Vec::new(),
+        };
+        let findings = crate::project::audit::ProjectAudit::run_with_path(
+            &project,
+            &env,
+            Some(demo_path.as_path()),
+        );
+        assert!(
+            findings.is_empty(),
+            "test-grid demo should audit clean, got: {findings:?}"
+        );
+
+        // Shape: 2 layers — SVG test grid (full screen) + masked image verifier.
+        assert_eq!(
+            project.layers.len(),
+            2,
+            "test-grid demo has exactly 2 layers"
+        );
+
+        // Layer 0: SVG test grid.
+        assert!(
+            matches!(
+                project.layers[0].kind,
+                crate::project::schema::LayerKind::Svg { ref svg_path }
+                    if svg_path.to_string_lossy().contains("test-grid")
+            ),
+            "layer 0 must be a Svg kind with path containing 'test-grid', got {:?}",
+            project.layers[0].kind,
+        );
+        assert!(
+            !project.layers[0].warp.mask_polygon.is_empty(),
+            "layer 0 (SVG) warp carries a full-frame mask",
+        );
+
+        // Layer 1: Image verifier.
+        assert!(
+            matches!(
+                project.layers[1].kind,
+                crate::project::schema::LayerKind::Image { .. }
+            ),
+            "layer 1 must be an Image kind"
+        );
+        assert!(
+            !project.layers[1].warp.mask_polygon.is_empty(),
+            "layer 1 (image verifier) warp carries a mask",
+        );
+
         assert!(project.output_windowed, "demo opens windowed for safety");
     }
 
