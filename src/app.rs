@@ -3750,6 +3750,17 @@ impl ApplicationHandler for App {
             return;
         }
 
+        // 004-V31.4.1: install the native macOS menu bar skeleton (App /
+        // File / Edit / Window / Help — all empty for now). Must run once,
+        // after the is_running guard so it doesn't fire on re-resume. Actions
+        // are wired in V31.4.2 – V31.4.4; cfg-gating is audited in V31.4.5.
+        // `MainThreadMarker::new()` is always `Some` here — winit guarantees
+        // `resumed` fires on the main thread on macOS.
+        #[cfg(target_os = "macos")]
+        if let Some(mtm) = objc2::MainThreadMarker::new() {
+            crate::macos::menu::install_main_menu(mtm);
+        }
+
         // 003-T2.2 — first-launch path. With no project arg, no
         // autostart, and the v3 feature on, we open the launcher
         // window instead of going straight into Editing. The launcher

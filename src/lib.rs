@@ -7,6 +7,8 @@
 
 pub mod clock;
 pub mod effects;
+#[cfg(target_os = "macos")]
+pub mod macos;
 pub mod modulators;
 pub mod monitors;
 pub mod project;

@@ -9,6 +9,8 @@ mod controls;
 mod effects;
 mod error;
 mod image_layer;
+#[cfg(target_os = "macos")]
+mod macos;
 mod modulators;
 mod monitors;
 mod project;
