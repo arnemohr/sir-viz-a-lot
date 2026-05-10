@@ -247,21 +247,47 @@ impl ProjectAudit {
         }
 
         // T1.39: output_target.fallback_index >= monitor_count.
-        if (project.primary_output_target().fallback_index as u32) >= env.monitor_count {
-            findings.push(AuditFinding {
-                kind: AuditKind::MonitorOutOfRange {
-                    requested: project.primary_output_target().fallback_index as u32,
-                    available: env.monitor_count,
-                },
-                severity: Severity::Warn,
-                message: format!(
-                    "Project requests monitor {} but only {} monitor(s) available. \
-                     Falls back to monitor 0.",
-                    project.primary_output_target().fallback_index,
-                    env.monitor_count,
-                ),
-                autofix: Some(project.set_output_monitor_index_mutation(0)),
-            });
+        // P0.7.2: walk every entry in output_targets so a two-projector project
+        // gets a finding per offending target. When the project has exactly one
+        // target the message text is the same as before (no "output N:" prefix)
+        // so existing tests and operator-visible wording stay unchanged.
+        // Autofix is emitted only for entry 0 (the primary); entries 1+ emit
+        // warning-only findings. Autofix for secondary outputs would require a
+        // `SetOutputMonitorIndexAt { output_idx, .. }` mutation that doesn't
+        // exist yet — noted as a follow-up.
+        let multi_output = project.output_targets.len() > 1;
+        for (target_idx, target) in project.output_targets.iter().enumerate() {
+            if (target.fallback_index as u32) >= env.monitor_count {
+                let message = if multi_output {
+                    format!(
+                        "output {target_idx}: requests monitor {} but only {} monitor(s) available. \
+                         Falls back to monitor 0.",
+                        target.fallback_index, env.monitor_count,
+                    )
+                } else {
+                    format!(
+                        "Project requests monitor {} but only {} monitor(s) available. \
+                         Falls back to monitor 0.",
+                        target.fallback_index, env.monitor_count,
+                    )
+                };
+                // Autofix: only for the primary target (index 0). Secondary
+                // targets need a per-entry mutation that is deferred (see above).
+                let autofix = if target_idx == 0 {
+                    Some(project.set_output_monitor_index_mutation(0))
+                } else {
+                    None
+                };
+                findings.push(AuditFinding {
+                    kind: AuditKind::MonitorOutOfRange {
+                        requested: target.fallback_index as u32,
+                        available: env.monitor_count,
+                    },
+                    severity: Severity::Warn,
+                    message,
+                    autofix,
+                });
+            }
         }
 
         // V31.2.2: OutputTargetUuidNotFound — project has a UUID but none of
@@ -269,26 +295,38 @@ impl ProjectAudit {
         // `live_monitor_uuids` is non-empty (i.e. the caller passed live
         // monitor data) so that callers that only populate `monitor_count`
         // (older call sites, non-v3 paths) don't produce spurious findings.
-        if let Some(ref uuid) = project.primary_output_target().uuid {
-            if !env.live_monitor_uuids.is_empty() {
-                let uuid_found = env
-                    .live_monitor_uuids
-                    .iter()
-                    .any(|u| u.as_deref() == Some(uuid.as_str()));
-                if !uuid_found {
-                    findings.push(AuditFinding {
-                        kind: AuditKind::OutputTargetUuidNotFound {
-                            uuid: uuid.clone(),
-                            fallback_index: project.primary_output_target().fallback_index,
-                        },
-                        severity: Severity::Warn,
-                        message: format!(
-                            "Saved projector (UUID {uuid}) isn't connected. \
-                             Falling back to monitor {}.",
-                            project.primary_output_target().fallback_index,
-                        ),
-                        autofix: None,
-                    });
+        // P0.7.2: walk all targets (same multi-output prefix convention as above).
+        for (target_idx, target) in project.output_targets.iter().enumerate() {
+            if let Some(ref uuid) = target.uuid {
+                if !env.live_monitor_uuids.is_empty() {
+                    let uuid_found = env
+                        .live_monitor_uuids
+                        .iter()
+                        .any(|u| u.as_deref() == Some(uuid.as_str()));
+                    if !uuid_found {
+                        let message = if multi_output {
+                            format!(
+                                "output {target_idx}: saved projector (UUID {uuid}) isn't connected. \
+                                 Falling back to monitor {}.",
+                                target.fallback_index,
+                            )
+                        } else {
+                            format!(
+                                "Saved projector (UUID {uuid}) isn't connected. \
+                                 Falling back to monitor {}.",
+                                target.fallback_index,
+                            )
+                        };
+                        findings.push(AuditFinding {
+                            kind: AuditKind::OutputTargetUuidNotFound {
+                                uuid: uuid.clone(),
+                                fallback_index: target.fallback_index,
+                            },
+                            severity: Severity::Warn,
+                            message,
+                            autofix: None,
+                        });
+                    }
                 }
             }
         }
@@ -1090,5 +1128,84 @@ mod tests {
                 .any(|f| matches!(f.kind, AuditKind::OutputTargetUuidNotFound { .. })),
             "should not fire OutputTargetUuidNotFound when live_monitor_uuids is empty"
         );
+    }
+
+    /// P0.7.2 — project with 2 output_targets, both with `fallback_index`
+    /// out of range → audit emits 2 findings, both Severity::Warn, both
+    /// messages contain the "output N:" prefix.
+    #[test]
+    fn audit_two_output_targets_both_out_of_range_emit_two_prefixed_findings() {
+        let mut p = fresh_project();
+        // Ensure we have exactly 2 output_targets, both pointing at
+        // monitor index 99 (well above any plausible monitor count).
+        p.output_targets[0].fallback_index = 99;
+        if p.output_targets.len() < 2 {
+            p.output_targets
+                .push(crate::project::schema::OutputTarget::default());
+        }
+        p.output_targets[1].fallback_index = 99;
+
+        let env = AuditEnv {
+            monitor_count: 1, // only monitor 0 is available
+            live_monitor_uuids: Vec::new(),
+        };
+        let findings = ProjectAudit::run(&p, &env);
+        let oor: Vec<_> = findings
+            .iter()
+            .filter(|f| matches!(f.kind, AuditKind::MonitorOutOfRange { .. }))
+            .collect();
+        assert_eq!(
+            oor.len(),
+            2,
+            "expected two MonitorOutOfRange findings for two out-of-range targets, got: {findings:?}"
+        );
+        assert!(oor.iter().all(|f| f.severity == Severity::Warn));
+        // Both messages should carry the "output N:" prefix because
+        // output_targets.len() > 1.
+        assert!(
+            oor[0].message.contains("output 0:"),
+            "primary finding should include 'output 0:' prefix: {}",
+            oor[0].message
+        );
+        assert!(
+            oor[1].message.contains("output 1:"),
+            "secondary finding should include 'output 1:' prefix: {}",
+            oor[1].message
+        );
+        // Autofix only for the primary (index 0); secondary gets None.
+        assert!(
+            oor[0].autofix.is_some(),
+            "primary out-of-range finding should carry an autofix"
+        );
+        assert!(
+            oor[1].autofix.is_none(),
+            "secondary out-of-range finding has no autofix (SetOutputMonitorIndexAt is a follow-up)"
+        );
+    }
+
+    /// P0.7.2 — single output_target out of range emits one finding WITHOUT
+    /// the "output N:" prefix so existing operator-visible wording is preserved.
+    #[test]
+    fn audit_single_output_target_out_of_range_no_prefix() {
+        let mut p = fresh_project();
+        assert_eq!(p.output_targets.len(), 1);
+        p.output_targets[0].fallback_index = 5;
+
+        let env = AuditEnv {
+            monitor_count: 1,
+            live_monitor_uuids: Vec::new(),
+        };
+        let findings = ProjectAudit::run(&p, &env);
+        let oor: Vec<_> = findings
+            .iter()
+            .filter(|f| matches!(f.kind, AuditKind::MonitorOutOfRange { .. }))
+            .collect();
+        assert_eq!(oor.len(), 1);
+        assert!(
+            !oor[0].message.contains("output 0:"),
+            "single-target finding must NOT have 'output N:' prefix: {}",
+            oor[0].message
+        );
+        assert!(oor[0].autofix.is_some());
     }
 }

@@ -164,6 +164,16 @@ pub struct OutputWindow {
     pub window: Arc<Window>,
     pub surface: wgpu::Surface<'static>,
     pub config: wgpu::SurfaceConfiguration,
+    /// The monitor this window was opened on, remembered so `GoLive` can
+    /// fullscreen each output on its canonical display without needing the
+    /// monitor threaded through every call site. `None` when the platform
+    /// default was used or the monitor was not resolved at open time.
+    ///
+    /// The GoLive path currently reads the monitor from the event loop for
+    /// primary; a follow-up will simplify it to read `self.monitor` for
+    /// each output.
+    #[allow(dead_code)]
+    pub monitor: Option<MonitorHandle>,
 }
 
 impl OutputWindow {
@@ -194,7 +204,7 @@ impl OutputWindow {
             .map_err(|e| RenderError::Surface(format!("create window: {e}")))?;
 
         if windowed {
-            if let Some(mh) = monitor {
+            if let Some(ref mh) = monitor {
                 window.set_outer_position(mh.position());
             }
             window.set_cursor_visible(true);
@@ -253,6 +263,7 @@ impl OutputWindow {
             window,
             surface,
             config,
+            monitor,
         })
     }
 

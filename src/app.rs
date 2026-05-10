@@ -437,7 +437,12 @@ struct EditingState {
     /// the receive thread.
     #[cfg(feature = "osc")]
     osc: Option<crate::controls::osc::OscSource>,
-    _sleep_assertion: SleepAssertion,
+    /// One RAII `SleepAssertion` (IOPMAssertion) per active output window,
+    /// index-aligned with `outputs`. Prevents display sleep on every
+    /// connected projector during a session. The entry at index `k` is
+    /// dropped alongside `outputs[k]` when an output window is closed
+    /// mid-session (vec-shrink in the `CloseRequested` handler).
+    _sleep_assertions: Vec<SleepAssertion>,
     /// Set when the session was started from a `*.rmap.json` CLI argument.
     #[allow(dead_code)]
     project_file_path: Option<PathBuf>,
@@ -1541,51 +1546,115 @@ fn init_control_window(event_loop: &ActiveEventLoop, gpu: &GpuContext) -> Option
 /// necessary because every field except the OutputWindow itself
 /// depends on the swap-chain's chosen surface format, which is
 /// only known after `OutputWindow::new` succeeds.
+///
+/// P0.7.2: `outputs` is a `SmallVec<[OutputWindow; 2]>` (length == number
+/// of monitors passed to `init_output_window`; always >= 1). Pipelines are
+/// built once from the first window's surface format; all subsequent windows
+/// must share that format (asserted at construction — mismatches return
+/// `RenderError::Surface`). `sleep_assertions` is one RAII
+/// `IOPMAssertion` per output window.
 struct OutputBundle {
-    output: OutputWindow,
+    outputs: SmallVec<[OutputWindow; 2]>,
     renderer: Renderer,
     test_patterns: TestPatternRenderer,
     color_pipeline: ColorPipeline,
     blur_pipeline: BlurPipeline,
     transform_pipeline: TransformPipeline,
-    sleep_assertion: SleepAssertion,
+    /// One `SleepAssertion` per output window (index-aligned). Held for
+    /// the lifetime of the `EditingState` so each active display stays
+    /// awake. Dropped (and the corresponding assertion released) when
+    /// the output is closed mid-session (vec-shrink in the
+    /// `CloseRequested` handler).
+    sleep_assertions: Vec<SleepAssertion>,
 }
 
-/// 003-T1.8: open the projector window, build the per-format
-/// pipelines, hand wgpu ownership to the `Renderer`, and acquire
-/// the display-sleep assertion. Returns everything bundled so the
-/// caller doesn't have to thread surface-format around.
+/// 003-T1.8 / P0.7.2: open one `OutputWindow` per element in `monitors`,
+/// build the per-format pipelines, hand wgpu ownership to the `Renderer`,
+/// and acquire one `SleepAssertion` per display. Returns everything bundled
+/// so the caller doesn't have to thread surface-format around.
 ///
 /// Consumes `gpu` because `Renderer::new` takes ownership.
+///
+/// ## Multi-output invariants
+///
+/// - `monitors` must not be empty (defensive check; the caller always
+///   passes at least the primary).
+/// - The first window's surface format is the reference. If any subsequent
+///   window's capabilities don't include that format, the function returns
+///   `RenderError::Surface("output {idx} format mismatch: …")`. All modern
+///   desktop GPUs expose `Bgra8UnormSrgb` on every surface, so this check
+///   should never trip in practice.
+/// - Pipelines (`test_patterns`, `color_pipeline`, `blur_pipeline`,
+///   `transform_pipeline`) and `Renderer` are built once from the reference
+///   format and shared across outputs — the surface format is the same.
 fn init_output_window(
     event_loop: &ActiveEventLoop,
-    monitor: Option<MonitorHandle>,
+    monitors: &[Option<MonitorHandle>],
     gpu: GpuContext,
     output_windowed: bool,
 ) -> Result<OutputBundle> {
-    let output = OutputWindow::new(
+    if monitors.is_empty() {
+        return Err(crate::error::RmapError::Render(RenderError::Surface(
+            "init_output_window called with empty monitors slice".into(),
+        )));
+    }
+
+    // Open the first (primary) window and use its surface format as the
+    // reference for all subsequent windows and for pipeline construction.
+    let primary = OutputWindow::new(
         event_loop,
-        monitor,
+        monitors[0].clone(),
         &gpu.instance,
         &gpu.adapter,
         &gpu.device,
         output_windowed,
     )?;
-    let surface_format = output.config.format;
-    let test_patterns = TestPatternRenderer::new(&gpu.device, surface_format);
-    let color_pipeline = ColorPipeline::new(&gpu.device, surface_format);
-    let blur_pipeline = BlurPipeline::new(&gpu.device, surface_format);
-    let transform_pipeline = TransformPipeline::new(&gpu.device, surface_format);
-    let renderer = Renderer::new(gpu, surface_format)?;
-    let sleep_assertion = SleepAssertion::acquire("rmap output window");
+    let reference_format = primary.config.format;
+
+    let mut outputs: SmallVec<[OutputWindow; 2]> = SmallVec::new();
+    let mut sleep_assertions: Vec<SleepAssertion> = Vec::with_capacity(monitors.len());
+
+    sleep_assertions.push(SleepAssertion::acquire("rmap output window"));
+    outputs.push(primary);
+
+    // Open additional windows (secondary, tertiary, …). Each must support
+    // the same surface format so pipelines built from `reference_format`
+    // work unchanged.
+    for (idx, monitor) in monitors[1..].iter().enumerate() {
+        let output_idx = idx + 1;
+        let win = OutputWindow::new(
+            event_loop,
+            monitor.clone(),
+            &gpu.instance,
+            &gpu.adapter,
+            &gpu.device,
+            output_windowed,
+        )?;
+        if win.config.format != reference_format {
+            return Err(crate::error::RmapError::Render(RenderError::Surface(
+                format!(
+                    "output {output_idx} format mismatch: got {:?}, want {:?}",
+                    win.config.format, reference_format
+                ),
+            )));
+        }
+        sleep_assertions.push(SleepAssertion::acquire("rmap output window"));
+        outputs.push(win);
+    }
+
+    let test_patterns = TestPatternRenderer::new(&gpu.device, reference_format);
+    let color_pipeline = ColorPipeline::new(&gpu.device, reference_format);
+    let blur_pipeline = BlurPipeline::new(&gpu.device, reference_format);
+    let transform_pipeline = TransformPipeline::new(&gpu.device, reference_format);
+    let renderer = Renderer::new(gpu, reference_format)?;
     Ok(OutputBundle {
-        output,
+        outputs,
         renderer,
         test_patterns,
         color_pipeline,
         blur_pipeline,
         transform_pipeline,
-        sleep_assertion,
+        sleep_assertions,
     })
 }
 
@@ -1597,7 +1666,7 @@ fn init_output_window(
 /// via [`init_running_app_with_resources`].
 fn init_running_app(
     event_loop: &ActiveEventLoop,
-    monitor: Option<MonitorHandle>,
+    monitors: &[Option<MonitorHandle>],
     project: Project,
     project_file_path: Option<PathBuf>,
     output_windowed: bool,
@@ -1606,7 +1675,7 @@ fn init_running_app(
     let inputs = init_inputs();
     init_running_app_with_resources(
         event_loop,
-        monitor,
+        monitors,
         project,
         project_file_path,
         output_windowed,
@@ -1631,7 +1700,7 @@ fn init_running_app(
 /// `EditingState`.
 fn init_running_app_with_resources(
     event_loop: &ActiveEventLoop,
-    monitor: Option<MonitorHandle>,
+    monitors: &[Option<MonitorHandle>],
     project: Project,
     project_file_path: Option<PathBuf>,
     output_windowed: bool,
@@ -1641,7 +1710,7 @@ fn init_running_app_with_resources(
     // ControlWindow first — it borrows gpu; init_output_window
     // consumes gpu next when handing it to Renderer.
     let control = init_control_window(event_loop, &gpu);
-    let output_bundle = init_output_window(event_loop, monitor, gpu, output_windowed)?;
+    let output_bundle = init_output_window(event_loop, monitors, gpu, output_windowed)?;
     // Bring the control window in front of the projector window:
     // OutputWindow was created last, so on macOS it would otherwise
     // be the key window. The operator-facing surface is the control
@@ -1649,11 +1718,11 @@ fn init_running_app_with_resources(
     if let Some(c) = control.as_ref() {
         c.window.focus_window();
     }
-    let surface_format = output_bundle.output.config.format;
-    // OutputBundle.output stays singular in Part 1; Part 2 will extend it.
+    // Canvas is sized to the primary output (index 0).
+    let surface_format = output_bundle.outputs[0].config.format;
     let output_size = (
-        output_bundle.output.config.width,
-        output_bundle.output.config.height,
+        output_bundle.outputs[0].config.width,
+        output_bundle.outputs[0].config.height,
     );
     let render_graph = init_render_graph(
         &output_bundle.renderer,
@@ -1688,10 +1757,10 @@ fn assemble_editing_state(
     }
 
     EditingState {
-        // Invariant: outputs is always non-empty. Part 1 always length 1.
-        // Part 2 (P0.7.2) will push a second OutputWindow when the project
-        // carries two output_targets.
-        outputs: smallvec::smallvec![output.output],
+        // Invariant: outputs is always non-empty. Length equals the number
+        // of monitors passed to `init_output_window` (1 for single-projector
+        // sessions, 2 when the launcher's secondary was selected).
+        outputs: output.outputs,
         output_state: OutputState::default(),
         control,
         renderer: output.renderer,
@@ -1717,7 +1786,7 @@ fn assemble_editing_state(
         midi: inputs.midi,
         #[cfg(feature = "osc")]
         osc: inputs.osc,
-        _sleep_assertion: output.sleep_assertion,
+        _sleep_assertions: output.sleep_assertions,
         project_file_path,
         crossfade: None,
         scene_texture_id: None,
@@ -1810,6 +1879,9 @@ enum LauncherAction {
     Launch {
         project: crate::controls::ProjectSource,
         monitor: usize,
+        /// Secondary monitor index from the P0.7.1 two-projector picker.
+        /// `None` for single-projector sessions.
+        secondary_monitor: Option<usize>,
         windowed: bool,
     },
 }
@@ -1834,6 +1906,43 @@ enum LauncherAction {
 /// "rmap::ux"` regardless of source variant, with the project source
 /// type as a label so the daily JSON sink (T1.47) can disambiguate
 /// without leaking project paths.
+/// P0.7.2 — reconcile `project.output_targets` against the set of monitor
+/// indices the launcher selected. Extends the vec when the launcher picked
+/// more projectors than the project currently has targets for; does NOT
+/// shrink it (saved targets for monitors not selected this session are
+/// preserved for next launch).
+///
+/// Returns `true` if the vec was extended (caller should mark the project
+/// dirty so the operator's choice survives a save).
+///
+/// This is intentionally NOT routed through the `Mutation` / undo system:
+/// the reconciliation happens at session-init time and is not an
+/// operator-undoable edit. Rationale: the operator opened the project with
+/// a specific monitor selection; adapting the vec to match that selection
+/// is infrastructure, not a content change. If they save, the new target is
+/// persisted; Cmd-Z cannot walk back to "this session had only one target"
+/// because `EditingState` doesn't exist yet when reconciliation runs.
+#[cfg(feature = "v3")]
+fn reconcile_output_targets(project: &mut Project, requested_monitor_indices: &[usize]) -> bool {
+    let mut extended = false;
+    for (k, &i) in requested_monitor_indices.iter().enumerate() {
+        if k >= project.output_targets.len() {
+            let target = crate::project::schema::OutputTarget {
+                fallback_index: i,
+                ..crate::project::schema::OutputTarget::default()
+            };
+            project.output_targets.push(target);
+            extended = true;
+        }
+        // If k < len: the existing target at position k is used as-is. Its
+        // `fallback_index` may differ from `i` — the launcher's selection
+        // wins this session. We do not overwrite the persisted target unless
+        // the operator triggers a save (which would write the currently-active
+        // index via a separate Mutation path).
+    }
+    extended
+}
+
 #[cfg(feature = "v3")]
 fn apply_launch_command(
     event_loop: &ActiveEventLoop,
@@ -1843,6 +1952,7 @@ fn apply_launch_command(
     let LauncherAction::Launch {
         project: source,
         monitor: monitor_idx,
+        secondary_monitor: secondary_monitor_idx,
         windowed,
     } = action;
 
@@ -1856,10 +1966,11 @@ fn apply_launch_command(
         event = "command_launch",
         source = source_label,
         monitor = monitor_idx,
+        secondary_monitor = ?secondary_monitor_idx,
         windowed,
     );
 
-    let (project, project_file_path) = match resolve_project_source(&source) {
+    let (mut project, project_file_path) = match resolve_project_source(&source) {
         Ok(v) => v,
         Err(e) => {
             tracing::error!(?e, ?source, "launcher: project load failed");
@@ -1898,14 +2009,45 @@ fn apply_launch_command(
         return failed_state_for_audit_critical(critical);
     }
 
-    let monitor = event_loop.available_monitors().nth(monitor_idx);
-    if monitor.is_none() {
-        tracing::warn!(
-            requested = monitor_idx,
-            available = event_loop.available_monitors().count(),
-            "launcher: requested monitor index out of range; using platform default",
+    // P0.7.2 — build the ordered list of monitor indices the launcher
+    // selected. Primary is always first; secondary (if any) comes second.
+    let requested_monitor_indices: Vec<usize> = {
+        let mut v = vec![monitor_idx];
+        if let Some(sec) = secondary_monitor_idx {
+            v.push(sec);
+        }
+        v
+    };
+
+    // Reconcile project.output_targets against the selected count. This
+    // extends the vec when the operator picked more projectors than the
+    // project currently has targets for. It never shrinks (unused targets
+    // stay in the project for the next session that might use them).
+    // Not routed through Mutation/undo: see `reconcile_output_targets` doc.
+    let targets_extended = reconcile_output_targets(&mut project, &requested_monitor_indices);
+    if targets_extended {
+        tracing::info!(
+            count = project.output_targets.len(),
+            "output_targets extended to match launcher selection; project needs save",
         );
     }
+
+    // Resolve each requested monitor index to a `MonitorHandle`.
+    // Out-of-range indices produce `None` (platform default).
+    let monitors_for_outputs: Vec<Option<MonitorHandle>> = requested_monitor_indices
+        .iter()
+        .map(|&idx| {
+            let h = event_loop.available_monitors().nth(idx);
+            if h.is_none() {
+                tracing::warn!(
+                    requested = idx,
+                    available = event_loop.available_monitors().count(),
+                    "launcher: requested monitor index out of range; using platform default",
+                );
+            }
+            h
+        })
+        .collect();
 
     let LauncherState {
         launcher: launcher_window,
@@ -1953,7 +2095,7 @@ fn apply_launch_command(
 
     match init_running_app_with_resources(
         event_loop,
-        monitor,
+        &monitors_for_outputs,
         project,
         project_file_path,
         windowed,
@@ -1961,6 +2103,12 @@ fn apply_launch_command(
         inputs,
     ) {
         Ok(mut running) => {
+            // If output_targets was extended to match the launcher's
+            // selection, mark the project dirty so the operator is prompted
+            // to save (otherwise the choice is lost on next launch).
+            if targets_extended {
+                running.dirty = true;
+            }
             register_scene_preview(&mut running);
             for finding in audit_findings {
                 let kind = match finding.severity {
@@ -2273,6 +2421,7 @@ fn launcher_render(
                     action = Some(LauncherAction::Launch {
                         project: ProjectSource::Empty,
                         monitor: *selected_monitor,
+                        secondary_monitor: *selected_secondary_monitor,
                         windowed: true,
                     });
                 }
@@ -2309,6 +2458,7 @@ fn launcher_render(
                                 action = Some(LauncherAction::Launch {
                                     project: ProjectSource::RecentPath(entry.path.clone()),
                                     monitor: *selected_monitor,
+                                    secondary_monitor: *selected_secondary_monitor,
                                     windowed: true,
                                 });
                             }
@@ -2352,6 +2502,7 @@ fn launcher_render(
                         action = Some(LauncherAction::Launch {
                             project: ProjectSource::Demo(slug),
                             monitor: *selected_monitor,
+                            secondary_monitor: *selected_secondary_monitor,
                             windowed: true,
                         });
                     }
@@ -3065,10 +3216,106 @@ impl Drop for SurfacePresentGuard {
     }
 }
 
+/// P0.7.2: run passes 5-6 (gamma + overlay + present) for a single output.
+/// Called in a loop over `outputs[..]` after passes 1-4 have been submitted.
+///
+/// Surface-loss outcomes (`SurfaceLost`, `SurfaceOutdated`, `SurfaceSuboptimal`)
+/// are handled inline: the surface is reconfigured and `Ok(())` is returned so
+/// the loop continues for the remaining outputs. Only `RenderPanic` / unexpected
+/// `Surface(...)` errors bubble up to the caller.
+#[allow(clippy::too_many_arguments)]
+fn render_m5_passes_5_6(
+    renderer: &Renderer,
+    output: &OutputWindow,
+    output_target: &crate::project::schema::OutputTarget,
+    project: &Project,
+    gamma: &GammaPipeline,
+    overlay: &mut OverlayPipeline,
+    overlay_selected: Option<usize>,
+    overlay_enabled: bool,
+    warp_rt_view: &wgpu::TextureView,
+) -> std::result::Result<(), RenderError> {
+    let frame = match acquire_frame(output) {
+        Ok(Some(f)) => f,
+        Ok(None) => return Ok(()), // Timeout / Occluded — drop frame.
+        Err(
+            RenderError::SurfaceLost
+            | RenderError::SurfaceOutdated
+            | RenderError::SurfaceSuboptimal,
+        ) => {
+            // Recover inline: reconfigure and drop this frame. The surface
+            // will be valid next frame.
+            output.recreate_surface(&renderer.gpu.device);
+            return Ok(());
+        }
+        Err(e) => return Err(e),
+    };
+    let guard = SurfacePresentGuard::new(frame);
+    {
+        let surface_view = guard.texture_view();
+        let mut enc_gamma =
+            renderer
+                .gpu
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("m5 gamma encoder"),
+                });
+        // 003-T3.28 — projector output applies per-display tone overrides
+        // when set; otherwise inherits master. The egui control-window
+        // preview binds `warp_rt_view` (post-warp, pre-gamma), so master
+        // tuning isn't visible there in either case — the override is
+        // therefore the only way to make projector output diverge from
+        // preview without a second gamma pass.
+        gamma.render(
+            &renderer.gpu.device,
+            &renderer.gpu.queue,
+            &mut enc_gamma,
+            &surface_view,
+            warp_rt_view,
+            project.gamma_override.unwrap_or(project.gamma),
+            project.brightness_override.unwrap_or(project.brightness),
+            project.contrast_override.unwrap_or(project.contrast),
+            // P0.8.2 — per-projector RGB matrix from the project's
+            // OutputTarget. Identity by default (P0.1.2 set the
+            // serde default to identity), so existing v6 projects
+            // load + render byte-identical to pre-P0.8.2 builds.
+            // P0.7.2: use the output_target for THIS output, not
+            // always primary.
+            output_target.rgb_matrix,
+            wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+        );
+        // Editor overlay: paint per-layer outlines + mask polygons on
+        // top of the gamma-corrected frame so the operator can see
+        // on the actual surface where each layer is mapped. Cheap to
+        // build (~40 lines/frame) — only the work skips when the
+        // toggle is off, not the encoder itself, so present timing
+        // stays unchanged.
+        if overlay_enabled {
+            let lines = crate::render::overlay::build_overlay_lines(project, overlay_selected);
+            if !lines.is_empty() {
+                overlay.render(
+                    &renderer.gpu.device,
+                    &renderer.gpu.queue,
+                    &mut enc_gamma,
+                    &surface_view,
+                    (output.config.width, output.config.height),
+                    &lines,
+                );
+            }
+        }
+        renderer
+            .gpu
+            .queue
+            .submit(std::iter::once(enc_gamma.finish()));
+    }
+    guard.present();
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_m5_pipeline(
     renderer: &Renderer,
-    output: &OutputWindow,
+    outputs: &[OutputWindow],
     project: &Project,
     layers: &mut [LayerState],
     svg_pipeline: &SvgLayerPipeline,
@@ -3086,6 +3333,8 @@ fn render_m5_pipeline(
     clock: &Clock,
 ) -> std::result::Result<(), RenderError> {
     crate::show_day::panic_restore::run_frame_assert_unwind_safe(|| {
+        // --- Passes 1-4: raster / effects / warp / composite into warp_rt ---
+        // These run once per frame regardless of how many outputs are active.
         let mut encoder =
             renderer
                 .gpu
@@ -3237,69 +3486,32 @@ fn render_m5_pipeline(
             &composite_inputs,
         );
 
+        // Submit passes 1-4. The warp_rt is now ready for gamma sampling.
         renderer.gpu.queue.submit(std::iter::once(encoder.finish()));
 
-        let frame = match acquire_frame(output)? {
-            Some(f) => f,
-            None => return Ok(()),
-        };
-        let guard = SurfacePresentGuard::new(frame);
-        {
-            let surface_view = guard.texture_view();
-            let mut enc_gamma =
-                renderer
-                    .gpu
-                    .device
-                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                        label: Some("m5 gamma encoder"),
-                    });
-            // 003-T3.28 — projector output applies per-display tone overrides
-            // when set; otherwise inherits master. The egui control-window
-            // preview binds `warp_rt_view` (post-warp, pre-gamma), so master
-            // tuning isn't visible there in either case — the override is
-            // therefore the only way to make projector output diverge from
-            // preview without a second gamma pass.
-            gamma.render(
-                &renderer.gpu.device,
-                &renderer.gpu.queue,
-                &mut enc_gamma,
-                &surface_view,
+        // --- Passes 5-6: gamma + overlay + present — once per output ---
+        // P0.7.2: each output gets its own encoder (its own surface texture).
+        // Surface-loss is handled inline per output; only RenderPanic escapes.
+        for (out_idx, output) in outputs.iter().enumerate() {
+            // Look up the per-output target. If the project has fewer targets
+            // than outputs (shouldn't happen after reconcile, but be safe),
+            // fall back to the primary.
+            let output_target = project
+                .output_targets
+                .get(out_idx)
+                .unwrap_or_else(|| project.primary_output_target());
+            render_m5_passes_5_6(
+                renderer,
+                output,
+                output_target,
+                project,
+                gamma,
+                overlay,
+                overlay_selected,
+                overlay_enabled,
                 warp_rt_view,
-                project.gamma_override.unwrap_or(project.gamma),
-                project.brightness_override.unwrap_or(project.brightness),
-                project.contrast_override.unwrap_or(project.contrast),
-                // P0.8.2 — per-projector RGB matrix from the project's
-                // OutputTarget. Identity by default (P0.1.2 set the
-                // serde default to identity), so existing v6 projects
-                // load + render byte-identical to pre-P0.8.2 builds.
-                project.primary_output_target().rgb_matrix,
-                wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-            );
-            // Editor overlay: paint per-layer outlines + mask polygons on
-            // top of the gamma-corrected frame so the operator can see
-            // on the actual surface where each layer is mapped. Cheap to
-            // build (~40 lines/frame) — only the work skips when the
-            // toggle is off, not the encoder itself, so present timing
-            // stays unchanged.
-            if overlay_enabled {
-                let lines = crate::render::overlay::build_overlay_lines(project, overlay_selected);
-                if !lines.is_empty() {
-                    overlay.render(
-                        &renderer.gpu.device,
-                        &renderer.gpu.queue,
-                        &mut enc_gamma,
-                        &surface_view,
-                        (output.config.width, output.config.height),
-                        &lines,
-                    );
-                }
-            }
-            renderer
-                .gpu
-                .queue
-                .submit(std::iter::once(enc_gamma.finish()));
+            )?;
         }
-        guard.present();
         Ok(())
     })
 }
@@ -3784,14 +3996,39 @@ fn handle_editing_window_event(
         return editing_transition;
     }
 
-    // Guard: only act on events for the output window from here down.
-    if window_id != state.primary_output().window.id() {
+    // P0.7.2: route events to the correct output window by matching window_id.
+    // `primary_output()` handles primary access; for events requiring
+    // per-output routing (Resized, CloseRequested) we look up the index first.
+    // If no output matches, fall through to the "not our window" path (no-op).
+    let output_idx = state
+        .outputs
+        .iter()
+        .position(|o| o.window.id() == window_id);
+    if output_idx.is_none() {
         return editing_transition;
     }
+    // SAFETY: checked above.
+    let output_idx = output_idx.unwrap();
 
     match event {
         WindowEvent::CloseRequested => {
-            event_loop.exit();
+            // P0.7.2: closing one output shrinks the vec. The matching
+            // SleepAssertion is dropped alongside the OutputWindow so the
+            // display sleep prevention releases on that screen. If all
+            // outputs are closed, exit the event loop.
+            //
+            // Vec-shrink semantics: `state.outputs.remove(output_idx)` is
+            // O(n) but n is at most 2 in v0.4, so this is fine. Indices of
+            // outputs after the removed one shift down by one — callers that
+            // cache an index by value must re-query after a close event, but
+            // the event loop's single-threaded nature means no aliasing.
+            state.outputs.remove(output_idx);
+            state._sleep_assertions.remove(output_idx);
+            if state.outputs.is_empty() {
+                event_loop.exit();
+            }
+            // Return early: the output is gone, no further event handling.
+            return editing_transition;
         }
         #[cfg(feature = "v3")]
         WindowEvent::ModifiersChanged(mods) => {
@@ -3876,14 +4113,22 @@ fn handle_editing_window_event(
             // Use direct field access (split-borrow) so `&mut outputs` and
             // `&renderer` can coexist. The helper methods borrow all of
             // `state`, which would conflict.
-            state.outputs[0].config.width = new_size.width.max(1);
-            state.outputs[0].config.height = new_size.height.max(1);
-            state.outputs[0].recreate_surface(&state.renderer.gpu.device);
-            resize_m5_gpu(state);
-            // warp_rt was recreated; the egui scene preview's
-            // TextureId now points to a freed view. Re-register so
-            // the Scene tab keeps painting after resize (T-M9-01).
-            register_scene_preview(state);
+            state.outputs[output_idx].config.width = new_size.width.max(1);
+            state.outputs[output_idx].config.height = new_size.height.max(1);
+            state.outputs[output_idx].recreate_surface(&state.renderer.gpu.device);
+            if output_idx == 0 {
+                // P0.7.2 canvas-size policy: the shared warp_rt is sized to
+                // outputs[0]. Resize events for outputs[1+] only update that
+                // surface's config — the canvas stays output-0-sized. The
+                // gamma shader samples the warp_rt at whatever resolution the
+                // surface is configured to; no special viewport math (P0.7.3
+                // brings the falloff that makes per-output sizing meaningful).
+                resize_m5_gpu(state);
+                // warp_rt was recreated; the egui scene preview's
+                // TextureId now points to a freed view. Re-register so
+                // the Scene tab keeps painting after resize (T-M9-01).
+                register_scene_preview(state);
+            }
         }
         WindowEvent::RedrawRequested => {
             // V31.7.3: tick the bar-boundary quantize gate BEFORE draining
@@ -4057,13 +4302,34 @@ fn handle_editing_window_event(
             // while frozen, the projector goes black immediately
             // rather than continuing to show the frozen frame.
             //
-            // Bind output via direct field access (split-borrow) so the
-            // compiler can simultaneously issue &mut borrows on other
-            // disjoint fields (layers, overlay) inside render_m5_pipeline.
-            // Using primary_output() (a method) would borrow all of `state`.
+            // P0.7.2: blackout and test_pattern loop over all outputs;
+            // render_m5_pipeline internally loops over outputs for passes
+            // 5-6. Surface-loss per output is handled inline in each render
+            // helper. Only RenderPanic and unexpected Surface errors escape
+            // to this match arm.
             let result = if state.output_state.blackout {
-                let output = &state.outputs[0];
-                render_blackout(&state.renderer, output)
+                // Loop over all outputs: each gets its own blackout frame.
+                // Surface-loss is recovered inline. Fatal errors (RenderPanic,
+                // unexpected Surface) are accumulated; the first one is reported.
+                let mut first_err: Option<RenderError> = None;
+                for output in &state.outputs {
+                    match render_blackout(&state.renderer, output) {
+                        Ok(()) => {}
+                        Err(
+                            RenderError::SurfaceLost
+                            | RenderError::SurfaceOutdated
+                            | RenderError::SurfaceSuboptimal,
+                        ) => {
+                            output.recreate_surface(&state.renderer.gpu.device);
+                        }
+                        Err(e) => {
+                            if first_err.is_none() {
+                                first_err = Some(e);
+                            }
+                        }
+                    }
+                }
+                first_err.map_or(Ok(()), Err)
             } else if state.output_state.freeze {
                 // Freeze: skip rendering entirely. The window keeps
                 // showing its last presented frame because we
@@ -4072,26 +4338,48 @@ fn handle_editing_window_event(
                 // and re-present the last framebuffer every frame.
                 Ok(())
             } else if state.output_state.test_pattern != TestPattern::None {
-                let output = &state.outputs[0];
-                render_test_pattern(
-                    &state.renderer,
-                    output,
-                    &state.test_patterns,
-                    state.output_state.test_pattern,
-                )
+                // Loop over all outputs: each gets its own test-pattern frame.
+                // Same error-accumulation pattern as blackout above.
+                let pattern = state.output_state.test_pattern;
+                let mut first_err: Option<RenderError> = None;
+                for output in &state.outputs {
+                    match render_test_pattern(
+                        &state.renderer,
+                        output,
+                        &state.test_patterns,
+                        pattern,
+                    ) {
+                        Ok(()) => {}
+                        Err(
+                            RenderError::SurfaceLost
+                            | RenderError::SurfaceOutdated
+                            | RenderError::SurfaceSuboptimal,
+                        ) => {
+                            output.recreate_surface(&state.renderer.gpu.device);
+                        }
+                        Err(e) => {
+                            if first_err.is_none() {
+                                first_err = Some(e);
+                            }
+                        }
+                    }
+                }
+                first_err.map_or(Ok(()), Err)
             } else if !state.project.layers.is_empty() {
-                // Split-borrow: bind output from state.outputs before taking
-                // &mut borrows on state.layers and state.overlay.
+                // Split-borrow: bind outputs from state.outputs before taking
+                // &mut borrows on state.layers and state.overlay. Passes 1-4
+                // run once (shared canvas work); passes 5-6 loop per output
+                // inside render_m5_pipeline.
                 let surface_format = state.outputs[0].config.format;
                 let overlay_enabled = state.output_state.show_editor_overlay;
                 let overlay_selected = match state.scene_editor.selected {
                     Some(crate::windows::scene_editor::Selection::Layer(i)) => Some(i),
                     _ => None,
                 };
-                let output = &state.outputs[0];
+                let outputs: &[OutputWindow] = &state.outputs;
                 render_m5_pipeline(
                     &state.renderer,
-                    output,
+                    outputs,
                     &state.project,
                     &mut state.layers,
                     &state.svg_pipeline,
@@ -4109,23 +4397,30 @@ fn handle_editing_window_event(
                     &state.clock,
                 )
             } else {
-                let output = &state.outputs[0];
-                state.renderer.render_frame(output)
+                // Empty project — render a blank frame for each output.
+                // Same error-accumulation pattern as blackout above.
+                let mut first_err: Option<RenderError> = None;
+                for output in &state.outputs {
+                    match state.renderer.render_frame(output) {
+                        Ok(()) => {}
+                        Err(
+                            RenderError::SurfaceLost
+                            | RenderError::SurfaceOutdated
+                            | RenderError::SurfaceSuboptimal,
+                        ) => {
+                            output.recreate_surface(&state.renderer.gpu.device);
+                        }
+                        Err(e) => {
+                            if first_err.is_none() {
+                                first_err = Some(e);
+                            }
+                        }
+                    }
+                }
+                first_err.map_or(Ok(()), Err)
             };
             match result {
                 Ok(()) => {}
-                Err(RenderError::SurfaceLost) => {
-                    tracing::warn!("surface lost; recreating");
-                    state.outputs[0].recreate_surface(&state.renderer.gpu.device);
-                }
-                Err(RenderError::SurfaceOutdated) => {
-                    tracing::warn!("surface outdated; recreating");
-                    state.outputs[0].recreate_surface(&state.renderer.gpu.device);
-                }
-                Err(RenderError::SurfaceSuboptimal) => {
-                    tracing::warn!("surface suboptimal; recreating");
-                    state.outputs[0].recreate_surface(&state.renderer.gpu.device);
-                }
                 Err(RenderError::RenderPanic { message }) => {
                     tracing::error!(%message, "renderer panicked; recovered");
                     crate::windows::control::error_overlay(&message);
@@ -4333,7 +4628,7 @@ impl ApplicationHandler for App {
 
         match init_running_app(
             event_loop,
-            monitor,
+            &[monitor],
             project,
             project_file_path,
             output_windowed,
@@ -4475,11 +4770,20 @@ impl ApplicationHandler for App {
                             self.state = prev;
                             return;
                         };
-                        // Hot-swap projector to fullscreen. V31.2.2 — resolve the
-                        // target via UUID-then-index-then-fallback so a project
-                        // saved on another machine still picks the right
-                        // projector when the saved UUID matches a live monitor.
-                        let monitor: Option<winit::monitor::MonitorHandle> = {
+                        // P0.7.2: loop over all outputs and fullscreen each on
+                        // its remembered monitor. For output[0] we resolve via
+                        // UUID-then-index (V31.2.2) as before; for outputs[1+]
+                        // we use the monitor stored in `output.monitor` (set at
+                        // window creation by the launcher's selection).
+                        //
+                        // If any output's set_fullscreen fails we log + toast
+                        // and abort the GoLive transition, leaving all outputs
+                        // in their pre-transition state. A partial-fullscreen
+                        // state (output[0] fullscreen, output[1] windowed) is
+                        // avoided by checking all before applying any — but
+                        // winit's `set_fullscreen` is a hint, not atomic, so
+                        // we accept best-effort on actual windowing-system bugs.
+                        let primary_monitor: Option<winit::monitor::MonitorHandle> = {
                             let live = crate::monitors::list(event_loop);
                             let outcome = crate::monitors::resolve_output_target(
                                 editing.project.primary_output_target(),
@@ -4489,24 +4793,43 @@ impl ApplicationHandler for App {
                             event_loop.available_monitors().nth(idx)
                         };
                         tracing::info!(
-                            monitor = ?monitor.as_ref().map(|m| m.name()),
-                            "entering GoLive; set_fullscreen(true)"
+                            monitor = ?primary_monitor.as_ref().map(|m| m.name()),
+                            output_count = editing.outputs.len(),
+                            "entering GoLive; set_fullscreen(true) for all outputs"
                         );
-                        match editing.primary_output().set_fullscreen(true, monitor) {
-                            Ok(()) => {
-                                self.state = AppState::GoLive(editing);
-                            }
-                            Err(e) => {
+                        // Attempt fullscreen for all outputs; first failure aborts.
+                        let mut go_live_ok = true;
+                        for (out_idx, output) in editing.outputs.iter().enumerate() {
+                            let monitor = if out_idx == 0 {
+                                primary_monitor.clone()
+                            } else {
+                                // Use the monitor remembered at window-open time
+                                // (set by the launcher's two-projector selection).
+                                output.monitor.clone()
+                            };
+                            if let Err(e) = output.set_fullscreen(true, monitor) {
                                 tracing::error!(
                                     ?e,
+                                    out_idx,
                                     "set_fullscreen(true) failed; staying in Editing"
                                 );
                                 editing.toast_queue.push(crate::windows::toast::Toast::new(
                                     crate::windows::toast::ToastKind::Error,
                                     "Couldn't switch to fullscreen. Try again.",
                                 ));
-                                self.state = AppState::Editing(editing);
+                                go_live_ok = false;
+                                break;
                             }
+                        }
+                        if go_live_ok {
+                            self.state = AppState::GoLive(editing);
+                        } else {
+                            // Roll back any outputs that succeeded before the failure.
+                            // `set_fullscreen(false, None)` on a windowed window is a no-op.
+                            for output in &editing.outputs {
+                                let _ = output.set_fullscreen(false, None);
+                            }
+                            self.state = AppState::Editing(editing);
                         }
                     }
                     EditingTransition::ExitGoLive => {
@@ -4516,18 +4839,25 @@ impl ApplicationHandler for App {
                             self.state = prev;
                             return;
                         };
-                        tracing::info!("exiting GoLive; set_fullscreen(false)");
-                        match editing.primary_output().set_fullscreen(false, None) {
-                            Ok(()) => {
-                                self.state = AppState::Editing(editing);
+                        tracing::info!(
+                            output_count = editing.outputs.len(),
+                            "exiting GoLive; set_fullscreen(false) for all outputs"
+                        );
+                        // Best-effort: try all outputs even if one fails.
+                        let mut first_err: Option<RenderError> = None;
+                        for output in &editing.outputs {
+                            if let Err(e) = output.set_fullscreen(false, None) {
+                                tracing::error!(?e, "set_fullscreen(false) failed");
+                                if first_err.is_none() {
+                                    first_err = Some(e);
+                                }
                             }
-                            Err(e) => {
-                                tracing::error!(
-                                    ?e,
-                                    "set_fullscreen(false) failed; staying in GoLive"
-                                );
-                                self.state = AppState::GoLive(editing);
-                            }
+                        }
+                        if let Some(e) = first_err {
+                            tracing::error!(?e, "set_fullscreen(false) failed; staying in GoLive");
+                            self.state = AppState::GoLive(editing);
+                        } else {
+                            self.state = AppState::Editing(editing);
                         }
                     }
                 }
@@ -4688,7 +5018,11 @@ impl ApplicationHandler for App {
         }
 
         if let Some(state) = self.state.editing_mut() {
-            state.primary_output().window.request_redraw();
+            // P0.7.2: request redraws for all active output windows so each
+            // surface presents a new frame every vsync tick.
+            for output in &state.outputs {
+                output.window.request_redraw();
+            }
             // T-M9-03: throttle the control window to ~30 fps.
             // Output stays at vsync (~60 fps); preview at half rate keeps
             // the event-rig CPU budget under control without making
@@ -5567,6 +5901,59 @@ mod tests {
 
             assert!(freed.is_empty(), "no free when there was no previous id");
             assert_eq!(id, Some(egui::TextureId::User(3)));
+        }
+    }
+
+    // P0.7.2: reconcile_output_targets tests.
+    // These test the pure data-reconciliation logic without bringing up wgpu.
+    #[cfg(feature = "v3")]
+    mod reconcile_tests {
+        use super::super::reconcile_output_targets;
+        use crate::project::schema::{OutputTarget, Project};
+
+        fn project_with_targets(count: usize) -> Project {
+            let mut p = Project::default();
+            // Project::default() already provides one target via the serde
+            // default. Push extras to reach `count`.
+            while p.output_targets.len() < count {
+                p.output_targets.push(OutputTarget::default());
+            }
+            assert_eq!(p.output_targets.len(), count);
+            p
+        }
+
+        /// 1 target, launcher picks 1 → vec unchanged, returns false.
+        #[test]
+        fn single_target_single_monitor_no_change() {
+            let mut p = project_with_targets(1);
+            let extended = reconcile_output_targets(&mut p, &[0]);
+            assert!(!extended, "no extension needed");
+            assert_eq!(p.output_targets.len(), 1);
+        }
+
+        /// 1 target, launcher picks 2 → vec grows to 2; second entry's
+        /// fallback_index == secondary_monitor_idx; returns true.
+        #[test]
+        fn single_target_two_monitors_extends_to_two() {
+            let mut p = project_with_targets(1);
+            let secondary_idx = 3; // arbitrary non-zero
+            let extended = reconcile_output_targets(&mut p, &[0, secondary_idx]);
+            assert!(extended, "vec should have been extended");
+            assert_eq!(p.output_targets.len(), 2);
+            assert_eq!(
+                p.output_targets[1].fallback_index, secondary_idx,
+                "new target's fallback_index should match the secondary monitor index"
+            );
+        }
+
+        /// 2 targets, launcher picks 1 → vec unchanged (stays at 2, one window
+        /// opens); returns false.
+        #[test]
+        fn two_targets_one_monitor_no_shrink() {
+            let mut p = project_with_targets(2);
+            let extended = reconcile_output_targets(&mut p, &[0]);
+            assert!(!extended, "no extension needed when targets >= requested");
+            assert_eq!(p.output_targets.len(), 2, "vec must not shrink");
         }
     }
 }

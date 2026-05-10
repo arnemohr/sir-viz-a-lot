@@ -56,6 +56,10 @@ pub enum Command {
     Launch {
         project: ProjectSource,
         monitor: usize,
+        /// Secondary monitor index from the launcher's two-projector picker.
+        /// `None` for single-projector sessions. P0.7.2 wires this to open
+        /// a second `OutputWindow` on the selected display.
+        secondary_monitor: Option<usize>,
         windowed: bool,
     },
     /// 003-T2.24 — operator clicked "Find this file…" on a missing-
