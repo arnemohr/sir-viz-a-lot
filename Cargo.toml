@@ -129,12 +129,18 @@ panic         = "abort"
 strip         = true
 
 [features]
-default = []
+# P0.1.3 — `osc` and `midi` flip to default-on now that v0.4's binding
+# picker (P0.2.3a/b/c) makes both transports operator-facing. `audio`
+# stays opt-in because `cpal` adds a meaningful build cost. Opt out
+# of any of them with `cargo build --no-default-features`.
+default = ["osc", "midi"]
 # Enables the headless-wgpu golden-image tests; requires a working GPU adapter
 # at test time. Off by default so plain `cargo test` stays CPU-only.
 gpu-tests = []
 
-# M7 input sources. Off by default so the wedding-show binary stays lean.
+# Live-input source dependencies. `osc` and `midi` are in `default`
+# (above); `audio` ships behind a flag because `cpal` adds a
+# meaningful build-time cost on first compile.
 audio = ["dep:cpal", "dep:rustfft"]
 midi  = ["dep:midir"]
 osc   = ["dep:rosc"]
