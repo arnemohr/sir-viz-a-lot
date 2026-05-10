@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Pre-commit gate: rustfmt + cargo check on staged Rust files.
+# Designed to be fast (<5s on warm cache) so it doesn't disrupt the inner
+# loop. Heavier checks (clippy --all-features, full test suite) live in
+# `make ci`. Bypass once with `git commit --no-verify`; if you find
+# yourself bypassing repeatedly, the hook is wrong — fix it, don't
+# train yourself out of it.
+set -euo pipefail
+
+# Staged Rust files only. Plain `grep` keeps this compatible with macOS's
+# bash 3.2 (no `mapfile`).
+staged_rs=$(git diff --cached --name-only --diff-filter=ACMR | grep '\.rs$' || true)
+[ -z "$staged_rs" ] && exit 0
+
+# rustfmt scoped to staged files. Pre-existing drift in unrelated files
+# does not block your commit; only what you are shipping must be clean.
+# (Edge case: a file that's partially staged is checked against the
+# working-tree version. Lean trade-off.)
+if ! echo "$staged_rs" | xargs rustfmt --edition 2024 --check; then
+  printf '\n[pre-commit] rustfmt: unformatted code in staged files. Fix: make fmt\n' >&2
+  exit 1
+fi
+
+# cargo check (not clippy) — catches type errors / missing imports without
+# the full lint set. Workspace-wide because cargo cannot scope to files,
+# but it is fast on warm cache. clippy + tests run via `make ci`.
+if ! cargo check --workspace --all-targets --quiet; then
+  printf '\n[pre-commit] cargo check failed.\n' >&2
+  exit 1
+fi

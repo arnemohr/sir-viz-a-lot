@@ -1,0 +1,9 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 51504b3d6e43bd5518da2c1f578983926493b83353618125ecdfd3a5a675f6c8 # shrinks to kinds = [WarpDimensions { rows: 1, cols: 2 }]
+cc d37c654f4c8a72cadf3c48713bd94913699df570e3213dee9565c27583bc3537 # shrinks to kinds = [RemoveLayer, LayerOpacity(0.0)]
+cc 3fdd39072973421ecb57017f605b814f129cbb8ed9ca7dfd8470fd9e6f151fc1 # shrinks to kinds = [RemoveLayer, LayerOpacity(0.0)]

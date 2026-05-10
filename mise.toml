@@ -7,8 +7,9 @@
 
 [tools]
 rust = "1.92"
-"cargo:cargo-watch"  = "latest"
-"cargo:cargo-bundle" = "latest"
+"cargo:cargo-watch"   = "latest"
+"cargo:cargo-bundle"  = "latest"
+"cargo:cargo-nextest" = "latest"
 
 [env]
 RUST_LOG       = "rmap=debug,wgpu=warn,naga=warn,winit=info"
