@@ -1649,8 +1649,10 @@ fn apply_launch_command(
     // route to Failed; Info / Warn become toasts on the new
     // EditingState below.
     let audit_findings = {
+        let live_monitors = crate::monitors::list(event_loop);
         let env = crate::project::audit::AuditEnv {
-            monitor_count: event_loop.available_monitors().count() as u32,
+            monitor_count: live_monitors.len() as u32,
+            live_monitor_uuids: live_monitors.iter().map(|m| m.uuid.clone()).collect(),
         };
         crate::project::audit::ProjectAudit::run_with_path(
             &project,
@@ -3775,10 +3777,14 @@ impl ApplicationHandler for App {
         // click path requires a richer dispatch type (Toast → Command | Mutation)
         // that belongs in a Phase-2 task. The toast message alone surfaces
         // the finding to the operator.
+        // Enumerate live monitors once; shared by audit + output-target resolution.
+        let live_monitors = crate::monitors::list(event_loop);
+
         #[cfg(feature = "v3")]
         let audit_findings = {
             let env = crate::project::audit::AuditEnv {
-                monitor_count: event_loop.available_monitors().count() as u32,
+                monitor_count: live_monitors.len() as u32,
+                live_monitor_uuids: live_monitors.iter().map(|m| m.uuid.clone()).collect(),
             };
             crate::project::audit::ProjectAudit::run_with_path(
                 &project,
@@ -3811,10 +3817,36 @@ impl ApplicationHandler for App {
             }
         }
 
-        // `--monitor` overrides [`Project::output_target`] fallback index from the file.
-        let monitor_index = self
-            .monitor_override
-            .unwrap_or(project.output_target.fallback_index);
+        // `--monitor` overrides [`Project::output_target`]; bypass UUID resolution.
+        // When no CLI override is present, use V31.2.2 UUID-then-index resolution.
+        let monitor_index = if let Some(override_idx) = self.monitor_override {
+            override_idx
+        } else if live_monitors.is_empty() {
+            project.output_target.fallback_index
+        } else {
+            let outcome =
+                crate::monitors::resolve_output_target(&project.output_target, &live_monitors);
+            match &outcome {
+                crate::monitors::ResolveOutcome::UuidMatch(m) => {
+                    tracing::info!(
+                        index = m.index,
+                        uuid = ?project.output_target.uuid,
+                        "output target resolved via UUID match",
+                    );
+                }
+                crate::monitors::ResolveOutcome::IndexMatch(m) => {
+                    tracing::debug!(index = m.index, "output target resolved via fallback_index",);
+                }
+                crate::monitors::ResolveOutcome::Fallback { selected, reason } => {
+                    tracing::warn!(
+                        index = selected.index,
+                        ?reason,
+                        "output target fell back to display 0",
+                    );
+                }
+            }
+            outcome.monitor().index
+        };
         let monitor = event_loop.available_monitors().nth(monitor_index);
         if monitor.is_none() {
             tracing::warn!(
@@ -3993,11 +4025,17 @@ impl ApplicationHandler for App {
                             self.state = prev;
                             return;
                         };
-                        // Hot-swap projector to fullscreen. Look up the target monitor
-                        // from project.output_target.fallback_index; fall back to primary if
-                        // the index is out of range.
+                        // Hot-swap projector to fullscreen. V31.2.2 — resolve the
+                        // target via UUID-then-index-then-fallback so a project
+                        // saved on another machine still picks the right
+                        // projector when the saved UUID matches a live monitor.
                         let monitor: Option<winit::monitor::MonitorHandle> = {
-                            let idx = editing.project.output_target.fallback_index;
+                            let live = crate::monitors::list(event_loop);
+                            let outcome = crate::monitors::resolve_output_target(
+                                &editing.project.output_target,
+                                &live,
+                            );
+                            let idx = outcome.monitor().index;
                             event_loop.available_monitors().nth(idx)
                         };
                         tracing::info!(
@@ -4391,7 +4429,12 @@ mod tests {
         // (the smallest valid env; CI test runners always have at
         // least one). T2.23's run_with_path handles the relative asset
         // path against the project file's parent.
-        let env = crate::project::audit::AuditEnv { monitor_count: 1 };
+        // live_monitor_uuids is empty because the demo project has no
+        // output_target.uuid set, so OutputTargetUuidNotFound won't fire.
+        let env = crate::project::audit::AuditEnv {
+            monitor_count: 1,
+            live_monitor_uuids: Vec::new(),
+        };
         let findings = crate::project::audit::ProjectAudit::run_with_path(
             &project,
             &env,

@@ -136,6 +136,15 @@ pub enum AuditKind {
     /// Project has no layers configured. Informational; operator may
     /// have started fresh.
     EmptyProject,
+    /// V31.2.2 — project's `output_target.uuid` is set but no live monitor
+    /// carries a matching UUID. Falls back to `fallback_index` (or display 0
+    /// if the index is also out of range). `Severity::Warn`.
+    OutputTargetUuidNotFound {
+        /// The UUID stored in the project that had no live match.
+        uuid: String,
+        /// The `fallback_index` the project intended as a secondary fallback.
+        fallback_index: usize,
+    },
 }
 
 /// One finding from a `ProjectAudit::run` walk. The `message` field is
@@ -156,12 +165,19 @@ pub struct AuditFinding {
 }
 
 /// Per-machine state the audit needs that isn't part of the project
-/// itself: available monitor count, etc. Passed in so unit tests can
-/// pin a deterministic environment.
-#[derive(Debug, Clone, Copy)]
+/// itself: available monitor count, UUID list, etc. Passed in so unit
+/// tests can pin a deterministic environment.
+///
+/// Note: `Copy` was removed in V31.2.2 when `live_monitor_uuids`
+/// (`Vec`) was added. Callers should pass `&env`.
+#[derive(Debug, Clone)]
 pub struct AuditEnv {
     /// Number of monitors visible to the OS at audit time.
     pub monitor_count: u32,
+    /// V31.2.2 — UUID of each live monitor (parallel to the monitor
+    /// list, same index ordering). `None` entries for monitors whose
+    /// UUID is not yet known (before V31.2.3 fills them in).
+    pub live_monitor_uuids: Vec<Option<String>>,
 }
 
 impl Default for AuditEnv {
@@ -169,7 +185,10 @@ impl Default for AuditEnv {
         // Tests that don't care about monitor checks can use Default;
         // 1 is a safe value (excludes MonitorOutOfRange unless the
         // project explicitly references monitor index ≥ 1).
-        Self { monitor_count: 1 }
+        Self {
+            monitor_count: 1,
+            live_monitor_uuids: Vec::new(),
+        }
     }
 }
 
@@ -242,6 +261,35 @@ impl ProjectAudit {
                 ),
                 autofix: Some(project.set_output_monitor_index_mutation(0)),
             });
+        }
+
+        // V31.2.2: OutputTargetUuidNotFound — project has a UUID but none of
+        // the live monitors carries a matching UUID. Only emitted when
+        // `live_monitor_uuids` is non-empty (i.e. the caller passed live
+        // monitor data) so that callers that only populate `monitor_count`
+        // (older call sites, non-v3 paths) don't produce spurious findings.
+        if let Some(ref uuid) = project.output_target.uuid {
+            if !env.live_monitor_uuids.is_empty() {
+                let uuid_found = env
+                    .live_monitor_uuids
+                    .iter()
+                    .any(|u| u.as_deref() == Some(uuid.as_str()));
+                if !uuid_found {
+                    findings.push(AuditFinding {
+                        kind: AuditKind::OutputTargetUuidNotFound {
+                            uuid: uuid.clone(),
+                            fallback_index: project.output_target.fallback_index,
+                        },
+                        severity: Severity::Warn,
+                        message: format!(
+                            "Saved projector (UUID {uuid}) isn't connected. \
+                             Falling back to monitor {}.",
+                            project.output_target.fallback_index,
+                        ),
+                        autofix: None,
+                    });
+                }
+            }
         }
 
         // EmptyProject (T1.34): no layers configured.
@@ -688,7 +736,10 @@ mod tests {
     fn audit_monitor_out_of_range_emits_finding() {
         let mut p = fresh_project();
         p.output_target.fallback_index = 99;
-        let env = AuditEnv { monitor_count: 1 };
+        let env = AuditEnv {
+            monitor_count: 1,
+            live_monitor_uuids: Vec::new(),
+        };
         let findings = ProjectAudit::run(&p, &env);
         let f = findings
             .iter()
@@ -734,6 +785,9 @@ mod tests {
             // MonitorOutOfRange. monitor_count = 1 keeps the test
             // deterministic regardless of host hardware.
             monitor_count: 1,
+            // Demo has no output_target.uuid set, so live_monitor_uuids
+            // being empty won't trigger OutputTargetUuidNotFound.
+            live_monitor_uuids: Vec::new(),
         };
         let findings = ProjectAudit::run_with_path(&project, &env, Some(&demo_path));
         assert!(
@@ -789,7 +843,7 @@ mod tests {
     /// for v4-native projects.
     #[test]
     fn audit_multiple_warps_consolidated_fires_once() {
-        let mut p = fresh_project();
+        let p = fresh_project();
         p.transient_audit_signals
             .set(crate::project::schema::TransientAuditSignals {
                 previous_warp_count: 3,
@@ -837,7 +891,7 @@ mod tests {
     #[test]
     fn audit_multiple_warps_consolidated_skips_low_counts() {
         for previous_warp_count in [0usize, 1] {
-            let mut p = fresh_project();
+            let p = fresh_project();
             p.transient_audit_signals
                 .set(crate::project::schema::TransientAuditSignals {
                     previous_warp_count,
@@ -850,5 +904,79 @@ mod tests {
                 "MultipleWarpsConsolidated must not fire for previous_warp_count={previous_warp_count}",
             );
         }
+    }
+
+    /// V31.2.2 — project has `output_target.uuid` set but no live monitor
+    /// carries a matching UUID → `OutputTargetUuidNotFound` (Warn, no autofix).
+    #[test]
+    fn audit_output_target_uuid_not_found_emits_warning() {
+        let mut p = fresh_project();
+        p.output_target.uuid = Some("DEAD-BEEF-1234".to_string());
+        p.output_target.fallback_index = 0;
+
+        let env = AuditEnv {
+            monitor_count: 1,
+            // Live monitors have a different UUID — no match.
+            live_monitor_uuids: vec![Some("AAAA-1111".to_string())],
+        };
+        let findings = ProjectAudit::run(&p, &env);
+        let f = findings
+            .iter()
+            .find(|f| matches!(f.kind, AuditKind::OutputTargetUuidNotFound { .. }))
+            .expect("expected OutputTargetUuidNotFound finding");
+        assert_eq!(f.severity, Severity::Warn);
+        assert!(
+            f.autofix.is_none(),
+            "OutputTargetUuidNotFound has no autofix (UUID comes from hardware)"
+        );
+        if let AuditKind::OutputTargetUuidNotFound {
+            ref uuid,
+            fallback_index,
+        } = f.kind
+        {
+            assert_eq!(uuid, "DEAD-BEEF-1234");
+            assert_eq!(fallback_index, 0);
+        } else {
+            unreachable!();
+        }
+    }
+
+    /// V31.2.2 — project's UUID matches a live monitor → no
+    /// `OutputTargetUuidNotFound` finding.
+    #[test]
+    fn audit_output_target_uuid_found_no_finding() {
+        let mut p = fresh_project();
+        p.output_target.uuid = Some("MATCH-ME".to_string());
+
+        let env = AuditEnv {
+            monitor_count: 1,
+            live_monitor_uuids: vec![Some("MATCH-ME".to_string())],
+        };
+        let findings = ProjectAudit::run(&p, &env);
+        assert!(
+            !findings
+                .iter()
+                .any(|f| matches!(f.kind, AuditKind::OutputTargetUuidNotFound { .. })),
+            "matching UUID should not produce OutputTargetUuidNotFound"
+        );
+    }
+
+    /// V31.2.2 — when `live_monitor_uuids` is empty (caller didn't populate
+    /// it), no `OutputTargetUuidNotFound` is emitted even if `uuid` is set.
+    /// This preserves backward compatibility with call sites that only fill
+    /// `monitor_count`.
+    #[test]
+    fn audit_output_target_uuid_not_found_skips_when_uuids_unpopulated() {
+        let mut p = fresh_project();
+        p.output_target.uuid = Some("SOME-UUID".to_string());
+
+        // AuditEnv::default() has live_monitor_uuids: vec![]
+        let findings = ProjectAudit::run(&p, &AuditEnv::default());
+        assert!(
+            !findings
+                .iter()
+                .any(|f| matches!(f.kind, AuditKind::OutputTargetUuidNotFound { .. })),
+            "should not fire OutputTargetUuidNotFound when live_monitor_uuids is empty"
+        );
     }
 }

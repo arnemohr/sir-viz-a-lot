@@ -37,6 +37,10 @@ pub struct MonitorInfo {
     /// sessions.
     #[allow(dead_code)] // Read by T-003-T2.20 (last-used-projector prefs).
     pub stable_id: Option<String>,
+    /// V31.2.2 — cross-machine UUID from `CGDisplayCreateUUIDFromDisplayID`.
+    /// `None` until V31.2.3 implements the macOS lookup. Other platforms
+    /// will likely stay `None` until they grow an equivalent.
+    pub uuid: Option<String>,
 }
 
 impl MonitorInfo {
@@ -52,6 +56,8 @@ impl MonitorInfo {
             position: (position.x, position.y),
             scale_factor: handle.scale_factor(),
             stable_id,
+            // V31.2.3 will populate this from CGDisplayCreateUUIDFromDisplayID.
+            uuid: None,
         }
     }
 }
@@ -135,8 +141,110 @@ fn stable_id(handle: &MonitorHandle) -> Option<String> {
     }
 }
 
+/// Outcome of resolving an `OutputTarget` against live monitors.
+///
+/// V31.2.2 — callers use this instead of indexing the monitor list directly
+/// so UUID matching (V31.2.3) is automatically preferred when available.
+#[derive(Debug, Clone)]
+pub enum ResolveOutcome {
+    /// UUID matched a live monitor.
+    UuidMatch(MonitorInfo),
+    /// UUID absent or didn't match; index resolved cleanly.
+    IndexMatch(MonitorInfo),
+    /// Both UUID and index failed; fell back to display 0 with a
+    /// non-fatal audit warning.
+    Fallback {
+        selected: MonitorInfo,
+        reason: ResolveFallbackReason,
+    },
+}
+
+impl ResolveOutcome {
+    /// The resolved monitor, regardless of which path was taken.
+    pub fn monitor(&self) -> &MonitorInfo {
+        match self {
+            ResolveOutcome::UuidMatch(m) | ResolveOutcome::IndexMatch(m) => m,
+            ResolveOutcome::Fallback { selected, .. } => selected,
+        }
+    }
+}
+
+/// Reason the resolution fell back to display 0.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolveFallbackReason {
+    /// `OutputTarget.uuid` was Some but no live monitor matched.
+    ///
+    /// Note: this variant fires only when `fallback_index` is also valid and
+    /// the caller explicitly wants to surface a warning despite a successful
+    /// index match. The current `resolve_output_target` returns `IndexMatch`
+    /// (not `Fallback`) when UUID fails but index succeeds; this variant is
+    /// reserved for future use (e.g. explicit audit-warning-only paths).
+    #[allow(dead_code)]
+    UuidNotFound,
+    /// `OutputTarget.fallback_index` was out of range vs live monitor count.
+    IndexOutOfRange,
+    /// UUID was Some, no match, and `fallback_index` was also out of range.
+    /// (Both rules failed.)
+    UuidAndIndexBothMissing,
+}
+
+/// Resolve an `OutputTarget` to a live `MonitorInfo`.
+///
+/// Precedence:
+/// 1. If `target.uuid` is `Some(u)` **and** a `MonitorInfo` has `uuid == Some(u)`,
+///    return `UuidMatch`.
+/// 2. Else, if `target.fallback_index < monitors.len()`, return
+///    `IndexMatch(monitors[target.fallback_index])`.
+/// 3. Else, return `Fallback { selected: monitors[0], reason }`.
+///
+/// Panics if `monitors` is empty — rmap requires ≥1 display.
+pub fn resolve_output_target(
+    target: &crate::project::schema::OutputTarget,
+    monitors: &[MonitorInfo],
+) -> ResolveOutcome {
+    debug_assert!(
+        !monitors.is_empty(),
+        "resolve_output_target: monitor list must not be empty"
+    );
+
+    // Step 1 — UUID match.
+    if let Some(ref uuid) = target.uuid {
+        if let Some(m) = monitors
+            .iter()
+            .find(|m| m.uuid.as_deref() == Some(uuid.as_str()))
+        {
+            return ResolveOutcome::UuidMatch(m.clone());
+        }
+        // UUID was set but not found in the live list.
+        // Still attempt the index fallback before giving up.
+        if target.fallback_index < monitors.len() {
+            // UUID miss but index is valid — treat as IndexMatch (UUID just not live).
+            return ResolveOutcome::IndexMatch(monitors[target.fallback_index].clone());
+        }
+        // Both UUID and index failed.
+        return ResolveOutcome::Fallback {
+            selected: monitors[0].clone(),
+            reason: ResolveFallbackReason::UuidAndIndexBothMissing,
+        };
+    }
+
+    // Step 2 — no UUID; use fallback_index.
+    if target.fallback_index < monitors.len() {
+        return ResolveOutcome::IndexMatch(monitors[target.fallback_index].clone());
+    }
+
+    // Step 3 — index out of range.
+    ResolveOutcome::Fallback {
+        selected: monitors[0].clone(),
+        reason: ResolveFallbackReason::IndexOutOfRange,
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::project::schema::OutputTarget;
+
     /// 003-T2.7 acceptance criterion 1 + 4: on macOS, looking up an id
     /// that does not match any attached display falls back to `None`
     /// (the same code path the spec calls out as "fail to match" in
@@ -153,6 +261,108 @@ mod tests {
         assert!(
             result.is_none(),
             "unknown display id should yield None, not a panic or an empty string"
+        );
+    }
+
+    // --- V31.2.2: resolve_output_target tests ---
+
+    fn mk_monitor(index: usize, uuid: Option<&str>) -> MonitorInfo {
+        MonitorInfo {
+            index,
+            name: format!("Display {index}"),
+            size: (1920, 1080),
+            position: (0, 0),
+            scale_factor: 1.0,
+            stable_id: None,
+            uuid: uuid.map(|s| s.to_string()),
+        }
+    }
+
+    /// V31.2.2 — UUID present in both target and live monitor → UuidMatch.
+    #[test]
+    fn resolve_uuid_match_success() {
+        let monitors = vec![mk_monitor(0, None), mk_monitor(1, Some("AAAA-1111"))];
+        let target = OutputTarget {
+            uuid: Some("AAAA-1111".to_string()),
+            fallback_index: 0,
+        };
+        let outcome = resolve_output_target(&target, &monitors);
+        assert!(
+            matches!(outcome, ResolveOutcome::UuidMatch(ref m) if m.index == 1),
+            "expected UuidMatch for index 1, got {outcome:?}",
+        );
+    }
+
+    /// V31.2.2 — UUID Some but no live monitor has it; index is valid → IndexMatch.
+    #[test]
+    fn resolve_uuid_some_no_match_index_valid() {
+        let monitors = vec![mk_monitor(0, None), mk_monitor(1, Some("BBBB-2222"))];
+        let target = OutputTarget {
+            uuid: Some("ZZZZ-9999".to_string()), // not in live list
+            fallback_index: 1,
+        };
+        let outcome = resolve_output_target(&target, &monitors);
+        assert!(
+            matches!(outcome, ResolveOutcome::IndexMatch(ref m) if m.index == 1),
+            "expected IndexMatch for index 1 (UUID miss fallback), got {outcome:?}",
+        );
+    }
+
+    /// V31.2.2 — UUID None, valid fallback_index → IndexMatch.
+    #[test]
+    fn resolve_uuid_none_index_valid() {
+        let monitors = vec![mk_monitor(0, None), mk_monitor(1, None)];
+        let target = OutputTarget {
+            uuid: None,
+            fallback_index: 1,
+        };
+        let outcome = resolve_output_target(&target, &monitors);
+        assert!(
+            matches!(outcome, ResolveOutcome::IndexMatch(ref m) if m.index == 1),
+            "expected IndexMatch for index 1, got {outcome:?}",
+        );
+    }
+
+    /// V31.2.2 — UUID None, fallback_index out of range → Fallback(IndexOutOfRange).
+    #[test]
+    fn resolve_uuid_none_index_out_of_range() {
+        let monitors = vec![mk_monitor(0, None)];
+        let target = OutputTarget {
+            uuid: None,
+            fallback_index: 5,
+        };
+        let outcome = resolve_output_target(&target, &monitors);
+        assert!(
+            matches!(
+                outcome,
+                ResolveOutcome::Fallback {
+                    ref selected,
+                    reason: ResolveFallbackReason::IndexOutOfRange
+                } if selected.index == 0
+            ),
+            "expected Fallback(IndexOutOfRange) to monitor 0, got {outcome:?}",
+        );
+    }
+
+    /// V31.2.2 — UUID Some, no match, AND fallback_index out of range →
+    /// Fallback(UuidAndIndexBothMissing).
+    #[test]
+    fn resolve_uuid_some_no_match_index_out_of_range() {
+        let monitors = vec![mk_monitor(0, None)];
+        let target = OutputTarget {
+            uuid: Some("ZZZZ-9999".to_string()),
+            fallback_index: 5,
+        };
+        let outcome = resolve_output_target(&target, &monitors);
+        assert!(
+            matches!(
+                outcome,
+                ResolveOutcome::Fallback {
+                    ref selected,
+                    reason: ResolveFallbackReason::UuidAndIndexBothMissing
+                } if selected.index == 0
+            ),
+            "expected Fallback(UuidAndIndexBothMissing) to monitor 0, got {outcome:?}",
         );
     }
 }
