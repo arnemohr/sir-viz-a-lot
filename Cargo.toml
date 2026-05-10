@@ -17,6 +17,11 @@ path = "src/main.rs"
 # verify before first build.
 
 [dependencies]
+# Collections
+# SmallVec is already a transitive dep (wgpu/winit pull it in at 1.15.1).
+# We add it as a direct dep so we can use SmallVec in our own code.
+smallvec = "1"
+
 # GPU + windowing
 winit = "0.30"
 wgpu  = "29"

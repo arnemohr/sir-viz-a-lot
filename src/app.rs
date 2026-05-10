@@ -33,6 +33,8 @@ pub mod autosave;
 
 use std::path::PathBuf;
 
+use smallvec::SmallVec;
+
 use crossbeam_channel::{Receiver, Sender};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, WindowEvent};
@@ -73,9 +75,9 @@ use crate::windows::control::ControlWindow;
 use crate::windows::control_panel::{
     ControlPanelAction, ControlPanelInputs, ControlPanelState, show as control_panel_show,
 };
-use crate::windows::output::OutputWindow;
 #[cfg(feature = "v3")]
 use crate::windows::output::PreviewWindow;
+use crate::windows::output::{OutputState, OutputWindow};
 #[cfg(feature = "v3")]
 use crate::windows::theme;
 
@@ -380,7 +382,20 @@ enum FailureKind {
 /// the renderer (which owns the [`GpuContext`]), the test-pattern renderer,
 /// the optional SVG layer state, and the IOPMAssertion preventing display sleep.
 struct EditingState {
-    output: OutputWindow,
+    /// Active projector windows. Always non-empty: index 0 is the primary
+    /// output window. Part 1 always holds exactly one entry; Part 2 (P0.7.2
+    /// second-window wiring) will populate a second slot when the project
+    /// carries two `output_targets`.
+    ///
+    /// Invariant: `outputs.len() >= 1`. Enforced at construction
+    /// (`assemble_editing_state`) and by `primary_output()` /
+    /// `primary_output_mut()` debug-asserts.
+    outputs: SmallVec<[OutputWindow; 2]>,
+    /// Operator-level show toggles: blackout, freeze, test-pattern, editor
+    /// overlay. These are session-scoped (not per-projector) — the operator
+    /// blacks out all projectors at once, not one at a time. One `OutputState`
+    /// lives here rather than being duplicated per `OutputWindow`.
+    output_state: OutputState,
     control: Option<ControlWindow>,
     renderer: Renderer,
     test_patterns: TestPatternRenderer,
@@ -393,7 +408,7 @@ struct EditingState {
     compositor: Compositor,
     gamma: GammaPipeline,
     /// Editor-overlay pass painted on top of the projector after gamma
-    /// (toggled by `output.state.show_editor_overlay`). Lets the
+    /// (toggled by `output_state.show_editor_overlay`). Lets the
     /// operator see on the actual surface where each layer is mapped
     /// while dragging in the control window.
     overlay: OverlayPipeline,
@@ -536,6 +551,43 @@ struct EditingState {
     /// Initialised to 0 at session start.
     #[cfg(feature = "v3")]
     prior_bar_idx: u64,
+}
+
+impl EditingState {
+    /// Return a shared reference to the primary (index-0) `OutputWindow`.
+    ///
+    /// # Panics (debug only)
+    /// Asserts that `outputs` is non-empty. The invariant is maintained by
+    /// `assemble_editing_state` (always pushes one entry) and by Part 2
+    /// (closes remove the entry but leave at least one). In release builds the
+    /// `.expect` is the safety net; in debug builds the `debug_assert!` fires
+    /// first with a more informative message.
+    fn primary_output(&self) -> &OutputWindow {
+        debug_assert!(
+            !self.outputs.is_empty(),
+            "EditingState.outputs invariant violated: vec is empty"
+        );
+        self.outputs
+            .first()
+            .expect("outputs is non-empty (Part 1 always length 1; Part 2 maintains the invariant)")
+    }
+
+    /// Return a mutable reference to the primary (index-0) `OutputWindow`.
+    ///
+    /// # Panics (debug only)
+    /// Same invariant and panic conditions as [`Self::primary_output`].
+    ///
+    /// Unused in Part 1 (all mutation sites use direct `state.outputs[0]`
+    /// indexing for split-borrow compatibility). Part 2 will use this
+    /// at sites that don't hold concurrent `&mut` borrows on other fields.
+    #[allow(dead_code)]
+    fn primary_output_mut(&mut self) -> &mut OutputWindow {
+        debug_assert!(
+            !self.outputs.is_empty(),
+            "EditingState.outputs invariant violated: vec is empty"
+        );
+        self.outputs.first_mut().expect("outputs is non-empty")
+    }
 }
 
 /// 003-T1.45 — once-per-session "first X" guards for the Plan §11.7
@@ -815,16 +867,16 @@ fn apply_command(state: &mut EditingState, event: Command) -> SideEffect {
             }
         }
         Command::Blackout => {
-            state.output.state.toggle_blackout();
+            state.output_state.toggle_blackout();
             tracing::info!(
-                blackout = state.output.state.blackout,
+                blackout = state.output_state.blackout,
                 "blackout via source"
             );
             SideEffect::None
         }
         Command::Freeze => {
-            state.output.state.toggle_freeze();
-            tracing::info!(freeze = state.output.state.freeze, "freeze via source");
+            state.output_state.toggle_freeze();
+            tracing::info!(freeze = state.output_state.freeze, "freeze via source");
             SideEffect::None
         }
         Command::CycleTestPattern => {
@@ -833,18 +885,18 @@ fn apply_command(state: &mut EditingState, event: Command) -> SideEffect {
             // scoped and reverting them by Cmd-Z would be confusing
             // (operator hits T to escape a frozen show, then bumps Z
             // and the test pattern comes back).
-            state.output.state.cycle_test_pattern();
+            state.output_state.cycle_test_pattern();
             tracing::info!(
-                pattern = state.output.state.test_pattern.label(),
+                pattern = state.output_state.test_pattern.label(),
                 "test pattern via source"
             );
             SideEffect::None
         }
         Command::ToggleEditorOverlay => {
             // 003-T1.32: O hotkey routes through Command for telemetry.
-            state.output.state.toggle_editor_overlay();
+            state.output_state.toggle_editor_overlay();
             tracing::info!(
-                overlay = state.output.state.show_editor_overlay,
+                overlay = state.output_state.show_editor_overlay,
                 "editor overlay via source"
             );
             SideEffect::None
@@ -1079,9 +1131,9 @@ enum EditingTransition {
 fn rebuild_layers_for_state(state: &mut EditingState) {
     let device = &state.renderer.gpu.device;
     let queue = &state.renderer.gpu.queue;
-    let w = state.output.config.width.max(1);
-    let h = state.output.config.height.max(1);
-    let fmt = state.output.config.format;
+    let w = state.primary_output().config.width.max(1);
+    let h = state.primary_output().config.height.max(1);
+    let fmt = state.primary_output().config.format;
     let project_path = state.project_file_path.clone();
     match rebuild_layers(
         device,
@@ -1598,6 +1650,7 @@ fn init_running_app_with_resources(
         c.window.focus_window();
     }
     let surface_format = output_bundle.output.config.format;
+    // OutputBundle.output stays singular in Part 1; Part 2 will extend it.
     let output_size = (
         output_bundle.output.config.width,
         output_bundle.output.config.height,
@@ -1635,7 +1688,11 @@ fn assemble_editing_state(
     }
 
     EditingState {
-        output: output.output,
+        // Invariant: outputs is always non-empty. Part 1 always length 1.
+        // Part 2 (P0.7.2) will push a second OutputWindow when the project
+        // carries two output_targets.
+        outputs: smallvec::smallvec![output.output],
+        output_state: OutputState::default(),
         control,
         renderer: output.renderer,
         test_patterns: output.test_patterns,
@@ -2797,10 +2854,10 @@ fn make_warp_render_target(
 }
 
 fn resize_m5_gpu(state: &mut EditingState) {
-    let w = state.output.config.width.max(1);
-    let h = state.output.config.height.max(1);
+    let w = state.primary_output().config.width.max(1);
+    let h = state.primary_output().config.height.max(1);
     let device = &state.renderer.gpu.device;
-    let fmt = state.output.config.format;
+    let fmt = state.primary_output().config.format;
     state.compositor.resize(device, w, h);
     let (tex, view) = make_warp_render_target(device, w, h, fmt);
     state.warp_rt = tex;
@@ -3348,7 +3405,10 @@ fn handle_editing_window_event(
                 let mut panel_action = ControlPanelAction::None;
                 let inputs = ControlPanelInputs {
                     scene_texture: state.scene_texture_id,
-                    output_size: (state.output.config.width, state.output.config.height),
+                    output_size: (
+                        state.primary_output().config.width,
+                        state.primary_output().config.height,
+                    ),
                     #[cfg(feature = "v3")]
                     session_age: state.session_started_at.elapsed(),
                     #[cfg(feature = "v3")]
@@ -3356,18 +3416,18 @@ fn handle_editing_window_event(
                     #[cfg(feature = "v3")]
                     can_redo: state.undo_stack.can_redo(),
                     // 003-T3.23: snapshot of the four output-state flags.
-                    // Reading directly from output.state so the UI gets the
+                    // Reading directly from output_state so the UI gets the
                     // most recent frame's values without an extra indirection.
                     #[cfg(feature = "v3")]
                     output_state_snapshot: {
                         use crate::test_patterns::TestPattern;
                         use crate::windows::show_day_strip::OutputStateSnapshot;
                         OutputStateSnapshot {
-                            blackout: state.output.state.blackout,
-                            freeze: state.output.state.freeze,
-                            test_pattern_active: state.output.state.test_pattern
+                            blackout: state.output_state.blackout,
+                            freeze: state.output_state.freeze,
+                            test_pattern_active: state.output_state.test_pattern
                                 != TestPattern::None,
-                            overlay_on: state.output.state.show_editor_overlay,
+                            overlay_on: state.output_state.show_editor_overlay,
                         }
                     },
                     // 003-T4.9: derive project name from file path at call
@@ -3725,7 +3785,7 @@ fn handle_editing_window_event(
     }
 
     // Guard: only act on events for the output window from here down.
-    if window_id != state.output.window.id() {
+    if window_id != state.primary_output().window.id() {
         return editing_transition;
     }
 
@@ -3813,9 +3873,12 @@ fn handle_editing_window_event(
             state.keyboard.push_winit_key(key_event.physical_key);
         }
         WindowEvent::Resized(new_size) => {
-            state.output.config.width = new_size.width.max(1);
-            state.output.config.height = new_size.height.max(1);
-            state.output.recreate_surface(&state.renderer.gpu.device);
+            // Use direct field access (split-borrow) so `&mut outputs` and
+            // `&renderer` can coexist. The helper methods borrow all of
+            // `state`, which would conflict.
+            state.outputs[0].config.width = new_size.width.max(1);
+            state.outputs[0].config.height = new_size.height.max(1);
+            state.outputs[0].recreate_surface(&state.renderer.gpu.device);
             resize_m5_gpu(state);
             // warp_rt was recreated; the egui scene preview's
             // TextureId now points to a freed view. Re-register so
@@ -3871,7 +3934,13 @@ fn handle_editing_window_event(
                     let generation = ls.generation;
                     match kind {
                         schema::LayerKind::Svg { .. } => {
-                            let size = (state.output.config.width, state.output.config.height);
+                            // Direct field access (split-borrow): state.layers is
+                            // mutably borrowed by the enclosing for-loop, so we
+                            // cannot call primary_output() (method borrows all of state).
+                            let size = (
+                                state.outputs[0].config.width,
+                                state.outputs[0].config.height,
+                            );
                             let _ = ls.job_tx.send(RasterJob {
                                 layer_id,
                                 path: asset_path,
@@ -3987,31 +4056,42 @@ fn handle_editing_window_event(
             // Blackout wins over freeze: if the operator hits B
             // while frozen, the projector goes black immediately
             // rather than continuing to show the frozen frame.
-            let result = if state.output.state.blackout {
-                render_blackout(&state.renderer, &state.output)
-            } else if state.output.state.freeze {
+            //
+            // Bind output via direct field access (split-borrow) so the
+            // compiler can simultaneously issue &mut borrows on other
+            // disjoint fields (layers, overlay) inside render_m5_pipeline.
+            // Using primary_output() (a method) would borrow all of `state`.
+            let result = if state.output_state.blackout {
+                let output = &state.outputs[0];
+                render_blackout(&state.renderer, output)
+            } else if state.output_state.freeze {
                 // Freeze: skip rendering entirely. The window keeps
                 // showing its last presented frame because we
                 // never call `frame.present()` again. Pragmatic M2
                 // implementation; a perfect "freeze" would copy
                 // and re-present the last framebuffer every frame.
                 Ok(())
-            } else if state.output.state.test_pattern != TestPattern::None {
+            } else if state.output_state.test_pattern != TestPattern::None {
+                let output = &state.outputs[0];
                 render_test_pattern(
                     &state.renderer,
-                    &state.output,
+                    output,
                     &state.test_patterns,
-                    state.output.state.test_pattern,
+                    state.output_state.test_pattern,
                 )
             } else if !state.project.layers.is_empty() {
-                let surface_format = state.output.config.format;
+                // Split-borrow: bind output from state.outputs before taking
+                // &mut borrows on state.layers and state.overlay.
+                let surface_format = state.outputs[0].config.format;
+                let overlay_enabled = state.output_state.show_editor_overlay;
                 let overlay_selected = match state.scene_editor.selected {
                     Some(crate::windows::scene_editor::Selection::Layer(i)) => Some(i),
                     _ => None,
                 };
+                let output = &state.outputs[0];
                 render_m5_pipeline(
                     &state.renderer,
-                    &state.output,
+                    output,
                     &state.project,
                     &mut state.layers,
                     &state.svg_pipeline,
@@ -4019,7 +4099,7 @@ fn handle_editing_window_event(
                     &state.gamma,
                     &mut state.overlay,
                     overlay_selected,
-                    state.output.state.show_editor_overlay,
+                    overlay_enabled,
                     &state.warp_rt_view,
                     &state.color_pipeline,
                     &state.blur_pipeline,
@@ -4029,21 +4109,22 @@ fn handle_editing_window_event(
                     &state.clock,
                 )
             } else {
-                state.renderer.render_frame(&state.output)
+                let output = &state.outputs[0];
+                state.renderer.render_frame(output)
             };
             match result {
                 Ok(()) => {}
                 Err(RenderError::SurfaceLost) => {
                     tracing::warn!("surface lost; recreating");
-                    state.output.recreate_surface(&state.renderer.gpu.device);
+                    state.outputs[0].recreate_surface(&state.renderer.gpu.device);
                 }
                 Err(RenderError::SurfaceOutdated) => {
                     tracing::warn!("surface outdated; recreating");
-                    state.output.recreate_surface(&state.renderer.gpu.device);
+                    state.outputs[0].recreate_surface(&state.renderer.gpu.device);
                 }
                 Err(RenderError::SurfaceSuboptimal) => {
                     tracing::warn!("surface suboptimal; recreating");
-                    state.output.recreate_surface(&state.renderer.gpu.device);
+                    state.outputs[0].recreate_surface(&state.renderer.gpu.device);
                 }
                 Err(RenderError::RenderPanic { message }) => {
                     tracing::error!(%message, "renderer panicked; recovered");
@@ -4411,7 +4492,7 @@ impl ApplicationHandler for App {
                             monitor = ?monitor.as_ref().map(|m| m.name()),
                             "entering GoLive; set_fullscreen(true)"
                         );
-                        match editing.output.set_fullscreen(true, monitor) {
+                        match editing.primary_output().set_fullscreen(true, monitor) {
                             Ok(()) => {
                                 self.state = AppState::GoLive(editing);
                             }
@@ -4436,7 +4517,7 @@ impl ApplicationHandler for App {
                             return;
                         };
                         tracing::info!("exiting GoLive; set_fullscreen(false)");
-                        match editing.output.set_fullscreen(false, None) {
+                        match editing.primary_output().set_fullscreen(false, None) {
                             Ok(()) => {
                                 self.state = AppState::Editing(editing);
                             }
@@ -4607,7 +4688,7 @@ impl ApplicationHandler for App {
         }
 
         if let Some(state) = self.state.editing_mut() {
-            state.output.window.request_redraw();
+            state.primary_output().window.request_redraw();
             // T-M9-03: throttle the control window to ~30 fps.
             // Output stays at vsync (~60 fps); preview at half rate keeps
             // the event-rig CPU budget under control without making

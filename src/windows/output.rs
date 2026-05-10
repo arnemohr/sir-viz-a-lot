@@ -155,11 +155,15 @@ pub const WINDOWED_DEFAULT_HEIGHT: u32 = 720;
 /// requires the window-handle source to live as long as the surface.
 /// `Arc<winit::window::Window>` implements wgpu's `DisplayAndWindowHandle`
 /// blanket impl, so it converts directly into `SurfaceTarget<'static>`.
+///
+/// Note: operator-level show toggles (blackout, freeze, test-pattern,
+/// editor overlay) are NOT stored here. They are session-scoped and live
+/// once on `EditingState.output_state` — a single `OutputState` shared
+/// across all projectors, not duplicated per projector.
 pub struct OutputWindow {
     pub window: Arc<Window>,
     pub surface: wgpu::Surface<'static>,
     pub config: wgpu::SurfaceConfiguration,
-    pub state: OutputState,
 }
 
 impl OutputWindow {
@@ -249,7 +253,6 @@ impl OutputWindow {
             window,
             surface,
             config,
-            state: OutputState::default(),
         })
     }
 
