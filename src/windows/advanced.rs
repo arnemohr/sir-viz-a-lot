@@ -557,6 +557,31 @@ fn show_project_section(
 
     ui.add_space(4.0);
 
+    // V31.10.4: crossfade duration slider — surfaces the field that previously
+    // only had a v2-Scenes-tab UI. The v3 cue strip is the canonical recall
+    // surface, so the project-level crossfade knob lives here in the Project
+    // section. Crossfade only fires when both scenes share layer topology
+    // (same layer paths in the same order); structural changes snap instantly
+    // regardless of this setting (see snapshots_share_layer_topology in
+    // src/project/mod.rs).
+    ui.label("Cue crossfade duration");
+    if let Some(new) = command_slider(
+        ui,
+        "adv_crossfade_duration_s",
+        "seconds",
+        project.crossfade_duration_s,
+        0.0..=5.0,
+    ) {
+        st.pending_mutations
+            .push(project.set_crossfade_duration_s_mutation(new));
+    }
+    ui.weak(
+        "0 = instant snap. Crossfade only fires when both cues share the same \
+         layer paths in the same order; structural changes snap instantly.",
+    );
+
+    ui.add_space(4.0);
+
     if let Some(new) = command_checkbox(ui, "Windowed output", project.output_windowed) {
         st.pending_mutations
             .push(project.set_output_windowed_mutation(new));
