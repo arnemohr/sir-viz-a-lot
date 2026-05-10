@@ -107,6 +107,7 @@ impl GammaPipeline {
         }
     }
 
+    #[allow(clippy::too_many_arguments)] // wgpu render APIs naturally take many borrows
     pub fn render(
         &self,
         device: &wgpu::Device,

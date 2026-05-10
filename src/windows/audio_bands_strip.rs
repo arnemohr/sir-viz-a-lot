@@ -31,7 +31,7 @@ pub const STRIP_HEIGHT: f32 = 40.0;
 /// degenerate case (caller's loop over 0 bands does nothing).
 pub fn bar_layout(avail_x: f32, avail_y: f32, bar_count: usize) -> (f32, f32, f32) {
     let gutter = 4.0_f32;
-    let bar_h = avail_y.min(STRIP_HEIGHT - 8.0).max(12.0);
+    let bar_h = avail_y.clamp(12.0, STRIP_HEIGHT - 8.0);
     let bar_w = if bar_count == 0 {
         0.0
     } else {

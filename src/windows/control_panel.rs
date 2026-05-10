@@ -1,3 +1,9 @@
+// egui 0.34 deprecated `SidePanel` / `TopBottomPanel` / `Panel::exact_width`
+// in favour of `Panel::left/right/top/bottom` + `exact_size`. The migration
+// is mechanical but ripples across every panel call site here; deferring it
+// to its own commit so v0.4 work doesn't bundle UI-API churn.
+#![allow(deprecated)]
+
 //! egui control panel: effects per layer, layer order, warp corners, scenes, gamma.
 
 use std::path::Path;

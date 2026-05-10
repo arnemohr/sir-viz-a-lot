@@ -201,6 +201,7 @@ impl TransformPipeline {
     /// before drawing the moved quad. Pixels outside the transformed
     /// quad must be transparent so the compositor sees layers below them
     /// — clearing to opaque black would punch a hole in the stack.
+    #[allow(clippy::too_many_arguments)] // wgpu render APIs naturally take many borrows
     pub fn render(
         &self,
         device: &wgpu::Device,

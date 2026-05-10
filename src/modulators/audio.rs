@@ -247,8 +247,8 @@ mod cpal_impl {
                         continue;
                     }
                     let mut sum = 0.0;
-                    for k in lo..hi {
-                        let m = (buf[k].re * buf[k].re + buf[k].im * buf[k].im).sqrt();
+                    for c in &buf[lo..hi] {
+                        let m = (c.re * c.re + c.im * c.im).sqrt();
                         sum += m;
                     }
                     let avg = sum / (hi - lo) as f32;

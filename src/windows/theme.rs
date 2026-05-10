@@ -44,6 +44,7 @@ pub const ACCENT_DIM: egui::Color32 = egui::Color32::from_rgb(180, 140, 70);
 
 // ── Semantic status ───────────────────────────────────────────────────────────
 
+#[allow(dead_code)] // reserved for forthcoming warning-toast surfaces
 pub const WARNING: egui::Color32 = egui::Color32::from_rgb(255, 180, 80);
 pub const DESTRUCTIVE: egui::Color32 = egui::Color32::from_rgb(220, 100, 100);
 pub const SUCCESS: egui::Color32 = egui::Color32::from_rgb(120, 200, 140);
@@ -60,6 +61,7 @@ pub const HANDLE_ACTIVE: egui::Color32 = ACCENT;
 /// Warp mesh grid lines — faint cool-tinted stroke.
 pub const MESH_LINE: egui::Color32 = egui::Color32::from_rgba_premultiplied(160, 200, 255, 90);
 /// Selected-layer outline — warm accent so it reads as "mine".
+#[allow(dead_code)] // reserved for the M4 selected-layer outline (UX punch-list item)
 pub const SELECTED_OUTLINE: egui::Color32 = ACCENT;
 /// Mask polygon edge — violet so it's distinct from both the accent and
 /// the neutral layer-outline palette.

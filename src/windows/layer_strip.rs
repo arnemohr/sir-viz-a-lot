@@ -559,8 +559,8 @@ mod tests {
         let m = p.set_layer_muted_mutation(0, !p.layers[0].muted);
         match &m {
             Mutation::SetLayerMuted(s) => {
-                assert_eq!(s.new, true);
-                assert_eq!(s.old, false);
+                assert!(s.new);
+                assert!(!s.old);
             }
             _ => panic!("expected SetLayerMuted"),
         }
@@ -571,8 +571,8 @@ mod tests {
         let m2 = p.set_layer_muted_mutation(0, !p.layers[0].muted);
         match &m2 {
             Mutation::SetLayerMuted(s) => {
-                assert_eq!(s.new, false);
-                assert_eq!(s.old, true);
+                assert!(!s.new);
+                assert!(s.old);
             }
             _ => panic!("expected SetLayerMuted"),
         }

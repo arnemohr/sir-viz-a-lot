@@ -208,11 +208,8 @@ mod tests {
         // any Mutation, and asserting UndoStack stays empty.
         let stack = UndoStack::new();
         let mut event_count = 0;
-        loop {
-            match rx.try_recv() {
-                Ok(_ev) => event_count += 1,
-                Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
-            }
+        while let Ok(_ev) = rx.try_recv() {
+            event_count += 1;
         }
 
         let _ = std::fs::remove_file(&path);

@@ -5250,9 +5250,8 @@ mod tests {
         // Simulate the state side of apply_command with quantize Some(4).
         // We can't construct EditingState, so we verify the *intended*
         // mutation pattern: the field is just an Option<usize> assignment.
-        let mut pending_cue: Option<usize> = None;
         // Press cue 5.
-        pending_cue = Some(5);
+        let mut pending_cue: Option<usize> = Some(5);
         assert_eq!(pending_cue, Some(5));
         // Press cue 3 before boundary — last-press-wins.
         pending_cue = Some(3);

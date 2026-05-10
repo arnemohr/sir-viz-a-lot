@@ -1,3 +1,8 @@
+// P0.2.3a ships the widgets; full call-site migration to
+// `ParameterRow` lands in P0.2.3b/c follow-up + P0.2.4 / P0.2.5.
+// Until those commits, the row-shaped helpers look dead to clippy.
+#![allow(dead_code)]
+
 //! Reusable egui widgets for the Advanced panel (P0.2.3a, W2.3a).
 //!
 //! Per roadmap Appendix B (component vocabulary), these are the

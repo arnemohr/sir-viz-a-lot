@@ -29,7 +29,11 @@ static PROVIDER: OnceLock<Arc<dyn OscProvider>> = OnceLock::new();
 /// Install the active OSC provider. Subsequent calls are silently
 /// ignored — once the dispatch sees a provider it should not change
 /// for the lifetime of the app.
-#[cfg_attr(not(feature = "osc"), allow(dead_code))]
+///
+/// W2.1 follow-up wires `controls::osc::OscSource::start` to install
+/// a `CcRegistry`-equivalent provider here; until then the resolve
+/// path always returns `0.0`.
+#[allow(dead_code)] // wired by W2.1 OSC value-registry follow-up
 pub fn install(provider: Arc<dyn OscProvider>) {
     let _ = PROVIDER.set(provider);
 }

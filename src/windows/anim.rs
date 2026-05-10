@@ -19,7 +19,7 @@ pub const HOVER_FADE_MS: f32 = 120.0;
 ///
 /// Slightly longer than `HOVER_FADE_MS` so drag affordances feel
 /// "heavier" than pointer hovers — reflects physical inertia.
-#[cfg_attr(not(feature = "v3"), allow(dead_code))]
+#[allow(dead_code)] // reserved for thumbnail drag animations (not yet shipped)
 pub const DRAG_EASE_MS: f32 = 160.0;
 
 /// Duration (ms) for panel / banner transitions (slide-in, cross-fade).
@@ -53,19 +53,15 @@ mod tests {
     use super::*;
 
     /// T4.15 acceptance: timing tokens are all positive and ordered
-    /// HOVER_FADE_MS < DRAG_EASE_MS < TRANSITION_MS.
+    /// HOVER_FADE_MS < DRAG_EASE_MS < TRANSITION_MS. Asserted at
+    /// compile time via `const { ... }` blocks so a regression in
+    /// the constants fails the build, not a `cargo test` run.
     #[test]
     fn anim_constants_present_and_sensible() {
-        assert!(HOVER_FADE_MS > 0.0, "HOVER_FADE_MS must be positive");
-        assert!(DRAG_EASE_MS > 0.0, "DRAG_EASE_MS must be positive");
-        assert!(TRANSITION_MS > 0.0, "TRANSITION_MS must be positive");
-        assert!(
-            HOVER_FADE_MS < DRAG_EASE_MS,
-            "HOVER_FADE_MS ({HOVER_FADE_MS}) must be less than DRAG_EASE_MS ({DRAG_EASE_MS})"
-        );
-        assert!(
-            DRAG_EASE_MS < TRANSITION_MS,
-            "DRAG_EASE_MS ({DRAG_EASE_MS}) must be less than TRANSITION_MS ({TRANSITION_MS})"
-        );
+        const _: () = assert!(HOVER_FADE_MS > 0.0);
+        const _: () = assert!(DRAG_EASE_MS > 0.0);
+        const _: () = assert!(TRANSITION_MS > 0.0);
+        const _: () = assert!(HOVER_FADE_MS < DRAG_EASE_MS);
+        const _: () = assert!(DRAG_EASE_MS < TRANSITION_MS);
     }
 }

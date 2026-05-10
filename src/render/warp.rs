@@ -1,3 +1,9 @@
+// `needless_range_loop` triggers on Gauss-Jordan inner loops that
+// index two parallel rows of the augmented matrix (`m[col][j]` +
+// `m[row][j]`), which can't cleanly become an iterator. The render
+// API also takes the standard wgpu-multi-borrow shape.
+#![allow(clippy::needless_range_loop, clippy::too_many_arguments)]
+
 //! Warp mesh geometry + mask sampling (T-M5-03 … T-M5-06).
 
 use glam::{Mat3, Vec2, Vec3};
@@ -525,8 +531,8 @@ mod tests {
             let v = p.y / p.z;
             assert!(
                 (u - src[i][0]).abs() < 1e-4 && (v - src[i][1]).abs() < 1e-4,
-                "corner {i}: got ({u},{v}) want {}",
-                format!("{:?}", src[i])
+                "corner {i}: got ({u},{v}) want {:?}",
+                src[i]
             );
         }
     }

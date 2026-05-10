@@ -573,16 +573,16 @@ fn show_rgb_matrix_editor(ui: &mut Ui, project: &mut Project, st: &mut ControlPa
             ui.end_row();
             for (r, row_label) in row_labels.iter().enumerate() {
                 ui.weak(*row_label);
-                for c in 0..3 {
-                    let mut v = new_matrix[r][c];
+                for cell in new_matrix[r].iter_mut() {
+                    let mut v = *cell;
                     let resp = ui.add(
                         egui::DragValue::new(&mut v)
                             .speed(0.005)
                             .range(-2.0..=2.0_f32)
                             .fixed_decimals(3),
                     );
-                    if resp.changed() && (v - new_matrix[r][c]).abs() > 0.0 {
-                        new_matrix[r][c] = v;
+                    if resp.changed() && (v - *cell).abs() > 0.0 {
+                        *cell = v;
                         changed = true;
                     }
                 }
@@ -765,9 +765,6 @@ fn blend_label(m: BlendMode) -> &'static str {
 /// picker (P0.2.3a-c). Inline editing of the address + a port-config
 /// row + a "+ Add binding" button can land in a follow-up commit.
 fn show_osc_bindings_summary(ui: &mut Ui, project: &Project) {
-    use crate::effects::Effect;
-    use crate::modulators::Modulator;
-
     let mut any_binding = false;
 
     for (layer_idx, layer) in project.layers.iter().enumerate() {

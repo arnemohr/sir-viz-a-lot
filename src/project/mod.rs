@@ -422,8 +422,10 @@ mod tests {
 
     #[test]
     fn resolve_asset_default_to_project_dir() {
-        let mut p = Project::default();
-        p.asset_root = None;
+        let p = Project {
+            asset_root: None,
+            ..Project::default()
+        };
         let proj = Path::new("shows/event/show.rmap.json");
         let got = p.resolve_asset(proj, Path::new("gfx/logo.svg"));
         assert_eq!(got, Path::new("shows/event/gfx/logo.svg"));
@@ -431,8 +433,10 @@ mod tests {
 
     #[test]
     fn resolve_asset_honors_explicit_root() {
-        let mut p = Project::default();
-        p.asset_root = Some(PathBuf::from("assets/shared"));
+        let p = Project {
+            asset_root: Some(PathBuf::from("assets/shared")),
+            ..Project::default()
+        };
         let proj = Path::new("shows/event/show.rmap.json");
         let got = p.resolve_asset(proj, Path::new("logo.svg"));
         assert_eq!(got, Path::new("assets/shared/logo.svg"));
@@ -721,7 +725,7 @@ mod tests {
     #[cfg(feature = "v3")]
     #[test]
     fn recall_via_mutation_preserves_cue_strip() {
-        use crate::project::command::{ApplyProjectSnapshot, Mutation, ReverseStorage};
+        use crate::project::command::{ApplyProjectSnapshot, ReverseStorage};
 
         let mut p = Project::default();
         p.layers.push(LayerConfig {
@@ -907,8 +911,10 @@ mod tests {
     /// slider alone: it's a session control, not part of the scene.
     #[test]
     fn restore_scene_preserves_crossfade_duration() {
-        let mut p = Project::default();
-        p.crossfade_duration_s = 0.0;
+        let mut p = Project {
+            crossfade_duration_s: 0.0,
+            ..Project::default()
+        };
         let snap_before = snapshot(&p);
         p.crossfade_duration_s = 1.5;
         restore_scene(&mut p, &snap_before).expect("restore");
@@ -1158,7 +1164,7 @@ mod tests {
         {
             let snap = snapshot(&project);
             let mut new_scenes = project.scenes.clone();
-            while new_scenes.len() <= 0 {
+            while new_scenes.is_empty() {
                 new_scenes.push(Scene {
                     name: format!("scene{}", new_scenes.len() + 1),
                     snapshot: serde_json::json!({}),

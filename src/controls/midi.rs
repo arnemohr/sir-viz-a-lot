@@ -97,9 +97,10 @@ impl MidiSource {
 
         // First pass to enumerate; each `connect` consumes its `MidiInput`,
         // so allocate one per port.
-        let probe = MidiInput::new("rmap-midi-probe")?;
-        let port_descriptors: Vec<_> = probe.ports().into_iter().collect();
-        drop(probe);
+        let port_descriptors: Vec<_> = {
+            let probe = MidiInput::new("rmap-midi-probe")?;
+            probe.ports().into_iter().collect()
+        };
 
         for port in port_descriptors {
             let midi = MidiInput::new("rmap")?;

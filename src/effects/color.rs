@@ -180,6 +180,7 @@ impl ColorPipeline {
     /// The render pass clears `dst_view` to black before drawing; the
     /// fragment shader writes alpha from the source, so fully-transparent
     /// source pixels produce black pixels with alpha 0 in the output.
+    #[allow(clippy::too_many_arguments)] // wgpu render APIs naturally take many borrows
     pub fn render(
         &self,
         device: &wgpu::Device,

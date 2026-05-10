@@ -61,9 +61,12 @@ pub fn void_block() -> Vec<[f32; 2]> {
     vec![[0.3, 0.3], [0.7, 0.3], [0.7, 0.7], [0.3, 0.7]]
 }
 
+/// `(name, builder)` pair as it appears in the all-templates listing.
+pub type ZoneTemplate = (&'static str, fn() -> Vec<[f32; 2]>);
+
 /// All four templates by `(name, builder)` so the UI can iterate without
 /// hard-coding the list.
-pub fn all_templates() -> Vec<(&'static str, fn() -> Vec<[f32; 2]>)> {
+pub fn all_templates() -> Vec<ZoneTemplate> {
     vec![
         ("window-rectangle", window_rectangle),
         ("arch-portal", arch_portal),

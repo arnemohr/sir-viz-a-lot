@@ -193,8 +193,12 @@ pub struct SceneEditorState {
     pub drag: Option<DragSession>,
     pub mode: EditMode,
     /// Last mode rendered — used by [`mode_banner`] to drive the cross-fade
-    /// animation when the mode changes.
-    #[cfg_attr(not(feature = "v3"), allow(dead_code))]
+    /// animation when the mode changes. Read by the v3 banner-render path
+    /// (T4.15 follow-up); the field stays in the struct because
+    /// `SceneEditorState` is constructed from the v3 launcher and the
+    /// v3 banner reads it transitively. Allow dead_code under
+    /// `--all-features` until the read site is wired.
+    #[allow(dead_code)]
     pub previous_mode: Option<EditMode>,
 }
 

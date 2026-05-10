@@ -191,7 +191,7 @@ impl OutputWindow {
 
         if windowed {
             if let Some(mh) = monitor {
-                let _ = window.set_outer_position(mh.position());
+                window.set_outer_position(mh.position());
             }
             window.set_cursor_visible(true);
         } else {

@@ -1,3 +1,10 @@
+// P0.3.1 ships the queue + tests; the producers (P0.4.2 video,
+// P0.6.2 NDI in v0.5) and the per-frame drain hook land in
+// follow-up commits, so every public item below currently
+// looks dead to clippy. Suppress at the module level until
+// the first producer wires in.
+#![allow(dead_code)]
+
 //! P0.3.1 (W3.1) — thread-safe texture-upload queue.
 //!
 //! Background-thread producers (the video decoder worker landed in

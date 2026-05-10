@@ -36,7 +36,7 @@ pub fn migrate(mut value: Value) -> Result<(Value, MigrationOutcome), ProjectErr
         // layer's new `warp` field. `Project.warps` is preserved during
         // T3.0a so the renderer + audit + mutations keep compiling; T3.0b
         // deletes it once the render graph reads per-layer warps.
-        0 | 1 | 2 | 3 | 4 | 5 | 6 => {
+        0..=6 => {
             if version <= 2 {
                 migrate_v2_to_v3_layers(&mut value);
             }
