@@ -4,6 +4,62 @@ All notable changes to rmap are documented here.
 
 ---
 
+## v0.3.1 — 2026-05-10
+
+v3.1 is a stabilisation release built on top of the v3 canvas-first editor. It
+closes the four deferred audit findings from v3.0, hardens cross-machine project
+portability, and ships a set of small operator-facing enhancements (native menu
+bar, BPM HUD, layer solo/mute, output thumbnail, audio meter) that were scoped
+out of the initial v3 launch.
+
+### What changed
+
+**Operator-facing**
+
+- Native macOS menu bar (`App / File / Edit / Window / Help`) with
+  `Cmd-S` / `Cmd-Shift-S` (save / save as), `Cmd-O` (open), `Cmd-Q` (quit),
+  `Cmd-Z` / `Cmd-Shift-Z` (undo / redo), and a standard About panel.
+- Top-chrome BPM HUD shows live BPM, tap source (Space / MIDI / OSC), and tap
+  age. A quantize selector (Off / 1 / 2 / 4 / 8 bars) makes cue recalls wait
+  for the next bar boundary; set to Off for immediate fire (bit-identical to
+  v3.0 behaviour).
+- Layer rows in the left rail gain **Solo (S)** and **Mute (M)** buttons.
+  Solo'd layer renders even when also muted; state survives undo/redo and scene
+  recall.
+- Top-right thumbnail of projector output in the control window. Click to
+  focus (or open) the preview-as-projector window. No extra GPU work — reuses
+  the existing render texture.
+- When an audio source is active, an 8-band FFT meter strip appears above the
+  cue strip. (Drag interaction reserved for parameter binding in a future
+  release.)
+- Two new bundled demos: **Film Strip** (4-frame horizontal photo strip) and
+  **Test Grid** (SVG alignment grid + masked image corner verifier). The
+  launcher demo picker now lists all three demos.
+- Cross-machine project portability: saved shows now record the projector's
+  display UUID (`CGDisplayCreateUUIDFromDisplayID`). On load the loader prefers
+  a UUID match, falls back to index, and falls back to display 0 with an audit
+  warning. A project saved on machine A loads onto the same physical display
+  when opened on machine B.
+
+**Bug fixes (deferred from v3.0)**
+
+- Static-value modulator now round-trips bit-exact through save/load
+  (T1.36 / V31.1.1).
+- `crossfade_duration_s` undo now restores the correct previous value
+  (T1.37 / V31.1.2).
+- `output_windowed` flip is now tracked in the undo stack (T1.39 / V31.1.3).
+- Empty effects-vec snapshots are now round-trip-safe in `snapshot_parity`
+  tests (T1.40 / V31.1.4). All four fixes are covered by proptest harnesses.
+
+**Internal / refactor (no operator visibility)**
+
+- All `Mutation` variants now implement a `ReverseStorage` trait at the type
+  level. Adding a new mutation variant without specifying its undo behaviour is
+  a compile error. Asymmetric exceptions (`AddLayer`/`RemoveLayer` etc.) are
+  documented inline. No operator-visible change.
+
+---
+
 ## v0.3.0 — v3 UI/UX overhaul (Spec 003)
 
 This release replaces the v2 tabbed control panel with a canvas-first editor.
