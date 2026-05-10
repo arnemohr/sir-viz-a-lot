@@ -4126,6 +4126,95 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // 004-V31.4.2: drain File menu actions and dispatch them.
+        //
+        // AppKit menu callbacks fire on the main thread but outside the winit
+        // event loop, so they push into a static queue (`MENU_QUEUE`) rather
+        // than touching `AppState` directly. We drain that queue here, at the
+        // top of every `about_to_wait` tick, before any other state mutation.
+        //
+        // Dispatch rules (matches spec §V31.4.2):
+        //
+        //   • Save / SaveAs: only meaningful in Editing / GoLive. No-op
+        //     silently when state is Booting / Launcher / Failed. Requires
+        //     the `v3` feature (same gate as RequestSave / RequestSaveAs in
+        //     the control-panel dispatch arm).
+        //
+        //   • Open: only meaningful in Editing / GoLive. Opens a blocking
+        //     `rfd` picker; on success, loads the chosen `.rmap.json`,
+        //     replaces project state, and rebuilds layers. No-op silently
+        //     when not in Editing. Requires `v3` (same gate as save pickers).
+        //
+        //   • Quit: always honoured regardless of AppState. Equivalent to
+        //     `CloseRequested` on the output window.
+        //
+        // Error handling: on Project::load failure, log and discard — no
+        // toast yet (V31.4.2 does not add new error-reporting infra).
+        #[cfg(all(target_os = "macos", feature = "v3"))]
+        {
+            let actions = crate::macos::menu::drain_pending();
+            for action in actions {
+                use crate::macos::menu::MenuAction;
+                match action {
+                    MenuAction::Save | MenuAction::SaveAs => {
+                        if let Some(state) = self.state.editing_mut() {
+                            capture_uuid_into_project(state, event_loop);
+                            let side =
+                                apply_command(state, crate::controls::Command::OpenSaveAsPicker);
+                            if matches!(side, SideEffect::RebuildLayers) {
+                                rebuild_layers_for_state(state);
+                            }
+                        }
+                        // else: silently no-op when not in Editing.
+                    }
+                    MenuAction::Open => {
+                        if let Some(state) = self.state.editing_mut() {
+                            // V31.4.2: simple project replace — open an rfd
+                            // picker, load the picked project, swap it into
+                            // `EditingState`. Does NOT reset the autosave
+                            // session token or re-run the project audit;
+                            // those are deferred to a future task.
+                            let picked = crate::windows::file_dialogs::pick_open_project();
+                            if let Some(path) = picked {
+                                match crate::project::Project::load(&path) {
+                                    Ok(project) => {
+                                        state.project = project;
+                                        state.project_file_path = Some(path);
+                                        state.dirty = false;
+                                        rebuild_layers_for_state(state);
+                                        tracing::info!(
+                                            target: "rmap::ux",
+                                            event = "menu_open_project",
+                                            path = %state
+                                                .project_file_path
+                                                .as_deref()
+                                                .map(|p| p.display().to_string())
+                                                .unwrap_or_default(),
+                                        );
+                                    }
+                                    Err(err) => {
+                                        tracing::warn!(
+                                            ?err,
+                                            "menu Open: project load failed; discarding",
+                                        );
+                                    }
+                                }
+                            } else {
+                                tracing::info!(
+                                    target: "rmap::ux",
+                                    event = "menu_open_cancelled"
+                                );
+                            }
+                        }
+                        // else: silently no-op when not in Editing.
+                    }
+                    MenuAction::Quit => {
+                        event_loop.exit();
+                    }
+                }
+            }
+        }
+
         // 003-T1.4: derive ControlFlow from AppState every loop tick.
         // Switching from Editing→Launcher (and back) flips Poll↔Wait
         // automatically; no explicit set_control_flow call elsewhere
