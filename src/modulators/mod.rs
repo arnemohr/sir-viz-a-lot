@@ -8,9 +8,45 @@ use serde::{Deserialize, Serialize};
 
 use crate::clock::Clock;
 
+/// Serialize a finite `f32` to JSON, returning an error for `NaN` / `±∞`.
+///
+/// `serde_json` maps non-finite `f32` to JSON `null` silently.  For project
+/// fields that must survive a save → load round-trip this is unacceptable:
+/// `null` fails to deserialize back as `f32`, corrupting the project.  This
+/// helper rejects non-finite values at serialization time with a clear error
+/// so the bug surfaces at the *save* call site rather than on the next load.
+mod finite_f32_serde {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(v: &f32, s: S) -> Result<S::Ok, S::Error> {
+        if v.is_finite() {
+            s.serialize_f32(*v)
+        } else {
+            Err(serde::ser::Error::custom(format!(
+                "Modulator::Static value must be finite, got {v:?}"
+            )))
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<f32, D::Error> {
+        let v = f32::deserialize(d)?;
+        if v.is_finite() {
+            Ok(v)
+        } else {
+            Err(serde::de::Error::custom(format!(
+                "Modulator::Static value must be finite, got {v:?}"
+            )))
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Modulator {
-    Static(f32),
+    /// A constant value.  Serialized with [`finite_f32_serde`] so that
+    /// `NaN` / `±∞` are rejected at save time rather than silently written
+    /// as JSON `null`, which would corrupt the project on the next load
+    /// (V31.1.1 fix).
+    Static(#[serde(with = "finite_f32_serde")] f32),
     Sine {
         period_s: f32,
         amp: f32,
@@ -142,5 +178,109 @@ mod tests {
         };
         let v = m.value(&clock);
         assert!((v - 1.0).abs() < 1e-3, "expected ~1.0, got {v}");
+    }
+
+    // ── V31.1.1 — static-modulator round-trip proptest ──────────────────────
+    //
+    // Bug: before the fix, `serde_json` silently serialized `NaN` / `±∞` as
+    // JSON `null`, which then failed to deserialize back as `f32`, leaving
+    // the project in a corrupt state.  The fix (`finite_f32_serde`) makes the
+    // serializer *return an error* for non-finite values.
+    //
+    // Three checks live here:
+    // 1. `proptest` over the full finite f32 range: every finite value
+    //    must survive a `to_string` → `from_str` round-trip bit-exactly.
+    // 2. Deterministic smoke tests for the subnormals and corner cases called
+    //    out by the spec.
+    // 3. Non-finite values must produce a *serialization error* (not `null`).
+
+    /// V31.1.1 — every finite f32 round-trips through JSON string bit-exactly.
+    ///
+    /// The proptest uses `any::<f32>()` and skips non-finite values via
+    /// `prop_assume!`.  The remaining values must survive
+    /// `serde_json::to_string` → `serde_json::from_str` with bit-exact
+    /// identity.  Subnormals are included (they ARE finite and must round-trip).
+    mod proptest_round_trip {
+        use proptest::prelude::*;
+
+        use super::Modulator;
+
+        proptest! {
+            #![proptest_config(proptest::test_runner::Config::with_cases(4096))]
+
+            #[test]
+            fn static_modulator_round_trips(v in any::<f32>()) {
+                // NaN and ±∞ cannot be represented in JSON — they are covered by
+                // the deterministic `non_finite_serialize_errors` test below.
+                prop_assume!(v.is_finite());
+
+                let m = Modulator::Static(v);
+                let json = serde_json::to_string(&m).unwrap();
+                let back: Modulator = serde_json::from_str(&json).unwrap();
+                match back {
+                    Modulator::Static(b) => prop_assert!(
+                        v.to_bits() == b.to_bits(),
+                        "static modulator round-trip lost bit-identity: \
+                         a={v:?} bits={:#010x} → json='{json}' → b={b:?} bits={:#010x}",
+                        v.to_bits(),
+                        b.to_bits(),
+                    ),
+                    other => prop_assert!(
+                        false,
+                        "round-trip changed variant: {other:?}"
+                    ),
+                }
+            }
+        }
+    }
+
+    /// V31.1.1 — non-finite values produce a serialization error, not `null`.
+    ///
+    /// Before the fix, `serde_json` wrote `null` for `NaN` / `±∞`, which
+    /// would then fail to deserialize and corrupt the project silently.
+    /// After the fix, the serializer returns an error immediately.
+    #[test]
+    fn non_finite_serialize_errors() {
+        for (label, v) in [
+            ("NaN", f32::NAN),
+            ("+Inf", f32::INFINITY),
+            ("-Inf", f32::NEG_INFINITY),
+        ] {
+            let result = serde_json::to_string(&Modulator::Static(v));
+            assert!(
+                result.is_err(),
+                "serializing Static({label}) must return an error, got: {result:?}"
+            );
+        }
+    }
+
+    /// V31.1.1 — subnormals round-trip exactly (they ARE finite).
+    #[test]
+    fn subnormal_round_trips() {
+        let subnormals = [
+            f32::from_bits(0x00000001), // smallest positive subnormal
+            f32::from_bits(0x007fffff), // largest positive subnormal
+            f32::from_bits(0x00400000), // mid-range subnormal
+            f32::MIN_POSITIVE / 2.0,    // one subnormal step below MIN_POSITIVE
+        ];
+        for v in subnormals {
+            assert!(
+                !v.is_normal() && v.is_finite(),
+                "fixture should be subnormal: {v:?}"
+            );
+            let m = Modulator::Static(v);
+            let json = serde_json::to_string(&m).expect("subnormal should serialize without error");
+            let back: Modulator =
+                serde_json::from_str(&json).expect("subnormal should deserialize");
+            match back {
+                Modulator::Static(b) => assert!(
+                    v.to_bits() == b.to_bits(),
+                    "subnormal round-trip lost bit-identity: {v:?} bits={:#010x} → back={b:?} bits={:#010x}",
+                    v.to_bits(),
+                    b.to_bits(),
+                ),
+                other => panic!("round-trip changed variant: {other:?}"),
+            }
+        }
     }
 }
