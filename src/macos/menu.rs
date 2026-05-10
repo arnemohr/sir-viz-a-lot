@@ -11,7 +11,8 @@
 //! |          | Open, Quit) with keyboard equivalents. Actions push into   |
 //! |          | a static `MENU_QUEUE`; `drain_pending()` is called from    |
 //! |          | `App::about_to_wait` each frame.                           |
-//! | V31.4.3  | Wire Edit menu actions (Undo, Redo, Cut, Copy, Paste, …).  |
+//! | V31.4.3  | Wire Edit menu actions (Undo Cmd-Z, Redo Cmd-Shift-Z).     |
+//! |          | Cut/Copy/Paste are explicitly out of scope per the spec.   |
 //! | V31.4.4  | Wire Window / Help menu actions; call `setWindowsMenu` to  |
 //! |          | enable macOS-managed Minimise / Zoom items.                |
 //! | V31.4.5  | Audit cfg-gating across the entire `src/macos/` directory. |
@@ -69,16 +70,18 @@ use objc2_foundation::NSString;
 
 // ── Action queue ──────────────────────────────────────────────────────────────
 
-/// An action emitted by a File menu item. Pushed by the NSObject selector
+/// An action emitted by a menu item. Pushed by the NSObject selector
 /// callback; drained each `about_to_wait` tick.
 ///
-/// V31.4.3 will add `Undo`, `Redo` here; V31.4.4 adds `OpenHelp`, `ShowAbout`.
+/// V31.4.4 will add `OpenHelp`, `ShowAbout`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MenuAction {
     Save,
     SaveAs,
     Open,
     Quit,
+    Undo,
+    Redo,
 }
 
 /// Process-wide pending-action queue.
@@ -141,6 +144,16 @@ define_class!(
         #[unsafe(method(quitAction:))]
         fn quit_action(&self, _sender: *mut AnyObject) {
             push(MenuAction::Quit);
+        }
+
+        #[unsafe(method(undoAction:))]
+        fn undo_action(&self, _sender: *mut AnyObject) {
+            push(MenuAction::Undo);
+        }
+
+        #[unsafe(method(redoAction:))]
+        fn redo_action(&self, _sender: *mut AnyObject) {
+            push(MenuAction::Redo);
         }
     }
 );
@@ -283,7 +296,48 @@ pub fn install_main_menu(mtm: MainThreadMarker) {
     }
 
     // ── Edit submenu ───────────────────────────────────────────────────────
-    add_empty_submenu(&menu_bar, "Edit", mtm);
+    // V31.4.3: wire Undo (Cmd-Z) and Redo (Cmd-Shift-Z).
+    // Cut / Copy / Paste are explicitly out of scope per the spec.
+    {
+        let edit_item = NSMenuItem::new(mtm);
+        let edit_title = NSString::from_str("Edit");
+        edit_item.setTitle(&edit_title);
+        let edit_submenu = NSMenu::new(mtm);
+        edit_submenu.setTitle(&edit_title);
+
+        let target: &AnyObject = menu_target_ref();
+
+        // Undo — Cmd-Z
+        {
+            let item = NSMenuItem::new(mtm);
+            item.setTitle(&NSString::from_str("Undo"));
+            item.setKeyEquivalent(&NSString::from_str("z"));
+            item.setKeyEquivalentModifierMask(NSEventModifierFlags::Command);
+            unsafe {
+                item.setTarget(Some(target));
+                item.setAction(Some(sel!(undoAction:)));
+            }
+            edit_submenu.addItem(&item);
+        }
+
+        // Redo — Cmd-Shift-Z
+        {
+            let item = NSMenuItem::new(mtm);
+            item.setTitle(&NSString::from_str("Redo"));
+            item.setKeyEquivalent(&NSString::from_str("Z")); // capital Z
+            item.setKeyEquivalentModifierMask(NSEventModifierFlags(
+                NSEventModifierFlags::Command.0 | NSEventModifierFlags::Shift.0,
+            ));
+            unsafe {
+                item.setTarget(Some(target));
+                item.setAction(Some(sel!(redoAction:)));
+            }
+            edit_submenu.addItem(&item);
+        }
+
+        edit_item.setSubmenu(Some(&edit_submenu));
+        menu_bar.addItem(&edit_item);
+    }
 
     // ── Window submenu ─────────────────────────────────────────────────────
     // V31.4.4 will call `setWindowsMenu` to enable macOS-managed items
@@ -297,7 +351,7 @@ pub fn install_main_menu(mtm: MainThreadMarker) {
     NSApplication::sharedApplication(mtm).setMainMenu(Some(&menu_bar));
 
     tracing::debug!(
-        "004-V31.4.2: main menu installed (File: Save/Save as…/Open/Quit + App/Edit/Window/Help)"
+        "004-V31.4.3: main menu installed (File: Save/Save as\u{2026}/Open/Quit; Edit: Undo/Redo + App/Window/Help)"
     );
 }
 
@@ -415,6 +469,69 @@ mod tests {
 
         for (i, &(exp_title, exp_key)) in expected.iter().enumerate() {
             let item = file_submenu
+                .itemAtIndex(i as isize)
+                .expect("item must exist at index");
+            let title = item.title().to_string();
+            let key = item.keyEquivalent().to_string();
+            assert_eq!(
+                title, exp_title,
+                "item {i}: expected title {:?}, got {:?}",
+                exp_title, title
+            );
+            assert_eq!(
+                key, exp_key,
+                "item {i}: expected key equivalent {:?}, got {:?}",
+                exp_key, key
+            );
+        }
+    }
+
+    /// V31.4.3 acceptance: the Edit submenu must contain exactly two items
+    /// (Undo, Redo) with the right key equivalents.
+    ///
+    /// Skips gracefully when not on the main thread (same pattern as above).
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn edit_menu_has_two_items() {
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
+
+        install_main_menu(mtm);
+
+        let app = NSApplication::sharedApplication(mtm);
+        let main_menu = app
+            .mainMenu()
+            .expect("mainMenu must be Some after install_main_menu");
+
+        // Find the Edit submenu.
+        let count = main_menu.numberOfItems();
+        let mut edit_submenu = None;
+        for i in 0..count {
+            if let Some(item) = main_menu.itemAtIndex(i) {
+                if let Some(submenu) = item.submenu() {
+                    if submenu.title().to_string() == "Edit" {
+                        edit_submenu = Some(submenu);
+                        break;
+                    }
+                }
+            }
+        }
+
+        let edit_submenu = edit_submenu.expect("Edit submenu must exist after install_main_menu");
+
+        // Collect (title, key_equivalent) pairs.
+        let item_count = edit_submenu.numberOfItems();
+        assert_eq!(
+            item_count, 2,
+            "Edit submenu must have exactly 2 items, found {}",
+            item_count
+        );
+
+        let expected: &[(&str, &str)] = &[("Undo", "z"), ("Redo", "Z")];
+
+        for (i, &(exp_title, exp_key)) in expected.iter().enumerate() {
+            let item = edit_submenu
                 .itemAtIndex(i as isize)
                 .expect("item must exist at index");
             let title = item.title().to_string();

@@ -1277,7 +1277,7 @@ fn init_inputs() -> InputsBundle {
     let keyboard = KeyboardSource::new();
 
     // T-M7-03: audio capture provider; failure to open the input
-    // device is non-fatal — a wedding venue without a mic still
+    // device is non-fatal — a event venue without a mic still
     // wants the projector running.
     #[cfg(feature = "audio")]
     let audio_capture = match crate::modulators::audio::start_default() {
@@ -4133,7 +4133,7 @@ impl ApplicationHandler for App {
         // than touching `AppState` directly. We drain that queue here, at the
         // top of every `about_to_wait` tick, before any other state mutation.
         //
-        // Dispatch rules (matches spec §V31.4.2):
+        // Dispatch rules (matches spec §V31.4.2 / §V31.4.3):
         //
         //   • Save / SaveAs: only meaningful in Editing / GoLive. No-op
         //     silently when state is Booting / Launcher / Failed. Requires
@@ -4147,6 +4147,13 @@ impl ApplicationHandler for App {
         //
         //   • Quit: always honoured regardless of AppState. Equivalent to
         //     `CloseRequested` on the output window.
+        //
+        //   • Undo / Redo: only meaningful in Editing / GoLive; mirror the
+        //     toolbar-button dispatch path (ControlPanelAction::RequestUndo /
+        //     RequestRedo). AppKit intercepts the Cmd-Z / Cmd-Shift-Z chords
+        //     via the menu key equivalent, so the existing keyboard handlers
+        //     at app.rs:3461 and app.rs:3186 are naturally bypassed — single
+        //     source of truth, no double-fire.
         //
         // Error handling: on Project::load failure, log and discard — no
         // toast yet (V31.4.2 does not add new error-reporting infra).
@@ -4211,6 +4218,30 @@ impl ApplicationHandler for App {
                     MenuAction::Quit => {
                         event_loop.exit();
                     }
+                    MenuAction::Undo => {
+                        if let Some(state) = self.state.editing_mut() {
+                            let outcome = state.undo_stack.undo(&mut state.project);
+                            if outcome.is_some() {
+                                state.dirty = true;
+                                tracing::info!(target: "rmap::ux", event = "undo_invoked");
+                            }
+                            if matches!(outcome, Some(true)) {
+                                rebuild_layers_for_state(state);
+                            }
+                        }
+                    }
+                    MenuAction::Redo => {
+                        if let Some(state) = self.state.editing_mut() {
+                            let outcome = state.undo_stack.redo(&mut state.project);
+                            if outcome.is_some() {
+                                state.dirty = true;
+                                tracing::info!(target: "rmap::ux", event = "undo_invoked");
+                            }
+                            if matches!(outcome, Some(true)) {
+                                rebuild_layers_for_state(state);
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -4240,7 +4271,7 @@ impl ApplicationHandler for App {
             state.output.window.request_redraw();
             // T-M9-03: throttle the control window to ~30 fps.
             // Output stays at vsync (~60 fps); preview at half rate keeps
-            // the wedding-rig CPU budget under control without making
+            // the event-rig CPU budget under control without making
             // operator drag interactions feel sticky.
             state.control_redraw_skip = !state.control_redraw_skip;
             if !state.control_redraw_skip {
