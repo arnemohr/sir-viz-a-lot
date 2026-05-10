@@ -1965,6 +1965,31 @@ mod tests {
         );
     }
 
+    /// 004-V31.1.3 — apply + undo round-trip for `SetOutputWindowed`.
+    ///
+    /// Bool has only two values so a proptest would be overkill; instead
+    /// we exhaustively cover all four (start, target) combinations.
+    /// Verifies that `apply` writes `target` and that the returned Reverse
+    /// restores `start` exactly.
+    #[test]
+    fn output_windowed_apply_undo_round_trip() {
+        for (start, target) in [(false, true), (true, false), (false, false), (true, true)] {
+            let mut p = fresh_project();
+            p.output_windowed = start;
+            let m = p.set_output_windowed_mutation(target);
+            let reverse = m.apply(&mut p);
+            assert_eq!(
+                p.output_windowed, target,
+                "apply should write `target` for {start} → {target}"
+            );
+            reverse.apply(&mut p);
+            assert_eq!(
+                p.output_windowed, start,
+                "undo failed for {start} → {target}"
+            );
+        }
+    }
+
     /// 003-T1.17 — property-based test for the Reverse-storage
     /// invariant (Risk R11 mitigation).
     ///

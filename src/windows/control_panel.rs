@@ -610,7 +610,19 @@ pub fn show(
                     if !st.project_save_message.is_empty() {
                         ui.label(&st.project_save_message);
                     }
-                    ui.checkbox(&mut project.output_windowed, "Windowed output");
+                    #[cfg(feature = "v3")]
+                    {
+                        if let Some(new) =
+                            command_checkbox(ui, "Windowed output", project.output_windowed)
+                        {
+                            st.pending_mutations
+                                .push(project.set_output_windowed_mutation(new));
+                        }
+                    }
+                    #[cfg(not(feature = "v3"))]
+                    {
+                        ui.checkbox(&mut project.output_windowed, "Windowed output");
+                    }
                     ui.label(
                         "When saved in the project: opens a 1280×720 window on the output monitor instead of fullscreen. Restart rmap to apply.",
                     );
