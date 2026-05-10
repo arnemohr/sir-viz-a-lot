@@ -843,10 +843,6 @@ fn apply_command(state: &mut EditingState, event: Command) -> SideEffect {
             );
             SideEffect::None
         }
-        Command::ParamSet { .. } => {
-            // Reserved for Param::Bound resolution (v1.5+); v1 has no consumer.
-            SideEffect::None
-        }
         // 003-T2.3 — Command::Launch is launcher-side and is dispatched
         // through `apply_launch_command` before any `EditingState` exists.
         // Reaching this arm would mean a keyboard / MIDI / OSC source

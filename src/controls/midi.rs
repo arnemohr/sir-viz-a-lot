@@ -15,9 +15,10 @@
 //! - Note 71              → `Freeze`
 //!
 //! Other messages — Control Change, Pitch Bend, Program Change, etc. —
-//! are silently dropped. T-M7-05 follow-up (or M7+) can extend the
-//! decoder to emit `ParamSet { binding, value }` for CC; the channel
-//! and Source plumbing are already in place.
+//! are silently dropped. v0.4 W2.2 extends this decoder to maintain a
+//! process-wide CC value registry (analogous to `audio::PROVIDER`)
+//! that the new `Modulator::MidiBound { cc, channel }` resolves
+//! against.
 
 use crossbeam_channel::{Receiver, bounded};
 use midir::{MidiInput, MidiInputConnection};

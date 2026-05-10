@@ -1,9 +1,8 @@
 //! Live input. v1 in-scope: tap-tempo (Space) + scene-recall hotkeys (1–9).
-//! v1.5: MIDI (`midir`) and OSC (`rosc`) bindings via a shared
-//! `Param::bind` API. Reserved here so the v1.5 add is non-disruptive.
+//! Live MIDI / OSC parameter binding ships in v0.4 via new `Modulator`
+//! variants (`OscBound`, `MidiBound`) parallel to the existing
+//! `Modulator::Audio` path — see `specs/004-phase-0-tasks.md` W2.
 
-// M7 hooks: `ParamSet`, `Source::read`, `InputState` and its methods
-// are stubs that MIDI / OSC sources will consume in T-M7-05 / T-M7-06.
 #![allow(dead_code)]
 
 pub mod keyboard;
@@ -11,10 +10,8 @@ pub mod keyboard;
 pub mod midi;
 #[cfg(feature = "osc")]
 pub mod osc;
-pub mod param;
 
 use crate::clock::TapSource;
-use crate::controls::param::SourceRef;
 
 /// 003-T2.3 — where the launcher should pull the project from when the
 /// operator clicks one of the start buttons.
@@ -47,10 +44,6 @@ pub enum Command {
     /// 003-T1.32 — toggle the editor overlay on the output window
     /// (O hotkey). Same telemetry rationale as `CycleTestPattern`.
     ToggleEditorOverlay,
-    ParamSet {
-        binding: SourceRef,
-        value: f32,
-    },
     /// 003-T2.3 — launcher → editor transition. Dispatched from
     /// `LauncherState`, not from `EditingState`, so it does not flow
     /// through the per-frame `apply_command(&mut EditingState, …)`
@@ -122,20 +115,12 @@ pub enum Command {
     ClosePreview,
 }
 
-/// A pluggable input. v1 ships [`KeyboardSource`] (T-M4-09); v1.5
-/// adds MIDI (T-M7-05) and OSC (T-M7-06) impls. Each is owned by
+/// A pluggable input. v1 ships [`KeyboardSource`] (T-M4-09); v0.4
+/// adds MIDI (W2.2) and OSC (W2.1) impls. Each is owned by
 /// [`InputState`] and polled per frame.
 pub trait Source {
     /// Drain any pending events since the last poll.
     fn poll(&mut self) -> Vec<Command>;
-
-    /// Read a source's current value by handle. Used by
-    /// `Param::Bound` resolution. Default impl returns `None` so
-    /// keyboard / OSC sources without queryable state don't have to
-    /// implement it.
-    fn read(&self, _binding: SourceRef) -> Option<f32> {
-        None
-    }
 }
 
 /// Live input aggregator. Owns all registered [`Source`] impls and
@@ -159,17 +144,6 @@ impl InputState {
         }
         events
     }
-
-    /// Read a value through the source registry (for `Param::Bound`).
-    /// Asks each source in turn; first non-None wins.
-    pub fn read(&self, binding: SourceRef) -> Option<f32> {
-        for s in self.sources.iter() {
-            if let Some(v) = s.read(binding) {
-                return Some(v);
-            }
-        }
-        None
-    }
 }
 
 #[cfg(test)]
@@ -180,21 +154,16 @@ mod tests {
 
     struct MockSource {
         events: Vec<Command>,
-        read_value: Option<f32>,
     }
 
     impl Source for MockSource {
         fn poll(&mut self) -> Vec<Command> {
             std::mem::take(&mut self.events)
         }
-
-        fn read(&self, _binding: SourceRef) -> Option<f32> {
-            self.read_value
-        }
     }
 
     /// Smoke test: empty InputState polls to empty Vec; register + poll
-    /// drains the mock source; a second poll is empty; read() delegates.
+    /// drains the mock source; a second poll is empty.
     #[test]
     fn source_registry_smoke() {
         // Empty state.
@@ -204,7 +173,6 @@ mod tests {
         // Register a mock with two seeded events.
         let mock = MockSource {
             events: vec![Command::TapTempo(TapSource::Keyboard), Command::Blackout],
-            read_value: Some(0.5),
         };
         state.register(Box::new(mock));
 
@@ -216,8 +184,5 @@ mod tests {
 
         // Second poll returns nothing (source drained).
         assert!(state.poll().is_empty());
-
-        // read() returns the mock's value.
-        assert_eq!(state.read(SourceRef(1)), Some(0.5));
     }
 }

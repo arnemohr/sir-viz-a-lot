@@ -12,9 +12,10 @@
 //! - `/rmap/blackout`         → `Blackout`
 //! - `/rmap/freeze`           → `Freeze`
 //!
-//! Unknown addresses are dropped silently. T-M7-06 follow-up can extend
-//! decode to emit `ParamSet { binding, value }` for `/rmap/param/...`
-//! addresses with a numeric arg.
+//! Unknown addresses are dropped silently. v0.4 W2.1 maintains a
+//! process-wide OSC value registry keyed by address (analogous to
+//! `audio::PROVIDER`) that the new `Modulator::OscBound { addr }`
+//! resolves against.
 
 use std::net::UdpSocket;
 use std::sync::Arc;
