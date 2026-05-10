@@ -5291,8 +5291,12 @@ mod tests {
 
         // Branch 1: control window absent → clears to None.
         {
+            // Simulate a stale id that was set before the control window closed.
             let mut id: Option<egui::TextureId> = Some(egui::TextureId::User(42));
-            // mirrors: state.scene_texture_id = None (early return path)
+            // mirrors: state.scene_texture_id = None (early return path).
+            // Drop the old value to document we intentionally discard it (no free
+            // happens on this path — control window is absent, renderer is gone).
+            drop(id.take());
             id = None;
             assert!(id.is_none());
         }
