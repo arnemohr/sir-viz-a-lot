@@ -530,6 +530,89 @@ fn show_display_overrides(ui: &mut Ui, project: &mut Project, st: &mut ControlPa
         st.pending_mutations
             .push(project.set_project_contrast_override_mutation(new));
     }
+
+    // P0.8.3 — per-projector RGB matrix calibration (3×3 grid).
+    ui.add_space(8.0);
+    ui.separator();
+    ui.add_space(4.0);
+    show_rgb_matrix_editor(ui, project, st);
+}
+
+/// 3×3 RGB matrix editor with per-cell spinners + reset-to-identity.
+/// Edits dispatch a `SetOutputRgbMatrix` mutation per change so undo
+/// rolls back bit-exact. The card title shows a small dot when the
+/// matrix is non-identity so the operator can see at a glance that
+/// per-projector colour calibration is active.
+fn show_rgb_matrix_editor(ui: &mut Ui, project: &mut Project, st: &mut ControlPanelState) {
+    use crate::project::command::{Mutation, SetOutputRgbMatrix};
+    use crate::project::schema::rgb_matrix_identity;
+
+    let identity = rgb_matrix_identity();
+    let is_identity = project.output_target.rgb_matrix == identity;
+
+    ui.horizontal(|ui| {
+        glossary_label(ui, GlossaryTerm::RgbMatrix);
+        if !is_identity {
+            ui.colored_label(egui::Color32::from_rgb(0xd0, 0xa0, 0x40), "●");
+        }
+    });
+
+    let mut new_matrix = project.output_target.rgb_matrix;
+    let mut changed = false;
+    let row_labels = ["R out", "G out", "B out"];
+    let col_labels = ["·R", "·G", "·B"];
+    egui::Grid::new("rmap_rgb_matrix_grid")
+        .num_columns(4)
+        .spacing([6.0, 4.0])
+        .show(ui, |ui| {
+            // Header row.
+            ui.label("");
+            for col in col_labels {
+                ui.weak(col);
+            }
+            ui.end_row();
+            for (r, row_label) in row_labels.iter().enumerate() {
+                ui.weak(*row_label);
+                for c in 0..3 {
+                    let mut v = new_matrix[r][c];
+                    let resp = ui.add(
+                        egui::DragValue::new(&mut v)
+                            .speed(0.005)
+                            .range(-2.0..=2.0_f32)
+                            .fixed_decimals(3),
+                    );
+                    if resp.changed() && (v - new_matrix[r][c]).abs() > 0.0 {
+                        new_matrix[r][c] = v;
+                        changed = true;
+                    }
+                }
+                ui.end_row();
+            }
+        });
+
+    if changed && new_matrix != project.output_target.rgb_matrix {
+        st.pending_mutations
+            .push(Mutation::SetOutputRgbMatrix(SetOutputRgbMatrix {
+                new: new_matrix,
+                old: project.output_target.rgb_matrix,
+            }));
+    }
+
+    ui.horizontal(|ui| {
+        let reset = ui.add_enabled(!is_identity, egui::Button::new("Reset to identity"));
+        if reset.clicked() {
+            st.pending_mutations
+                .push(Mutation::SetOutputRgbMatrix(SetOutputRgbMatrix {
+                    new: identity,
+                    old: project.output_target.rgb_matrix,
+                }));
+        }
+        ui.add_enabled(false, egui::Button::new("Calibrate…"))
+            .on_disabled_hover_text(
+                "Hardware measurement workflow — Phase 7. Edit cells manually \
+                 in the meantime.",
+            );
+    });
 }
 
 /// Render one checkbox + slider row. Returns `Some(new_override)` only
