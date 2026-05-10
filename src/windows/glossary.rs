@@ -49,6 +49,16 @@ pub enum GlossaryTerm {
     Opacity,
     /// 003-T3.28 — per-display tone overrides.
     DisplayOverride,
+    /// P0.1.4 (W5) — procedural mask-driven layer type.
+    FxLayer,
+    /// P0.1.4 (W6) — live network video stream as a layer source.
+    NdiSource,
+    /// P0.1.4 (W7) — overlap zone between two projectors.
+    EdgeBlendRegion,
+    /// P0.1.4 (W8) — 3×3 per-projector colour matrix.
+    RgbMatrix,
+    /// P0.1.4 (W2) — right-click → bind next MIDI CC workflow.
+    MidiLearn,
 }
 
 /// A single glossary entry: a short headline and a 1–2 sentence body.
@@ -185,6 +195,39 @@ pub fn entry(t: GlossaryTerm) -> GlossaryEntry {
                    Tune the master for what looks right on your laptop, then \
                    set the override for what looks right on the wall.",
         },
+        GlossaryTerm::FxLayer => GlossaryEntry {
+            headline: "FX Layer",
+            body: "A layer whose visual content is generated from its mask \
+                   rather than from media.  v0.4 ships a single proof-point \
+                   preset (mask-edge ripple wash); the full library of \
+                   particle / wave / fluid presets lands in Phase 2.",
+        },
+        GlossaryTerm::NdiSource => GlossaryEntry {
+            headline: "NDI Source",
+            body: "A live video stream received over the network from another \
+                   machine (e.g. an OBS instance).  v0.4 supports NDI as input \
+                   only; output (Phase 7) lets other apps consume rmap's render.",
+        },
+        GlossaryTerm::EdgeBlendRegion => GlossaryEntry {
+            headline: "Edge-Blend Region",
+            body: "The overlap zone between two projectors where image \
+                   brightness is feathered so the seam between the two beams \
+                   becomes invisible.  Configure overlap width and falloff \
+                   curve per edge.",
+        },
+        GlossaryTerm::RgbMatrix => GlossaryEntry {
+            headline: "RGB Matrix",
+            body: "A 3×3 colour-correction matrix applied per-projector at \
+                   present time, after gamma / brightness / contrast.  Use it \
+                   to compensate for differences in projector colour response \
+                   when two projectors share the same canvas.",
+        },
+        GlossaryTerm::MidiLearn => GlossaryEntry {
+            headline: "MIDI Learn",
+            body: "Right-click any parameter and pick \"Learn next MIDI CC\".  \
+                   The next incoming control-change message binds to that \
+                   parameter; press ESC to cancel before a CC arrives.",
+        },
     }
 }
 
@@ -221,6 +264,11 @@ pub fn all_terms() -> &'static [GlossaryTerm] {
         GlossaryTerm::GridDetail,
         GlossaryTerm::Opacity,
         GlossaryTerm::DisplayOverride,
+        GlossaryTerm::FxLayer,
+        GlossaryTerm::NdiSource,
+        GlossaryTerm::EdgeBlendRegion,
+        GlossaryTerm::RgbMatrix,
+        GlossaryTerm::MidiLearn,
     ]
 }
 
@@ -297,7 +345,7 @@ mod tests {
     #[test]
     fn all_terms_covers_every_variant() {
         // Bump this when you add a new GlossaryTerm variant.
-        const EXPECTED_VARIANT_COUNT: usize = 20;
+        const EXPECTED_VARIANT_COUNT: usize = 25;
         assert_eq!(
             super::all_terms().len(),
             EXPECTED_VARIANT_COUNT,
