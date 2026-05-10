@@ -2106,36 +2106,41 @@ fn launcher_render(
                 }
                 center_ui.add_space(10.0);
 
-                // 3. Try a demo — Recommended badge while
+                // 3. Try a demo — small picker listing all bundled
+                //    demos. The "Recommended" star badge attaches to
+                //    the first entry (window-glow) while
                 //    `prefs.first_launch_completed` is false.
+                //
+                // 004-V31.5.1: extended from a single hard-wired button
+                // to a list driven by DEMO_LIST so adding a new demo
+                // only requires one line in the const.
+                const DEMO_LIST: &[(&str, &str)] =
+                    &[("window-glow", "Window Glow"), ("film-strip", "Film Strip")];
+
                 let badge = !prefs.first_launch_completed;
-                let demo_text = if badge {
-                    egui::RichText::new("★  Try a demo  (Recommended)").strong()
-                } else {
-                    egui::RichText::new("Try a demo")
-                };
-                if center_ui
-                    .add_sized(button_size, egui::Button::new(demo_text))
-                    .clicked()
-                {
-                    // 003-T2.9 — telemetry: demo button click. The
-                    // later command_launch event (emitted in
-                    // apply_launch_command) carries source = "demo"
-                    // for the launch side; this earlier event marks
-                    // the operator's first-impression decision so the
-                    // Plan §11.7 funnel can measure launcher-open →
-                    // demo-clicked → first-pixel without conflating
-                    // the click with the launch.
-                    tracing::info!(
-                        target: "rmap::ux",
-                        event = "demo_clicked",
-                        demo = "window-glow",
-                    );
-                    action = Some(LauncherAction::Launch {
-                        project: ProjectSource::Demo("window-glow"),
-                        monitor: *selected_monitor,
-                        windowed: true,
-                    });
+                center_ui.weak("Try a demo");
+                for (idx, (slug, title)) in DEMO_LIST.iter().enumerate() {
+                    let label = if idx == 0 && badge {
+                        egui::RichText::new(format!("★  {title}  (Recommended)")).strong()
+                    } else {
+                        egui::RichText::new(*title)
+                    };
+                    if center_ui
+                        .add_sized(button_size, egui::Button::new(label))
+                        .clicked()
+                    {
+                        // 003-T2.9 — telemetry: demo button click.
+                        tracing::info!(
+                            target: "rmap::ux",
+                            event = "demo_clicked",
+                            demo = slug,
+                        );
+                        action = Some(LauncherAction::Launch {
+                            project: ProjectSource::Demo(slug),
+                            monitor: *selected_monitor,
+                            windowed: true,
+                        });
+                    }
                 }
 
                 // 003-T2.5 — projector picker. Sits below the start
@@ -4637,6 +4642,72 @@ mod tests {
             [1.0, 1.0],
             "demo's transform.scale must be the identity (not [0, 0])",
         );
+    }
+
+    /// 004-V31.5.1 — film-strip demo presence and shape. Mirrors
+    /// `demo_loads_clean` for the `film-strip` demo: verifies the file
+    /// resolves via `ProjectSource::Demo`, audits clean, and has the
+    /// expected 4-layer horizontal-strip shape.
+    #[cfg(feature = "v3")]
+    #[test]
+    fn demo_loads_film_strip() {
+        use crate::controls::ProjectSource;
+        let demo_path = std::path::PathBuf::from("assets/demos/film-strip.rmap.json");
+        if !demo_path.exists() {
+            eprintln!(
+                "demo_loads_film_strip: skipping — `{}` not present (004-V31.5.1 bundle).",
+                demo_path.display(),
+            );
+            return;
+        }
+
+        let (project, returned_path) = resolve_project_source(&ProjectSource::Demo("film-strip"))
+            .expect("film-strip demo project loads");
+        assert!(
+            returned_path
+                .as_deref()
+                .map(|p| p == demo_path.as_path())
+                .unwrap_or(false),
+            "Demo source should return the bundled path"
+        );
+
+        let env = crate::project::audit::AuditEnv {
+            monitor_count: 1,
+            live_monitor_uuids: Vec::new(),
+        };
+        let findings = crate::project::audit::ProjectAudit::run_with_path(
+            &project,
+            &env,
+            Some(demo_path.as_path()),
+        );
+        assert!(
+            findings.is_empty(),
+            "film-strip demo should audit clean, got: {findings:?}"
+        );
+
+        // Shape: 4 image layers arranged in a horizontal strip.
+        assert_eq!(
+            project.layers.len(),
+            4,
+            "film-strip demo has exactly 4 image layers"
+        );
+        for (i, layer) in project.layers.iter().enumerate() {
+            assert!(
+                matches!(layer.kind, crate::project::schema::LayerKind::Image { .. }),
+                "layer {i} must be an Image kind"
+            );
+            assert!(
+                !layer.warp.mask_polygon.is_empty(),
+                "layer {i} warp carries a rectangular mask",
+            );
+            // Frames are scaled down — must not be the collapsed [0, 0] default.
+            assert!(
+                layer.transform.scale[0] > 0.0 && layer.transform.scale[1] > 0.0,
+                "layer {i} transform.scale must be non-zero, got {:?}",
+                layer.transform.scale,
+            );
+        }
+        assert!(project.output_windowed, "demo opens windowed for safety");
     }
 
     /// 003-T1.44 acceptance criterion 1: Critical audit findings must

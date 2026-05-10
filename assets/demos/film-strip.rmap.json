@@ -1,0 +1,156 @@
+{
+  "schema_version": 6,
+  "layers": [
+    {
+      "id": "demo_film_strip_frame_1",
+      "kind": {
+        "Image": {
+          "path": "window-glow/photo.jpg",
+          "fit": "Cover",
+          "focal": [0.2, 0.3]
+        }
+      },
+      "enabled": true,
+      "transform": {
+        "translate": [0.13, 0.5],
+        "rotate_deg": -3.0,
+        "scale": [0.22, 0.6],
+        "anchor": [0.5, 0.5]
+      },
+      "effects": [],
+      "blend_mode": "Normal",
+      "opacity": 1.0,
+      "warp": {
+        "rows": 1,
+        "cols": 1,
+        "grid": [
+          [[0.02, 0.02], [0.98, 0.02]],
+          [[0.02, 0.98], [0.98, 0.98]]
+        ],
+        "mask_polygon": [
+          [0.02, 0.02],
+          [0.98, 0.02],
+          [0.98, 0.98],
+          [0.02, 0.98]
+        ],
+        "mask_feather": 0.04
+      }
+    },
+    {
+      "id": "demo_film_strip_frame_2",
+      "kind": {
+        "Image": {
+          "path": "window-glow/photo.jpg",
+          "fit": "Cover",
+          "focal": [0.45, 0.55]
+        }
+      },
+      "enabled": true,
+      "transform": {
+        "translate": [0.38, 0.5],
+        "rotate_deg": 1.0,
+        "scale": [0.22, 0.6],
+        "anchor": [0.5, 0.5]
+      },
+      "effects": [],
+      "blend_mode": "Normal",
+      "opacity": 1.0,
+      "warp": {
+        "rows": 1,
+        "cols": 1,
+        "grid": [
+          [[0.02, 0.02], [0.98, 0.02]],
+          [[0.02, 0.98], [0.98, 0.98]]
+        ],
+        "mask_polygon": [
+          [0.02, 0.02],
+          [0.98, 0.02],
+          [0.98, 0.98],
+          [0.02, 0.98]
+        ],
+        "mask_feather": 0.04
+      }
+    },
+    {
+      "id": "demo_film_strip_frame_3",
+      "kind": {
+        "Image": {
+          "path": "window-glow/photo.jpg",
+          "fit": "Cover",
+          "focal": [0.6, 0.4]
+        }
+      },
+      "enabled": true,
+      "transform": {
+        "translate": [0.63, 0.5],
+        "rotate_deg": -2.0,
+        "scale": [0.22, 0.6],
+        "anchor": [0.5, 0.5]
+      },
+      "effects": [],
+      "blend_mode": "Normal",
+      "opacity": 1.0,
+      "warp": {
+        "rows": 1,
+        "cols": 1,
+        "grid": [
+          [[0.02, 0.02], [0.98, 0.02]],
+          [[0.02, 0.98], [0.98, 0.98]]
+        ],
+        "mask_polygon": [
+          [0.02, 0.02],
+          [0.98, 0.02],
+          [0.98, 0.98],
+          [0.02, 0.98]
+        ],
+        "mask_feather": 0.04
+      }
+    },
+    {
+      "id": "demo_film_strip_frame_4",
+      "kind": {
+        "Image": {
+          "path": "window-glow/photo.jpg",
+          "fit": "Cover",
+          "focal": [0.8, 0.7]
+        }
+      },
+      "enabled": true,
+      "transform": {
+        "translate": [0.88, 0.5],
+        "rotate_deg": 3.0,
+        "scale": [0.22, 0.6],
+        "anchor": [0.5, 0.5]
+      },
+      "effects": [],
+      "blend_mode": "Normal",
+      "opacity": 1.0,
+      "warp": {
+        "rows": 1,
+        "cols": 1,
+        "grid": [
+          [[0.02, 0.02], [0.98, 0.02]],
+          [[0.02, 0.98], [0.98, 0.98]]
+        ],
+        "mask_polygon": [
+          [0.02, 0.02],
+          [0.98, 0.02],
+          [0.98, 0.98],
+          [0.02, 0.98]
+        ],
+        "mask_feather": 0.04
+      }
+    }
+  ],
+  "scenes": [],
+  "output_target": {
+    "uuid": null,
+    "fallback_index": 0
+  },
+  "output_windowed": true,
+  "background_color": [0.05, 0.05, 0.08, 1.0],
+  "gamma": 1.0,
+  "brightness": 0.0,
+  "contrast": 1.0,
+  "crossfade_duration_s": 0.0
+}

@@ -1,7 +1,7 @@
 //! 003-T1.34 — `ProjectAudit`: pre-flight checks against a `Project`.
 //!
 //! The audit walks the project once (cheap; M1 scope is single-machine
-//! single-projector wedding-scale shows, where projects are <100 layers)
+//! single-projector event-scale shows, where projects are <100 layers)
 //! and returns a `Vec<AuditFinding>` describing anything the renderer or
 //! operator should know about before going live. Each finding carries a
 //! human-readable `message`, a `severity`, and an optional `autofix`
@@ -24,7 +24,7 @@
 //!   v4 migration could only copy one warp onto every layer, so the
 //!   operator must re-map per-layer.
 //! - [`AuditKind::MissingAsset`] (T1.38) — layer's asset path doesn't
-//!   exist on disk. `Severity::Critical`. Wedding-DJ "second laptop"
+//!   exist on disk. `Severity::Critical`. event-DJ "second laptop"
 //!   failover hits this every time without a relink autofix.
 //! - [`AuditKind::MonitorOutOfRange`] (T1.39) — the saved monitor index
 //!   exceeds available count on this machine. Defaults to monitor 0.
@@ -809,6 +809,53 @@ mod tests {
         assert!(
             metadata.len() > 0,
             "demo asset {} is a zero-byte placeholder; would render solid black",
+            asset.display(),
+        );
+    }
+
+    /// 004-V31.5.1 — `film_strip_demo_audits_clean`: load the bundled
+    /// `assets/demos/film-strip.rmap.json` demo and assert
+    /// [`ProjectAudit::run_with_path`] returns zero findings. Mirrors the
+    /// `first_run_canonical_demo_audits_clean` test for the window-glow demo.
+    #[test]
+    fn film_strip_demo_audits_clean() {
+        let demo_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("assets/demos/film-strip.rmap.json");
+        assert!(
+            demo_path.exists(),
+            "bundled film-strip demo missing at {}; 004-V31.5.1 ships it",
+            demo_path.display(),
+        );
+        let project = crate::project::Project::load(&demo_path).expect("film-strip demo loads");
+
+        let env = AuditEnv {
+            monitor_count: 1,
+            live_monitor_uuids: Vec::new(),
+        };
+        let findings = ProjectAudit::run_with_path(&project, &env, Some(&demo_path));
+        assert!(
+            findings.is_empty(),
+            "004-V31.5.1 film-strip demo should audit clean; got {findings:?}",
+        );
+
+        // ≥ 1 non-black pixel pre-condition: the shared image asset must
+        // exist and have non-zero size. All 4 layers reference the same
+        // photo so checking the first is sufficient.
+        let layer = project
+            .layers
+            .first()
+            .expect("film-strip demo carries at least one layer");
+        let rel = layer.kind.asset_path();
+        let asset = project.resolve_asset(&demo_path, rel);
+        let metadata = std::fs::metadata(&asset).unwrap_or_else(|err| {
+            panic!(
+                "film-strip demo asset {} not on disk: {err}",
+                asset.display()
+            )
+        });
+        assert!(
+            metadata.len() > 0,
+            "film-strip demo asset {} is a zero-byte placeholder; would render solid black",
             asset.display(),
         );
     }
