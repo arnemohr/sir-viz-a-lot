@@ -1772,6 +1772,67 @@ pub(super) fn show_effect(
     change
 }
 
+/// Construct a fresh `Modulator` payload for a newly-picked
+/// [`BindingSource`], using `range`-aware defaults so the new
+/// modulator's amplitude / offset don't snap the parameter to an
+/// out-of-range value.
+///
+/// P0.2.3b/c migration recipe — every existing inline modulator
+/// picker switches to this helper. Defaults match the v3 hand-rolled
+/// values for Static / Sine; the new variants (Triangle / Noise /
+/// Bpm / Audio / OscBound / MidiBound) follow the same `span * 0.5`
+/// amp + midpoint-offset pattern.
+#[cfg(feature = "v3")]
+fn modulator_for_source(
+    source: crate::windows::components::binding_picker::BindingSource,
+    range: &std::ops::RangeInclusive<f32>,
+) -> Modulator {
+    use crate::windows::components::binding_picker::BindingSource;
+    let span = range.end() - range.start();
+    let mid = (range.start() + range.end()) * 0.5;
+    match source {
+        BindingSource::Fixed => Modulator::Static(*range.start()),
+        BindingSource::Sine => Modulator::Sine {
+            period_s: 1.0,
+            amp: span * 0.5,
+            phase: 0.0,
+            offset: mid,
+        },
+        BindingSource::Triangle => Modulator::Triangle {
+            period_s: 1.0,
+            amp: span * 0.5,
+            offset: mid,
+        },
+        BindingSource::Noise => Modulator::Noise {
+            period_s: 1.0,
+            amp: span * 0.5,
+            offset: mid,
+        },
+        BindingSource::Bpm => Modulator::Bpm {
+            divisor: 1.0,
+            amp: span * 0.5,
+            offset: mid,
+        },
+        BindingSource::Audio => Modulator::Audio {
+            band: 0,
+            smoothing: 0.0,
+            amp: span,
+            offset: *range.start(),
+        },
+        BindingSource::Osc => Modulator::OscBound {
+            addr: "/rmap/param".to_string(),
+            scale: span,
+            offset: *range.start(),
+        },
+        BindingSource::Midi => Modulator::MidiBound {
+            cc: 21,
+            channel: 0,
+            scale: span,
+            offset: *range.start(),
+        },
+    }
+}
+
 /// Inner body of `modulator_slider` — shared between v3 and non-v3.
 /// Returns `Some(EffectChange::ModulatorSwitch { .. })` in v3 mode on a
 /// variant switch; in non-v3 it writes directly to `*m` and returns `None`.
@@ -1785,46 +1846,24 @@ fn modulator_slider(
     field: ModulatorField,
     effect_idx: usize,
 ) -> Option<EffectChange> {
+    use crate::windows::components::binding_picker::{BindingSource, binding_picker};
+
     let mut change: Option<EffectChange> = None;
 
     ui.horizontal(|ui| {
         ui.label(label);
-        let cur_label = match m {
-            Modulator::Static(_) => "static",
-            Modulator::Sine { .. } => "sine",
-            Modulator::Triangle { .. } => "tri",
-            Modulator::Noise { .. } => "noise",
-            Modulator::Bpm { .. } => "bpm",
-            Modulator::Audio { .. } => "audio",
-            Modulator::OscBound { .. } => "osc",
-            Modulator::MidiBound { .. } => "midi",
-        };
-        egui::ComboBox::from_id_salt(salt)
-            .selected_text(cur_label)
-            .show_ui(ui, |ui| {
-                let is_static = matches!(m, Modulator::Static(_));
-                let is_sine = matches!(m, Modulator::Sine { .. });
-                if ui.selectable_label(is_static, "static").clicked() && !is_static {
-                    change = Some(EffectChange::ModulatorSwitch {
-                        effect_idx,
-                        field,
-                        new: Modulator::Static(*range.start()),
-                    });
-                }
-                if ui.selectable_label(is_sine, "sine").clicked() && !is_sine {
-                    let span = range.end() - range.start();
-                    change = Some(EffectChange::ModulatorSwitch {
-                        effect_idx,
-                        field,
-                        new: Modulator::Sine {
-                            period_s: 1.0,
-                            amp: span * 0.5,
-                            phase: 0.0,
-                            offset: (range.start() + range.end()) * 0.5,
-                        },
-                    });
-                }
+        // P0.2.3b/c — replace the bespoke ComboBox + Static/Sine arms
+        // with the shared `BindingPicker`. Operators can now switch
+        // to any of the 8 sources (was: only Static / Sine were
+        // selectable, even though every variant resolved at runtime).
+        let current = BindingSource::from_modulator(m);
+        if let Some(new_source) = binding_picker(ui, salt, current) {
+            change = Some(EffectChange::ModulatorSwitch {
+                effect_idx,
+                field,
+                new: modulator_for_source(new_source, &range),
             });
+        }
     });
     // 003-T1.23: if the picker emitted a variant switch this frame, still
     // render the parameter widgets for the *current* modulator so the UI
