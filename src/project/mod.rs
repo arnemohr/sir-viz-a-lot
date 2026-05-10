@@ -1228,6 +1228,28 @@ mod tests {
         }
     }
 
+    /// V31.7.2 — loading v6 demo fixtures must produce `quantize_bars = None`.
+    /// Protects the no-schema-bump decision: `Option<u8>` defaults to `None`
+    /// so existing fixtures load unchanged.
+    #[test]
+    fn v6_demo_fixtures_have_identity_quantize_default() {
+        let demos = [
+            "assets/demos/window-glow.rmap.json",
+            "assets/demos/film-strip.rmap.json",
+            "assets/demos/test-grid.rmap.json",
+        ];
+        for rel in &demos {
+            let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(rel);
+            let project =
+                Project::load(&path).unwrap_or_else(|e| panic!("failed to load demo {rel}: {e}"));
+            assert!(
+                project.quantize_bars.is_none(),
+                "demo {rel}: expected quantize_bars=None, got {:?}",
+                project.quantize_bars
+            );
+        }
+    }
+
     /// V31.6.1 — `interpolate` behavior on `solo: Option<usize>` snapshots.
     ///
     /// `solo` serialises as JSON `null` (None) or a JSON number (Some(n)).

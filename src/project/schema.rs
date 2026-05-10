@@ -240,6 +240,14 @@ pub struct Project {
     /// keeps v6 fixtures loading unchanged.
     #[serde(default)]
     pub solo: Option<usize>,
+    /// V31.7.2 — quantize cue firing to this many bars. `None` means
+    /// immediate fire (current behaviour). `Some(1)`, `Some(2)`,
+    /// `Some(4)`, `Some(8)` are the values exposed in the UI; other
+    /// values are accepted at the schema level for forward compat. No
+    /// schema bump — `Option<u8>` defaults to `None` so v6 fixtures
+    /// load unchanged.
+    #[serde(default)]
+    pub quantize_bars: Option<u8>,
     /// Side-channel state surfaced by [`migrate::migrate_v3_to_v4`] to the
     /// audit pass (T3.0d). `previous_warp_count > 1` triggers a one-shot
     /// `MultipleWarpsConsolidated` finding so the operator knows the
@@ -280,6 +288,7 @@ impl Default for Project {
             contrast_override: None,
             crossfade_duration_s: 0.0,
             solo: None,
+            quantize_bars: None,
             transient_audit_signals: Cell::new(TransientAuditSignals::default()),
         }
     }

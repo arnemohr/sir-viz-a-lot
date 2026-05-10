@@ -32,7 +32,7 @@ pub fn flip_warp(mode: EditMode) -> EditMode {
 /// and `st` rather than going through `ControlPanelAction`.
 pub fn show(
     ui: &mut egui::Ui,
-    _project: &Project,
+    project: &Project,
     st: &mut ControlPanelState,
     scene: &mut SceneEditorState,
     inputs: &ControlPanelInputs,
@@ -71,6 +71,42 @@ pub fn show(
         }
         if ui.button("Save as\u{2026}").clicked() {
             action = Some(ControlPanelAction::RequestSaveAs);
+        }
+
+        // --- BPM HUD badge (V31.7.2) --- live BPM + tap source + quantize selector
+        #[cfg(feature = "v3")]
+        {
+            ui.add_space(12.0);
+            ui.label(format!("BPM: {:.1}", inputs.bpm_telemetry.current_bpm));
+            if let (Some(src), Some(at)) = (
+                inputs.bpm_telemetry.last_tap_source,
+                inputs.bpm_telemetry.last_tap_at,
+            ) {
+                let age_s = at.elapsed().as_secs_f32();
+                ui.weak(format!("({}, {:.1}s)", src.label(), age_s));
+            }
+            ui.add_space(8.0);
+            ui.label("Quantize:");
+            for opt in [None, Some(1u8), Some(2u8), Some(4u8), Some(8u8)] {
+                let label = match opt {
+                    None => "Off",
+                    Some(1) => "1",
+                    Some(2) => "2",
+                    Some(4) => "4",
+                    Some(8) => "8",
+                    _ => unreachable!(),
+                };
+                let is_active = project.quantize_bars == opt;
+                let button = egui::Button::new(label).fill(if is_active {
+                    crate::windows::theme::ACCENT.linear_multiply(0.25)
+                } else {
+                    egui::Color32::TRANSPARENT
+                });
+                if ui.add(button).clicked() && !is_active {
+                    st.pending_mutations
+                        .push(project.set_quantize_bars_mutation(opt));
+                }
+            }
         }
 
         // --- Right side --- push remaining widgets to the right edge

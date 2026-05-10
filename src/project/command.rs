@@ -449,6 +449,35 @@ impl ReverseStorage for SetLayerSolo {
     }
 }
 
+/// V31.7.2 — payload for [`Mutation::SetQuantizeBars`].
+///
+/// Replaces `Project.quantize_bars` (a project-level `Option<u8>` for
+/// bar-quantized cue firing). Whole-`Option` Reverse so `None → Some(n) → None`
+/// and `Some(a) → Some(b)` both round-trip byte-equally.
+#[derive(Debug, Clone)]
+pub struct SetQuantizeBars {
+    /// Value to write (`None` means immediate fire; `Some(n)` quantizes to n bars).
+    pub new: Option<u8>,
+    /// Pre-mutation value; `apply` `debug_assert!`s this matches the live state.
+    pub old: Option<u8>,
+}
+
+impl ReverseStorage for SetQuantizeBars {
+    fn apply(self, project: &mut Project) -> Self {
+        debug_assert!(
+            project.quantize_bars == self.old,
+            "SetQuantizeBars stale Reverse: project.quantize_bars={:?}, expected old={:?}",
+            project.quantize_bars,
+            self.old
+        );
+        project.quantize_bars = self.new;
+        SetQuantizeBars {
+            new: self.old,
+            old: self.new,
+        }
+    }
+}
+
 /// Payload for [`Mutation::SetLayerMaskFeather`].
 #[derive(Debug, Clone)]
 pub struct SetLayerMaskFeather {
@@ -1083,6 +1112,8 @@ pub enum Mutation {
     SetLayerMuted(SetLayerMuted),
     /// V31.6.1 — replace `Project.solo`. Delegates to [`SetLayerSolo`].
     SetLayerSolo(SetLayerSolo),
+    /// V31.7.2 — replace `Project.quantize_bars`. Delegates to [`SetQuantizeBars`].
+    SetQuantizeBars(SetQuantizeBars),
     /// Replace `LayerConfig.blend_mode`. Delegates to [`SetLayerBlendMode`].
     SetLayerBlendMode(SetLayerBlendMode),
     /// Replace a layer's effect chain wholesale. Delegates to [`SetLayerEffects`].
@@ -1191,6 +1222,7 @@ impl Mutation {
             Mutation::SetLayerEnabled(s) => Mutation::SetLayerEnabled(s.apply(project)),
             Mutation::SetLayerMuted(s) => Mutation::SetLayerMuted(s.apply(project)),
             Mutation::SetLayerSolo(s) => Mutation::SetLayerSolo(s.apply(project)),
+            Mutation::SetQuantizeBars(s) => Mutation::SetQuantizeBars(s.apply(project)),
             Mutation::SetLayerBlendMode(s) => Mutation::SetLayerBlendMode(s.apply(project)),
             Mutation::SetLayerEffects(s) => Mutation::SetLayerEffects(s.apply(project)),
             Mutation::SwapLayers(s) => Mutation::SwapLayers(s.apply(project)),
@@ -1300,6 +1332,7 @@ impl Mutation {
             | Mutation::SetLayerEnabled(_)
             | Mutation::SetLayerMuted(_)
             | Mutation::SetLayerSolo(_)
+            | Mutation::SetQuantizeBars(_)
             | Mutation::SetLayerBlendMode(_)
             | Mutation::SetLayerEffects(_)
             | Mutation::SetModulator(_)
@@ -1508,6 +1541,16 @@ impl Project {
         Mutation::SetLayerSolo(SetLayerSolo {
             new,
             old: self.solo,
+        })
+    }
+
+    /// V31.7.2 — build a `SetQuantizeBars` mutation. Captures the current
+    /// `quantize_bars` value as `old`. `new = None` means immediate fire;
+    /// `new = Some(n)` quantizes cue firing to n bars.
+    pub fn set_quantize_bars_mutation(&self, new: Option<u8>) -> Mutation {
+        Mutation::SetQuantizeBars(SetQuantizeBars {
+            new,
+            old: self.quantize_bars,
         })
     }
 
@@ -2236,6 +2279,93 @@ mod tests {
         assert!(!p.set_solo_mutation(None).is_non_undoable());
     }
 
+    // ── V31.7.2 — quantize bars Mutation tests ────────────────────────────────
+
+    /// V31.7.2 — `SetQuantizeBars` apply + undo round-trips `None → Some`,
+    /// `Some → None`, and `Some(a) → Some(b)`.
+    #[test]
+    fn set_quantize_bars_apply_undo_round_trip() {
+        // None → Some(4)
+        {
+            let mut p = fresh_project();
+            assert!(p.quantize_bars.is_none());
+            let before = serde_json::to_value(&p).unwrap();
+            let m = p.set_quantize_bars_mutation(Some(4));
+            let reverse = m.apply(&mut p);
+            assert_eq!(p.quantize_bars, Some(4), "apply should write Some(4)");
+            reverse.apply(&mut p);
+            assert_eq!(p.quantize_bars, None, "undo should restore None");
+            let after = serde_json::to_value(&p).unwrap();
+            assert_eq!(before, after, "None → Some(4) round-trip byte-equal");
+        }
+        // Some(2) → Some(8)
+        {
+            let mut p = fresh_project();
+            p.quantize_bars = Some(2);
+            let before = serde_json::to_value(&p).unwrap();
+            let m = p.set_quantize_bars_mutation(Some(8));
+            let reverse = m.apply(&mut p);
+            assert_eq!(p.quantize_bars, Some(8), "apply should write Some(8)");
+            reverse.apply(&mut p);
+            assert_eq!(p.quantize_bars, Some(2), "undo should restore Some(2)");
+            let after = serde_json::to_value(&p).unwrap();
+            assert_eq!(before, after, "Some(2) → Some(8) round-trip byte-equal");
+        }
+        // Some(8) → None
+        {
+            let mut p = fresh_project();
+            p.quantize_bars = Some(8);
+            let before = serde_json::to_value(&p).unwrap();
+            let m = p.set_quantize_bars_mutation(None);
+            let reverse = m.apply(&mut p);
+            assert_eq!(p.quantize_bars, None, "apply should write None");
+            reverse.apply(&mut p);
+            assert_eq!(p.quantize_bars, Some(8), "undo should restore Some(8)");
+            let after = serde_json::to_value(&p).unwrap();
+            assert_eq!(before, after, "Some(8) → None round-trip byte-equal");
+        }
+    }
+
+    /// V31.7.2 — stale Reverse for `SetQuantizeBars` panics in debug builds.
+    #[test]
+    #[should_panic(expected = "SetQuantizeBars stale Reverse")]
+    fn stale_set_quantize_bars_panics_in_debug_builds() {
+        let mut p = fresh_project();
+        assert!(p.quantize_bars.is_none());
+        // Claim old=Some(4) when it's actually None.
+        let stale = Mutation::SetQuantizeBars(SetQuantizeBars {
+            new: Some(2),
+            old: Some(4), // stale!
+        });
+        let _ = stale.apply(&mut p);
+    }
+
+    /// V31.7.2 — quantize mutation is undoable.
+    #[test]
+    fn quantize_bars_mutation_is_undoable() {
+        let p = fresh_project();
+        assert!(!p.set_quantize_bars_mutation(Some(4)).is_non_undoable());
+        assert!(!p.set_quantize_bars_mutation(None).is_non_undoable());
+    }
+
+    /// V31.7.2 — constructor captures the live `quantize_bars` value as `old`.
+    #[test]
+    fn set_quantize_bars_mutation_captures_old() {
+        let mut p = fresh_project();
+        p.quantize_bars = Some(2);
+        let m = p.set_quantize_bars_mutation(Some(4));
+        if let Mutation::SetQuantizeBars(payload) = m {
+            assert_eq!(
+                payload.old,
+                Some(2),
+                "constructor should capture the current quantize_bars as old"
+            );
+            assert_eq!(payload.new, Some(4));
+        } else {
+            panic!("expected Mutation::SetQuantizeBars");
+        }
+    }
+
     /// V31.6.1 — render-graph visibility rule unit test.
     ///
     /// Three layers:
@@ -2384,6 +2514,8 @@ mod tests {
             LayerMuted(bool),
             /// V31.6.1 — set the project-level solo index (`None` to clear).
             LayerSolo(Option<usize>),
+            /// V31.7.2 — set the quantize-bars field (`None` = off; `Some(1/2/4/8)` = quantized).
+            QuantizeBars(Option<u8>),
         }
 
         fn to_mutation(kind: &MutationKind, project: &Project) -> Mutation {
@@ -2696,6 +2828,8 @@ mod tests {
                     });
                     project.set_solo_mutation(clamped)
                 }
+                // V31.7.2 — quantize bars coverage.
+                MutationKind::QuantizeBars(v) => project.set_quantize_bars_mutation(*v),
             }
         }
 
@@ -2852,6 +2986,12 @@ mod tests {
                 // Solo index: None (clear) or Some(0..=2) (fresh_project has 1 layer;
                 // to_mutation clamps to a valid index or falls back to 0 when layers > 0).
                 proptest::option::weighted(0.5, 0usize..=2).prop_map(MutationKind::LayerSolo),
+                // V31.7.2 — quantize bars: None (off) or one of 1/2/4/8.
+                proptest::option::weighted(
+                    0.5,
+                    prop_oneof![Just(1u8), Just(2u8), Just(4u8), Just(8u8)],
+                )
+                .prop_map(MutationKind::QuantizeBars),
             ]
         }
 

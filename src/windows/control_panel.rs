@@ -391,6 +391,10 @@ pub struct ControlPanelInputs {
     /// `"Output: BenQ TH685"` instead of the bare index.
     #[cfg(feature = "v3")]
     pub monitor_names: Vec<String>,
+    /// V31.7.2 — live BPM telemetry from the clock: current BPM, last tap
+    /// source, and last tap timestamp. Used by the toolbar BPM HUD badge.
+    #[cfg(feature = "v3")]
+    pub bpm_telemetry: crate::clock::BpmTelemetry,
 }
 
 /// Render the control panel. Mutates `project` in place.

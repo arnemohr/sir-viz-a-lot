@@ -3135,6 +3135,9 @@ fn handle_editing_window_event(
                         .into_iter()
                         .map(|m| m.name)
                         .collect(),
+                    // V31.7.2: live BPM telemetry for the toolbar BPM HUD badge.
+                    #[cfg(feature = "v3")]
+                    bpm_telemetry: state.clock.telemetry(),
                 };
                 // 003-T1.42 follow-up: drain expired toasts once per frame
                 // before render. Sticky Error toasts survive; auto-expiring
