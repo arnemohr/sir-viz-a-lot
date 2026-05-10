@@ -585,6 +585,62 @@ mod tests {
         );
     }
 
+    /// Bug reproducer: clicking an already-created cue tile must not
+    /// wipe the cue strip. Simulates the v3 cue-recall path end-to-end:
+    /// save cue, save cue, recall cue 0 via `Mutation::ApplyProjectSnapshot`.
+    /// `project.scenes.len()` must remain 2 after the recall — the cue
+    /// strip's visible tile count is bound to this length.
+    #[cfg(feature = "v3")]
+    #[test]
+    fn recall_via_mutation_preserves_cue_strip() {
+        use crate::project::command::{ApplyProjectSnapshot, Mutation, ReverseStorage};
+
+        let mut p = Project::default();
+        p.layers.push(LayerConfig {
+            id: "a".into(),
+            kind: LayerKind::Svg {
+                svg_path: PathBuf::from("/tmp/x.svg"),
+            },
+            enabled: true,
+            transform: crate::project::schema::Transform2D::default(),
+            effects: Vec::new(),
+            blend_mode: BlendMode::Normal,
+            opacity: 1.0,
+            warp: WarpMesh::identity(),
+            muted: false,
+        });
+        // Save cue 1 (scenes.len() goes 0 → 1).
+        p.scenes.push(Scene {
+            name: "1".into(),
+            snapshot: snapshot(&p),
+            thumbnail: None,
+        });
+        // Save cue 2 (scenes.len() goes 1 → 2).
+        p.scenes.push(Scene {
+            name: "2".into(),
+            snapshot: snapshot(&p),
+            thumbnail: None,
+        });
+        assert_eq!(p.scenes.len(), 2);
+
+        // Recall cue 1 via the same Mutation::ApplyProjectSnapshot path
+        // the v3 cue strip uses (see schedule_scene_recall in src/app.rs).
+        let target = p.scenes[0].snapshot.clone();
+        let cur = snapshot(&p);
+        let mutation = ApplyProjectSnapshot {
+            new: target,
+            old: cur,
+            non_undoable: false,
+        };
+        let _reverse = mutation.apply(&mut p);
+
+        assert_eq!(
+            p.scenes.len(),
+            2,
+            "recall via Mutation::ApplyProjectSnapshot wiped cue strip",
+        );
+    }
+
     /// `restore_scene` should also leave the live crossfade-duration
     /// slider alone: it's a session control, not part of the scene.
     #[test]
