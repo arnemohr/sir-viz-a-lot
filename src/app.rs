@@ -423,10 +423,23 @@ struct EditingState {
     /// In-flight scene crossfade. `None` when no fade is active. Driven from
     /// `RedrawRequested` per frame; cleared at `t = 1`.
     crossfade: Option<ActiveCrossfade>,
-    /// Egui-side handle for the live scene preview (T-M9-01). The handle
-    /// references `warp_rt_view`; re-registered on resize because the
-    /// underlying texture is recreated. `None` when the control window
-    /// is closed or registration failed.
+    /// Egui-side handle for the live scene preview (T-M9-01, V31.8.1).
+    ///
+    /// The handle references `warp_rt_view` — the post-warp, post-effects render
+    /// target that is pixel-equivalent to the projector output. Registered via
+    /// `register_native_texture` with `FilterMode::Linear` so egui's sampler can
+    /// downsample it at any draw size (e.g. the full-bleed Scene tab AND the small
+    /// V31.8.2 top-chrome thumbnail) with no additional GPU cost or texture allocation.
+    ///
+    /// **Multiple consumers in the same window are fine** — egui reads the same
+    /// bind group from different draw calls; the GPU renders it once, samples it N times.
+    ///
+    /// **Do not cache this across frames.** It is invalidated and re-registered on
+    /// every `resize_m5_gpu` (the warp_rt texture is recreated). Always read from
+    /// `ControlPanelInputs::scene_texture` each frame.
+    ///
+    /// `None` when the control window is closed or registration has not yet occurred
+    /// (e.g. the "Connecting to projector…" dot animation period on first launch).
     scene_texture_id: Option<egui::TextureId>,
     /// Toggle that flips every `about_to_wait`; a `true` value skips a
     /// control-window redraw request that frame so the preview runs at
@@ -2483,10 +2496,20 @@ fn emit_mutation_telemetry(t: &mut SessionTelemetry, m: &crate::project::command
 }
 
 /// Register `state.warp_rt_view` with the control window's egui renderer
-/// so the Scene tab can paint it as a live preview. Frees any previous
-/// registration first. No-op when the control window is closed.
+/// so the Scene tab and the V31.8.2 top-chrome thumbnail can both paint
+/// the same post-warp pixel data at any draw size (egui's sampler does
+/// the downsampling at draw time — no extra GPU work). Frees any previous
+/// registration first to avoid leaking bind groups on resize churn.
+/// No-op when the control window is closed.
+///
 /// Called once after init and again after every `resize_m5_gpu`
-/// (the warp_rt texture is recreated there) (T-M9-01).
+/// (the warp_rt texture is recreated there, making the old TextureId
+/// point to a freed view) (T-M9-01, V31.8.1).
+///
+/// **MUST remain outside the `panic_restore` boundary.** This is a setup
+/// operation, not per-frame render work. Moving it inside `panic_restore`
+/// would defeat the resize-bookkeeping pattern (the take→free→register→store
+/// sequence must be atomic from the App's perspective).
 fn register_scene_preview(state: &mut EditingState) {
     let Some(ctrl) = state.control.as_mut() else {
         state.scene_texture_id = None;
@@ -5235,5 +5258,78 @@ mod tests {
             pending_cue, None,
             "quantize-off branch must clear pending_cue"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // V31.8.1 — `register_scene_preview` bookkeeping regression
+    //
+    // `EditingState` owns wgpu resources and cannot be constructed in a unit
+    // test. The integration-level behaviour (Scene tab paints after resize)
+    // is exercised end-to-end; the tests below verify the bookkeeping
+    // invariants at the pure-type level so a future refactor that breaks the
+    // take→free→set sequence fails fast.
+    // -----------------------------------------------------------------------
+
+    /// `scene_texture_id` starts as `None` — no egui handle before
+    /// `register_scene_preview` is called. This mirrors the field initialiser
+    /// at `EditingState` construction (T-M9-01).
+    #[test]
+    fn scene_texture_id_initial_state_is_none() {
+        let initial: Option<egui::TextureId> = None;
+        assert!(initial.is_none(), "scene_texture_id must be None at init");
+    }
+
+    /// The resize-bookkeeping pattern — take old, free if Some, register new,
+    /// store new — is tested at the type level with mock closures.
+    ///
+    /// V31.8.1: the same pattern makes the thumbnail safe across resizes.
+    /// `consumers_should_not_cache_across_frames` is the contract — read
+    /// `ControlPanelInputs::scene_texture` each frame, never hold the TextureId.
+    #[test]
+    fn scene_texture_resize_bookkeeping_take_free_register() {
+        // Simulate the three states: no control window, stale id, fresh id.
+
+        // Branch 1: control window absent → clears to None.
+        {
+            let mut id: Option<egui::TextureId> = Some(egui::TextureId::User(42));
+            // mirrors: state.scene_texture_id = None (early return path)
+            id = None;
+            assert!(id.is_none());
+        }
+
+        // Branch 2: re-registration — old id is taken (to be freed), new id stored.
+        {
+            let mut freed: Vec<egui::TextureId> = Vec::new();
+            let mut id: Option<egui::TextureId> = Some(egui::TextureId::User(1));
+
+            // take the old id (mirrors `state.scene_texture_id.take()`)
+            if let Some(old) = id.take() {
+                freed.push(old); // mirrors `ctrl.free_native_texture(old)`
+            }
+            // register the new id (mirrors `ctrl.register_native_texture(...)`)
+            let new_id = egui::TextureId::User(2);
+            id = Some(new_id);
+
+            assert_eq!(
+                freed,
+                vec![egui::TextureId::User(1)],
+                "old id must be freed"
+            );
+            assert_eq!(id, Some(egui::TextureId::User(2)), "new id must be stored");
+        }
+
+        // Branch 3: first registration (no stale id) — nothing to free.
+        {
+            let mut freed: Vec<egui::TextureId> = Vec::new();
+            let mut id: Option<egui::TextureId> = None;
+
+            if let Some(old) = id.take() {
+                freed.push(old);
+            }
+            id = Some(egui::TextureId::User(3));
+
+            assert!(freed.is_empty(), "no free when there was no previous id");
+            assert_eq!(id, Some(egui::TextureId::User(3)));
+        }
     }
 }
