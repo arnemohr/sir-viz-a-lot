@@ -34,15 +34,40 @@ impl ControlWindow {
         adapter: &wgpu::Adapter,
         device: &wgpu::Device,
     ) -> Result<Self, RenderError> {
-        // Offset the initial position so the control window doesn't stack
-        // directly behind the output window on macOS — they're created
-        // back-to-back from the same process and winit/macOS otherwise
-        // reuses the most-recent window's position, hiding the control
-        // window from the operator on launch.
-        let attrs = WindowAttributes::default()
-            .with_title("rmap control")
-            .with_inner_size(winit::dpi::LogicalSize::new(420u32, 600u32))
-            .with_position(winit::dpi::LogicalPosition::new(40.0, 40.0));
+        // Open the control window almost-fullscreen on the primary
+        // monitor (margin = MARGIN_PX inset on every edge), so the
+        // operator lands in the canvas-sized layout immediately rather
+        // than a 420×600 strip. Falls back to the historical 420×600 +
+        // (40, 40) placement when winit can't report a primary monitor
+        // (CI / headless / iCloud-stub setups).
+        //
+        // `with_active(true)` (winit's default) plus `focus_window()`
+        // after the OutputWindow exists — see `init_running_app` —
+        // ensures the control window is the foreground window even
+        // though it's created before OutputWindow.
+        const MARGIN_PX: u32 = 40;
+        let attrs = match active_loop.primary_monitor() {
+            Some(mon) => {
+                let scale = mon.scale_factor().max(0.5);
+                let phys = mon.size();
+                // PhysicalSize → logical so the WindowAttributes call
+                // matches what winit expects on retina displays.
+                let logical_w = (phys.width as f64 / scale).max(640.0) as u32;
+                let logical_h = (phys.height as f64 / scale).max(480.0) as u32;
+                let inner_w = logical_w.saturating_sub(MARGIN_PX * 2).max(640);
+                let inner_h = logical_h.saturating_sub(MARGIN_PX * 2).max(480);
+                let pos_x = mon.position().x as f64 / scale + MARGIN_PX as f64;
+                let pos_y = mon.position().y as f64 / scale + MARGIN_PX as f64;
+                WindowAttributes::default()
+                    .with_title("rmap control")
+                    .with_inner_size(winit::dpi::LogicalSize::new(inner_w, inner_h))
+                    .with_position(winit::dpi::LogicalPosition::new(pos_x, pos_y))
+            }
+            None => WindowAttributes::default()
+                .with_title("rmap control")
+                .with_inner_size(winit::dpi::LogicalSize::new(420u32, 600u32))
+                .with_position(winit::dpi::LogicalPosition::new(40.0, 40.0)),
+        };
         let window = active_loop
             .create_window(attrs)
             .map_err(|e| RenderError::Surface(format!("create control window: {e}")))?;

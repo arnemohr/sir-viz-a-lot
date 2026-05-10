@@ -1425,6 +1425,13 @@ fn init_running_app_with_resources(
     // consumes gpu next when handing it to Renderer.
     let control = init_control_window(event_loop, &gpu);
     let output_bundle = init_output_window(event_loop, monitor, gpu, output_windowed)?;
+    // Bring the control window in front of the projector window:
+    // OutputWindow was created last, so on macOS it would otherwise
+    // be the key window. The operator-facing surface is the control
+    // window; raise it explicitly.
+    if let Some(c) = control.as_ref() {
+        c.window.focus_window();
+    }
     let surface_format = output_bundle.output.config.format;
     let output_size = (
         output_bundle.output.config.width,
