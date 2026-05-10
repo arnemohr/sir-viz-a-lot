@@ -2,7 +2,23 @@
 //!
 //! A Procreate-style vertical list: one ~80 px wide row per layer with
 //! a coloured-block thumbnail, visibility toggle, layer id label,
-//! up/down reorder arrows, and a "+ Add image" tile at the bottom.
+//! up/down reorder arrows, S (solo) and M (mute) buttons, and a
+//! "+ Add image" tile at the bottom.
+//!
+//! ## Controls column layout (option A — 3-row stack)
+//! Row 1: eye toggle (full `ctrl_w`, 18 px tall)
+//! Row 2: S | M buttons (each `ctrl_w/2`, 16 px tall)
+//! Row 3: ▲ | ▼ reorder arrows (each `ctrl_w/2`, 16 px tall)
+//! Total: 50 px inside the 56 px `ROW_HEIGHT`.
+//!
+//! ## Visual state precedence
+//! - **Muted row**: thumbnail and label are dimmed to ~50 % brightness.
+//! - **Solo'd row**: warm accent ring (`theme::ACCENT`, 3 px stroke) drawn
+//!   around the row, replacing the 2 px selection border when both apply.
+//! - A row can be both selected AND solo'd: the solo ring takes precedence
+//!   (operator intent — "this is the active layer right now").
+//! - A row can be both muted AND solo'd: both the dim AND the accent ring are
+//!   shown simultaneously (V31.6.1 render rule: soloed-and-muted still renders).
 //!
 //! Every interaction pushes a [`Mutation`] onto
 //! `st.pending_mutations`; the App's per-frame drain routes them
@@ -101,6 +117,23 @@ pub fn row_index_at_y(y_in_strip: f32, row_height: f32, n_layers: usize) -> Opti
     if idx < n_layers { Some(idx) } else { None }
 }
 
+// ── solo click helper ────────────────────────────────────────────────────────
+
+/// Pure helper: compute the next `Project.solo` value when the user clicks the
+/// S button on `clicked_idx`.
+///
+/// - If `current == Some(clicked_idx)` → un-solo (returns `None`).
+/// - Otherwise → solo this layer (returns `Some(clicked_idx)`), which
+///   implicitly clears any prior solo because `Project.solo` is a single
+///   `Option<usize>`.
+pub fn next_solo(current: Option<usize>, clicked_idx: usize) -> Option<usize> {
+    if current == Some(clicked_idx) {
+        None
+    } else {
+        Some(clicked_idx)
+    }
+}
+
 // ── main render ─────────────────────────────────────────────────────────────
 
 /// Render the layer thumbnail strip into `ui`.
@@ -124,6 +157,8 @@ pub fn show(
             for idx in 0..n {
                 let layer = &project.layers[idx];
                 let is_selected = matches!(scene.selected, Some(Selection::Layer(i)) if i == idx);
+                let is_muted = layer.muted;
+                let is_solo = project.solo == Some(idx);
 
                 // ── row allocation ──────────────────────────────────────
                 let (row_rect, row_resp) = ui.allocate_exact_size(
@@ -153,8 +188,20 @@ pub fn show(
                 };
                 painter.rect_filled(draw_rect, egui::CornerRadius::same(2), bg);
 
-                // ── selected highlight border ───────────────────────────
-                if is_selected {
+                // ── highlight border (selected / solo precedence) ───────
+                // Solo ring takes precedence over selection border when both
+                // apply (operator intent: "this is the active layer right
+                // now"). A muted+solo'd row shows both dim AND the ring.
+                if is_solo {
+                    // Solo ring: thicker warm accent stroke (3 px) so it reads
+                    // as distinct from the 2 px selection border.
+                    painter.rect_stroke(
+                        draw_rect,
+                        egui::CornerRadius::same(2),
+                        Stroke::new(3.0, theme::ACCENT),
+                        egui::StrokeKind::Inside,
+                    );
+                } else if is_selected {
                     painter.rect_stroke(
                         draw_rect,
                         egui::CornerRadius::same(2),
@@ -164,7 +211,10 @@ pub fn show(
                 }
 
                 // ── thumbnail block ─────────────────────────────────────
-                let thumb_colour = color_for_id(&layer.id);
+                // Muted rows are dimmed to ~50 % brightness so the operator
+                // can see at a glance which layers are suppressed.
+                let dim = if is_muted { 0.4 } else { 1.0 };
+                let thumb_colour = color_for_id(&layer.id).linear_multiply(dim);
                 let thumb_rect = egui::Rect::from_min_size(
                     row_rect.min + egui::vec2(4.0, (ROW_HEIGHT - THUMB_H) * 0.5),
                     egui::vec2(THUMB_W, THUMB_H),
@@ -176,12 +226,13 @@ pub fn show(
                     egui::pos2(thumb_rect.left(), thumb_rect.bottom() + 2.0),
                     egui::pos2(thumb_rect.right(), row_rect.bottom() - 1.0),
                 );
+                let label_colour = theme::TEXT_PRIMARY.linear_multiply(dim);
                 painter.text(
                     label_rect.center_top(),
                     egui::Align2::CENTER_TOP,
                     &layer.id,
                     egui::FontId::proportional(9.5),
-                    theme::TEXT_PRIMARY,
+                    label_colour,
                 );
 
                 // ── right-side controls column ──────────────────────────
@@ -220,7 +271,49 @@ pub fn show(
                     pending.push(project.set_layer_enabled_mutation(idx, !layer.enabled));
                 }
 
-                // Up / Down reorder arrows
+                // ── S / M buttons (row 2 of controls column) ───────────
+                // Layout A: row 2 is a horizontal pair S | M, each ctrl_w/2.
+                // Button fill hints: active state gets a faint accent tint so
+                // the operator can read mute/solo state without inspecting the
+                // row decoration.
+                let (solo_resp, mute_resp) = child
+                    .horizontal(|ui| {
+                        let s_fill = if is_solo {
+                            theme::ACCENT.linear_multiply(0.25)
+                        } else {
+                            Color32::TRANSPARENT
+                        };
+                        let s_resp = ui.add(
+                            egui::Button::new(egui::RichText::new("S").size(10.0))
+                                .min_size(egui::vec2(ctrl_w * 0.5 - 1.0, 16.0))
+                                .fill(s_fill),
+                        );
+
+                        let m_fill = if is_muted {
+                            theme::ACCENT.linear_multiply(0.15)
+                        } else {
+                            Color32::TRANSPARENT
+                        };
+                        let m_resp = ui.add(
+                            egui::Button::new(egui::RichText::new("M").size(10.0))
+                                .min_size(egui::vec2(ctrl_w * 0.5 - 1.0, 16.0))
+                                .fill(m_fill),
+                        );
+                        (s_resp, m_resp)
+                    })
+                    .inner;
+
+                if solo_resp.clicked() {
+                    // Single-solo design: toggling S on this layer sets
+                    // project.solo to Some(idx) or clears it if already set.
+                    let new_solo = next_solo(project.solo, idx);
+                    pending.push(project.set_solo_mutation(new_solo));
+                }
+                if mute_resp.clicked() {
+                    pending.push(project.set_layer_muted_mutation(idx, !layer.muted));
+                }
+
+                // ── ▲ / ▼ reorder arrows (row 3 of controls column) ────
                 let up_enabled = idx > 0;
                 let dn_enabled = idx + 1 < n;
 
@@ -253,7 +346,13 @@ pub fn show(
 
                 // ── row click → selection ───────────────────────────────
                 // Only handle the row click if no child button consumed it.
-                if row_resp.clicked() && !eye_resp.clicked() {
+                // Guard all interactive controls so clicks on buttons don't
+                // also change the layer selection.
+                if row_resp.clicked()
+                    && !eye_resp.clicked()
+                    && !solo_resp.clicked()
+                    && !mute_resp.clicked()
+                {
                     scene.selected = Some(Selection::Layer(idx));
                 }
             }
@@ -359,6 +458,126 @@ mod tests {
     #[test]
     fn row_index_no_layers() {
         assert_eq!(row_index_at_y(10.0, ROW_HEIGHT, 0), None);
+    }
+
+    // ── next_solo helper ──────────────────────────────────────────────────
+
+    /// Clicking S on the currently-solo'd layer un-solos it (returns None).
+    #[test]
+    fn next_solo_clears_current() {
+        assert_eq!(next_solo(Some(1), 1), None);
+    }
+
+    /// Clicking S on a non-solo'd layer solos it.
+    #[test]
+    fn next_solo_sets_new() {
+        assert_eq!(next_solo(None, 2), Some(2));
+    }
+
+    /// Clicking S on a different layer solos that layer (overrides previous solo).
+    #[test]
+    fn next_solo_switches_to_new_layer() {
+        assert_eq!(next_solo(Some(0), 2), Some(2));
+    }
+
+    // ── solo / mute Mutation dispatch (V31.6.2) ───────────────────────────
+
+    /// Build a `Project` with `n` stub layers for testing.
+    fn make_test_project(n: usize) -> crate::project::schema::Project {
+        use std::path::PathBuf;
+        let mut p = crate::project::schema::Project::default();
+        for i in 0..n {
+            p.layers.push(crate::project::schema::layer_from_svg_path(
+                format!("l{i}"),
+                PathBuf::from(format!("/tmp/test_layer_{i}.svg")),
+            ));
+        }
+        p
+    }
+
+    /// Clicking S on layer 1 (not currently solo'd): produces SetLayerSolo
+    /// with new=Some(1), old=None.
+    #[test]
+    fn solo_button_toggles_solo() {
+        use crate::project::command::Mutation;
+
+        let mut p = make_test_project(3);
+
+        // Click S on layer 1 — no prior solo.
+        let new_val = next_solo(p.solo, 1);
+        let m = p.set_solo_mutation(new_val);
+        match &m {
+            Mutation::SetLayerSolo(s) => {
+                assert_eq!(s.new, Some(1), "new should be Some(1)");
+                assert_eq!(s.old, None, "old should be None");
+            }
+            _ => panic!("expected SetLayerSolo"),
+        }
+        // Apply it so project.solo is updated.
+        let _rev = m.apply(&mut p);
+        assert_eq!(p.solo, Some(1));
+
+        // Click S again on layer 1 — should un-solo.
+        let new_val2 = next_solo(p.solo, 1);
+        let m2 = p.set_solo_mutation(new_val2);
+        match &m2 {
+            Mutation::SetLayerSolo(s) => {
+                assert_eq!(s.new, None, "second click should un-solo");
+                assert_eq!(s.old, Some(1));
+            }
+            _ => panic!("expected SetLayerSolo"),
+        }
+        let _rev2 = m2.apply(&mut p);
+        assert_eq!(p.solo, None);
+
+        // Solo layer 1 again, then click S on layer 2 → overrides old solo.
+        let _ = p.set_solo_mutation(Some(1)).apply(&mut p);
+        assert_eq!(p.solo, Some(1));
+
+        let new_val3 = next_solo(p.solo, 2);
+        let m3 = p.set_solo_mutation(new_val3);
+        match &m3 {
+            Mutation::SetLayerSolo(s) => {
+                assert_eq!(s.new, Some(2));
+                assert_eq!(s.old, Some(1));
+            }
+            _ => panic!("expected SetLayerSolo"),
+        }
+        let _rev3 = m3.apply(&mut p);
+        assert_eq!(p.solo, Some(2));
+    }
+
+    /// Clicking M on layer 0 toggles the muted flag and round-trips.
+    #[test]
+    fn mute_button_toggles_layer_muted() {
+        use crate::project::command::Mutation;
+
+        let mut p = make_test_project(3);
+        assert!(!p.layers[0].muted, "initially not muted");
+
+        // First click: mute layer 0.
+        let m = p.set_layer_muted_mutation(0, !p.layers[0].muted);
+        match &m {
+            Mutation::SetLayerMuted(s) => {
+                assert_eq!(s.new, true);
+                assert_eq!(s.old, false);
+            }
+            _ => panic!("expected SetLayerMuted"),
+        }
+        let _rev = m.apply(&mut p);
+        assert!(p.layers[0].muted);
+
+        // Second click: un-mute.
+        let m2 = p.set_layer_muted_mutation(0, !p.layers[0].muted);
+        match &m2 {
+            Mutation::SetLayerMuted(s) => {
+                assert_eq!(s.new, false);
+                assert_eq!(s.old, true);
+            }
+            _ => panic!("expected SetLayerMuted"),
+        }
+        let _rev2 = m2.apply(&mut p);
+        assert!(!p.layers[0].muted);
     }
 
     // ── hsv_to_rgb sanity ─────────────────────────────────────────────────
