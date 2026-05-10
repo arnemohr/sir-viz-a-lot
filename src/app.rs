@@ -570,11 +570,13 @@ fn schedule_scene_recall(state: &mut EditingState, slot: usize) -> RecallOutcome
             // undoable via Cmd-Z. Topology was already checked above; the
             // snapshot is well-formed at this point so we trust apply to
             // succeed (errors are silenced inside the apply arm).
-            let mutation = crate::project::command::Mutation::ApplyProjectSnapshot {
-                new: target,
-                old: cur,
-                non_undoable: false,
-            };
+            let mutation = crate::project::command::Mutation::ApplyProjectSnapshot(
+                crate::project::command::ApplyProjectSnapshot {
+                    new: target,
+                    old: cur,
+                    non_undoable: false,
+                },
+            );
             state.undo_stack.push(mutation, &mut state.project);
             #[cfg(feature = "v3")]
             {
@@ -814,11 +816,13 @@ fn apply_command(state: &mut EditingState, event: Command) -> SideEffect {
                 old = %old_path.display(),
                 new = %new_path.display(),
             );
-            let mutation = crate::project::command::Mutation::RelinkAssetPath {
-                layer_idx,
-                new_path,
-                old_path,
-            };
+            let mutation = crate::project::command::Mutation::RelinkAssetPath(
+                crate::project::command::RelinkAssetPath {
+                    layer_idx,
+                    new_path,
+                    old_path,
+                },
+            );
             state.undo_stack.push(mutation, &mut state.project);
             state.dirty = true;
             // RelinkAssetPath::needs_layer_rebuild() == true so we
@@ -2314,7 +2318,7 @@ fn emit_mutation_telemetry(t: &mut SessionTelemetry, m: &crate::project::command
                 );
             }
         }
-        Mutation::SetLayerWarpDimensions { .. } => {
+        Mutation::SetLayerWarpDimensions(_) => {
             if !t.first_warp_drag {
                 t.first_warp_drag = true;
                 tracing::info!(
@@ -3601,11 +3605,13 @@ fn handle_editing_window_event(
                     // already verified at scheduling time so a well-formed
                     // interp snapshot is guaranteed.
                     let cur = snapshot(&state.project);
-                    let mutation = crate::project::command::Mutation::ApplyProjectSnapshot {
-                        new: interp,
-                        old: cur,
-                        non_undoable: true,
-                    };
+                    let mutation = crate::project::command::Mutation::ApplyProjectSnapshot(
+                        crate::project::command::ApplyProjectSnapshot {
+                            new: interp,
+                            old: cur,
+                            non_undoable: true,
+                        },
+                    );
                     state.undo_stack.push(mutation, &mut state.project);
                 }
                 #[cfg(not(feature = "v3"))]

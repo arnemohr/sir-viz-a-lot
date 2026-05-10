@@ -108,11 +108,13 @@ fn show_layer(
         let new_effects = project.layers[idx].effects.clone();
         // Revert the live mutation; the drain re-applies `new_effects`.
         project.layers[idx].effects = old_effects.clone();
-        st.pending_mutations.push(Mutation::SetLayerEffects {
-            layer_idx: idx,
-            new: new_effects,
-            old: old_effects,
-        });
+        st.pending_mutations.push(Mutation::SetLayerEffects(
+            crate::project::command::SetLayerEffects {
+                layer_idx: idx,
+                new: new_effects,
+                old: old_effects,
+            },
+        ));
     }
 
     ui.separator();

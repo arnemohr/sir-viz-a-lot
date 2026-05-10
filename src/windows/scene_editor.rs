@@ -818,11 +818,13 @@ pub fn handle_scene_input(
                                 layer.warp = old.clone();
                                 if !same {
                                     emitted = Some(
-                                        crate::project::command::Mutation::ResetLayerWarpMesh {
-                                            layer_idx,
-                                            new,
-                                            old,
-                                        },
+                                        crate::project::command::Mutation::ResetLayerWarpMesh(
+                                            crate::project::command::ResetLayerWarpMesh {
+                                                layer_idx,
+                                                new,
+                                                old,
+                                            },
+                                        ),
                                     );
                                 }
                             }
@@ -845,12 +847,14 @@ pub fn handle_scene_input(
                                 // Revert live mutation; the drain re-applies `new`.
                                 *p = old;
                                 emitted =
-                                    Some(crate::project::command::Mutation::SetLayerMaskVertex {
-                                        layer_idx: *warp,
-                                        idx: *idx,
-                                        new,
-                                        old,
-                                    });
+                                    Some(crate::project::command::Mutation::SetLayerMaskVertex(
+                                        crate::project::command::SetLayerMaskVertex {
+                                            layer_idx: *warp,
+                                            idx: *idx,
+                                            new,
+                                            old,
+                                        },
+                                    ));
                             }
                         }
                     }
@@ -885,13 +889,15 @@ pub fn handle_scene_input(
                                 {
                                     *p = old;
                                     emitted = Some(
-                                        crate::project::command::Mutation::SetLayerWarpCorner {
-                                            layer_idx: *layer_idx,
-                                            r: *r,
-                                            c: *c,
-                                            new,
-                                            old,
-                                        },
+                                        crate::project::command::Mutation::SetLayerWarpCorner(
+                                            crate::project::command::SetLayerWarpCorner {
+                                                layer_idx: *layer_idx,
+                                                r: *r,
+                                                c: *c,
+                                                new,
+                                                old,
+                                            },
+                                        ),
                                     );
                                 }
                             }

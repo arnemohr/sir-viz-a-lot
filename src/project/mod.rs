@@ -770,13 +770,13 @@ mod tests {
         // --- step 3: drag warp corner (row 0, col 0) ---
         let old_corner = project.layers[0].warp.grid[0][0];
         let new_corner = [0.05f32, 0.07f32];
-        let m = Mutation::SetLayerWarpCorner {
+        let m = Mutation::SetLayerWarpCorner(crate::project::command::SetLayerWarpCorner {
             layer_idx: 0,
             r: 0,
             c: 0,
             new: new_corner,
             old: old_corner,
-        };
+        });
         stack.push(m, &mut project);
         assert_eq!(
             project.layers[0].warp.grid[0][0], new_corner,

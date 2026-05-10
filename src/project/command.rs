@@ -154,6 +154,20 @@ fn modulator_at_mut(
 /// `match` inside `Mutation::apply` requiring every arm to call
 /// `s.apply(project)` — the compiler rejects a new arm that omits the
 /// impl. V31.3.2 migrates the remaining variants.
+///
+/// # Trait-bound enforcement (compile-fail demonstration)
+///
+/// A type that does not implement `ReverseStorage` cannot satisfy the
+/// bound. This doctest verifies the real trait rejects non-impl types —
+/// unlike the deleted trybuild harness, this uses the actual symbol from
+/// this module rather than a locally-defined stand-in.
+///
+/// ```compile_fail
+/// use rmap::project::command::ReverseStorage;
+/// struct NotReverseStorage;
+/// fn requires_reverse_storage<T: ReverseStorage>() {}
+/// fn _bad() { requires_reverse_storage::<NotReverseStorage>(); }
+/// ```
 pub trait ReverseStorage {
     /// Apply the mutation to `project` and return the reverse.
     ///
@@ -171,7 +185,6 @@ pub trait ReverseStorage {
 /// Replaces `Project.gamma` with `new` and records the prior value in
 /// `old` so the Reverse can restore it.
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // V31.3.2 will wire remaining call sites.
 pub struct SetGamma {
     /// Value to write to `Project.gamma`.
     pub new: f32,
@@ -196,6 +209,758 @@ impl ReverseStorage for SetGamma {
     }
 }
 
+/// Payload for [`Mutation::SetBrightness`].
+#[derive(Debug, Clone)]
+pub struct SetBrightness {
+    /// Value to write.
+    pub new: f32,
+    /// Pre-mutation value.
+    pub old: f32,
+}
+
+impl ReverseStorage for SetBrightness {
+    fn apply(self, project: &mut Project) -> Self {
+        debug_assert!(
+            (project.brightness - self.old).abs() < 1e-6,
+            "SetBrightness stale Reverse: project.brightness={}, expected old={}",
+            project.brightness,
+            self.old
+        );
+        project.brightness = self.new;
+        SetBrightness {
+            new: self.old,
+            old: self.new,
+        }
+    }
+}
+
+/// Payload for [`Mutation::SetContrast`].
+#[derive(Debug, Clone)]
+pub struct SetContrast {
+    /// Value to write.
+    pub new: f32,
+    /// Pre-mutation value.
+    pub old: f32,
+}
+
+impl ReverseStorage for SetContrast {
+    fn apply(self, project: &mut Project) -> Self {
+        debug_assert!(
+            (project.contrast - self.old).abs() < 1e-6,
+            "SetContrast stale Reverse: project.contrast={}, expected old={}",
+            project.contrast,
+            self.old
+        );
+        project.contrast = self.new;
+        SetContrast {
+            new: self.old,
+            old: self.new,
+        }
+    }
+}
+
+/// Payload for [`Mutation::SetCrossfadeDurationS`].
+#[derive(Debug, Clone)]
+pub struct SetCrossfadeDurationS {
+    /// Value to write.
+    pub new: f32,
+    /// Pre-mutation value.
+    pub old: f32,
+}
+
+impl ReverseStorage for SetCrossfadeDurationS {
+    fn apply(self, project: &mut Project) -> Self {
+        debug_assert!(
+            (project.crossfade_duration_s - self.old).abs() < 1e-6,
+            "SetCrossfadeDurationS stale Reverse: project.crossfade_duration_s={}, expected old={}",
+            project.crossfade_duration_s,
+            self.old
+        );
+        project.crossfade_duration_s = self.new;
+        SetCrossfadeDurationS {
+            new: self.old,
+            old: self.new,
+        }
+    }
+}
+
+/// Payload for [`Mutation::SetProjectGammaOverride`].
+/// Whole-`Option` Reverse so a `Some → None → Some` toggle round-trips byte-equally.
+#[derive(Debug, Clone)]
+pub struct SetProjectGammaOverride {
+    /// Value to write (`None` clears the override).
+    pub new: Option<f32>,
+    /// Pre-mutation value.
+    pub old: Option<f32>,
+}
+
+impl ReverseStorage for SetProjectGammaOverride {
+    fn apply(self, project: &mut Project) -> Self {
+        debug_assert!(
+            project.gamma_override == self.old,
+            "SetProjectGammaOverride stale Reverse: project.gamma_override={:?}, expected old={:?}",
+            project.gamma_override,
+            self.old
+        );
+        project.gamma_override = self.new;
+        SetProjectGammaOverride {
+            new: self.old,
+            old: self.new,
+        }
+    }
+}
+
+/// Payload for [`Mutation::SetProjectBrightnessOverride`].
+#[derive(Debug, Clone)]
+pub struct SetProjectBrightnessOverride {
+    /// Value to write.
+    pub new: Option<f32>,
+    /// Pre-mutation value.
+    pub old: Option<f32>,
+}
+
+impl ReverseStorage for SetProjectBrightnessOverride {
+    fn apply(self, project: &mut Project) -> Self {
+        debug_assert!(
+            project.brightness_override == self.old,
+            "SetProjectBrightnessOverride stale Reverse: project.brightness_override={:?}, expected old={:?}",
+            project.brightness_override,
+            self.old
+        );
+        project.brightness_override = self.new;
+        SetProjectBrightnessOverride {
+            new: self.old,
+            old: self.new,
+        }
+    }
+}
+
+/// Payload for [`Mutation::SetProjectContrastOverride`].
+#[derive(Debug, Clone)]
+pub struct SetProjectContrastOverride {
+    /// Value to write.
+    pub new: Option<f32>,
+    /// Pre-mutation value.
+    pub old: Option<f32>,
+}
+
+impl ReverseStorage for SetProjectContrastOverride {
+    fn apply(self, project: &mut Project) -> Self {
+        debug_assert!(
+            project.contrast_override == self.old,
+            "SetProjectContrastOverride stale Reverse: project.contrast_override={:?}, expected old={:?}",
+            project.contrast_override,
+            self.old
+        );
+        project.contrast_override = self.new;
+        SetProjectContrastOverride {
+            new: self.old,
+            old: self.new,
+        }
+    }
+}
+
+/// Payload for [`Mutation::SetOutputWindowed`].
+#[derive(Debug, Clone)]
+pub struct SetOutputWindowed {
+    /// Value to write.
+    pub new: bool,
+    /// Pre-mutation value.
+    pub old: bool,
+}
+
+impl ReverseStorage for SetOutputWindowed {
+    fn apply(self, project: &mut Project) -> Self {
+        debug_assert!(
+            project.output_windowed == self.old,
+            "SetOutputWindowed stale Reverse: project.output_windowed={}, expected old={}",
+            project.output_windowed,
+            self.old
+        );
+        project.output_windowed = self.new;
+        SetOutputWindowed {
+            new: self.old,
+            old: self.new,
+        }
+    }
+}
+
+/// Payload for [`Mutation::SetLayerMaskFeather`].
+#[derive(Debug, Clone)]
+pub struct SetLayerMaskFeather {
+    /// Index into `Project.layers`; the layer's `warp` is the target.
+    pub layer_idx: usize,
+    /// Value to write.
+    pub new: f32,
+    /// Pre-mutation value.
+    pub old: f32,
+}
+
+impl ReverseStorage for SetLayerMaskFeather {
+    fn apply(self, project: &mut Project) -> Self {
+        let warp = &mut project
+            .layers
+            .get_mut(self.layer_idx)
+            .expect("SetLayerMaskFeather: layer_idx out of range")
+            .warp;
+        debug_assert!(
+            (warp.mask_feather - self.old).abs() < 1e-6,
+            "SetLayerMaskFeather stale Reverse: warp.mask_feather={}, expected old={}",
+            warp.mask_feather,
+            self.old
+        );
+        warp.mask_feather = self.new;
+        SetLayerMaskFeather {
+            layer_idx: self.layer_idx,
+            new: self.old,
+            old: self.new,
+        }
+    }
+}
+
+/// Payload for [`Mutation::SetLayerWarpDimensions`].
+///
+/// Editing rows or cols bilinear-resamples the grid (the existing T-M7-01
+/// helper); the resample is lossy, so this variant follows Reverse rule 3 —
+/// the `old_grid` snapshot lets undo restore the pre-mutation grid byte-equally
+/// instead of attempting a reverse-resample.
+#[derive(Debug, Clone)]
+pub struct SetLayerWarpDimensions {
+    /// Index into `Project.layers`; the layer's `warp` is the target.
+    pub layer_idx: usize,
+    /// Cell-row count to write.
+    pub new_rows: u32,
+    /// Cell-column count to write.
+    pub new_cols: u32,
+    /// Resampled grid to install.
+    pub new_grid: Vec<Vec<[f32; 2]>>,
+    /// Pre-mutation rows.
+    pub old_rows: u32,
+    /// Pre-mutation cols.
+    pub old_cols: u32,
+    /// Pre-mutation grid (full snapshot — see Reverse rule 3).
+    pub old_grid: Vec<Vec<[f32; 2]>>,
+}
+
+impl ReverseStorage for SetLayerWarpDimensions {
+    fn apply(self, project: &mut Project) -> Self {
+        let warp = &mut project
+            .layers
+            .get_mut(self.layer_idx)
+            .expect("SetLayerWarpDimensions: layer_idx out of range")
+            .warp;
+        debug_assert!(
+            warp.rows == self.old_rows && warp.cols == self.old_cols,
+            "SetLayerWarpDimensions stale Reverse: warp dims=({}, {}), expected old=({}, {})",
+            warp.rows,
+            warp.cols,
+            self.old_rows,
+            self.old_cols
+        );
+        let post_grid = self.new_grid;
+        warp.grid = post_grid.clone();
+        warp.rows = self.new_rows;
+        warp.cols = self.new_cols;
+        SetLayerWarpDimensions {
+            layer_idx: self.layer_idx,
+            new_rows: self.old_rows,
+            new_cols: self.old_cols,
+            new_grid: self.old_grid,
+            old_rows: self.new_rows,
+            old_cols: self.new_cols,
+            old_grid: post_grid,
+        }
+    }
+}
+
+/// Payload for [`Mutation::SetLayerOpacity`].
+#[derive(Debug, Clone)]
+pub struct SetLayerOpacity {
+    /// Index into `Project.layers`.
+    pub layer_idx: usize,
+    /// Value to write.
+    pub new: f32,
+    /// Pre-mutation value.
+    pub old: f32,
+}
+
+impl ReverseStorage for SetLayerOpacity {
+    fn apply(self, project: &mut Project) -> Self {
+        let layer = project
+            .layers
+            .get_mut(self.layer_idx)
+            .expect("SetLayerOpacity: layer_idx out of range");
+        debug_assert!(
+            (layer.opacity - self.old).abs() < 1e-6,
+            "SetLayerOpacity stale Reverse: layer.opacity={}, expected old={}",
+            layer.opacity,
+            self.old
+        );
+        layer.opacity = self.new;
+        SetLayerOpacity {
+            layer_idx: self.layer_idx,
+            new: self.old,
+            old: self.new,
+        }
+    }
+}
+
+/// Payload for [`Mutation::SetLayerEnabled`].
+#[derive(Debug, Clone)]
+pub struct SetLayerEnabled {
+    /// Index into `Project.layers`.
+    pub layer_idx: usize,
+    /// Value to write.
+    pub new: bool,
+    /// Pre-mutation value.
+    pub old: bool,
+}
+
+impl ReverseStorage for SetLayerEnabled {
+    fn apply(self, project: &mut Project) -> Self {
+        let layer = project
+            .layers
+            .get_mut(self.layer_idx)
+            .expect("SetLayerEnabled: layer_idx out of range");
+        debug_assert!(
+            layer.enabled == self.old,
+            "SetLayerEnabled stale Reverse: layer.enabled={}, expected old={}",
+            layer.enabled,
+            self.old
+        );
+        layer.enabled = self.new;
+        SetLayerEnabled {
+            layer_idx: self.layer_idx,
+            new: self.old,
+            old: self.new,
+        }
+    }
+}
+
+/// Payload for [`Mutation::SetLayerBlendMode`].
+/// Whole-enum Reverse (rule 1): stores the full old `BlendMode` value.
+#[derive(Debug, Clone)]
+pub struct SetLayerBlendMode {
+    /// Index into `Project.layers`.
+    pub layer_idx: usize,
+    /// Value to write.
+    pub new: BlendMode,
+    /// Pre-mutation value (full enum — Reverse rule 1).
+    pub old: BlendMode,
+}
+
+impl ReverseStorage for SetLayerBlendMode {
+    fn apply(self, project: &mut Project) -> Self {
+        let layer = project
+            .layers
+            .get_mut(self.layer_idx)
+            .expect("SetLayerBlendMode: layer_idx out of range");
+        debug_assert!(
+            layer.blend_mode == self.old,
+            "SetLayerBlendMode stale Reverse: layer.blend_mode={:?}, expected old={:?}",
+            layer.blend_mode,
+            self.old
+        );
+        layer.blend_mode = self.new;
+        SetLayerBlendMode {
+            layer_idx: self.layer_idx,
+            new: self.old,
+            old: self.new,
+        }
+    }
+}
+
+/// Payload for [`Mutation::SetLayerEffects`].
+///
+/// Replaces a layer's effect chain wholesale (Reverse rule 2: Effects-Vec
+/// Reverse). Both `new` and `old` are full `Vec<Effect>` snapshots.
+#[derive(Debug, Clone)]
+pub struct SetLayerEffects {
+    /// Index into `Project.layers`.
+    pub layer_idx: usize,
+    /// Effect chain to install.
+    pub new: Vec<crate::effects::Effect>,
+    /// Pre-mutation snapshot of the chain.
+    pub old: Vec<crate::effects::Effect>,
+}
+
+impl ReverseStorage for SetLayerEffects {
+    fn apply(self, project: &mut Project) -> Self {
+        let layer = project
+            .layers
+            .get_mut(self.layer_idx)
+            .expect("SetLayerEffects: layer_idx out of range");
+        debug_assert!(
+            layer.effects.len() == self.old.len(),
+            "SetLayerEffects stale Reverse: effects.len()={}, expected old.len()={}",
+            layer.effects.len(),
+            self.old.len()
+        );
+        let post = self.new;
+        layer.effects = post.clone();
+        SetLayerEffects {
+            layer_idx: self.layer_idx,
+            new: self.old,
+            old: post,
+        }
+    }
+}
+
+/// Payload for [`Mutation::SwapLayers`]. Self-reverse.
+#[derive(Debug, Clone)]
+pub struct SwapLayers {
+    /// First swap index.
+    pub i: usize,
+    /// Second swap index.
+    pub j: usize,
+}
+
+impl ReverseStorage for SwapLayers {
+    fn apply(self, project: &mut Project) -> Self {
+        debug_assert!(
+            self.i < project.layers.len() && self.j < project.layers.len(),
+            "SwapLayers index out of range: i={}, j={}, len={}",
+            self.i,
+            self.j,
+            project.layers.len()
+        );
+        project.layers.swap(self.i, self.j);
+        SwapLayers {
+            i: self.i,
+            j: self.j,
+        }
+    }
+}
+
+/// Payload for [`Mutation::RelinkAssetPath`].
+///
+/// Repoints a layer's asset path to a new location on disk. Both paths are
+/// stored alongside the layer index so the proptest round-trip works without
+/// re-reading project state at undo time.
+#[derive(Debug, Clone)]
+pub struct RelinkAssetPath {
+    /// Index into `Project.layers`.
+    pub layer_idx: usize,
+    /// Replacement asset path.
+    pub new_path: PathBuf,
+    /// Pre-mutation asset path.
+    pub old_path: PathBuf,
+}
+
+impl ReverseStorage for RelinkAssetPath {
+    fn apply(self, project: &mut Project) -> Self {
+        let layer = project
+            .layers
+            .get_mut(self.layer_idx)
+            .expect("RelinkAssetPath: layer_idx out of range");
+        debug_assert_eq!(
+            layer.kind.asset_path(),
+            self.old_path.as_path(),
+            "RelinkAssetPath: stale old_path for layer_idx={}",
+            self.layer_idx,
+        );
+        match &mut layer.kind {
+            crate::project::schema::LayerKind::Image { path, .. } => {
+                *path = self.new_path.clone();
+            }
+            crate::project::schema::LayerKind::Svg { svg_path } => {
+                *svg_path = self.new_path.clone();
+            }
+        }
+        RelinkAssetPath {
+            layer_idx: self.layer_idx,
+            new_path: self.old_path,
+            old_path: self.new_path,
+        }
+    }
+}
+
+/// Payload for [`Mutation::SetModulator`].
+///
+/// Whole-enum Reverse (rule 1): stores the full old `Modulator` value so a
+/// variant switch (e.g. Sine → Static) round-trips byte-equally.
+#[derive(Debug, Clone)]
+pub struct SetModulator {
+    /// Index into `Project.layers`.
+    pub layer_idx: usize,
+    /// Index into `LayerConfig.effects`.
+    pub effect_idx: usize,
+    /// Which modulator slot inside the effect.
+    pub field: ModulatorField,
+    /// Replacement modulator (full enum value).
+    pub new: crate::modulators::Modulator,
+    /// Pre-mutation modulator (full enum value — Reverse rule 1).
+    pub old: crate::modulators::Modulator,
+}
+
+impl ReverseStorage for SetModulator {
+    fn apply(self, project: &mut Project) -> Self {
+        let layer = project
+            .layers
+            .get_mut(self.layer_idx)
+            .expect("SetModulator: layer_idx out of range");
+        let effect = layer
+            .effects
+            .get_mut(self.effect_idx)
+            .expect("SetModulator: effect_idx out of range");
+        let slot = modulator_at_mut(effect, self.field)
+            .expect("SetModulator: field does not apply to this effect variant");
+        *slot = self.new.clone();
+        SetModulator {
+            layer_idx: self.layer_idx,
+            effect_idx: self.effect_idx,
+            field: self.field,
+            new: self.old,
+            old: self.new,
+        }
+    }
+}
+
+/// Payload for [`Mutation::ResetLayerWarpMesh`].
+///
+/// Replaces the entire `WarpMesh` at `layer_idx` (rule 3 snapshot Reverse).
+#[derive(Debug, Clone)]
+pub struct ResetLayerWarpMesh {
+    /// Index into `Project.layers`; the layer's `warp` is the target.
+    pub layer_idx: usize,
+    /// Full `WarpMesh` to install.
+    pub new: crate::project::schema::WarpMesh,
+    /// Pre-mutation `WarpMesh` snapshot.
+    pub old: crate::project::schema::WarpMesh,
+}
+
+impl ReverseStorage for ResetLayerWarpMesh {
+    fn apply(self, project: &mut Project) -> Self {
+        let warp = &mut project
+            .layers
+            .get_mut(self.layer_idx)
+            .expect("ResetLayerWarpMesh: layer_idx out of range")
+            .warp;
+        debug_assert!(
+            warp.rows == self.old.rows && warp.cols == self.old.cols,
+            "ResetLayerWarpMesh stale Reverse: warp dims=({}, {}), expected old=({}, {})",
+            warp.rows,
+            warp.cols,
+            self.old.rows,
+            self.old.cols
+        );
+        let post = self.new;
+        *warp = post.clone();
+        ResetLayerWarpMesh {
+            layer_idx: self.layer_idx,
+            new: self.old,
+            old: post,
+        }
+    }
+}
+
+/// Payload for [`Mutation::SetLayerMaskPolygon`].
+///
+/// Replaces `WarpMesh.mask_polygon` for the layer at `layer_idx`.
+/// Both sides are full polygon snapshots (whole-Vec Reverse).
+#[derive(Debug, Clone)]
+pub struct SetLayerMaskPolygon {
+    /// Index into `Project.layers`; the layer's `warp` is the target.
+    pub layer_idx: usize,
+    /// Polygon to install.
+    pub new: Vec<[f32; 2]>,
+    /// Pre-mutation polygon snapshot.
+    pub old: Vec<[f32; 2]>,
+}
+
+impl ReverseStorage for SetLayerMaskPolygon {
+    fn apply(self, project: &mut Project) -> Self {
+        let warp = &mut project
+            .layers
+            .get_mut(self.layer_idx)
+            .expect("SetLayerMaskPolygon: layer_idx out of range")
+            .warp;
+        debug_assert!(
+            warp.mask_polygon.len() == self.old.len(),
+            "SetLayerMaskPolygon stale Reverse: mask_polygon.len()={}, expected old.len()={}",
+            warp.mask_polygon.len(),
+            self.old.len()
+        );
+        let post = self.new;
+        warp.mask_polygon = post.clone();
+        SetLayerMaskPolygon {
+            layer_idx: self.layer_idx,
+            new: self.old,
+            old: post,
+        }
+    }
+}
+
+/// Payload for [`Mutation::SetLayerMaskVertex`].
+///
+/// Replaces `WarpMesh.mask_polygon[idx]` with `new`. Reverse swaps `new` and `old`.
+#[derive(Debug, Clone)]
+pub struct SetLayerMaskVertex {
+    /// Index into `Project.layers`; the layer's `warp` is the target.
+    pub layer_idx: usize,
+    /// Index of the vertex inside `mask_polygon`.
+    pub idx: usize,
+    /// Value to write.
+    pub new: [f32; 2],
+    /// Pre-mutation value; `apply` `debug_assert!`s this matches the live state.
+    pub old: [f32; 2],
+}
+
+impl ReverseStorage for SetLayerMaskVertex {
+    fn apply(self, project: &mut Project) -> Self {
+        let warp = &mut project
+            .layers
+            .get_mut(self.layer_idx)
+            .expect("SetLayerMaskVertex: layer_idx out of range")
+            .warp;
+        debug_assert!(
+            self.idx < warp.mask_polygon.len(),
+            "SetLayerMaskVertex idx out of range: idx={}, len={}",
+            self.idx,
+            warp.mask_polygon.len()
+        );
+        let cur = warp.mask_polygon[self.idx];
+        debug_assert!(
+            (cur[0] - self.old[0]).abs() < 1e-6 && (cur[1] - self.old[1]).abs() < 1e-6,
+            "SetLayerMaskVertex stale Reverse: cur=[{}, {}], expected old=[{}, {}]",
+            cur[0],
+            cur[1],
+            self.old[0],
+            self.old[1]
+        );
+        warp.mask_polygon[self.idx] = self.new;
+        SetLayerMaskVertex {
+            layer_idx: self.layer_idx,
+            idx: self.idx,
+            new: self.old,
+            old: self.new,
+        }
+    }
+}
+
+/// Payload for [`Mutation::SetLayerWarpCorner`].
+///
+/// Replaces `WarpMesh.grid[r][c]` for the layer at `layer_idx`.
+#[derive(Debug, Clone)]
+pub struct SetLayerWarpCorner {
+    /// Index into `Project.layers`; the layer's `warp` is the target.
+    pub layer_idx: usize,
+    /// Grid row index (vertex coords, 0..=warp.rows).
+    pub r: usize,
+    /// Grid column index (vertex coords, 0..=warp.cols).
+    pub c: usize,
+    /// Value to write.
+    pub new: [f32; 2],
+    /// Pre-mutation value; `apply` `debug_assert!`s this matches the live state.
+    pub old: [f32; 2],
+}
+
+impl ReverseStorage for SetLayerWarpCorner {
+    fn apply(self, project: &mut Project) -> Self {
+        let warp = &mut project
+            .layers
+            .get_mut(self.layer_idx)
+            .expect("SetLayerWarpCorner: layer_idx out of range")
+            .warp;
+        debug_assert!(
+            (warp.grid[self.r][self.c][0] - self.old[0]).abs() < 1e-6
+                && (warp.grid[self.r][self.c][1] - self.old[1]).abs() < 1e-6,
+            "SetLayerWarpCorner stale Reverse: cur=[{}, {}], expected old=[{}, {}]",
+            warp.grid[self.r][self.c][0],
+            warp.grid[self.r][self.c][1],
+            self.old[0],
+            self.old[1]
+        );
+        warp.grid[self.r][self.c] = self.new;
+        SetLayerWarpCorner {
+            layer_idx: self.layer_idx,
+            r: self.r,
+            c: self.c,
+            new: self.old,
+            old: self.new,
+        }
+    }
+}
+
+/// Payload for [`Mutation::SetProjectScenes`].
+///
+/// Replaces `Project.scenes` wholesale (whole-Vec snapshot Reverse).
+#[derive(Debug, Clone)]
+pub struct SetProjectScenes {
+    /// Replacement scenes Vec.
+    pub new: Vec<crate::project::schema::Scene>,
+    /// Pre-mutation scenes Vec.
+    pub old: Vec<crate::project::schema::Scene>,
+}
+
+impl ReverseStorage for SetProjectScenes {
+    fn apply(self, project: &mut Project) -> Self {
+        debug_assert!(
+            project.scenes.len() == self.old.len(),
+            "SetProjectScenes stale Reverse: scenes.len()={}, expected old.len()={}",
+            project.scenes.len(),
+            self.old.len()
+        );
+        let post = self.new;
+        project.scenes = post.clone();
+        SetProjectScenes {
+            new: self.old,
+            old: post,
+        }
+    }
+}
+
+/// Payload for [`Mutation::SetOutputMonitorIndex`].
+#[derive(Debug, Clone)]
+pub struct SetOutputMonitorIndex {
+    /// Value to write.
+    pub new: usize,
+    /// Pre-mutation value; `apply` `debug_assert!`s this matches.
+    pub old: usize,
+}
+
+impl ReverseStorage for SetOutputMonitorIndex {
+    fn apply(self, project: &mut Project) -> Self {
+        debug_assert!(
+            project.output_monitor_index == self.old,
+            "SetOutputMonitorIndex stale Reverse: project.output_monitor_index={}, expected old={}",
+            project.output_monitor_index,
+            self.old
+        );
+        project.output_monitor_index = self.new;
+        SetOutputMonitorIndex {
+            new: self.old,
+            old: self.new,
+        }
+    }
+}
+
+/// Payload for [`Mutation::ApplyProjectSnapshot`].
+///
+/// Replaces the entire project from a serde_json snapshot (Reverse rule 3).
+/// `non_undoable: true` is reserved for the crossfade-tick path which fires
+/// ~60×/s and must not enter the user-facing undo stack.
+#[derive(Debug, Clone)]
+pub struct ApplyProjectSnapshot {
+    /// Snapshot to install.
+    pub new: serde_json::Value,
+    /// Project state captured before the apply call.
+    pub old: serde_json::Value,
+    /// `true` for crossfade-tick callers; `false` for user-triggered scene recall.
+    pub non_undoable: bool,
+}
+
+impl ReverseStorage for ApplyProjectSnapshot {
+    fn apply(self, project: &mut Project) -> Self {
+        let _ = crate::project::restore_scene(project, &self.new);
+        ApplyProjectSnapshot {
+            new: self.old,
+            old: self.new,
+            non_undoable: self.non_undoable,
+        }
+    }
+}
+
 /// 003-T1.14 — typed project mutations.
 ///
 /// Each variant carries the previous value of every field it
@@ -206,6 +971,19 @@ impl ReverseStorage for SetGamma {
 /// `non_undoable` discriminator: see [`Mutation::is_non_undoable`].
 /// Currently the only non-undoable variant is the crossfade-tick
 /// flavour of `ApplyProjectSnapshot`.
+///
+/// ## Asymmetric variants
+///
+/// `AddLayer`, `RemoveLayer`, `AddLayerMaskVertex`, and
+/// `RemoveLayerMaskVertex` are intentionally **not** wrapped in
+/// `ReverseStorage` structs. Their Reverse changes the variant
+/// itself: `AddLayer`'s Reverse is `RemoveLayer` and vice versa.
+/// The `ReverseStorage` trait's `fn apply(self, …) -> Self`
+/// contract requires the Reverse to be the same type as `Self`,
+/// which breaks for these pairs. Migrating them would require
+/// changing the trait signature to `-> Mutation`, which defeats the
+/// per-variant compile-time guarantee. They remain as inline match
+/// arms in `Mutation::apply` with an explanatory comment.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 #[allow(dead_code)] // T-003-T1.18+ wires call sites; foundation lives here from T1.14.
@@ -214,229 +992,72 @@ pub enum Mutation {
     /// implements [`ReverseStorage`]; Reverse is the same variant
     /// with `new` and `old` swapped.
     SetGamma(SetGamma),
-    /// Replace `Project.brightness`. Same shape as `SetGamma`.
-    SetBrightness {
-        /// Value to write.
-        new: f32,
-        /// Pre-mutation value.
-        old: f32,
-    },
-    /// Replace `Project.contrast`. Same shape as `SetGamma`.
-    SetContrast {
-        /// Value to write.
-        new: f32,
-        /// Pre-mutation value.
-        old: f32,
-    },
-    /// Replace `Project.crossfade_duration_s`. Same shape as `SetGamma`.
-    SetCrossfadeDurationS {
-        /// Value to write.
-        new: f32,
-        /// Pre-mutation value.
-        old: f32,
-    },
-    /// 003-T3.28 — replace `Project.gamma_override`. `None` ⇒ inherit
-    /// master gamma; `Some(v)` ⇒ projector uses `v`. Whole-`Option`
-    /// Reverse so a `Some → None → Some` toggle round-trips byte-equally.
-    SetProjectGammaOverride {
-        /// Value to write (`None` clears the override).
-        new: Option<f32>,
-        /// Pre-mutation value.
-        old: Option<f32>,
-    },
-    /// 003-T3.28 — replace `Project.brightness_override`. See
-    /// `SetProjectGammaOverride`.
-    SetProjectBrightnessOverride {
-        /// Value to write.
-        new: Option<f32>,
-        /// Pre-mutation value.
-        old: Option<f32>,
-    },
+    /// Replace `Project.brightness`. Delegates to [`SetBrightness`].
+    SetBrightness(SetBrightness),
+    /// Replace `Project.contrast`. Delegates to [`SetContrast`].
+    SetContrast(SetContrast),
+    /// Replace `Project.crossfade_duration_s`. Delegates to [`SetCrossfadeDurationS`].
+    SetCrossfadeDurationS(SetCrossfadeDurationS),
+    /// 003-T3.28 — replace `Project.gamma_override`. Delegates to [`SetProjectGammaOverride`].
+    SetProjectGammaOverride(SetProjectGammaOverride),
+    /// 003-T3.28 — replace `Project.brightness_override`. Delegates to [`SetProjectBrightnessOverride`].
+    SetProjectBrightnessOverride(SetProjectBrightnessOverride),
     /// 003-T3.28 — replace `Project.contrast_override`. See
     /// `SetProjectGammaOverride`.
-    SetProjectContrastOverride {
-        /// Value to write.
-        new: Option<f32>,
-        /// Pre-mutation value.
-        old: Option<f32>,
-    },
-    /// Replace `Project.output_windowed`. Boolean toggle.
-    SetOutputWindowed {
-        /// Value to write.
-        new: bool,
-        /// Pre-mutation value.
-        old: bool,
-    },
-    /// Replace `WarpMesh.mask_feather` for the layer at `layer_idx`.
-    SetLayerMaskFeather {
-        /// Index into `Project.layers`; the layer's `warp` is the target.
-        layer_idx: usize,
-        /// Value to write.
-        new: f32,
-        /// Pre-mutation value.
-        old: f32,
-    },
-    /// Replace `WarpMesh.rows`/`cols`/`grid` for the layer at `layer_idx`.
-    /// Editing rows or cols bilinear-resamples the grid (the existing
-    /// T-M7-01 helper); the resample is lossy, so this variant follows
-    /// Reverse rule 3 — the `old_grid` snapshot lets undo restore the
-    /// pre-mutation grid byte-equally instead of attempting a reverse-
-    /// resample.
-    SetLayerWarpDimensions {
-        /// Index into `Project.layers`; the layer's `warp` is the target.
-        layer_idx: usize,
-        /// Cell-row count to write.
-        new_rows: u32,
-        /// Cell-column count to write.
-        new_cols: u32,
-        /// Resampled grid to install (caller pre-computes via
-        /// [`crate::project::schema::resample_grid`] so this can be a
-        /// snapshot Reverse without per-step bookkeeping).
-        new_grid: Vec<Vec<[f32; 2]>>,
-        /// Pre-mutation rows.
-        old_rows: u32,
-        /// Pre-mutation cols.
-        old_cols: u32,
-        /// Pre-mutation grid (full snapshot — see Reverse rule 3).
-        old_grid: Vec<Vec<[f32; 2]>>,
-    },
-
-    /// Replace `LayerConfig.opacity` for the layer at `layer_idx`.
-    SetLayerOpacity {
-        /// Index into `Project.layers`.
-        layer_idx: usize,
-        /// Value to write.
-        new: f32,
-        /// Pre-mutation value.
-        old: f32,
-    },
-    /// Replace `LayerConfig.enabled` for the layer at `layer_idx`.
-    SetLayerEnabled {
-        /// Index into `Project.layers`.
-        layer_idx: usize,
-        /// Value to write.
-        new: bool,
-        /// Pre-mutation value.
-        old: bool,
-    },
-    /// Replace `LayerConfig.blend_mode` for the layer at `layer_idx`.
-    /// Whole-enum Reverse (rule 1): stores the full old `BlendMode` value.
-    SetLayerBlendMode {
-        /// Index into `Project.layers`.
-        layer_idx: usize,
-        /// Value to write.
-        new: BlendMode,
-        /// Pre-mutation value (full enum — Reverse rule 1).
-        old: BlendMode,
-    },
-
-    /// Replace a layer's effect chain wholesale (Reverse rule 2: Effects-Vec
-    /// Reverse). Both `new` and `old` are full `Vec<Effect>` snapshots — per-
-    /// field Reverses would leave stray effects on undo because of the
-    /// `mutate_transform_effect` append-on-missing pattern in scene_editor.rs.
-    SetLayerEffects {
-        /// Index into `Project.layers`.
-        layer_idx: usize,
-        /// Effect chain to install.
-        new: Vec<crate::effects::Effect>,
-        /// Pre-mutation snapshot of the chain.
-        old: Vec<crate::effects::Effect>,
-    },
+    SetProjectContrastOverride(SetProjectContrastOverride),
+    /// Replace `Project.output_windowed`. Delegates to [`SetOutputWindowed`].
+    SetOutputWindowed(SetOutputWindowed),
+    /// Replace `WarpMesh.mask_feather`. Delegates to [`SetLayerMaskFeather`].
+    SetLayerMaskFeather(SetLayerMaskFeather),
+    /// Replace `WarpMesh` dimensions. Delegates to [`SetLayerWarpDimensions`].
+    SetLayerWarpDimensions(SetLayerWarpDimensions),
+    /// Replace `LayerConfig.opacity`. Delegates to [`SetLayerOpacity`].
+    SetLayerOpacity(SetLayerOpacity),
+    /// Replace `LayerConfig.enabled`. Delegates to [`SetLayerEnabled`].
+    SetLayerEnabled(SetLayerEnabled),
+    /// Replace `LayerConfig.blend_mode`. Delegates to [`SetLayerBlendMode`].
+    SetLayerBlendMode(SetLayerBlendMode),
+    /// Replace a layer's effect chain wholesale. Delegates to [`SetLayerEffects`].
+    SetLayerEffects(SetLayerEffects),
 
     /// Insert `layer` at `position`. Reverse is `RemoveLayer { idx: position }`.
-    /// The whole `LayerConfig` is stored — covers Reverse rule 1 (LayerKind
-    /// enum) automatically.
+    ///
+    /// **Asymmetric variant** — intentionally kept as an inline match arm
+    /// (not wrapped in a `ReverseStorage` struct) because the Reverse changes
+    /// variant identity: `AddLayer`'s reverse is `RemoveLayer`. See enum-level
+    /// doc comment for the full rationale.
     AddLayer {
         /// The layer to insert.
         layer: LayerConfig,
         /// Insertion index (0..=project.layers.len()).
         position: usize,
     },
-    /// Remove the layer at `idx`. Reverse is `AddLayer { layer, position: idx }`
-    /// where `layer` is captured during apply via `Vec::remove`.
+    /// Remove the layer at `idx`. Reverse is `AddLayer { layer, position: idx }`.
+    ///
+    /// **Asymmetric variant** — kept as inline match arm for the same reason as
+    /// `AddLayer`. See enum-level doc comment.
     RemoveLayer {
         /// Index into `Project.layers`.
         idx: usize,
     },
-    /// Swap the layers at `i` and `j`. Self-reverse.
-    SwapLayers {
-        /// First swap index.
-        i: usize,
-        /// Second swap index.
-        j: usize,
-    },
+    /// Swap the layers at `i` and `j`. Delegates to [`SwapLayers`].
+    SwapLayers(SwapLayers),
 
-    /// 003-T2.24 — repoint a layer's asset path to a new location on
-    /// disk. Used by the missing-media relink toast: the audit's
-    /// `MissingAsset` finding offers a "Find this file…" action; on
-    /// successful pick, this mutation rewrites the layer's
-    /// `LayerKind::Image.path` (or `LayerKind::Svg.svg_path`) to the
-    /// picked path. Reverse swaps `new` ↔ `old`.
+    /// 003-T2.24 — repoint a layer's asset path. Delegates to [`RelinkAssetPath`].
+    RelinkAssetPath(RelinkAssetPath),
+
+    /// Replace the modulator at `(layer_idx, effect_idx, field)`. Delegates to [`SetModulator`].
+    SetModulator(SetModulator),
+
+    /// Replace the entire `WarpMesh`. Delegates to [`ResetLayerWarpMesh`].
+    ResetLayerWarpMesh(ResetLayerWarpMesh),
+    /// Replace `WarpMesh.mask_polygon`. Delegates to [`SetLayerMaskPolygon`].
+    SetLayerMaskPolygon(SetLayerMaskPolygon),
+
+    /// Insert a new vertex into `WarpMesh.mask_polygon` at `position`.
     ///
-    /// Both paths are stored alongside the layer index so the proptest
-    /// round-trip (Reverse rule 3 — snapshot Reverse — is overkill
-    /// here; only one field changes, so per-field Reverse is correct
-    /// and minimal). `needs_layer_rebuild() == true` so the
-    /// renderer's `state.layers` Vec re-uploads the new texture.
-    RelinkAssetPath {
-        /// Index into `Project.layers`.
-        layer_idx: usize,
-        /// Replacement asset path (typically absolute, picked via
-        /// `rfd::FileDialog`).
-        new_path: PathBuf,
-        /// Pre-mutation asset path. Capturing it makes the Reverse
-        /// hand-rollable without re-reading the project state at
-        /// undo time.
-        old_path: PathBuf,
-    },
-
-    /// Replace the modulator at `(layer_idx, effect_idx, field)` with `new`,
-    /// storing the previous value as `old` (Reverse rule 1 — whole-enum
-    /// Reverse). Both `new` and `old` are full `Modulator` enum values so a
-    /// variant switch (e.g. Sine → Static) round-trips byte-equally — the
-    /// canonical case the rule was written for.
-    SetModulator {
-        /// Index into `Project.layers`.
-        layer_idx: usize,
-        /// Index into `LayerConfig.effects`.
-        effect_idx: usize,
-        /// Which modulator slot inside the effect.
-        field: ModulatorField,
-        /// Replacement modulator (full enum value).
-        new: crate::modulators::Modulator,
-        /// Pre-mutation modulator (full enum value — Reverse rule 1).
-        old: crate::modulators::Modulator,
-    },
-
-    /// Replace the entire `WarpMesh` at `layer_idx` (rule 3 snapshot
-    /// Reverse). Used by the Mapping tab's "Reset to identity" button so
-    /// undo restores the full pre-reset mesh — including `mask_polygon`,
-    /// `mask_feather`, and `source_rect` even though Reset only currently
-    /// writes `rows`, `cols`, and `grid`. The full-snapshot shape
-    /// future-proofs against Reset growing to touch more fields.
-    ResetLayerWarpMesh {
-        /// Index into `Project.layers`; the layer's `warp` is the target.
-        layer_idx: usize,
-        /// Full `WarpMesh` to install.
-        new: crate::project::schema::WarpMesh,
-        /// Pre-mutation `WarpMesh` snapshot.
-        old: crate::project::schema::WarpMesh,
-    },
-    /// Replace `WarpMesh.mask_polygon` for the layer at `layer_idx`.
-    /// Both sides are full polygon snapshots (whole-Vec Reverse). Used
-    /// by the Mapping tab's zone-template buttons and the "clear mask"
-    /// button.
-    SetLayerMaskPolygon {
-        /// Index into `Project.layers`; the layer's `warp` is the target.
-        layer_idx: usize,
-        /// Polygon to install.
-        new: Vec<[f32; 2]>,
-        /// Pre-mutation polygon snapshot.
-        old: Vec<[f32; 2]>,
-    },
-
-    /// Insert a new vertex into `WarpMesh.mask_polygon` at `position`
-    /// (0..=polygon.len()). Reverse is `RemoveLayerMaskVertex { layer_idx, idx: position }`.
+    /// **Asymmetric variant** — kept as inline match arm because the Reverse
+    /// is `RemoveLayerMaskVertex`. See enum-level doc comment.
     AddLayerMaskVertex {
         /// Index into `Project.layers`; the layer's `warp` is the target.
         layer_idx: usize,
@@ -446,79 +1067,29 @@ pub enum Mutation {
         point: [f32; 2],
     },
     /// Remove the vertex at `idx` from `WarpMesh.mask_polygon`.
-    /// Reverse is `AddLayerMaskVertex { layer_idx, position: idx, point: removed }`.
+    ///
+    /// **Asymmetric variant** — kept as inline match arm because the Reverse
+    /// is `AddLayerMaskVertex`. See enum-level doc comment.
     RemoveLayerMaskVertex {
         /// Index into `Project.layers`; the layer's `warp` is the target.
         layer_idx: usize,
         /// Index of the vertex to remove.
         idx: usize,
     },
-    /// Replace `WarpMesh.mask_polygon[idx]` with `new`. Reverse swaps
-    /// `new` and `old`. Like `SetGamma` but for a polygon vertex.
-    SetLayerMaskVertex {
-        /// Index into `Project.layers`; the layer's `warp` is the target.
-        layer_idx: usize,
-        /// Index of the vertex inside `mask_polygon`.
-        idx: usize,
-        /// Value to write.
-        new: [f32; 2],
-        /// Pre-mutation value; `apply` `debug_assert!`s this matches the live state.
-        old: [f32; 2],
-    },
+    /// Replace `WarpMesh.mask_polygon[idx]`. Delegates to [`SetLayerMaskVertex`].
+    SetLayerMaskVertex(SetLayerMaskVertex),
 
-    /// Replace `WarpMesh.grid[r][c]` for the layer at `layer_idx`.
-    /// Direct corner-pin manipulation; `is_non_undoable = false`,
-    /// `needs_layer_rebuild = false`.
-    SetLayerWarpCorner {
-        /// Index into `Project.layers`; the layer's `warp` is the target.
-        layer_idx: usize,
-        /// Grid row index (vertex coords, 0..=warp.rows).
-        r: usize,
-        /// Grid column index (vertex coords, 0..=warp.cols).
-        c: usize,
-        /// Value to write.
-        new: [f32; 2],
-        /// Pre-mutation value; `apply` `debug_assert!`s this matches the live state.
-        old: [f32; 2],
-    },
+    /// Replace `WarpMesh.grid[r][c]`. Delegates to [`SetLayerWarpCorner`].
+    SetLayerWarpCorner(SetLayerWarpCorner),
 
-    /// Replace `Project.scenes` wholesale (whole-Vec snapshot Reverse).
-    /// Used by the Scenes-tab "save" button: saving captures the current
-    /// project state into a slot, possibly extending the Vec with placeholder
-    /// scenes; the Reverse restores the entire pre-save Vec — including any
-    /// placeholder additions, so undo cleanly removes them.
-    SetProjectScenes {
-        /// Replacement scenes Vec.
-        new: Vec<crate::project::schema::Scene>,
-        /// Pre-mutation scenes Vec.
-        old: Vec<crate::project::schema::Scene>,
-    },
+    /// Replace `Project.scenes` wholesale. Delegates to [`SetProjectScenes`].
+    SetProjectScenes(SetProjectScenes),
 
-    /// Replace `Project.output_monitor_index`. Same simple shape as
-    /// `SetGamma`. Autofix emitted by `ProjectAudit` for
-    /// `AuditKind::MonitorOutOfRange` (T-003-T1.39).
-    SetOutputMonitorIndex {
-        /// Value to write.
-        new: usize,
-        /// Pre-mutation value; `apply` `debug_assert!`s this matches.
-        old: usize,
-    },
+    /// Replace `Project.output_monitor_index`. Delegates to [`SetOutputMonitorIndex`].
+    SetOutputMonitorIndex(SetOutputMonitorIndex),
 
-    /// Replace the entire project from a serde_json snapshot
-    /// (Reverse rule 3: snapshot Reverse). T-003-T1.30 routes
-    /// scene-recall and crossfade-tick through this variant.
-    /// `non_undoable: true` is reserved for the crossfade-tick
-    /// path which fires ~60×/s and must not enter the
-    /// user-facing undo stack.
-    ApplyProjectSnapshot {
-        /// Snapshot to install.
-        new: serde_json::Value,
-        /// Project state captured before the apply call.
-        old: serde_json::Value,
-        /// `true` for crossfade-tick callers; `false` for
-        /// user-triggered scene recall.
-        non_undoable: bool,
-    },
+    /// Replace the entire project from a serde_json snapshot. Delegates to [`ApplyProjectSnapshot`].
+    ApplyProjectSnapshot(ApplyProjectSnapshot),
 }
 
 #[allow(dead_code)] // T-003-T1.18+ wires call sites.
@@ -529,239 +1100,50 @@ impl Mutation {
     /// errors that would otherwise corrupt undo history.
     pub fn apply(self, project: &mut Project) -> Mutation {
         match self {
+            // --- Symmetric variants: delegate to ReverseStorage::apply ---
             Mutation::SetGamma(s) => Mutation::SetGamma(s.apply(project)),
-            Mutation::SetBrightness { new, old } => {
-                debug_assert!(
-                    (project.brightness - old).abs() < 1e-6,
-                    "SetBrightness stale Reverse: project.brightness={}, expected old={}",
-                    project.brightness,
-                    old
-                );
-                project.brightness = new;
-                Mutation::SetBrightness { new: old, old: new }
+            Mutation::SetBrightness(s) => Mutation::SetBrightness(s.apply(project)),
+            Mutation::SetContrast(s) => Mutation::SetContrast(s.apply(project)),
+            Mutation::SetCrossfadeDurationS(s) => Mutation::SetCrossfadeDurationS(s.apply(project)),
+            Mutation::SetProjectGammaOverride(s) => {
+                Mutation::SetProjectGammaOverride(s.apply(project))
             }
-            Mutation::SetContrast { new, old } => {
-                debug_assert!(
-                    (project.contrast - old).abs() < 1e-6,
-                    "SetContrast stale Reverse: project.contrast={}, expected old={}",
-                    project.contrast,
-                    old
-                );
-                project.contrast = new;
-                Mutation::SetContrast { new: old, old: new }
+            Mutation::SetProjectBrightnessOverride(s) => {
+                Mutation::SetProjectBrightnessOverride(s.apply(project))
             }
-            Mutation::SetCrossfadeDurationS { new, old } => {
-                debug_assert!(
-                    (project.crossfade_duration_s - old).abs() < 1e-6,
-                    "SetCrossfadeDurationS stale Reverse: project.crossfade_duration_s={}, expected old={}",
-                    project.crossfade_duration_s,
-                    old
-                );
-                project.crossfade_duration_s = new;
-                Mutation::SetCrossfadeDurationS { new: old, old: new }
+            Mutation::SetProjectContrastOverride(s) => {
+                Mutation::SetProjectContrastOverride(s.apply(project))
             }
-            Mutation::SetProjectGammaOverride { new, old } => {
-                debug_assert!(
-                    project.gamma_override == old,
-                    "SetProjectGammaOverride stale Reverse: project.gamma_override={:?}, expected old={:?}",
-                    project.gamma_override,
-                    old
-                );
-                project.gamma_override = new;
-                Mutation::SetProjectGammaOverride { new: old, old: new }
+            Mutation::SetOutputWindowed(s) => Mutation::SetOutputWindowed(s.apply(project)),
+            Mutation::SetLayerMaskFeather(s) => Mutation::SetLayerMaskFeather(s.apply(project)),
+            Mutation::SetLayerWarpDimensions(s) => {
+                Mutation::SetLayerWarpDimensions(s.apply(project))
             }
-            Mutation::SetProjectBrightnessOverride { new, old } => {
-                debug_assert!(
-                    project.brightness_override == old,
-                    "SetProjectBrightnessOverride stale Reverse: project.brightness_override={:?}, expected old={:?}",
-                    project.brightness_override,
-                    old
-                );
-                project.brightness_override = new;
-                Mutation::SetProjectBrightnessOverride { new: old, old: new }
-            }
-            Mutation::SetProjectContrastOverride { new, old } => {
-                debug_assert!(
-                    project.contrast_override == old,
-                    "SetProjectContrastOverride stale Reverse: project.contrast_override={:?}, expected old={:?}",
-                    project.contrast_override,
-                    old
-                );
-                project.contrast_override = new;
-                Mutation::SetProjectContrastOverride { new: old, old: new }
-            }
-            Mutation::SetOutputWindowed { new, old } => {
-                debug_assert!(
-                    project.output_windowed == old,
-                    "SetOutputWindowed stale Reverse: project.output_windowed={}, expected old={}",
-                    project.output_windowed,
-                    old
-                );
-                project.output_windowed = new;
-                Mutation::SetOutputWindowed { new: old, old: new }
-            }
-            Mutation::SetLayerMaskFeather {
-                layer_idx,
-                new,
-                old,
-            } => {
-                let warp = &mut project
-                    .layers
-                    .get_mut(layer_idx)
-                    .expect("SetLayerMaskFeather: layer_idx out of range")
-                    .warp;
-                debug_assert!(
-                    (warp.mask_feather - old).abs() < 1e-6,
-                    "SetLayerMaskFeather stale Reverse: warp.mask_feather={}, expected old={}",
-                    warp.mask_feather,
-                    old
-                );
-                warp.mask_feather = new;
-                Mutation::SetLayerMaskFeather {
-                    layer_idx,
-                    new: old,
-                    old: new,
-                }
-            }
-            Mutation::SetLayerWarpDimensions {
-                layer_idx,
-                new_rows,
-                new_cols,
-                new_grid,
-                old_rows,
-                old_cols,
-                old_grid,
-            } => {
-                let warp = &mut project
-                    .layers
-                    .get_mut(layer_idx)
-                    .expect("SetLayerWarpDimensions: layer_idx out of range")
-                    .warp;
-                // Snapshot Reverse: only assert the scalar dimensions
-                // match. The grid is restored byte-equally via the
-                // stored snapshot, so any drift surfaces in the
-                // proptest round-trip rather than per-mutation.
-                debug_assert!(
-                    warp.rows == old_rows && warp.cols == old_cols,
-                    "SetLayerWarpDimensions stale Reverse: warp dims=({}, {}), expected old=({}, {})",
-                    warp.rows,
-                    warp.cols,
-                    old_rows,
-                    old_cols
-                );
-                // Standard swap (rule 3 snapshot variant): the Reverse
-                // restores `old_grid` and tracks the just-installed
-                // `new_grid` as its own pre-apply state. Cloning
-                // `new_grid` keeps both halves owned so the Reverse
-                // round-trips without referencing `warp.grid` after
-                // the in-place write.
-                let post_grid = new_grid;
-                warp.grid = post_grid.clone();
-                warp.rows = new_rows;
-                warp.cols = new_cols;
-                Mutation::SetLayerWarpDimensions {
-                    layer_idx,
-                    new_rows: old_rows,
-                    new_cols: old_cols,
-                    new_grid: old_grid,
-                    old_rows: new_rows,
-                    old_cols: new_cols,
-                    old_grid: post_grid,
-                }
-            }
-            Mutation::SetLayerOpacity {
-                layer_idx,
-                new,
-                old,
-            } => {
-                let layer = project
-                    .layers
-                    .get_mut(layer_idx)
-                    .expect("SetLayerOpacity: layer_idx out of range");
-                debug_assert!(
-                    (layer.opacity - old).abs() < 1e-6,
-                    "SetLayerOpacity stale Reverse: layer.opacity={}, expected old={}",
-                    layer.opacity,
-                    old
-                );
-                layer.opacity = new;
-                Mutation::SetLayerOpacity {
-                    layer_idx,
-                    new: old,
-                    old: new,
-                }
-            }
-            Mutation::SetLayerEnabled {
-                layer_idx,
-                new,
-                old,
-            } => {
-                let layer = project
-                    .layers
-                    .get_mut(layer_idx)
-                    .expect("SetLayerEnabled: layer_idx out of range");
-                debug_assert!(
-                    layer.enabled == old,
-                    "SetLayerEnabled stale Reverse: layer.enabled={}, expected old={}",
-                    layer.enabled,
-                    old
-                );
-                layer.enabled = new;
-                Mutation::SetLayerEnabled {
-                    layer_idx,
-                    new: old,
-                    old: new,
-                }
-            }
-            Mutation::SetLayerBlendMode {
-                layer_idx,
-                new,
-                old,
-            } => {
-                let layer = project
-                    .layers
-                    .get_mut(layer_idx)
-                    .expect("SetLayerBlendMode: layer_idx out of range");
-                debug_assert!(
-                    layer.blend_mode == old,
-                    "SetLayerBlendMode stale Reverse: layer.blend_mode={:?}, expected old={:?}",
-                    layer.blend_mode,
-                    old
-                );
-                layer.blend_mode = new;
-                Mutation::SetLayerBlendMode {
-                    layer_idx,
-                    new: old,
-                    old: new,
-                }
-            }
-            Mutation::SetLayerEffects {
-                layer_idx,
-                new,
-                old,
-            } => {
-                let layer = project
-                    .layers
-                    .get_mut(layer_idx)
-                    .expect("SetLayerEffects: layer_idx out of range");
-                debug_assert!(
-                    layer.effects.len() == old.len(),
-                    "SetLayerEffects stale Reverse: effects.len()={}, expected old.len()={}",
-                    layer.effects.len(),
-                    old.len()
-                );
-                // Effects-Vec Reverse (rule 2): snapshot the whole chain.
-                // Mirror the SetWarpDimensions pattern: capture `new` into a
-                // local so we can write it to `layer.effects` and reference it
-                // as `old` in the Reverse without fighting the borrow checker.
-                let post = new;
-                layer.effects = post.clone();
-                Mutation::SetLayerEffects {
-                    layer_idx,
-                    new: old,
-                    old: post,
-                }
-            }
+            Mutation::SetLayerOpacity(s) => Mutation::SetLayerOpacity(s.apply(project)),
+            Mutation::SetLayerEnabled(s) => Mutation::SetLayerEnabled(s.apply(project)),
+            Mutation::SetLayerBlendMode(s) => Mutation::SetLayerBlendMode(s.apply(project)),
+            Mutation::SetLayerEffects(s) => Mutation::SetLayerEffects(s.apply(project)),
+            Mutation::SwapLayers(s) => Mutation::SwapLayers(s.apply(project)),
+            Mutation::RelinkAssetPath(s) => Mutation::RelinkAssetPath(s.apply(project)),
+            Mutation::SetModulator(s) => Mutation::SetModulator(s.apply(project)),
+            Mutation::ResetLayerWarpMesh(s) => Mutation::ResetLayerWarpMesh(s.apply(project)),
+            Mutation::SetLayerMaskPolygon(s) => Mutation::SetLayerMaskPolygon(s.apply(project)),
+            Mutation::SetLayerMaskVertex(s) => Mutation::SetLayerMaskVertex(s.apply(project)),
+            Mutation::SetLayerWarpCorner(s) => Mutation::SetLayerWarpCorner(s.apply(project)),
+            Mutation::SetProjectScenes(s) => Mutation::SetProjectScenes(s.apply(project)),
+            Mutation::SetOutputMonitorIndex(s) => Mutation::SetOutputMonitorIndex(s.apply(project)),
+            Mutation::ApplyProjectSnapshot(s) => Mutation::ApplyProjectSnapshot(s.apply(project)),
+
+            // --- Asymmetric variants: kept as inline arms ---
+            //
+            // `AddLayer`, `RemoveLayer`, `AddLayerMaskVertex`, and
+            // `RemoveLayerMaskVertex` are intentionally NOT wrapped in
+            // `ReverseStorage` structs. Their Reverse crosses variant
+            // boundaries: `AddLayer`'s reverse is `RemoveLayer` and vice
+            // versa, making `fn apply(self, …) -> Self` impossible. Changing
+            // the trait to return `Mutation` would defeat the per-variant
+            // compile-time guarantee. These four stay here as documented
+            // exceptions; all other variants use the trait.
             Mutation::AddLayer { layer, position } => {
                 debug_assert!(
                     position <= project.layers.len(),
@@ -783,133 +1165,6 @@ impl Mutation {
                 Mutation::AddLayer {
                     layer,
                     position: idx,
-                }
-            }
-            Mutation::SwapLayers { i, j } => {
-                debug_assert!(
-                    i < project.layers.len() && j < project.layers.len(),
-                    "SwapLayers index out of range: i={}, j={}, len={}",
-                    i,
-                    j,
-                    project.layers.len()
-                );
-                project.layers.swap(i, j);
-                Mutation::SwapLayers { i, j }
-            }
-            Mutation::RelinkAssetPath {
-                layer_idx,
-                new_path,
-                old_path,
-            } => {
-                let layer = project
-                    .layers
-                    .get_mut(layer_idx)
-                    .expect("RelinkAssetPath: layer_idx out of range");
-                // Stale-Reverse check: if the on-record `old_path`
-                // doesn't match the layer's current path, undo would
-                // restore something else. The proptest-safe choice is
-                // to debug_assert and let the test harness surface the
-                // mismatch; release builds proceed with the rewrite.
-                debug_assert_eq!(
-                    layer.kind.asset_path(),
-                    old_path.as_path(),
-                    "RelinkAssetPath: stale old_path for layer_idx={layer_idx}",
-                );
-                match &mut layer.kind {
-                    crate::project::schema::LayerKind::Image { path, .. } => {
-                        *path = new_path.clone();
-                    }
-                    crate::project::schema::LayerKind::Svg { svg_path } => {
-                        *svg_path = new_path.clone();
-                    }
-                }
-                Mutation::RelinkAssetPath {
-                    layer_idx,
-                    new_path: old_path,
-                    old_path: new_path,
-                }
-            }
-            Mutation::SetModulator {
-                layer_idx,
-                effect_idx,
-                field,
-                new,
-                old,
-            } => {
-                let layer = project
-                    .layers
-                    .get_mut(layer_idx)
-                    .expect("SetModulator: layer_idx out of range");
-                let effect = layer
-                    .effects
-                    .get_mut(effect_idx)
-                    .expect("SetModulator: effect_idx out of range");
-                let slot = modulator_at_mut(effect, field)
-                    .expect("SetModulator: field does not apply to this effect variant");
-                // Cheap stale-Reverse check is impossible without PartialEq on Modulator.
-                // The proptest harness covers content drift; structural invariants
-                // are enforced via the helper's Option return above.
-                *slot = new.clone();
-                Mutation::SetModulator {
-                    layer_idx,
-                    effect_idx,
-                    field,
-                    new: old,
-                    old: new,
-                }
-            }
-            Mutation::ResetLayerWarpMesh {
-                layer_idx,
-                new,
-                old,
-            } => {
-                let warp = &mut project
-                    .layers
-                    .get_mut(layer_idx)
-                    .expect("ResetLayerWarpMesh: layer_idx out of range")
-                    .warp;
-                // Snapshot Reverse: cheap-assert that the carried `old`
-                // describes the live state by comparing rows/cols (the
-                // only scalars Reset touches today). The proptest catches
-                // deeper drift.
-                debug_assert!(
-                    warp.rows == old.rows && warp.cols == old.cols,
-                    "ResetLayerWarpMesh stale Reverse: warp dims=({}, {}), expected old=({}, {})",
-                    warp.rows,
-                    warp.cols,
-                    old.rows,
-                    old.cols
-                );
-                let post = new;
-                *warp = post.clone();
-                Mutation::ResetLayerWarpMesh {
-                    layer_idx,
-                    new: old,
-                    old: post,
-                }
-            }
-            Mutation::SetLayerMaskPolygon {
-                layer_idx,
-                new,
-                old,
-            } => {
-                let warp = &mut project
-                    .layers
-                    .get_mut(layer_idx)
-                    .expect("SetLayerMaskPolygon: layer_idx out of range")
-                    .warp;
-                debug_assert!(
-                    warp.mask_polygon.len() == old.len(),
-                    "SetLayerMaskPolygon stale Reverse: mask_polygon.len()={}, expected old.len()={}",
-                    warp.mask_polygon.len(),
-                    old.len()
-                );
-                let post = new;
-                warp.mask_polygon = post.clone();
-                Mutation::SetLayerMaskPolygon {
-                    layer_idx,
-                    new: old,
-                    old: post,
                 }
             }
             Mutation::AddLayerMaskVertex {
@@ -953,109 +1208,6 @@ impl Mutation {
                     point,
                 }
             }
-            Mutation::SetLayerMaskVertex {
-                layer_idx,
-                idx,
-                new,
-                old,
-            } => {
-                let warp = &mut project
-                    .layers
-                    .get_mut(layer_idx)
-                    .expect("SetLayerMaskVertex: layer_idx out of range")
-                    .warp;
-                debug_assert!(
-                    idx < warp.mask_polygon.len(),
-                    "SetLayerMaskVertex idx out of range: idx={}, len={}",
-                    idx,
-                    warp.mask_polygon.len()
-                );
-                let cur = warp.mask_polygon[idx];
-                debug_assert!(
-                    (cur[0] - old[0]).abs() < 1e-6 && (cur[1] - old[1]).abs() < 1e-6,
-                    "SetLayerMaskVertex stale Reverse: cur=[{}, {}], expected old=[{}, {}]",
-                    cur[0],
-                    cur[1],
-                    old[0],
-                    old[1]
-                );
-                warp.mask_polygon[idx] = new;
-                Mutation::SetLayerMaskVertex {
-                    layer_idx,
-                    idx,
-                    new: old,
-                    old: new,
-                }
-            }
-            Mutation::SetLayerWarpCorner {
-                layer_idx,
-                r,
-                c,
-                new,
-                old,
-            } => {
-                let warp = &mut project
-                    .layers
-                    .get_mut(layer_idx)
-                    .expect("SetLayerWarpCorner: layer_idx out of range")
-                    .warp;
-                debug_assert!(
-                    (warp.grid[r][c][0] - old[0]).abs() < 1e-6
-                        && (warp.grid[r][c][1] - old[1]).abs() < 1e-6,
-                    "SetLayerWarpCorner stale Reverse: cur=[{}, {}], expected old=[{}, {}]",
-                    warp.grid[r][c][0],
-                    warp.grid[r][c][1],
-                    old[0],
-                    old[1]
-                );
-                warp.grid[r][c] = new;
-                Mutation::SetLayerWarpCorner {
-                    layer_idx,
-                    r,
-                    c,
-                    new: old,
-                    old: new,
-                }
-            }
-            Mutation::SetProjectScenes { new, old } => {
-                debug_assert!(
-                    project.scenes.len() == old.len(),
-                    "SetProjectScenes stale Reverse: scenes.len()={}, expected old.len()={}",
-                    project.scenes.len(),
-                    old.len()
-                );
-                let post = new;
-                project.scenes = post.clone();
-                Mutation::SetProjectScenes {
-                    new: old,
-                    old: post,
-                }
-            }
-            Mutation::SetOutputMonitorIndex { new, old } => {
-                debug_assert!(
-                    project.output_monitor_index == old,
-                    "SetOutputMonitorIndex stale Reverse: project.output_monitor_index={}, expected old={}",
-                    project.output_monitor_index,
-                    old
-                );
-                project.output_monitor_index = new;
-                Mutation::SetOutputMonitorIndex { new: old, old: new }
-            }
-            Mutation::ApplyProjectSnapshot {
-                new,
-                old,
-                non_undoable,
-            } => {
-                // Snapshot Reverse (rule 3): the previous
-                // serialised project. Use restore_scene to
-                // overwrite project state in-place.
-                let _ = crate::project::restore_scene(project, &new);
-                Mutation::ApplyProjectSnapshot {
-                    new: old,
-                    old: new,
-                    non_undoable,
-                }
-            }
         }
     }
 
@@ -1066,33 +1218,33 @@ impl Mutation {
     pub fn is_non_undoable(&self) -> bool {
         match self {
             Mutation::SetGamma(_)
-            | Mutation::SetBrightness { .. }
-            | Mutation::SetContrast { .. }
-            | Mutation::SetCrossfadeDurationS { .. }
-            | Mutation::SetOutputWindowed { .. }
-            | Mutation::SetLayerMaskFeather { .. }
-            | Mutation::SetLayerWarpDimensions { .. }
-            | Mutation::SetLayerOpacity { .. }
-            | Mutation::SetLayerEnabled { .. }
-            | Mutation::SetLayerBlendMode { .. }
-            | Mutation::SetLayerEffects { .. }
-            | Mutation::SetModulator { .. }
+            | Mutation::SetBrightness(_)
+            | Mutation::SetContrast(_)
+            | Mutation::SetCrossfadeDurationS(_)
+            | Mutation::SetOutputWindowed(_)
+            | Mutation::SetLayerMaskFeather(_)
+            | Mutation::SetLayerWarpDimensions(_)
+            | Mutation::SetLayerOpacity(_)
+            | Mutation::SetLayerEnabled(_)
+            | Mutation::SetLayerBlendMode(_)
+            | Mutation::SetLayerEffects(_)
+            | Mutation::SetModulator(_)
             | Mutation::AddLayer { .. }
             | Mutation::RemoveLayer { .. }
-            | Mutation::SwapLayers { .. }
+            | Mutation::SwapLayers(_)
             | Mutation::AddLayerMaskVertex { .. }
             | Mutation::RemoveLayerMaskVertex { .. }
-            | Mutation::SetLayerMaskVertex { .. }
-            | Mutation::ResetLayerWarpMesh { .. }
-            | Mutation::SetLayerMaskPolygon { .. }
-            | Mutation::SetLayerWarpCorner { .. }
-            | Mutation::SetProjectScenes { .. }
-            | Mutation::SetOutputMonitorIndex { .. }
-            | Mutation::SetProjectGammaOverride { .. }
-            | Mutation::SetProjectBrightnessOverride { .. }
-            | Mutation::SetProjectContrastOverride { .. }
-            | Mutation::RelinkAssetPath { .. } => false,
-            Mutation::ApplyProjectSnapshot { non_undoable, .. } => *non_undoable,
+            | Mutation::SetLayerMaskVertex(_)
+            | Mutation::ResetLayerWarpMesh(_)
+            | Mutation::SetLayerMaskPolygon(_)
+            | Mutation::SetLayerWarpCorner(_)
+            | Mutation::SetProjectScenes(_)
+            | Mutation::SetOutputMonitorIndex(_)
+            | Mutation::SetProjectGammaOverride(_)
+            | Mutation::SetProjectBrightnessOverride(_)
+            | Mutation::SetProjectContrastOverride(_)
+            | Mutation::RelinkAssetPath(_) => false,
+            Mutation::ApplyProjectSnapshot(s) => s.non_undoable,
         }
     }
 
@@ -1115,9 +1267,9 @@ impl Mutation {
         match self {
             Mutation::AddLayer { .. }
             | Mutation::RemoveLayer { .. }
-            | Mutation::SwapLayers { .. }
-            | Mutation::RelinkAssetPath { .. } => true,
-            Mutation::ApplyProjectSnapshot { non_undoable, .. } => !non_undoable,
+            | Mutation::SwapLayers(_)
+            | Mutation::RelinkAssetPath(_) => true,
+            Mutation::ApplyProjectSnapshot(s) => !s.non_undoable,
             _ => false,
         }
     }
@@ -1142,68 +1294,68 @@ impl Project {
 
     /// Build a `SetBrightness` mutation.
     pub fn set_brightness_mutation(&self, new: f32) -> Mutation {
-        Mutation::SetBrightness {
+        Mutation::SetBrightness(SetBrightness {
             new,
             old: self.brightness,
-        }
+        })
     }
 
     /// Build a `SetContrast` mutation.
     pub fn set_contrast_mutation(&self, new: f32) -> Mutation {
-        Mutation::SetContrast {
+        Mutation::SetContrast(SetContrast {
             new,
             old: self.contrast,
-        }
+        })
     }
 
     /// Build a `SetCrossfadeDurationS` mutation.
     pub fn set_crossfade_duration_s_mutation(&self, new: f32) -> Mutation {
-        Mutation::SetCrossfadeDurationS {
+        Mutation::SetCrossfadeDurationS(SetCrossfadeDurationS {
             new,
             old: self.crossfade_duration_s,
-        }
+        })
     }
 
     /// 003-T3.28 — build a `SetProjectGammaOverride` mutation.
     pub fn set_project_gamma_override_mutation(&self, new: Option<f32>) -> Mutation {
-        Mutation::SetProjectGammaOverride {
+        Mutation::SetProjectGammaOverride(SetProjectGammaOverride {
             new,
             old: self.gamma_override,
-        }
+        })
     }
 
     /// 003-T3.28 — build a `SetProjectBrightnessOverride` mutation.
     pub fn set_project_brightness_override_mutation(&self, new: Option<f32>) -> Mutation {
-        Mutation::SetProjectBrightnessOverride {
+        Mutation::SetProjectBrightnessOverride(SetProjectBrightnessOverride {
             new,
             old: self.brightness_override,
-        }
+        })
     }
 
     /// 003-T3.28 — build a `SetProjectContrastOverride` mutation.
     pub fn set_project_contrast_override_mutation(&self, new: Option<f32>) -> Mutation {
-        Mutation::SetProjectContrastOverride {
+        Mutation::SetProjectContrastOverride(SetProjectContrastOverride {
             new,
             old: self.contrast_override,
-        }
+        })
     }
 
     /// Build a `SetOutputWindowed` mutation.
     pub fn set_output_windowed_mutation(&self, new: bool) -> Mutation {
-        Mutation::SetOutputWindowed {
+        Mutation::SetOutputWindowed(SetOutputWindowed {
             new,
             old: self.output_windowed,
-        }
+        })
     }
 
     /// Build a `SetOutputMonitorIndex` mutation (T-003-T1.39). Captures
     /// the project's current `output_monitor_index` as `old`. Used by
     /// `ProjectAudit` to emit an autofix for `MonitorOutOfRange`.
     pub fn set_output_monitor_index_mutation(&self, new: usize) -> Mutation {
-        Mutation::SetOutputMonitorIndex {
+        Mutation::SetOutputMonitorIndex(SetOutputMonitorIndex {
             new,
             old: self.output_monitor_index,
-        }
+        })
     }
 
     /// Build a `SetLayerMaskFeather` mutation. Panics if `layer_idx` is
@@ -1212,11 +1364,11 @@ impl Project {
     /// stays unambiguous.
     pub fn set_layer_mask_feather_mutation(&self, layer_idx: usize, new: f32) -> Mutation {
         let warp = &self.layers[layer_idx].warp;
-        Mutation::SetLayerMaskFeather {
+        Mutation::SetLayerMaskFeather(SetLayerMaskFeather {
             layer_idx,
             new,
             old: warp.mask_feather,
-        }
+        })
     }
 
     /// Build a `SetLayerWarpDimensions` mutation. The new grid is computed
@@ -1231,7 +1383,7 @@ impl Project {
     ) -> Mutation {
         let warp = &self.layers[layer_idx].warp;
         let new_grid = crate::project::schema::resample_grid(&warp.grid, new_rows, new_cols);
-        Mutation::SetLayerWarpDimensions {
+        Mutation::SetLayerWarpDimensions(SetLayerWarpDimensions {
             layer_idx,
             new_rows,
             new_cols,
@@ -1239,29 +1391,29 @@ impl Project {
             old_rows: warp.rows,
             old_cols: warp.cols,
             old_grid: warp.grid.clone(),
-        }
+        })
     }
 
     /// Build a `SetLayerOpacity` mutation. Panics if `layer_idx` is
     /// out of range.
     pub fn set_layer_opacity_mutation(&self, layer_idx: usize, new: f32) -> Mutation {
         let layer = &self.layers[layer_idx];
-        Mutation::SetLayerOpacity {
+        Mutation::SetLayerOpacity(SetLayerOpacity {
             layer_idx,
             new,
             old: layer.opacity,
-        }
+        })
     }
 
     /// Build a `SetLayerEnabled` mutation. Panics if `layer_idx` is
     /// out of range.
     pub fn set_layer_enabled_mutation(&self, layer_idx: usize, new: bool) -> Mutation {
         let layer = &self.layers[layer_idx];
-        Mutation::SetLayerEnabled {
+        Mutation::SetLayerEnabled(SetLayerEnabled {
             layer_idx,
             new,
             old: layer.enabled,
-        }
+        })
     }
 
     /// Build a `SetLayerBlendMode` mutation. Whole-enum Reverse (rule 1):
@@ -1269,11 +1421,11 @@ impl Project {
     /// out of range.
     pub fn set_layer_blend_mode_mutation(&self, layer_idx: usize, new: BlendMode) -> Mutation {
         let layer = &self.layers[layer_idx];
-        Mutation::SetLayerBlendMode {
+        Mutation::SetLayerBlendMode(SetLayerBlendMode {
             layer_idx,
             new,
             old: layer.blend_mode,
-        }
+        })
     }
 
     /// Build an `AddLayer` mutation. Caller-supplied `position` is the
@@ -1292,7 +1444,7 @@ impl Project {
     /// Build a `SwapLayers` mutation. `i` and `j` must both be valid indices
     /// at the time of apply.
     pub fn set_swap_layers_mutation(&self, i: usize, j: usize) -> Mutation {
-        Mutation::SwapLayers { i, j }
+        Mutation::SwapLayers(SwapLayers { i, j })
     }
 
     /// Build a `SetLayerMaskVertex` mutation. Captures the current polygon vertex
@@ -1304,12 +1456,12 @@ impl Project {
         new: [f32; 2],
     ) -> Mutation {
         let warp = &self.layers[layer_idx].warp;
-        Mutation::SetLayerMaskVertex {
+        Mutation::SetLayerMaskVertex(SetLayerMaskVertex {
             layer_idx,
             idx,
             new,
             old: warp.mask_polygon[idx],
-        }
+        })
     }
 
     /// Build an `AddLayerMaskVertex` mutation. `position` is the insertion index
@@ -1344,11 +1496,11 @@ impl Project {
         new: crate::project::schema::WarpMesh,
     ) -> Mutation {
         let old = self.layers[layer_idx].warp.clone();
-        Mutation::ResetLayerWarpMesh {
+        Mutation::ResetLayerWarpMesh(ResetLayerWarpMesh {
             layer_idx,
             new,
             old,
-        }
+        })
     }
 
     /// Build a `SetLayerMaskPolygon` mutation. Captures the current
@@ -1360,11 +1512,11 @@ impl Project {
         new: Vec<[f32; 2]>,
     ) -> Mutation {
         let old = self.layers[layer_idx].warp.mask_polygon.clone();
-        Mutation::SetLayerMaskPolygon {
+        Mutation::SetLayerMaskPolygon(SetLayerMaskPolygon {
             layer_idx,
             new,
             old,
-        }
+        })
     }
 
     /// Build a `SetLayerWarpCorner` mutation. Captures the current grid vertex
@@ -1377,13 +1529,13 @@ impl Project {
         new: [f32; 2],
     ) -> Mutation {
         let old = self.layers[layer_idx].warp.grid[r][c];
-        Mutation::SetLayerWarpCorner {
+        Mutation::SetLayerWarpCorner(SetLayerWarpCorner {
             layer_idx,
             r,
             c,
             new,
             old,
-        }
+        })
     }
 
     /// Build a `SetProjectScenes` mutation (whole-Vec Reverse). Captures the
@@ -1391,10 +1543,10 @@ impl Project {
     /// install (e.g. after a slot save or placeholder extension). The Reverse
     /// restores the entire pre-save Vec byte-equally on undo.
     pub fn set_project_scenes_mutation(&self, new: Vec<crate::project::schema::Scene>) -> Mutation {
-        Mutation::SetProjectScenes {
+        Mutation::SetProjectScenes(SetProjectScenes {
             new,
             old: self.scenes.clone(),
-        }
+        })
     }
 
     /// Build a `SetLayerEffects` mutation. Captures the current effect chain
@@ -1407,11 +1559,11 @@ impl Project {
         new: Vec<crate::effects::Effect>,
     ) -> Mutation {
         let layer = &self.layers[layer_idx];
-        Mutation::SetLayerEffects {
+        Mutation::SetLayerEffects(SetLayerEffects {
             layer_idx,
             new,
             old: layer.effects.clone(),
-        }
+        })
     }
 
     /// Build a `SetModulator` mutation. Captures the current modulator at
@@ -1431,13 +1583,13 @@ impl Project {
         let old = modulator_at_ref(effect, field)
             .expect("set_modulator_mutation: field does not apply to effect variant")
             .clone();
-        Mutation::SetModulator {
+        Mutation::SetModulator(SetModulator {
             layer_idx,
             effect_idx,
             field,
             new,
             old,
-        }
+        })
     }
 }
 
@@ -1576,11 +1728,11 @@ mod tests {
         let original = p.layers[0].kind.asset_path().to_path_buf();
 
         let new_path = std::path::PathBuf::from("/some/other/place.svg");
-        let mutation = Mutation::RelinkAssetPath {
+        let mutation = Mutation::RelinkAssetPath(RelinkAssetPath {
             layer_idx: 0,
             new_path: new_path.clone(),
             old_path: original.clone(),
-        };
+        });
         let reverse = mutation.apply(&mut p);
         assert_eq!(
             p.layers[0].kind.asset_path(),
@@ -1693,11 +1845,11 @@ mod tests {
             scale_x: Modulator::Static(1.0),
             scale_y: Modulator::Static(1.0),
         });
-        let mutation = Mutation::SetLayerEffects {
+        let mutation = Mutation::SetLayerEffects(SetLayerEffects {
             layer_idx: 0,
             new,
             old: pre_drag,
-        };
+        });
 
         let reverse = mutation.apply(&mut p);
         // Sanity: post-apply, the chain has one more effect (the Transform).
@@ -1764,11 +1916,11 @@ mod tests {
         // 4. Recall slot 0 via ApplyProjectSnapshot { non_undoable: false }.
         let target = p.scenes[0].snapshot.clone();
         let cur = serde_json::to_value(&p).unwrap();
-        let recall = Mutation::ApplyProjectSnapshot {
+        let recall = Mutation::ApplyProjectSnapshot(ApplyProjectSnapshot {
             new: target,
             old: cur,
             non_undoable: false,
-        };
+        });
         stack.push(recall, &mut p);
 
         // 5. Undo the recall.
@@ -1798,11 +1950,11 @@ mod tests {
 
         let snap = serde_json::to_value(&p).unwrap();
         for _ in 0..60 {
-            let m = Mutation::ApplyProjectSnapshot {
+            let m = Mutation::ApplyProjectSnapshot(ApplyProjectSnapshot {
                 new: snap.clone(),
                 old: snap.clone(),
                 non_undoable: true,
-            };
+            });
             stack.push(m, &mut p);
         }
 
@@ -1949,11 +2101,11 @@ mod tests {
                     let mut next = project.clone();
                     next.gamma += 0.1;
                     let new = serde_json::to_value(&next).unwrap();
-                    Mutation::ApplyProjectSnapshot {
+                    Mutation::ApplyProjectSnapshot(ApplyProjectSnapshot {
                         new,
                         old,
                         non_undoable: false,
-                    }
+                    })
                 }
                 MutationKind::LayerOpacity(v) => {
                     if project.layers.is_empty() {
@@ -2054,11 +2206,11 @@ mod tests {
                                 break;
                             }
                         }
-                        Mutation::SetLayerEffects {
+                        Mutation::SetLayerEffects(SetLayerEffects {
                             layer_idx: 0,
                             new,
                             old,
-                        }
+                        })
                     }
                 }
                 MutationKind::LayerEffectsDragRotate { degrees } => {
@@ -2087,11 +2239,11 @@ mod tests {
                                 break;
                             }
                         }
-                        Mutation::SetLayerEffects {
+                        Mutation::SetLayerEffects(SetLayerEffects {
                             layer_idx: 0,
                             new,
                             old,
-                        }
+                        })
                     }
                 }
                 // 003-T1.27 — mask vertex mutations.

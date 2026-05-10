@@ -12,7 +12,9 @@ Load-bearing invariants live here. These are silent-corruption traps, not stylis
 
 ## v3: typed mutations + undo (`command.rs`, `undo.rs`)
 
-**V31.3 introduces a `ReverseStorage` trait** (see `command.rs`). Pattern (A) — enum-of-structs: each `Mutation` variant has a payload struct implementing the trait. Once V31.3.2 has migrated every variant *and* the compile-fail test lands, the three rules below are enforced at the type level — a new variant won't compile until its `impl ReverseStorage` is written. **Until then** (v3.1 development) the rules remain hand-enforced and the proptest harness is the safety net.
+**V31.3.2 (landed) — all `Mutation` variants use `ReverseStorage`**. Pattern (A) — enum-of-structs: each `Mutation` variant has a payload struct implementing the `ReverseStorage` trait (see `command.rs`). The three rules below are now enforced at the type level — a new symmetric variant won't compile until its `impl ReverseStorage` is written. A `compile_fail` doctest on `ReverseStorage` itself (in `command.rs`) demonstrates the trait-bound enforcement using the real symbol (run with `cargo test --features v3 --doc`).
+
+**Asymmetric exception:** `AddLayer`, `RemoveLayer`, `AddLayerMaskVertex`, and `RemoveLayerMaskVertex` are intentionally kept as inline match arms in `Mutation::apply` (not wrapped in `ReverseStorage` structs). Their Reverse crosses variant boundaries (e.g. `AddLayer`'s reverse is `RemoveLayer`), making `fn apply(self, …) -> Self` impossible without changing the trait signature to return `Mutation`, which would defeat the per-variant compile-time guarantee. These four are the documented exceptions.
 
 The undo system has three **mandatory Reverse-storage rules**. Get them wrong and projects silently corrupt on undo. The proptest harness (`project::command::tests::proptest_round_trip`) is the runtime safety net, but it cannot enumerate every future variant — adding a new `Mutation` variant means re-applying these rules by hand:
 

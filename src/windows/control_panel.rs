@@ -1056,11 +1056,13 @@ fn show_effects_tab(ui: &mut Ui, project: &mut Project, st: &mut ControlPanelSta
                     }
                 }
             }
-            st.pending_mutations.push(Mutation::SetLayerEffects {
-                layer_idx,
-                new,
-                old,
-            });
+            st.pending_mutations.push(Mutation::SetLayerEffects(
+                crate::project::command::SetLayerEffects {
+                    layer_idx,
+                    new,
+                    old,
+                },
+            ));
         }
     }
 }
@@ -1207,11 +1209,13 @@ fn show_layers_tab(
                 #[cfg(feature = "v3")]
                 {
                     if let Some(new) = command_checkbox(ui, &layer.id, layer.enabled) {
-                        st.pending_mutations.push(Mutation::SetLayerEnabled {
-                            layer_idx: i,
-                            new,
-                            old: layer.enabled,
-                        });
+                        st.pending_mutations.push(Mutation::SetLayerEnabled(
+                            crate::project::command::SetLayerEnabled {
+                                layer_idx: i,
+                                new,
+                                old: layer.enabled,
+                            },
+                        ));
                     }
                 }
                 #[cfg(not(feature = "v3"))]
@@ -1245,11 +1249,13 @@ fn show_layers_tab(
                         });
                     if let Some(new) = staged {
                         if new != current_mode {
-                            st.pending_mutations.push(Mutation::SetLayerBlendMode {
-                                layer_idx: i,
-                                new,
-                                old: current_mode,
-                            });
+                            st.pending_mutations.push(Mutation::SetLayerBlendMode(
+                                crate::project::command::SetLayerBlendMode {
+                                    layer_idx: i,
+                                    new,
+                                    old: current_mode,
+                                },
+                            ));
                         }
                     }
                     if let Some(new) = command_slider(
@@ -1259,11 +1265,13 @@ fn show_layers_tab(
                         layer.opacity,
                         0.0..=1.0,
                     ) {
-                        st.pending_mutations.push(Mutation::SetLayerOpacity {
-                            layer_idx: i,
-                            new,
-                            old: layer.opacity,
-                        });
+                        st.pending_mutations.push(Mutation::SetLayerOpacity(
+                            crate::project::command::SetLayerOpacity {
+                                layer_idx: i,
+                                new,
+                                old: layer.opacity,
+                            },
+                        ));
                     }
                 }
                 #[cfg(not(feature = "v3"))]
@@ -1303,7 +1311,10 @@ fn show_layers_tab(
         #[cfg(feature = "v3")]
         {
             st.pending_mutations
-                .push(Mutation::SwapLayers { i, j: i - 1 });
+                .push(Mutation::SwapLayers(crate::project::command::SwapLayers {
+                    i,
+                    j: i - 1,
+                }));
         }
         #[cfg(not(feature = "v3"))]
         {
@@ -1320,7 +1331,10 @@ fn show_layers_tab(
         #[cfg(feature = "v3")]
         {
             st.pending_mutations
-                .push(Mutation::SwapLayers { i, j: i + 1 });
+                .push(Mutation::SwapLayers(crate::project::command::SwapLayers {
+                    i,
+                    j: i + 1,
+                }));
         }
         #[cfg(not(feature = "v3"))]
         {

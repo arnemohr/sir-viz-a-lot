@@ -339,11 +339,13 @@ fn show_effect_chain(
                     }
                 }
             }
-            st.pending_mutations.push(Mutation::SetLayerEffects {
-                layer_idx,
-                new,
-                old,
-            });
+            st.pending_mutations.push(Mutation::SetLayerEffects(
+                crate::project::command::SetLayerEffects {
+                    layer_idx,
+                    new,
+                    old,
+                },
+            ));
         }
     }
 }
@@ -403,20 +405,24 @@ fn show_layer_mapping(
         for (name, build) in crate::project::zone_templates::all_templates() {
             if ui.button(name).clicked() {
                 use crate::project::command::Mutation;
-                st.pending_mutations.push(Mutation::SetLayerMaskPolygon {
-                    layer_idx,
-                    new: build(),
-                    old: old_polygon.clone(),
-                });
+                st.pending_mutations.push(Mutation::SetLayerMaskPolygon(
+                    crate::project::command::SetLayerMaskPolygon {
+                        layer_idx,
+                        new: build(),
+                        old: old_polygon.clone(),
+                    },
+                ));
             }
         }
         if ui.button("clear mask").clicked() {
             use crate::project::command::Mutation;
-            st.pending_mutations.push(Mutation::SetLayerMaskPolygon {
-                layer_idx,
-                new: Vec::new(),
-                old: old_polygon,
-            });
+            st.pending_mutations.push(Mutation::SetLayerMaskPolygon(
+                crate::project::command::SetLayerMaskPolygon {
+                    layer_idx,
+                    new: Vec::new(),
+                    old: old_polygon,
+                },
+            ));
         }
     });
 
