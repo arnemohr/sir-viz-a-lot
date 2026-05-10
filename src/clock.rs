@@ -4,10 +4,43 @@
 
 use std::time::{Duration, Instant};
 
+/// Which input source produced the most-recent tap-tempo event.
+///
+/// Used by [`BpmTelemetry`] so the UI can show "tapped via Space 0.4 s ago"
+/// without any allocation on the read path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TapSource {
+    Keyboard,
+    Midi,
+    Osc,
+}
+
+impl TapSource {
+    /// Short user-facing label, suitable for inline display in the BPM HUD.
+    pub fn label(&self) -> &'static str {
+        match self {
+            TapSource::Keyboard => "Space",
+            TapSource::Midi => "MIDI",
+            TapSource::Osc => "OSC",
+        }
+    }
+}
+
+/// Read-only snapshot of the clock's tap-tempo state. Returned by
+/// [`Clock::telemetry`] each frame; allocation-free because all fields
+/// are `Copy`.
+#[derive(Debug, Clone, Copy)]
+pub struct BpmTelemetry {
+    pub current_bpm: f32,
+    pub last_tap_source: Option<TapSource>,
+    pub last_tap_at: Option<Instant>,
+}
+
 pub struct Clock {
     started: Instant,
     bpm: f32,
     last_tap: Option<Instant>,
+    last_tap_source: Option<TapSource>,
 }
 
 impl Clock {
@@ -16,6 +49,7 @@ impl Clock {
             started: Instant::now(),
             bpm: 120.0,
             last_tap: None,
+            last_tap_source: None,
         }
     }
 
@@ -29,17 +63,29 @@ impl Clock {
 
     /// Record a tap-tempo press. Two consecutive taps are sufficient to
     /// derive a BPM; subsequent taps update the running estimate.
-    pub fn tap(&mut self) {
-        self.tap_at(Instant::now());
+    pub fn tap(&mut self, source: TapSource) {
+        self.tap_at(Instant::now(), source);
     }
 
     /// Like [`tap`], but accepts an explicit timestamp. Useful for
     /// deterministic tests and for callers that need to backdate a tap.
-    pub fn tap_at(&mut self, now: Instant) {
+    pub fn tap_at(&mut self, now: Instant, source: TapSource) {
         if let Some(prev) = self.last_tap.replace(now) {
             let interval = now.duration_since(prev).as_secs_f32().max(1e-3);
             let inferred = 60.0 / interval;
             self.bpm = (self.bpm + inferred) * 0.5;
+        }
+        self.last_tap_source = Some(source);
+    }
+
+    /// Return a cheap, allocation-free snapshot of tap-tempo state that the
+    /// UI can poll per frame. The struct is `Copy` so reads have zero heap
+    /// cost.
+    pub fn telemetry(&self) -> BpmTelemetry {
+        BpmTelemetry {
+            current_bpm: self.bpm,
+            last_tap_source: self.last_tap_source,
+            last_tap_at: self.last_tap,
         }
     }
 }
@@ -64,6 +110,7 @@ impl Clock {
             started: std::time::Instant::now() - elapsed_target,
             bpm,
             last_tap: None,
+            last_tap_source: None,
         }
     }
 }
@@ -93,11 +140,11 @@ mod tests {
 
         let t0 = Instant::now();
         // First tap establishes the baseline (no inferred bpm change).
-        clock.tap_at(t0);
+        clock.tap_at(t0, TapSource::Keyboard);
         // Three subsequent taps at 0.5s intervals -> 120 BPM inferred each.
-        clock.tap_at(t0 + Duration::from_millis(500));
-        clock.tap_at(t0 + Duration::from_millis(1000));
-        clock.tap_at(t0 + Duration::from_millis(1500));
+        clock.tap_at(t0 + Duration::from_millis(500), TapSource::Keyboard);
+        clock.tap_at(t0 + Duration::from_millis(1000), TapSource::Keyboard);
+        clock.tap_at(t0 + Duration::from_millis(1500), TapSource::Keyboard);
 
         let bpm = clock.bpm();
         assert!(
@@ -113,7 +160,55 @@ mod tests {
         // interval from.
         let mut clock = Clock::for_test(Duration::ZERO, 137.0);
         let t0 = Instant::now();
-        clock.tap_at(t0);
+        clock.tap_at(t0, TapSource::Keyboard);
         assert!((clock.bpm() - 137.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn telemetry_reports_zero_taps_initially() {
+        let clock = Clock::for_test(Duration::ZERO, 120.0);
+        let t = clock.telemetry();
+        assert!(
+            t.last_tap_source.is_none(),
+            "fresh clock should have no tap source"
+        );
+        assert!(
+            t.last_tap_at.is_none(),
+            "fresh clock should have no tap timestamp"
+        );
+    }
+
+    #[test]
+    fn telemetry_after_tap_records_source() {
+        let mut clock = Clock::for_test(Duration::ZERO, 120.0);
+        let t0 = Instant::now();
+        clock.tap_at(t0, TapSource::Keyboard);
+        let t = clock.telemetry();
+        assert_eq!(t.last_tap_source, Some(TapSource::Keyboard));
+        assert!(t.last_tap_at.is_some(), "tap_at should set last_tap_at");
+    }
+
+    #[test]
+    fn telemetry_updates_source_on_each_tap() {
+        let mut clock = Clock::for_test(Duration::ZERO, 120.0);
+        let t0 = Instant::now();
+        clock.tap_at(t0, TapSource::Keyboard);
+        clock.tap_at(t0 + Duration::from_millis(500), TapSource::Midi);
+        let t = clock.telemetry();
+        assert_eq!(
+            t.last_tap_source,
+            Some(TapSource::Midi),
+            "telemetry should reflect the most recent tap source"
+        );
+    }
+
+    #[test]
+    fn telemetry_bpm_matches_clock_bpm() {
+        let mut clock = Clock::for_test(Duration::ZERO, 100.0);
+        let t0 = Instant::now();
+        clock.tap_at(t0, TapSource::Osc);
+        clock.tap_at(t0 + Duration::from_millis(500), TapSource::Osc);
+        clock.tap_at(t0 + Duration::from_millis(1000), TapSource::Osc);
+        assert_eq!(clock.telemetry().current_bpm, clock.bpm());
     }
 }

@@ -24,6 +24,7 @@ use std::thread;
 use crossbeam_channel::{Receiver, bounded};
 use rosc::{OscMessage, OscPacket};
 
+use crate::clock::TapSource;
 use crate::controls::{Command, Source};
 
 /// Default UDP listen port for OSC. Operators expecting a different
@@ -129,7 +130,7 @@ fn emit_from_packet(packet: OscPacket, tx: &crossbeam_channel::Sender<Command>) 
 fn decode_message(msg: &OscMessage) -> Option<Command> {
     let addr = msg.addr.to_lowercase();
     match addr.as_str() {
-        "/rmap/tap" => Some(Command::TapTempo),
+        "/rmap/tap" => Some(Command::TapTempo(TapSource::Osc)),
         "/rmap/blackout" => Some(Command::Blackout),
         "/rmap/freeze" => Some(Command::Freeze),
         a if a.starts_with("/rmap/scene/") => {
@@ -169,7 +170,7 @@ mod tests {
     fn decode_tap() {
         assert!(matches!(
             decode_message(&msg("/rmap/tap")),
-            Some(Command::TapTempo)
+            Some(Command::TapTempo(TapSource::Osc))
         ));
     }
 
@@ -213,7 +214,7 @@ mod tests {
     fn decode_is_case_insensitive() {
         assert!(matches!(
             decode_message(&msg("/RMAP/Tap")),
-            Some(Command::TapTempo)
+            Some(Command::TapTempo(TapSource::Osc))
         ));
     }
 }

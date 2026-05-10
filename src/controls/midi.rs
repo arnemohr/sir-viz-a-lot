@@ -6,7 +6,7 @@
 //! impl drains the channel each frame, alongside `KeyboardSource` and
 //! the OSC source (T-M7-06).
 //!
-//! v1 mappings (Note On only — keep the surface tiny so a wedding rig
+//! v1 mappings (Note On only — keep the surface tiny so a event rig
 //! with a $30 USB MIDI pad works out of the box without configuration):
 //!
 //! - Note 60 (C4)         → `TapTempo`
@@ -22,6 +22,7 @@
 use crossbeam_channel::{Receiver, bounded};
 use midir::{MidiInput, MidiInputConnection};
 
+use crate::clock::TapSource;
 use crate::controls::{Command, Source};
 
 const QUEUE_DEPTH: usize = 256;
@@ -95,7 +96,7 @@ fn decode(msg: &[u8]) -> Option<Command> {
         return None;
     }
     match msg[1] {
-        60 => Some(Command::TapTempo),
+        60 => Some(Command::TapTempo(TapSource::Midi)),
         n if (61..=69).contains(&n) => Some(Command::SceneRecall((n - 61) as usize)),
         70 => Some(Command::Blackout),
         71 => Some(Command::Freeze),
@@ -120,7 +121,10 @@ mod tests {
     #[test]
     fn decode_note_on_60_is_tap() {
         let msg = [0x90, 60, 100];
-        assert!(matches!(decode(&msg), Some(Command::TapTempo)));
+        assert!(matches!(
+            decode(&msg),
+            Some(Command::TapTempo(TapSource::Midi))
+        ));
     }
 
     #[test]

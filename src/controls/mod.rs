@@ -13,6 +13,7 @@ pub mod midi;
 pub mod osc;
 pub mod param;
 
+use crate::clock::TapSource;
 use crate::controls::param::SourceRef;
 
 /// 003-T2.3 — where the launcher should pull the project from when the
@@ -35,7 +36,7 @@ pub enum ProjectSource {
 /// Operator-driven event coming from any registered [`Source`].
 #[derive(Debug, Clone)]
 pub enum Command {
-    TapTempo,
+    TapTempo(TapSource),
     SceneRecall(usize),
     Blackout,
     Freeze,
@@ -173,6 +174,8 @@ impl InputState {
 
 #[cfg(test)]
 mod tests {
+    use crate::clock::TapSource;
+
     use super::*;
 
     struct MockSource {
@@ -200,7 +203,7 @@ mod tests {
 
         // Register a mock with two seeded events.
         let mock = MockSource {
-            events: vec![Command::TapTempo, Command::Blackout],
+            events: vec![Command::TapTempo(TapSource::Keyboard), Command::Blackout],
             read_value: Some(0.5),
         };
         state.register(Box::new(mock));
@@ -208,7 +211,7 @@ mod tests {
         // First poll drains the two seeded events.
         let events = state.poll();
         assert_eq!(events.len(), 2);
-        assert!(matches!(events[0], Command::TapTempo));
+        assert!(matches!(events[0], Command::TapTempo(TapSource::Keyboard)));
         assert!(matches!(events[1], Command::Blackout));
 
         // Second poll returns nothing (source drained).

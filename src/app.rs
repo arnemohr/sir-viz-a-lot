@@ -664,9 +664,9 @@ fn next_unique_layer_id(project: &Project) -> String {
 /// would re-enter the same borrow.
 fn apply_command(state: &mut EditingState, event: Command) -> SideEffect {
     match event {
-        Command::TapTempo => {
-            state.clock.tap();
-            tracing::debug!(bpm = state.clock.bpm(), "tap tempo");
+        Command::TapTempo(source) => {
+            state.clock.tap(source);
+            tracing::debug!(bpm = state.clock.bpm(), ?source, "tap tempo");
             SideEffect::None
         }
         Command::SceneRecall(idx) => {

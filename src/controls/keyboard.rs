@@ -19,6 +19,7 @@ use std::collections::VecDeque;
 
 use winit::keyboard::{KeyCode, PhysicalKey};
 
+use crate::clock::TapSource;
 use crate::controls::{Command, Source};
 
 #[derive(Default)]
@@ -36,7 +37,7 @@ impl KeyboardSource {
     /// consumer can dedupe if it wants.
     pub fn push_winit_key(&mut self, physical_key: PhysicalKey) {
         let event = match physical_key {
-            PhysicalKey::Code(KeyCode::Space) => Some(Command::TapTempo),
+            PhysicalKey::Code(KeyCode::Space) => Some(Command::TapTempo(TapSource::Keyboard)),
             PhysicalKey::Code(KeyCode::KeyB) => Some(Command::Blackout),
             PhysicalKey::Code(KeyCode::KeyF) => Some(Command::Freeze),
             PhysicalKey::Code(KeyCode::Digit1) => Some(Command::SceneRecall(0)),
@@ -72,7 +73,7 @@ mod tests {
         src.push_winit_key(PhysicalKey::Code(KeyCode::Space));
         let events = src.poll();
         assert_eq!(events.len(), 1);
-        assert!(matches!(events[0], Command::TapTempo));
+        assert!(matches!(events[0], Command::TapTempo(TapSource::Keyboard)));
         // Second poll empty.
         assert!(src.poll().is_empty());
     }
