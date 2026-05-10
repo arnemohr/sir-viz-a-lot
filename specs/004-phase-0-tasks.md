@@ -3,24 +3,23 @@
 Companion task spec for [`004-phase-0.md`](004-phase-0.md). Each task
 below is sized for a single PR.
 
-## Implementation status (2026-05-10)
+## Implementation status (2026-05-11)
 
 **Shipped (commit SHAs):**
 
 - ✅ **P0.1.1** `8424f37` — Param::Bound + SourceRef removed.
 - ✅ **P0.1.2** `47d2df9` — Schema v6 → v7 scaffold (LayerKind variants
   Video/FxLayer/Ndi as placeholders; OutputTarget.rgb_matrix added).
-  *Deferred:* `output_target → output_targets: Vec<OutputTarget>`
-  rename is W7.1 work; the singular field stays for now.
+  The `output_target → output_targets: Vec<OutputTarget>` rename
+  shipped separately in P0.7.1 (`a57ac8b`).
 - ✅ **P0.1.3** `caa37b2` — `osc` + `midi` cargo features default-on.
 - ✅ **P0.1.4** `3d02c6f` — Glossary entries for FxLayer / NDI source /
   edge-blend region / RGB matrix / MIDI-learn.
 - ✅ **P0.2.1** `2d3baaa` — `Modulator::OscBound` + OSC value registry
   in `src/modulators/osc.rs`.
-- ✅ **P0.2.2** `1d2244e` — `Modulator::MidiBound` + MIDI CC value
-  registry in `src/modulators/midi.rs`. *Deferred:* CC decoder
-  extension in `src/controls/midi.rs` (the existing decoder still
-  handles only Note On 60-71).
+- ✅ **P0.2.2** `1d2244e` + follow-up `96437f2` — `Modulator::MidiBound`
+  + MIDI CC value registry in `src/modulators/midi.rs`. CC decoder
+  extension in `src/controls/midi.rs` shipped in the follow-up.
 - ✅ **P0.2.3a** `bf58b7e` — BindingPicker + ParameterRow components
   in `src/windows/components/`.
 - ✅ **P0.2.3b+c** `40b53ac` — `modulator_slider` migrated to
@@ -51,6 +50,31 @@ below is sized for a single PR.
   file and applies whenever the work resumes. Roadmap §1.1
   classifies NDI as "transport, not primary creative source",
   so the deferral matches the stated philosophy.
+- ✅ **P0.7.1** `a57ac8b` (schema rename) + `66297d4` (launcher half)
+  — `Vec<OutputTarget>` everywhere + launcher multi-output picker
+  with per-row Identify flash. Launcher captures the secondary
+  monitor in `LauncherState`; the actual second-window spawning
+  ships in P0.7.2.
+- ✅ **P0.7.2** `28d63e5` (part 1: container) + `4afac03` (part 2:
+  second OutputWindow lifecycle). `EditingState.outputs:
+  SmallVec<[OutputWindow; 2]>`, `OutputState` extracted to
+  EditingState, `secondary_monitor` plumbed through
+  `Command::Launch` / `LauncherAction::Launch`,
+  `reconcile_output_targets` adapts `project.output_targets` to the
+  launcher's selection, per-frame loop runs passes 1–4 once and
+  passes 5–6 per output, audit walks every entry with "output N:"
+  prefixes, `OutputWindow.monitor` field added for GoLive
+  fullscreen, one `SleepAssertion` per active display, window-close
+  shrinks the vec and exits when empty.
+- ✅ **P0.7.4** `fddc6c6` — `TestPattern::EdgeBlendGradient` and
+  `TestPattern::AlignmentCross` added to the `T` cycle with
+  shaders under `src/render/shaders/`. P0.7.1 wires
+  AlignmentCross into the launcher Identify button.
+- ✅ **P0.8.2** `b1ea596` — Per-projector RGB matrix render path.
+  `gamma.render` consumes `OutputTarget.rgb_matrix`; P0.7.2 routes
+  the per-output target so each projector applies its own matrix.
+- ✅ **P0.8.3** `c0e3181` — RGB matrix editor UI in the per-display
+  Advanced panel (3×3 spinner grid + identity reset).
 
 **Not yet started:**
 
@@ -60,14 +84,15 @@ below is sized for a single PR.
 - **P0.5.2 / P0.5.3** — SDF inputs to effect shaders + the
   `Mask-edge ripple wash` proof preset. WGSL + render-pipeline
   work; not started.
-- **P0.7.1 – P0.7.5** — Two-projector edge-blend stub
-  (Vec<OutputTarget> rename, second OutputWindow lifecycle,
-  edge-blend rendering, test patterns, Output mode pill). The
-  `output_targets` Vec rename is the blocker for the rest of W7.
-- **P0.8.1 – P0.8.3** — Output panel + per-projector RGB matrix
-  render path + matrix UI. Render path is independently
-  implementable (the schema field exists from P0.1.2); UI portion
-  depends on W7.
+- **P0.7.3** — Edge-blend overlap region rendering. Now unblocked
+  by P0.7.2; needs `EdgeBlendConfig` schema field + per-output
+  falloff WGSL. P0.7.4's gradient pattern is the verification fixture.
+- **P0.7.5** — `Output` mode pill. Depends on P0.7.2 ✅ and
+  P0.8.1 (still pending).
+- **P0.8.1** — OutputPanel scaffold (badge stays for 1 projector).
+  Now unblocked by P0.7.2. The P0.8.2/P0.8.3 RGB matrix UI
+  currently lives on the existing per-display panel and will move
+  into the new OutputPanel sub-card when this lands.
 - **P0.9.1 – P0.9.5** — Release housekeeping (version bump, soak,
   changelog, README, system-deps for ffmpeg, frame-budget perf
   gate). Tail-end; depends on all other workstreams.
@@ -85,12 +110,14 @@ below is sized for a single PR.
 
 **Test status:**
 
-- 458 tests pass under `--features v3` (up from 216 baseline).
-- 218 tests pass under default features.
-- New test count by workstream:
-  - W2 (modulator path + components): ~12 new tests.
-  - W3 (texture-upload queue): 5 new tests.
-  - W5 (FxLayer round-trip): 1 new test.
+- 475 tests pass under `--features v3,midi`.
+- 254 tests pass under default features.
+- New tests by workstream:
+  - W2 (modulator path + components): ~12 tests.
+  - W3 (texture-upload queue): 5 tests.
+  - W5 (FxLayer round-trip): 1 test.
+  - W7 (output-targets reconcile + per-target audit): 7 tests.
+  - W8 (RGB matrix render + mutation): tests landed with P0.8.2.
 
 **Pre-existing issues (not introduced by this work):**
 
