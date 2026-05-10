@@ -2919,6 +2919,23 @@ mod tests {
                         offset,
                     }
                 ),
+                // P0.2.1 — OscBound covers a small set of plausible
+                // addresses; range bounds match the static-modulator
+                // pattern (scale + offset both -1.0..=1.0).
+                (
+                    prop_oneof![
+                        Just("/rmap/blur/radius".to_string()),
+                        Just("/rmap/color/hue".to_string()),
+                        Just("/foo/bar".to_string()),
+                    ],
+                    -1.0_f32..=1.0,
+                    -1.0_f32..=1.0,
+                )
+                    .prop_map(|(addr, scale, offset)| Modulator::OscBound {
+                        addr,
+                        scale,
+                        offset,
+                    }),
             ]
         }
 

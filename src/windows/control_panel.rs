@@ -1796,6 +1796,7 @@ fn modulator_slider(
             Modulator::Noise { .. } => "noise",
             Modulator::Bpm { .. } => "bpm",
             Modulator::Audio { .. } => "audio",
+            Modulator::OscBound { .. } => "osc",
         };
         egui::ComboBox::from_id_salt(salt)
             .selected_text(cur_label)
@@ -1862,6 +1863,7 @@ fn modulator_slider(
             Modulator::Noise { .. } => "noise",
             Modulator::Bpm { .. } => "bpm",
             Modulator::Audio { .. } => "audio",
+            Modulator::OscBound { .. } => "osc",
         };
         egui::ComboBox::from_id_salt(salt)
             .selected_text(cur_label)
@@ -1973,6 +1975,13 @@ fn modulator_slider_params(
         Modulator::Triangle { .. } | Modulator::Noise { .. } | Modulator::Bpm { .. } => {
             ui.label("(this modulator variant has no UI in v1)");
         }
+        Modulator::OscBound { addr, .. } => {
+            // P0.2.1 — minimal placeholder UI. The full BindingPicker
+            // surface (text edit for address, scale / offset sliders,
+            // live value pill) lands in P0.2.3a. For now show the bound
+            // address read-only so projects load without crashing.
+            ui.label(format!("OSC: {addr}"));
+        }
         Modulator::Audio {
             band,
             smoothing,
@@ -2048,6 +2057,9 @@ fn modulator_slider_params(
         }
         Modulator::Triangle { .. } | Modulator::Noise { .. } | Modulator::Bpm { .. } => {
             ui.label("(this modulator variant has no UI in v1)");
+        }
+        Modulator::OscBound { addr, .. } => {
+            ui.label(format!("OSC: {addr}"));
         }
         Modulator::Audio {
             band,

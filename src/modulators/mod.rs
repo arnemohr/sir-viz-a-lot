@@ -2,6 +2,7 @@
 //! the time-driven variants; all variants read from the central `Clock`.
 
 pub mod audio;
+pub mod osc;
 pub mod waveforms;
 
 use serde::{Deserialize, Serialize};
@@ -82,6 +83,17 @@ pub enum Modulator {
         amp: f32,
         offset: f32,
     },
+    /// P0.2.1 (W2.1) — reads the latest value seen for `addr` from the
+    /// process-wide OSC value registry. Resolved as
+    /// `osc::current_value(addr) * scale + offset`. Variant exists
+    /// unconditionally; gated UDP listener (`controls::osc`,
+    /// `feature = "osc"`) populates the registry. Returns `0.0` when
+    /// no provider is installed or the address has never been seen.
+    OscBound {
+        addr: String,
+        scale: f32,
+        offset: f32,
+    },
 }
 
 impl Modulator {
@@ -122,6 +134,11 @@ impl Modulator {
                 let v = audio::current_band(*band);
                 v * amp + offset
             }
+            Self::OscBound {
+                addr,
+                scale,
+                offset,
+            } => osc::current_value(addr) * scale + offset,
         }
     }
 }
