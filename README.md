@@ -20,14 +20,38 @@ explore the canvas immediately — no command-line flags required.
    cargo run --release
    ```
 
-2. The launcher window opens. Click **Try a demo** to load the bundled sample
-   project and explore the canvas.
+2. The launcher window opens. Click **Try a demo** to choose from three bundled
+   demos: **window-glow** (a lit architectural still), **film-strip** (a
+   multi-layer composition), and **test-grid** (an alignment grid useful for
+   verifying warp accuracy).
 
 3. To use your own content, click **Open a recent show** (if you have one) or
    drag a JPG, PNG, or SVG onto the canvas once a project is open.
 
 4. Adjust warp corners directly on the canvas, mask out surfaces you don't
    want lit, and save with **Save** in the toolbar.
+
+## Top-chrome live readouts
+
+The top bar of the control window shows the project name (with a `*` dirty
+marker when there are unsaved changes), undo/redo buttons, and save controls.
+To the right of those: the **BPM HUD** — a live tempo readout, the tap source
+("Space", "MIDI", or "OSC"), and a quantize selector (Off / 1 bar / 2 bars …)
+that makes cue firing wait for the next bar boundary instead of firing
+immediately. At the far right, a **live thumbnail of the projector output** is
+always visible; click it to bring the preview window forward.
+
+## Layer solo / mute
+
+Every layer row in the left rail carries two toggle buttons:
+
+- **S (solo)** — isolates a single layer; only one layer can be soloed at a
+  time across the whole project.
+- **M (mute)** — drops the layer from the output without deleting it. The row
+  thumbnail and label dim to roughly 50 % to show the muted state.
+
+Both toggles survive undo and scene recall, making them safe for silently
+subbing a layer in or out mid-cue before committing to a scene save.
 
 ## Docs
 
@@ -66,8 +90,13 @@ make ci
 cargo run --release -- --help
 ```
 
-- **`*.rmap.json`** — full project (layers, warp, scenes, gamma,
-  `output_monitor_index`, optional `output_windowed`).
+- **`*.rmap.json`** — full project (layers, warp, scenes, gamma, `output_target`,
+  optional `output_windowed`). The `output_target` field records the projector
+  display's UUID; on load, rmap matches the saved UUID first, falls back to the
+  saved index, then falls back to display 0 with an audit warning. This means a
+  `.rmap.json` saved on machine A opens onto the same physical projector on
+  machine B as long as the display UUID is recognised — no `--monitor` flag
+  required.
 - **`*.svg`** — bootstrap one layer; warp defaults are added automatically.
 - **`--monitor INDEX`** — output monitor (overrides the value saved in the
   project file). Use `--list-monitors` to print indices.
@@ -79,13 +108,32 @@ cargo run --release -- --help
   uses the loaded project's monitor index when `--monitor` is omitted (no
   extra click gate in this build).
 
+### Native macOS menu bar
+
+Standard macOS keyboard shortcuts work via the native menu bar:
+
+| Action | Shortcut |
+|--------|----------|
+| Save | Cmd-S |
+| Save As | Cmd-Shift-S |
+| Open | Cmd-O |
+| Quit | Cmd-Q |
+| Undo | Cmd-Z |
+| Redo | Cmd-Shift-Z |
+
+The `rmap > About rmap` menu item shows the running version. The canonical
+list of all key bindings is in
+[`specs/keyboard-accelerators.md`](specs/keyboard-accelerators.md).
+
 ### Cargo features
 
 - `v3` — Spec 003 UI/UX overhaul (state machine, command/mutation pattern,
   undo, launcher, project audit). Currently behind the flag while v3 ships
   incrementally; planned to flip to default at M3.
 - `gpu-tests` — headless wgpu golden-image harness. Off by default.
-- `audio`, `midi`, `osc` — live input sources. Do not promote to default.
+- `audio`, `midi`, `osc` — live input sources. Do not promote to default. When
+  the `audio` feature is enabled and an audio input source is active, an 8-band
+  FFT meter appears above the cue strip.
 
 ### Build profiles
 
