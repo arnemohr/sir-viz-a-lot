@@ -150,9 +150,10 @@ pub fn entry(t: GlossaryTerm) -> GlossaryEntry {
         },
         GlossaryTerm::TestPattern => GlossaryEntry {
             headline: "Test Pattern",
-            body: "Replaces the projector output with a calibration grid.  \
-                   Cycle through patterns to check focus, geometry, \
-                   and corner alignment.",
+            body: "Replaces the projector output with a calibration source.  \
+                   Cycle through patterns to check focus, geometry, corner \
+                   alignment, and (P0.7.4) two-projector edge-blend overlap \
+                   via the alignment cross + edge-blend gradient patterns.",
         },
         GlossaryTerm::EditorOverlay => GlossaryEntry {
             headline: "Editor Overlay",

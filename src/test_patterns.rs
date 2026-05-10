@@ -13,6 +13,13 @@ pub enum TestPattern {
     White50,
     White25,
     ColorBars,
+    /// P0.7.4 — alignment cross with quarter / half / three-quarter
+    /// reference markings, for two-projector physical alignment.
+    AlignmentCross,
+    /// P0.7.4 — horizontal 0→1 luminance ramp across the canvas.
+    /// Verifies the edge-blend overlap + falloff (P0.7.3) without
+    /// media on the canvas.
+    EdgeBlendGradient,
 }
 
 impl TestPattern {
@@ -25,12 +32,18 @@ impl TestPattern {
             Self::White50 => "white 50%",
             Self::White25 => "white 25%",
             Self::ColorBars => "color bars",
+            Self::AlignmentCross => "alignment cross",
+            Self::EdgeBlendGradient => "edge-blend gradient",
         }
     }
 
     /// Cycle order driven by the `T` key in `App::window_event`. Wraps
-    /// back to `None` after `ColorBars`. Exhaustive match — adding a
-    /// variant later forces an update here.
+    /// back to `None` after the last pattern. Exhaustive match —
+    /// adding a variant later forces an update here.
+    ///
+    /// The two-projector patterns sit at the end of the cycle so the
+    /// single-projector operator sees the v3 patterns first and only
+    /// scrolls past them when reaching for calibration tools.
     pub fn next(self) -> Self {
         match self {
             Self::None => Self::Grid50,
@@ -39,7 +52,9 @@ impl TestPattern {
             Self::White100 => Self::White50,
             Self::White50 => Self::White25,
             Self::White25 => Self::ColorBars,
-            Self::ColorBars => Self::None,
+            Self::ColorBars => Self::AlignmentCross,
+            Self::AlignmentCross => Self::EdgeBlendGradient,
+            Self::EdgeBlendGradient => Self::None,
         }
     }
 }
@@ -68,6 +83,11 @@ pub struct TestPatternRenderer {
     // is obvious from the struct layout.
     #[allow(dead_code)]
     levels_uniform_buffers: [wgpu::Buffer; 4],
+    /// P0.7.4 — two-projector alignment + edge-blend calibration
+    /// patterns. Each gets its own pipeline (no shared uniform — the
+    /// shaders are entirely procedural off the fragment UV).
+    alignment_cross: wgpu::RenderPipeline,
+    edge_blend_gradient: wgpu::RenderPipeline,
 }
 
 impl TestPatternRenderer {
@@ -91,6 +111,19 @@ impl TestPatternRenderer {
                 include_str!("render/shaders/test_levels.wgsl").into(),
             ),
         });
+        let alignment_cross_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("test_alignment_cross.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(
+                include_str!("render/shaders/test_alignment_cross.wgsl").into(),
+            ),
+        });
+        let edge_blend_gradient_shader =
+            device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("test_edge_blend_gradient.wgsl"),
+                source: wgpu::ShaderSource::Wgsl(
+                    include_str!("render/shaders/test_edge_blend_gradient.wgsl").into(),
+                ),
+            });
 
         // ---------- bind group layout for the levels `mode` uniform ----------
         let levels_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -140,6 +173,20 @@ impl TestPatternRenderer {
             &levels_layout,
             surface_format,
             "test_levels pipeline",
+        );
+        let alignment_cross = build_pipeline(
+            device,
+            &alignment_cross_shader,
+            &empty_layout,
+            surface_format,
+            "test_alignment_cross pipeline",
+        );
+        let edge_blend_gradient = build_pipeline(
+            device,
+            &edge_blend_gradient_shader,
+            &empty_layout,
+            surface_format,
+            "test_edge_blend_gradient pipeline",
         );
 
         // ---------- per-mode uniform buffers + bind groups ----------
@@ -195,6 +242,8 @@ impl TestPatternRenderer {
             levels,
             levels_bind_groups,
             levels_uniform_buffers,
+            alignment_cross,
+            edge_blend_gradient,
         }
     }
 
@@ -221,6 +270,8 @@ impl TestPatternRenderer {
                 TestPattern::White50 => (&self.levels, Some(&self.levels_bind_groups[1])),
                 TestPattern::White25 => (&self.levels, Some(&self.levels_bind_groups[2])),
                 TestPattern::ColorBars => (&self.levels, Some(&self.levels_bind_groups[3])),
+                TestPattern::AlignmentCross => (&self.alignment_cross, None),
+                TestPattern::EdgeBlendGradient => (&self.edge_blend_gradient, None),
             };
 
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
