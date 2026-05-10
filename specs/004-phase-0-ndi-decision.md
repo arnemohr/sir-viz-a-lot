@@ -1,9 +1,19 @@
-# Phase 0 — NDI input binding decision (P0.6.1, W6)
+# Phase 0 — NDI input binding decision (P0.6.1, W6) — deferred to v0.5
 
-**Status:** decision record. Actual integration (receiver thread,
-texture-upload-queue producer, render-path wiring, audit) lands
-in follow-up commits once the NDI SDK is installed on the dev
-machine.
+**Status:** decision record only. **W6 (NDI input) is deferred from
+v0.4 to v0.5** in light of the NewTek SDK's installer +
+redistribution-license friction. This document stays on file as
+the binding decision that applies whenever the work resumes.
+
+The schema placeholder `LayerKind::Ndi { source_name }` shipped by
+P0.1.2 stays in v7 so v0.5 needs no migration when the receiver
+lands — this decision avoids paying for NDI's adoption later.
+
+Roadmap §1.1 classifies NDI as "transport, not primary creative
+source," so deferring it matches the stated philosophy. The other
+v0.4 deliverables (video, FX layer foundations, two-projector,
+OSC + MIDI bindings, per-projector colour calibration) carry the
+release without it.
 
 ## Constraints
 

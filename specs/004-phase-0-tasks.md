@@ -45,8 +45,12 @@ below is sized for a single PR.
   real fields + `SetLayerKind` Mutation (whole-enum Reverse).
 - ✅ **P0.6.1** `5196c64` — NDI binding decision record only
   (`specs/004-phase-0-ndi-decision.md`): community `ndi` crate.
-  *Deferred:* W6.2 / W6.3 integration — needs the NewTek NDI SDK
-  installed on the dev machine.
+  **W6 (NDI input) is now deferred to v0.5** — the NewTek SDK's
+  install + redistribution-license friction outweighs the
+  capability's value for v0.4. The decision record stays on
+  file and applies whenever the work resumes. Roadmap §1.1
+  classifies NDI as "transport, not primary creative source",
+  so the deferral matches the stated philosophy.
 
 **Not yet started:**
 
@@ -65,8 +69,19 @@ below is sized for a single PR.
   implementable (the schema field exists from P0.1.2); UI portion
   depends on W7.
 - **P0.9.1 – P0.9.5** — Release housekeeping (version bump, soak,
-  changelog, README, system-deps for ffmpeg/NDI, frame-budget perf
+  changelog, README, system-deps for ffmpeg, frame-budget perf
   gate). Tail-end; depends on all other workstreams.
+
+**Deferred to v0.5:**
+
+- **P0.6.2 / P0.6.3** — NDI receiver + audit. Decision record
+  (P0.6.1 `5196c64`) stays on file; the schema placeholder
+  `LayerKind::Ndi` shipped by P0.1.2 stays in v7 so v0.5 needs
+  no migration when the receiver lands. The "NDI source"
+  glossary entry stays in v0.4 — operators see it on the (inert)
+  NDI layer-row badge before the receiver lands. NDI ingest is
+  classified as "transport, not primary creative source" per
+  roadmap §1.1; the deferral matches the stated philosophy.
 
 **Test status:**
 
@@ -150,7 +165,7 @@ below is sized for a single PR.
 | 3 | Texture-upload pipeline | 2 | Land before W4.3 + W6.2 | `src/render/`, new `src/render/texture_upload.rs` |
 | 4 | Video playback | 3 | W4.1 first (decoder decision + bring-up); rest serial | new `src/video_layer/`, `src/render/`, `src/project/schema.rs` |
 | 5 | FX layer foundations | 3 | Internally serial; depends on W1.2 | `src/project/schema.rs`, `src/render/`, `src/effects/` |
-| 6 | NDI input | 3 | Internally serial; W6.2 depends on W3 | `src/controls/`, new `src/ndi_layer/`, `src/project/schema.rs` |
+| 6 | ~~NDI input~~ (deferred to v0.5) | 1 of 3 | Decision record (P0.6.1) shipped; W6.2 + W6.3 move to v0.5 | (see decision record) |
 | 7 | Two-projector edge-blend | 5 | Internally serial; depends on W1.2 | `src/app.rs`, `src/render/`, `src/project/schema.rs`, `src/test_patterns.rs` |
 | 8 | Output panel + calibration | 3 | Internally serial; depends on W7.2 | `src/render/`, `src/windows/control_panel.rs` |
 | 9 | Release housekeeping | 5 | Last — depends on everything else | `Cargo.toml`, `CHANGELOG.md`, `README.md`, `Makefile` |
@@ -160,9 +175,10 @@ below is sized for a single PR.
 1. **W1.1** (Param::Bound removal) — tiny dead-code cleanup; clears
    the deck.
 2. **W1.2** (schema v7 scaffold) — unblocks W4, W5, W7, W8.
-3. **W2.1 + W2.2 + W3.1 + W4.1 + W6.1** in parallel — independent
+3. **W2.1 + W2.2 + W3.1 + W4.1** in parallel — independent
    engine kick-offs (Modulator variants, texture-upload skeleton,
-   decoder decision + bring-up, NDI SDK binding).
+   decoder decision + bring-up). W6 (NDI input) was originally
+   in this batch but is deferred to v0.5.
 4. Per-workstream sequential progress through W2–W8.
 5. **W9** at the end (release housekeeping; P0.9.4 ffmpeg-deps
    should land alongside P0.4.1 if the chosen decoder needs them).
