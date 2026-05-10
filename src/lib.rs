@@ -8,4 +8,5 @@
 pub mod clock;
 pub mod effects;
 pub mod modulators;
+pub mod monitors;
 pub mod project;

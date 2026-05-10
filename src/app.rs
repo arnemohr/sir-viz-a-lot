@@ -964,6 +964,28 @@ fn rebuild_layers_for_state(state: &mut EditingState) {
     }
 }
 
+/// V31.2.3 — capture the live monitor UUID into `project.output_target.uuid`
+/// ahead of a save operation.
+///
+/// Enumerates live monitors via `event_loop`, then looks up the monitor at
+/// `project.output_target.fallback_index`. When that monitor has a `Some(uuid)`
+/// (macOS only today), writes it into `project.output_target.uuid`. When the
+/// live monitor's UUID is `None` (non-macOS or headless), the existing
+/// `output_target.uuid` is left untouched — a previously captured UUID must
+/// not be overwritten with `None` across platforms.
+///
+/// No-op when the monitor list is empty or the index is out of range.
+#[cfg(feature = "v3")]
+fn capture_uuid_into_project(state: &mut EditingState, event_loop: &ActiveEventLoop) {
+    let monitors = crate::monitors::list(event_loop);
+    if let Some(live) = monitors.get(state.project.output_target.fallback_index) {
+        if let Some(ref uuid) = live.uuid {
+            state.project.output_target.uuid = Some(uuid.clone());
+        }
+        // live.uuid == None: leave state.project.output_target.uuid unchanged.
+    }
+}
+
 /// Per-layer SVG raster + effect ping-pong + worker.
 struct LayerState {
     layer: SvgLayer,
@@ -3305,6 +3327,11 @@ fn handle_editing_window_event(
                     // project_file_path if known, otherwise open Save as…
                     #[cfg(feature = "v3")]
                     ControlPanelAction::RequestSave => {
+                        // V31.2.3 — capture the live monitor UUID into
+                        // output_target.uuid before the Save dialog writes to
+                        // disk. `apply_command` has no access to `event_loop`,
+                        // so we do it here where both are available.
+                        capture_uuid_into_project(state, event_loop);
                         let side = apply_command(state, crate::controls::Command::OpenSaveAsPicker);
                         if matches!(side, SideEffect::RebuildLayers) {
                             rebuild_layers_for_state(state);
@@ -3313,6 +3340,8 @@ fn handle_editing_window_event(
                     // 003-T4.8: toolbar Save as… button.
                     #[cfg(feature = "v3")]
                     ControlPanelAction::RequestSaveAs => {
+                        // V31.2.3 — same UUID capture as RequestSave above.
+                        capture_uuid_into_project(state, event_loop);
                         let side = apply_command(state, crate::controls::Command::OpenSaveAsPicker);
                         if matches!(side, SideEffect::RebuildLayers) {
                             rebuild_layers_for_state(state);
@@ -4122,8 +4151,12 @@ impl ApplicationHandler for App {
             // 003-T4.6: debounced autosave — writes to
             // `~/Documents/rmap/_autosave/<session_token>.rmap.json` at
             // most once every 5 seconds when the project is dirty.
+            // V31.2.3 — capture the live monitor UUID into output_target
+            // before each autosave so crash recovery loads with the
+            // correct projector pre-selected.
             #[cfg(feature = "v3")]
             {
+                capture_uuid_into_project(state, event_loop);
                 crate::app::autosave::maybe_autosave(
                     &state.project,
                     &state.session_token,

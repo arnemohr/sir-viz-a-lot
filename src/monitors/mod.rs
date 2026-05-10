@@ -49,6 +49,17 @@ impl MonitorInfo {
         let size = handle.size();
         let name = display_name(handle, index);
         let stable_id = stable_id(handle);
+        // V31.2.3 — populate UUID from CGDisplayCreateUUIDFromDisplayID on macOS.
+        // Other platforms return None (no equivalent stable cross-machine UUID
+        // API is available without OS-specific plumbing).
+        #[cfg(target_os = "macos")]
+        let uuid = {
+            let id = handle.native_id();
+            macos::uuid_for_display_id(id)
+        };
+        #[cfg(not(target_os = "macos"))]
+        let uuid = None;
+
         Self {
             index,
             name,
@@ -56,8 +67,7 @@ impl MonitorInfo {
             position: (position.x, position.y),
             scale_factor: handle.scale_factor(),
             stable_id,
-            // V31.2.3 will populate this from CGDisplayCreateUUIDFromDisplayID.
-            uuid: None,
+            uuid,
         }
     }
 }

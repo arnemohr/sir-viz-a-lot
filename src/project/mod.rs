@@ -55,6 +55,47 @@ impl Project {
         Ok(project)
     }
 
+    /// V31.2.3 — save the project, capturing the live monitor UUID into
+    /// `output_target.uuid` before writing.
+    ///
+    /// At save time, `monitors[output_target.fallback_index].uuid` (when
+    /// `Some`) is written into the cloned project's `output_target.uuid`.
+    /// When the live monitor's UUID is `None` (non-macOS, headless, or
+    /// unknown display ID), the existing `output_target.uuid` is **preserved**
+    /// rather than overwritten with `None` — a previously captured UUID from
+    /// a prior save on macOS should survive a save on a platform without UUID
+    /// support (e.g. a staging machine) so the UUID is still usable on the
+    /// next macOS launch.
+    ///
+    /// Falls through to the standard [`Self::save`] write path (temp file +
+    /// atomic rename). The original `self` is not mutated; mutation is
+    /// confined to the ephemeral clone written to disk.
+    ///
+    /// Pass the live monitor list from `crate::monitors::list(event_loop)`.
+    /// If the list is empty this behaves identically to `save` (nothing to
+    /// capture).
+    // V31.2.3: used in tests and available for future save call sites.
+    // The binary currently captures UUID via `capture_uuid_into_project` (in
+    // app.rs) before calling `save_portable`, which is the approach (a) from
+    // the design doc. This method provides a composable alternative for callers
+    // that already hold a monitor list and want to avoid redundant enumeration.
+    #[allow(dead_code)]
+    pub fn save_with_live_monitors(
+        &self,
+        path: &Path,
+        monitors: &[crate::monitors::MonitorInfo],
+    ) -> Result<(), ProjectError> {
+        let mut staged = self.clone();
+        if let Some(live) = monitors.get(staged.output_target.fallback_index) {
+            if let Some(ref uuid) = live.uuid {
+                // Live monitor has a UUID — always prefer the fresh value.
+                staged.output_target.uuid = Some(uuid.clone());
+            }
+            // live.uuid == None: preserve whatever is already in staged.output_target.uuid.
+        }
+        staged.save(path)
+    }
+
     /// Pretty-printed JSON to `path`, via a same-directory temp file + rename.
     pub fn save(&self, path: &Path) -> Result<(), ProjectError> {
         let json = serde_json::to_string_pretty(self)?;
@@ -817,6 +858,87 @@ mod tests {
         // WarpMesh identity should be restored — corner [0][0] is [0.0, 0.0]
         // after the AddLayer undo removes the layer entirely (no layer to check).
         assert!(!stack.can_undo(), "undo stack not empty after undo-all");
+    }
+
+    /// V31.2.3 — save_with_live_monitors writes the live monitor's UUID
+    /// into `output_target.uuid` when the monitor has `Some(uuid)`.
+    /// Verifies the round-trip: save → load → assert uuid persisted.
+    #[test]
+    fn save_with_live_monitors_captures_uuid() {
+        use crate::monitors::MonitorInfo;
+
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!(
+            "rmap_v31_uuid_capture_{}.rmap.json",
+            std::process::id()
+        ));
+
+        let mut project = Project::default();
+        project.output_target.fallback_index = 0;
+        project.output_target.uuid = None;
+
+        let monitors = vec![MonitorInfo {
+            index: 0,
+            name: "Test Display".to_string(),
+            size: (1920, 1080),
+            position: (0, 0),
+            scale_factor: 1.0,
+            stable_id: None,
+            uuid: Some("6F24E84B-D34F-4F66-93D9-EE7A4D9C9F4C".to_string()),
+        }];
+
+        project
+            .save_with_live_monitors(&path, &monitors)
+            .expect("save_with_live_monitors");
+        let loaded = Project::load(&path).expect("load");
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(
+            loaded.output_target.uuid,
+            Some("6F24E84B-D34F-4F66-93D9-EE7A4D9C9F4C".to_string()),
+            "UUID must be persisted to disk by save_with_live_monitors",
+        );
+    }
+
+    /// V31.2.3 — when the live monitor's UUID is None (headless / non-macOS),
+    /// an existing `output_target.uuid` in the project must be preserved, not
+    /// overwritten with None.
+    #[test]
+    fn save_with_live_monitors_preserves_existing_uuid_when_live_is_none() {
+        use crate::monitors::MonitorInfo;
+
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!(
+            "rmap_v31_uuid_preserve_{}.rmap.json",
+            std::process::id()
+        ));
+
+        let mut project = Project::default();
+        project.output_target.fallback_index = 0;
+        // Pre-existing UUID from a previous macOS save.
+        project.output_target.uuid = Some("PRESERVED-UUID-UNCHANGED".to_string());
+
+        let monitors = vec![MonitorInfo {
+            index: 0,
+            name: "Headless Display".to_string(),
+            size: (1920, 1080),
+            position: (0, 0),
+            scale_factor: 1.0,
+            stable_id: None,
+            uuid: None, // non-macOS / headless — no UUID
+        }];
+
+        project
+            .save_with_live_monitors(&path, &monitors)
+            .expect("save_with_live_monitors");
+        let loaded = Project::load(&path).expect("load");
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(
+            loaded.output_target.uuid,
+            Some("PRESERVED-UUID-UNCHANGED".to_string()),
+            "existing UUID must be preserved when live monitor UUID is None",
+        );
     }
 
     /// 003-T2.23 — `has_absolute_asset_paths` drives the migration

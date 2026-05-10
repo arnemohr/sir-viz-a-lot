@@ -89,10 +89,17 @@ rfd = "0.17"
 # `cocoa`/`objc` crates are deprecated. Sub-crate versions move together —
 # bump them in lockstep.
 [target.'cfg(target_os = "macos")'.dependencies]
-objc2            = "0.6"
-objc2-foundation = "0.3"
-objc2-app-kit    = "0.3"
-objc2-io-kit     = "0.3"
+objc2                  = "0.6"
+objc2-foundation       = "0.3"
+objc2-app-kit          = "0.3"
+objc2-io-kit           = "0.3"
+# V31.2.3 — UUID lookup for monitor identity across machines.
+# `objc2-core-graphics` does not export `CGDisplayCreateUUIDFromDisplayID`
+# (it lives in ColorSync / ApplicationServices, not CoreGraphics). We use
+# `objc2-core-foundation` for the `CFUUID` and `CFString` types; the
+# function itself is declared via a local `extern "C"` block linked against
+# ApplicationServices (the same pattern winit-0.30 uses in its ffi.rs).
+objc2-core-foundation  = { version = "0.3", features = ["CFUUID", "CFString"] }
 
 [build-dependencies]
 naga = { version = "29", features = ["wgsl-in"] }
