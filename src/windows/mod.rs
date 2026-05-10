@@ -8,6 +8,8 @@ pub mod advanced;
 pub mod anim;
 #[cfg(all(feature = "v3", feature = "audio"))]
 pub mod audio_bands_strip;
+#[cfg(feature = "v3")]
+pub mod components;
 pub mod control;
 pub mod control_panel;
 #[cfg(feature = "v3")]
