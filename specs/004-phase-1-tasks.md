@@ -41,6 +41,15 @@ below is sized for a single PR.
   due to a Rust 1.92 / clippy upgrade. Cleanup is orthogonal to
   Phase 1 scope; the v3,midi clippy target is clean.
 
+**Test status:** *(placeholder; filled in by snapshot commits as
+workstreams ship)*
+
+- *N tests pass under `--features v3,midi` (baseline 523).*
+- *N tests pass under default features (baseline 270).*
+- *N tests pass under `--no-default-features` (baseline 254).*
+- *1 test passes under `--features gpu-tests` (P0.9.5; P1.7.4
+  replaces the fixture).*
+
 ---
 
 ## Operating model
@@ -110,25 +119,28 @@ below is sized for a single PR.
 | WS | Theme | Tasks | Parallel-safe? | Touches |
 |----|-------|-------|----------------|---------|
 | 1 | Setup + housekeeping | 3 | All three parallel-safe; ship before W3/W4 hit their preset UIs | `src/image_layer.rs`, `src/app.rs` (drop dispatch), `src/windows/glossary.rs` |
-| 2 | Treatment pipeline foundation | 3 | W2.1 first; W2.2 + W2.3 serial | `src/project/schema.rs`, `src/project/command.rs`, new `src/render/treatments.rs`, `src/windows/advanced.rs` |
+| 2 | Treatment pipeline foundation | 4 | W2.1 first; W2.2 + W2.3 + W2.4 serial after | `src/project/schema.rs`, `src/project/command.rs`, new `src/render/treatments.rs`, `src/windows/advanced.rs`, `src/windows/scene_editor.rs` |
 | 3 | Treatment presets | 4 | All four parallel after W2.2 lands | new `src/render/shaders/treat_*.wgsl`, `src/render/treatments.rs` |
-| 4 | Video operator surface | 5 | W4.1 + W4.2 first; W4.3 / W4.4 / W4.5 parallel after | `src/project/schema.rs`, `src/video_layer/worker.rs`, `src/windows/advanced.rs`, `src/windows/layer_strip.rs` |
+| 4 | Video operator surface | 6 | W4.0 first (tiny); W4.1 + W4.2 next; W4.3 / W4.4 / W4.5 parallel after | `src/project/schema.rs`, `src/video_layer/worker.rs`, `src/windows/advanced.rs`, `src/windows/layer_strip.rs`, `src/app.rs` (layer spawn) |
 | 5 | Left rail row anatomy | 1 | Depends on W4.1 + W4.2 | `src/windows/layer_strip.rs` |
 | 6 | Diagnostics | 1 | Independent | `src/windows/diagnostics_strip.rs` (or wherever the badge lives), `src/render/texture_upload.rs` |
 | 7 | Release housekeeping | 4 | Last — depends on everything else | `Cargo.toml`, `CHANGELOG.md`, `README.md`, `docs/show-day-checklist.md`, `tests/perf_frame_budget.rs`, `Makefile` |
 
 **Suggested order for sequencing PRs:**
 
-1. **W1.1 + W1.2 + W1.3** in parallel — small ergonomics + glossary
-   work that doesn't block anything heavier.
+1. **W1.1 + W1.2 + W1.3 + W4.0** in parallel — small ergonomics +
+   glossary + the video auto-play tweak. None block anything heavier.
 2. **W6.1** — close the P0.3.2 deferred drop-count aggregation. Tiny.
-3. **W2.1** (schema + Mutation) — unblocks W2.2 + every W3 preset.
+3. **W2.1** (schema + Mutation) — unblocks W2.2 + every W3 preset +
+   W2.4 focal picker.
 4. **W2.2** (render integration) + **W4.1** (in/out points) +
    **W4.2** (loop modes) in parallel — separate code paths.
 5. **W2.3** (Selected-layer UI scaffold) once W2.2 ships; then
    **W3.1 → W3.4** in parallel (each preset is a leaf).
+   **W2.4** (focal picker) parallels W2.3.
 6. **W4.3 / W4.4 / W4.5** parallel after W4.1/W4.2.
-7. **W5.1** once W4.1 + W4.2 ship.
+7. **W5.1** once W4.1 + W4.2 + W4.5 ship (the row needs the
+   thumbnails).
 8. **W7** at the end (release housekeeping; W7.4 perf-gate refresh
    pulls in W7.1's fixture mp4 and the Path-A refactor of
    `render_m5_pipeline`).
@@ -341,29 +353,54 @@ pub struct Treatment {
     pub preset_id: String,
     #[serde(default)]
     pub params: std::collections::HashMap<String, f32>,
+    /// Optional second texture for presets that consume one (today:
+    /// the `texture_overlay` preset; P1.3.4). HashMap<String, f32>
+    /// can't carry a path, so the field lives on the struct directly.
+    /// `None` for presets that don't read it.
+    #[serde(default)]
+    pub overlay_path: Option<std::path::PathBuf>,
 }
 ```
 
-`#[serde(default)]` on `treatment` keeps v7 projects loading
+`#[serde(default)]` on every added field keeps v7 projects loading
 unchanged with `treatment == None`. No schema version bump.
+
+**Single-treatment-per-layer is intentional.** The Phase 1 spec uses
+"treatment pipeline" terminology, but v0.5 ships `Option<Treatment>`
+(one preset per layer) rather than `Vec<Treatment>`. Rationale:
+matches the FxLayer one-preset shape operators already learned, and
+the four shipped presets aren't useful to chain (you don't stack
+two tone-maps). If Phase 4 zone grammars need composition, growing
+to `Vec<Treatment>` is a non-breaking serde change.
 
 **Steps:**
 1. Read `src/project/CLAUDE.md` — rule 1 (whole-enum Reverse) +
    rule 2 (effects-vec Reverse) shape your Mutation design.
-2. Add the `Treatment` struct + the `treatment: Option<Treatment>`
-   field on `LayerConfig`.
+2. Add the `Treatment` struct (`preset_id` + `params` +
+   `overlay_path`) + the `treatment: Option<Treatment>` field on
+   `LayerConfig`.
 3. Mutation: `SetLayerTreatment { layer_idx: usize, new:
    Option<Treatment>, old: Option<Treatment> }` with snapshot Reverse
    (whole-`Option` replacement — same shape as `SetEdgeBlend`).
+   **This is the mutation that handles preset switches AND
+   overlay-path edits** (the UI constructs a new Treatment with
+   the same preset_id + params but a different `overlay_path` and
+   dispatches this).
 4. Mutation: `SetLayerTreatmentParams { layer_idx: usize, new:
    HashMap<String, f32>, old: HashMap<String, f32> }` — snapshots
    the whole map per W2.1's rule (variant-replacement loses keys
    silently otherwise; this matches `SetFxLayerParams` from P0.5.1).
+   Only touches `params`, not `overlay_path`.
 5. Add builder helpers on `Project`: `set_layer_treatment_mutation`,
    `set_layer_treatment_params_mutation`.
 6. Extend the proptest harness in `command.rs` with both variants.
+   The strategy generates `overlay_path: Option<PathBuf>` randomly
+   so the round-trip exercises both populated + None.
 7. Audit: a `Treatment` with an unknown `preset_id` surfaces a
    non-fatal warning. Mirror P0.5.1's unknown-FxLayer-preset audit.
+   Also: a `Treatment` whose `overlay_path` points at a missing file
+   surfaces a `MissingAsset` finding (mirrors the image-layer
+   missing-file path).
 
 **Tests:**
 - Schema serde round-trip: a project with a populated `Treatment`
@@ -374,14 +411,16 @@ unchanged with `treatment == None`. No schema version bump.
 - Audit test: unknown preset_id → Warn finding.
 
 **Acceptance:**
-- [ ] `LayerConfig.treatment: Option<Treatment>` exists.
+- [ ] `LayerConfig.treatment: Option<Treatment>` exists with
+      `preset_id`, `params`, and `overlay_path` fields.
 - [ ] Both Mutations implement `ReverseStorage` and pass proptest.
 - [ ] Unknown preset surfaces audit warning.
+- [ ] Missing overlay file surfaces `MissingAsset` audit warning.
 - [ ] No schema version bump (verified by existing v7-load tests).
 - [ ] `make ci` clean.
 
 **Out of scope:** any specific preset (W3); render integration
-(P1.2.2); UI (P1.2.3).
+(P1.2.2); UI (P1.2.3); focal-point picker (P1.2.4).
 
 ---
 
@@ -490,15 +529,88 @@ range; defaults pulled from the preset's `for_<id>(...)` builder).
 
 **Out of scope:** real-time param scrubbing (mutations dispatch on
 drag-release); per-frame param interpolation (Phase 4 scene
-grammars).
+grammars); focal-point picker (P1.2.4).
+
+---
+
+### P1.2.4 — Focal-point picker for Image / Video layers
+
+**Source:** `004-phase-1.md` Capability set ("focal-point selection"
+in the Photo / image treatments stanza).
+**Type:** UI
+**Depends on:** P1.2.3 (parallel-safe — both edit the Selected-layer
+section but in different sub-sections).
+**Files:** `src/windows/scene_editor.rs` (the canvas-side click-to-
+set affordance; check whether the existing scene editor handles this
+or if it lives in `advanced.rs`), `src/project/command.rs`
+(Mutation), `src/project/schema.rs` (no field change — `focal:
+[f32; 2]` already exists on `LayerKind::Image`; need a matching
+field on `LayerKind::Video` if we want focal there too — see
+scoping).
+
+**What:** the schema's existing `LayerKind::Image { focal: [f32;
+2] }` has had a focal point since v3, but no in-app editor —
+operators have to hand-edit JSON. Phase 1 closes this with a
+click-to-set affordance on the layer preview / canvas. Operator
+clicks (or drags) the focal anchor; the layer's `Cover` crop
+re-centres there.
+
+**Scoping decision (write this into the task before starting):**
+- `LayerKind::Video` doesn't carry a `focal` field today. Either
+  (a) add `focal: [f32; 2]` to `Video` for parity with Image, or
+  (b) keep focal Image-only this phase and document Video focal as
+  Phase 7 work. **Choose (a)** — it's a non-breaking serde
+  addition and parity is what the Phase 1 acceptance criterion
+  ("video and still expose the same controls") asks for.
+
+**Steps:**
+1. Add `focal: [f32; 2]` with `#[serde(default = "default_focal")]`
+   to `LayerKind::Video` (shape mirrors `Image`).
+2. Mutation: `SetLayerFocal { layer_idx, new: [f32; 2], old: [f32;
+   2] }` with `ReverseStorage` impl. Apply matches both `Image` and
+   `Video` arms (whole-enum Reverse rule applies — `Image` and
+   `Video` carry different other fields, so the apply panics on
+   any other variant).
+3. UI: in the Selected-layer panel, when the layer is Image or
+   Video with `fit == Cover`, render a 16:9 preview thumbnail
+   (re-uses the cached video thumbnail from W4.5 for Video, or the
+   image cache from W1.2 for Image). Click on the thumbnail sets
+   `focal`; the click position is mapped to normalised UV and
+   dispatched via `SetLayerFocal`.
+4. Visual feedback: small crosshair overlaid on the thumbnail at
+   the current focal position; draggable.
+5. The picker only renders when `fit == Cover` (focal is ignored
+   for Contain / Stretch).
+
+**Tests:**
+- Mutation proptest extends with `SetLayerFocal`.
+- Schema serde round-trip: a v7 Video JSON without `focal` loads
+  with the default `[0.5, 0.5]`.
+- Manual smoke: click on a portrait crop, confirm the head ends up
+  centred (focal moved to where the head is in the texture).
+
+**Acceptance:**
+- [ ] Click-to-set focal affordance exists for Image + Video layers
+      with `fit == Cover`.
+- [ ] Mutation is undoable; proptest covers it.
+- [ ] Video gains `focal` field (non-breaking serde).
+- [ ] Focal picker hidden for Contain / Stretch.
+
+**Out of scope:** focal-point animation across scenes (Phase 4); per-
+beat focal cycling (Phase 6).
 
 ---
 
 ## Workstream 3 — Treatment presets
 
-Phase 1 ships four proof-points. The full library (palette
-extraction, collage, etc.) lands in Phase 4 alongside scene
-grammars.
+Phase 1 ships four proof-points. **The fifth treatment family named
+in the Phase 1 spec (palette extraction + collage placement) is
+NOT shipped here.** They are not currently homed in a later phase
+either — Phase 4's "collage bloom" scene template + "palette → mood"
+wizard step are different constructs that don't require these
+primitives. See the [Cross-workstream notes](#cross-workstream-notes)
+for the open question this leaves; resolution either re-homes them
+or adds them to W3.
 
 ### P1.3.1 — `tone_map` preset
 
@@ -626,50 +738,29 @@ toggle expressed as float for the HashMap-keyed param shape).
 ### P1.3.4 — `texture_overlay` preset
 
 **Source:** `004-phase-1.md` Capability set ("texture overlays").
-**Type:** shader + render + content + schema
-**Depends on:** P1.2.2.
+**Type:** shader + render + content
+**Depends on:** P1.2.2 (which carries the `Treatment.overlay_path`
+field that this preset consumes).
 **Files:** new `src/render/shaders/treat_texture_overlay.wgsl`,
-`src/render/treatments.rs`, possibly a small schema extension to
-carry the overlay path.
+`src/render/treatments.rs`.
 
 **What:** a second texture multiplies into the source — paper grain,
-noise pattern, film texture, sky gradient. The overlay path lives
-on the layer's `treatment.params` *or* gets a dedicated string field
-(see scoping below). Two params: `opacity: f32` (0..=1), `tint: f32`
-(0..=1; lerp between greyscale and full-colour multiply).
-
-**Scoping note:** `treatment.params` is `HashMap<String, f32>` —
-can't store a path. Two options:
-- **(a)** Add an `overlay_path: Option<PathBuf>` field on `Treatment`
-  itself (schema addition; non-breaking via `#[serde(default)]`).
-- **(b)** Defer texture-overlay to a follow-up that introduces a
-  separate `LayerOverlay` field on `LayerConfig`.
-
-**Choose (a).** Treatment becomes:
-```rust
-pub struct Treatment {
-    pub preset_id: String,
-    pub params: HashMap<String, f32>,
-    #[serde(default)]
-    pub overlay_path: Option<PathBuf>,
-}
-```
-
-This stays close to the FxLayer pattern; only treatments-with-overlay
-populate the field. P1.2.1 lands the field too (move the extension
-into the foundation task) — note this dependency.
+noise pattern, film texture, sky gradient. Reads
+`Treatment.overlay_path` (already shipped by P1.2.1) for the overlay
+texture path. Two HashMap params: `opacity: f32` (0..=1), `tint:
+f32` (0..=1; lerp between greyscale and full-colour multiply).
 
 **Steps:**
-1. Update P1.2.1's `Treatment` struct: add `overlay_path:
-   Option<PathBuf>` with `#[serde(default)]`. Update
-   migration tests.
-2. WGSL: sample the source + sample the overlay; `result =
+1. WGSL: sample the source + sample the overlay; `result =
    source * mix(grayscale(overlay), overlay, tint) * opacity`.
-3. Overlay texture: upload via the P1.1.2 image cache (cache hit
+2. Overlay texture: upload via the P1.1.2 image cache (cache hit
    when multiple layers share the same overlay).
-4. UI: P1.2.3's slider grid grows a "Pick overlay…" button next to
-   the params when the active preset is `texture_overlay`. Uses
-   the existing `rfd::FileDialog` filtered to image extensions.
+3. UI: P1.2.3's slider grid grows a "Pick overlay…" button when
+   the active preset is `texture_overlay`. Uses the existing
+   `rfd::FileDialog` filtered to image extensions. The pick
+   constructs a new `Treatment` with the same preset_id + params
+   but the new `overlay_path`, then dispatches
+   `SetLayerTreatment` (the whole-Option mutation P1.2.1 wired).
 
 **Tests:**
 - Golden test: a fixture overlay (8×8 noise pattern) multiplied
@@ -680,9 +771,10 @@ into the foundation task) — note this dependency.
 
 **Acceptance:**
 - [ ] WGSL parses + validates.
-- [ ] Overlay path persists in the project file (non-breaking).
-- [ ] Missing overlay file → audit warning + no-op render.
 - [ ] Reachable from P1.2.3 with file-picker for the overlay path.
+- [ ] Missing overlay file → audit warning (from P1.2.1) + no-op
+      render.
+- [ ] Overlay-path edit is undoable (via `SetLayerTreatment`).
 
 **Out of scope:** procedural overlays (Phase 2 FX); animated overlays
 (out of scope until Phase 4 scene grammars).
@@ -693,6 +785,55 @@ into the foundation task) — note this dependency.
 
 The VJ-lens completions. Each task adds one operator-visible video
 control on top of the v0.4 schema-and-worker base.
+
+### P1.4.0 — Video worker default state (auto-play on drag-drop)
+
+**Source:** `004-phase-1.md` Acceptance criteria ("An operator can
+drop an mp4 into the left rail and see it play on the canvas with
+seamless loop **within one click**").
+**Type:** engine (tiny)
+**Depends on:** none
+**Files:** `src/video_layer/worker.rs`, possibly `src/app.rs`
+(drag-drop dispatch + layer-spawn path).
+
+**What:** the v0.4 worker (P0.4.2b) starts in a state where the
+decode loop only runs after `VideoControl::Play` arrives. If a
+freshly-spawned worker doesn't get an explicit `Play` from the
+spawn path, today's behaviour is "drop file → static layer; click
+Play → playback starts" — two operator clicks. The Phase 1
+acceptance criterion is one click (the drop itself).
+
+**Steps:**
+1. Read the v0.4 worker's state-machine bootstrap. Either:
+   - **(a)** the worker already auto-plays on spawn (Play is the
+     default state) — no code change needed; verify with a manual
+     smoke + write a unit test asserting the default; OR
+   - **(b)** the worker starts paused — add a `Play` send right
+     after `crate::video_layer::spawn(...)` returns the control
+     sender, in the layer-init path that constructs a Video
+     LayerState (today's site in `app.rs`); OR
+   - **(c)** change the worker's default state to Playing — choose
+     this if (b) feels like a workaround.
+2. Pick (a) / (b) / (c) based on what the code shows. Document the
+   choice in the commit body.
+3. If shipping a code change: add a unit test that confirms a
+   newly-spawned worker pushes at least one frame within ~200 ms
+   (use the test harness's TextureFrameSender stub).
+
+**Tests:**
+- Unit / integration: a freshly-spawned video worker produces a
+  frame without any explicit Play message.
+- Manual smoke: drag an mp4 onto the canvas; it animates without
+  additional clicks.
+
+**Acceptance:**
+- [ ] Drop-an-mp4 → see-it-play within one operator action.
+- [ ] No regression on explicit Play / Pause behaviour.
+
+**Out of scope:** auto-pause on focus-loss (Phase 6 show-control
+work); per-layer initial-state policy (Phase 4 scene grammars).
+
+---
 
 ### P1.4.1 — In/out points
 
@@ -781,21 +922,32 @@ maps `loop_seamless: true → Loop` and `false → Once`.
    Video section with a combobox listing the three modes.
 5. `VideoControl::SetLoopMode(LoopMode)` replaces `SetLoop(bool)`.
 
+**PingPong dependency.** True PingPong requires the reverse-decode
+path from P1.4.3. **P1.4.2 ships PingPong as a forward-only stub**:
+on hitting `clip_out` the worker resets to `clip_in` (same as Loop).
+This is correct for the Once and Loop modes; for PingPong it's a
+"functionally-Loop" stub until P1.4.3 wires the real reverse pass,
+at which point PingPong's second half plays the reverse direction.
+Document the stub in the commit; P1.4.3's acceptance closes the
+gap.
+
 **Tests:**
 - Schema migration: a v0.4 JSON with `loop_seamless: true` /
   `loop_seamless: false` loads to `Loop` / `Once`.
 - Mutation proptest: all three variants round-trip.
 - Manual smoke: `Once` stops on EOF; `Loop` wraps; `PingPong`
-  reverses (gated on W4.3 progress).
+  behaves as Loop until P1.4.3 lands.
 
 **Acceptance:**
 - [ ] `LoopMode` enum exists; serde compatible with old saves.
-- [ ] Worker implements all three modes.
+- [ ] Worker implements Once + Loop fully; PingPong is a
+      forward-only stub (closed by P1.4.3).
 - [ ] UI combobox replaces the checkbox.
 - [ ] Mutation is undoable.
 
 **Out of scope:** custom loop region beyond clip_in / clip_out
-(use P1.4.1 for that).
+(use P1.4.1 for that); true reverse direction inside PingPong
+(P1.4.3 closes this).
 
 ---
 
@@ -803,7 +955,9 @@ maps `loop_seamless: true → Loop` and `false → Once`.
 
 **Source:** `004-phase-1.md` Capability set ("rate (incl. reverse)").
 **Type:** worker engine
-**Depends on:** P1.4.2 (PingPong consumes the reverse path).
+**Depends on:** P1.4.2 (the LoopMode enum exists with PingPong;
+this task wires the reverse direction into PingPong's second half
+in addition to direct negative-rate playback).
 **Files:** `src/video_layer/worker.rs`.
 
 **What:** negative `speed` causes the worker to decode the clip in
@@ -825,20 +979,28 @@ warning and fall back to forward playback at `abs(speed)`.
    in reverse, push each cached frame onto the TextureUploadQueue.
    Inter-frame interpolation is **not** in scope — Phase 1 reverse
    is "I-frame staccato"; document this in the commit body.
-4. For clips > 30 s, log `tracing::warn!` and clamp `speed >= 0.05`.
-   The Selected-layer UI shows a "Reverse not available for clips
-   > 30 s" hint when the operator drags speed below zero.
+4. PingPong (P1.4.2 stub) now flips to the reverse path on each
+   `clip_out` hit; on `clip_in` it flips back to forward. Same
+   keyframe cache, alternating direction.
+5. For clips > 30 s, log `tracing::warn!` and clamp `speed >= 0.05`
+   (and PingPong falls back to forward-only Loop). The
+   Selected-layer UI shows a "Reverse not available for clips
+   > 30 s" hint when the operator drags speed below zero OR picks
+   PingPong on a long clip.
 
 **Tests:**
 - Unit test: keyframe-cache build for a fixture mp4 produces ≥1
   cached frame (skipped if no fixture mp4 — pending P1.7.4).
 - Manual smoke: a short clip at speed = -1.0 plays backward.
+- Manual smoke: a short clip with `PingPong` alternates forward /
+  reverse across clip boundaries.
 - Manual smoke: a > 30 s clip with negative speed warns + clamps.
 
 **Acceptance:**
 - [ ] Reverse playback works for clips ≤ 30 s.
-- [ ] Clips > 30 s fall back to forward at `abs(speed)` with a
-      log + UI hint.
+- [ ] PingPong second-half plays reverse on clips ≤ 30 s.
+- [ ] Clips > 30 s fall back to forward at `abs(speed)` + Loop for
+      PingPong, with a log + UI hint.
 - [ ] Memory cap documented (~180 MB worst case).
 
 **Out of scope:** smooth reverse (Phase 7); real-time reverse for
@@ -1207,33 +1369,56 @@ testing (operator's pre-tag work).
 ## Cross-workstream notes
 
 - **Schema bumps.** Phase 1 adds non-bumping fields only.
-  `Treatment` (W2.1), `clip_in` / `clip_out` (W4.1), `loop_mode`
-  (W4.2 — replaces `loop_seamless` via a custom deserializer that
-  accepts both shapes), `bpm_lock` (W4.4) all land on the existing
-  v7 schema with `#[serde(default)]` fallbacks. **No v7 → v8 bump.**
+  `Treatment` (W2.1, including `overlay_path`),
+  `LayerKind::Video.focal` (W2.4 for parity with `Image.focal`),
+  `clip_in` / `clip_out` (W4.1), `loop_mode` (W4.2 — replaces
+  `loop_seamless` via a custom deserializer that accepts both
+  shapes), `bpm_lock` (W4.4) all land on the existing v7 schema
+  with `#[serde(default)]` fallbacks. **No v7 → v8 bump.**
 - **Cargo features.** No new features in Phase 1. `video` stays
   default-on. The treatment pipeline is unconditional (the four
   shipped presets are pure WGSL + Rust; no system deps).
 - **Reverse-storage rules.** Every Mutation in Phase 1 follows
   `src/project/CLAUDE.md`'s three rules. The new mutations:
-  - `SetLayerTreatment` (whole-Option replacement — snapshot Reverse)
+  - `SetLayerTreatment` (whole-Option replacement — snapshot Reverse;
+    **also handles overlay-path edits** since `overlay_path` lives
+    inside the `Treatment` struct)
   - `SetLayerTreatmentParams` (whole-HashMap — effects-vec analog;
     per-key Reverse would lose unrelated keys silently)
+  - `SetLayerFocal` (per-field `[f32; 2]` — applies to Image AND
+    Video variants; the `apply` impl matches both arms)
   - `SetVideoClipRange` (both clip_in + clip_out snapshot together)
   - `SetVideoLoopMode` (whole-enum Reverse — replaces
     `SetVideoLoopSeamless` from P0.4.3, which is deleted)
   - `SetVideoBpmLock` (Option<u8> — snapshot Reverse)
 - **Glossary attachment.** P1.1.3 lands the data; downstream tasks
-  (P1.2.3, P1.3.x, P1.4.x, P1.5.1) attach `glossary_label(...)`
-  calls to the UI surfaces they introduce.
+  (P1.2.3, P1.2.4, P1.3.x, P1.4.x, P1.5.1) attach
+  `glossary_label(...)` calls to the UI surfaces they introduce.
 - **Preset registry expansion.** W3 grows the treatments registry
-  from one (none today) to four. The registry's `(preset_id,
-  display_label, param_descriptors)` shape is locked in P1.2.2; W3
-  tasks just add rows.
+  from zero (no treatment presets in v0.4) to four. The registry's
+  `(preset_id, display_label, param_descriptors)` shape is locked
+  in P1.2.2; W3 tasks just add rows.
 - **Worker contract.** W4 extends `VideoControl` with `SetClipRange`,
-  `SetLoopMode`, `SetBpmLock`, `SeekTo`. The worker state machine
+  `SetLoopMode`, `SetBpmLock`, `SeekTo`. P1.4.0 may also formalise
+  the default-state-is-Playing semantics. The worker state machine
   grows correspondingly; document the new states in
   `src/video_layer/worker.rs`'s header comment.
+- **Open question — palette extraction + collage placement.** The
+  Phase 1 spec's treatment-pipeline stanza names five families:
+  blur masks, luminance-driven reveals, palette extraction, collage
+  placement, texture overlays. W3 ships four (omits palette +
+  collage). **Neither is explicitly homed in a later phase.** Phase
+  4's `collage bloom` is a scene *template* (combination), and Phase
+  4's `palette → mood` wizard step is about authorial scene
+  palettes, not palette-extraction-from-image. Two resolutions:
+  - **(a)** Add `P1.3.5` + `P1.3.6` to W3 and ship them this phase.
+  - **(b)** Re-home them: palette extraction → Phase 2 alongside
+    the FX library (content-derived params are an FX concern);
+    collage placement → Phase 4 alongside scene grammars.
+    Update `specs/004-phase-1.md`'s capability list to remove
+    them; add the matching entries to phase-2 / phase-4 docs.
+
+  Resolution is a separate decision before W3 starts.
 - **Acceptance gate for shipping v0.5.0.** Every workstream
   acceptance box checked + P1.7.4 perf gate green + 10-minute soak
   under `make build-show` (P1.7.1) + show-day checklist walkthrough
