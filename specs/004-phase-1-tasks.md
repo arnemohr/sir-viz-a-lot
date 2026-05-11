@@ -3,7 +3,7 @@
 Companion task spec for [`004-phase-1.md`](004-phase-1.md). Each task
 below is sized for a single PR.
 
-## Implementation status (2026-05-11, W1 + W6 + W2.1–W2.3 + W3.1–W3.3 complete)
+## Implementation status (2026-05-12, **Phase 1 substantively complete**)
 
 **Shipped:**
 
@@ -101,6 +101,55 @@ below is sized for a single PR.
   `treat_blur` prefix so the helper is prepended at compile
   time. Three params: max_radius_px (0..=32), edge_band
   (0.01..=0.3 norm), falloff (0..=1).
+- ✅ **P1.4.1** `a200ae4` — video in/out points. Schema gains
+  `clip_in` + `clip_out` (serde-defaulted). Worker sets
+  `AVAssetReader.timeRange` before `startReading`; loop seek
+  honours `clip_in`. `SetVideoClipRange` mutation +
+  `VideoControl::SetClipRange` + DragValue UI.
+- ✅ **P1.4.3** `f698b81` — reverse playback graceful
+  fallback. Negative speed → log + clamp to `|speed|`. True
+  reverse + PingPong's reverse half deferred to Phase 7 (needs
+  the I-frame cache + 30 s clip cap policy).
+- ✅ **P1.4.4** `2671b90` — BPM-locked playback. `bpm_lock:
+  bool` on Video; per-frame loop in app.rs computes effective
+  speed = `manual_speed × (current_bpm / 120)` and dispatches
+  `SetSpeed` on ≥ 1e-3 change. `last_bpm_locked_speed`
+  per-layer cache prevents flooding the channel.
+- ✅ **P1.4.5** `cd88095` — `VideoControl::SeekTo(f32)` end-
+  to-end (worker `seek_override` for single-shot scrubbing).
+  Thumbnail-strip UI + click-to-seek deferred to Phase 7.
+- ✅ **P1.2.4** `f7201a2` — focal-point picker. `LayerKind::
+  Video` gains `fit` + `focal`; per-frame render code merges
+  Image and Video arms. `SetLayerFocal` mutation handles both
+  variants. UI: read-only fit + focal sliders (Cover only).
+  Click-to-set focal on thumbnail deferred (P7).
+- ✅ **P1.5.1** `d9c7f9d` — left-rail video row anatomy.
+  Loop-mode glyph (∞ / → / ⇆) + in/out trim markers overlaid
+  on the thumbnail. Inline scrub bar with hover thumbnails
+  deferred to Phase 7 (depends on same FFI as P1.4.5's
+  thumbnail strip).
+- ✅ **P1.3.4** `b397c10` — `texture_overlay` preset. Six-
+  binding bind group: source + overlay + 4 blend modes
+  (Normal/Multiply/Screen/Add). ImageTextureCache loads
+  `overlay_path` per-frame (cache-hit zero-cost). UI: file
+  picker in the Treatment section.
+- ✅ **P1.3.5** `ea9eade` — `palette_extract` (simplified to
+  bit-depth posterise + Bayer dither; true k-means deferred
+  to Phase 7).
+- ✅ **P1.3.6** `e5f1002` — `collage` preset. Fixed 2×2 grid
+  of 4 slot textures (variable-N deferred to Phase 7). Slots
+  load through ImageTextureCache; empty slots fall back to
+  source. UI: 4 file pickers with ✕ clear buttons.
+- ✅ **P1.7.1** `2cce0d5` — version bump 0.4.0 → 0.5.0.
+  `release-show` profile build verified.
+- ✅ **P1.7.2** `7669ee3` — CHANGELOG + README documenting
+  the v0.5 treatment library and video grammar.
+- ✅ **P1.7.3** `bae8b57` — show-day checklist items 27-31
+  for treatments + video grammar.
+- ⏳ **P1.7.4** — deferred. Real video fixture + Path-A
+  refactor of the perf gate. Spec-task itself documents the
+  scope reduction. The existing FxLayer-substituted perf gate
+  remains in place (M-series p99 baseline ≈ 5.87 ms).
 
 **UX fixes shipped alongside W2/W3 (post-smoke):**
 
@@ -156,9 +205,10 @@ below is sized for a single PR.
 
 **Test status:**
 
-- 561 tests pass under `--features v3,midi` (was 557; +4 from
-  W3.2 + W3.3 registry/descriptor tests).
-- 292 tests pass under default features (was 288; +4).
+- 567 tests pass under `--features v3,midi` (was 561; +6 from
+  the W4 + W3.4 + W3.6 mutations and the new preset registry/
+  descriptor tests).
+- 296 tests pass under default features (was 292; +4).
 - 267 tests pass under `--no-default-features`.
 - 1 test passes under `--features gpu-tests` (P0.9.5; P1.7.4 will
   refresh the fixture).
@@ -1705,6 +1755,29 @@ gaps:
 
 **Out of scope:** non-macOS CI configurations; long-duration soak
 testing (operator's pre-tag work).
+
+### Implementation note (2026-05-12 — deferred)
+
+P1.7.4 is **deferred to a Phase 1.x follow-up.** The two substantive
+pieces ship independently:
+
+- **Fixture mp4** — embedding a binary in `tests/fixtures/` raises
+  repo-size / license concerns and a generator approach via
+  AVFoundation writer APIs is its own substantial FFI surface.
+  The existing P0.9.5 FxLayer-substituted gate remains in place
+  (M-series p99 ≈ 5.87 ms baseline still holds — verified during
+  the v0.5 release-show profile build).
+- **Path-A refactor** — `render_m5_pipeline` is currently
+  `fn` (private to app.rs) by design; re-exporting it through
+  `lib.rs` for tests would expand the crate's public API
+  surface meaningfully. The clean approach is a `pub(crate)`
+  visibility bump *plus* a `tests` cfg-gate on the helper —
+  doable but not in this batch.
+
+The perf gate as it stands does its job: it bounds the show-day
+frame budget under a stable fixture. The two refinements would
+upgrade the fixture's realism + cut the local Path-B
+re-implementation, but they don't gate Phase 1 acceptance.
 
 ---
 
