@@ -29,6 +29,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::SystemTime;
 
+use image::ImageDecoder;
+
 use crate::error::RmapError;
 
 /// Hard cap on either axis after load. A larger source image is downscaled
@@ -37,20 +39,53 @@ use crate::error::RmapError;
 /// on integrated GPUs targeted at 1080p output.
 pub const MAX_DIM: u32 = 4096;
 
-/// Decode a raster image (PNG / JPG / any format `image` supports) and
-/// upload it to a fresh `Rgba8UnormSrgb` texture. Returns the texture, a
-/// default `TextureView`, and the `(width, height)` actually uploaded
-/// after any aspect-preserving downscale.
+/// Decode a raster image (PNG / JPG / WEBP / GIF first-frame / any
+/// format `image` supports) and upload it to a fresh `Rgba8UnormSrgb`
+/// texture. Returns the texture, a default `TextureView`, and the
+/// `(width, height)` actually uploaded after any aspect-preserving
+/// downscale and EXIF orientation rotation.
+///
+/// P1.1.4 — applies EXIF `Orientation` so phone-portrait JPEGs land
+/// upright instead of sideways. Dimensions returned are post-rotation
+/// (rotate-90 / 270 swap the axes); the `(orig_w, orig_h)` value in
+/// the result is the pre-downscale, **post-rotation** dimensions so
+/// the caller can detect a downscale by comparing against the
+/// returned dims.
 #[allow(dead_code)] // T-M8-03 wires this into rebuild_layers.
 pub fn upload_image_rgba8(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     path: &Path,
 ) -> Result<(wgpu::Texture, wgpu::TextureView, (u32, u32)), RmapError> {
-    let img = image::open(path)
+    // P1.1.4: read EXIF orientation from the decoder before consuming
+    // it into a DynamicImage. Then apply the rotation in-place. JPEG
+    // / TIFF / WEBP carry orientation metadata; other formats return
+    // `Orientation::NoTransforms` and the apply call is a no-op.
+    let reader = image::ImageReader::open(path)
+        .map_err(|e| RmapError::Other(format!("failed to open image {}: {e}", path.display())))?
+        .with_guessed_format()
+        .map_err(|e| {
+            RmapError::Other(format!(
+                "failed to guess image format for {}: {e}",
+                path.display()
+            ))
+        })?;
+    let mut decoder = reader.into_decoder().map_err(|e| {
+        RmapError::Other(format!(
+            "failed to construct decoder for {}: {e}",
+            path.display()
+        ))
+    })?;
+    let orientation = decoder
+        .orientation()
+        .unwrap_or(image::metadata::Orientation::NoTransforms);
+    let mut img = image::DynamicImage::from_decoder(decoder)
         .map_err(|e| RmapError::Other(format!("failed to decode image {}: {e}", path.display())))?;
+    let was_oriented = orientation != image::metadata::Orientation::NoTransforms;
+    img.apply_orientation(orientation);
 
-    let (mut width, mut height) = (img.width(), img.height());
+    let original_dims = (img.width(), img.height());
+    let (mut width, mut height) = original_dims;
     // Aspect-preserving downscale to MAX_DIM if needed.
     let rgba = if width <= MAX_DIM && height <= MAX_DIM {
         img.into_rgba8()
@@ -60,11 +95,35 @@ pub fn upload_image_rgba8(
         let new_h = ((height as f32 * scale).round() as u32).max(1);
         width = new_w;
         height = new_h;
+        // P1.1.4: surface the downscale loudly so it shows up in
+        // `RUST_LOG=rmap=warn` capture during a show prep. The cache
+        // (P1.1.2) calls this once per `(path, mtime)` so we don't
+        // spam the log on re-renders.
+        tracing::warn!(
+            target: "rmap::image",
+            path = %path.display(),
+            orig_w = original_dims.0,
+            orig_h = original_dims.1,
+            new_w,
+            new_h,
+            max_dim = MAX_DIM,
+            "image downscaled to fit GPU budget — re-encode the source \
+             to a smaller resolution upstream if possible",
+        );
         // image::DynamicImage::resize uses Lanczos3 — sharp enough that a
         // 4 K event shot downscaled to 4096 stays crisp on a projector.
         img.resize(new_w, new_h, image::imageops::FilterType::Lanczos3)
             .into_rgba8()
     };
+
+    if was_oriented {
+        tracing::debug!(
+            target: "rmap::image",
+            path = %path.display(),
+            ?orientation,
+            "applied EXIF orientation",
+        );
+    }
 
     let extent = wgpu::Extent3d {
         width,
@@ -306,6 +365,41 @@ mod tests {
         // the populate-then-clear behaviour.
         c.clear();
         assert_eq!(c.len(), 0);
+    }
+
+    /// P1.1.4 — `apply_orientation` on `DynamicImage` is the workhorse
+    /// for EXIF auto-rotate. Rotate-90 swaps width and height; this test
+    /// confirms the in-place transform is what we expect (so when we
+    /// chain it through `from_decoder` we trust the result).
+    #[test]
+    fn dynamic_image_apply_rotate90_swaps_axes() {
+        use image::metadata::Orientation;
+        // 4×2 image (landscape) — applying Rotate90 should leave a 2×4 (portrait).
+        let mut img = image::DynamicImage::ImageRgba8(image::RgbaImage::new(4, 2));
+        assert_eq!((img.width(), img.height()), (4, 2));
+        img.apply_orientation(Orientation::Rotate90);
+        assert_eq!(
+            (img.width(), img.height()),
+            (2, 4),
+            "Rotate90 must swap width/height — operator drops phone-\
+             portrait JPEG, expects upright result"
+        );
+    }
+
+    /// P1.1.4 — `Orientation::NoTransforms` leaves the image unchanged.
+    /// Most file formats (PNG, GIF, BMP) report this; our `apply` call
+    /// must be a no-op in that case so non-EXIF files round-trip
+    /// byte-equal.
+    #[test]
+    fn dynamic_image_apply_no_transform_is_noop() {
+        use image::metadata::Orientation;
+        let mut img = image::DynamicImage::ImageRgba8(image::RgbaImage::new(4, 2));
+        let before = img.clone();
+        img.apply_orientation(Orientation::NoTransforms);
+        // Compare raw pixel buffers — the apply path must not have
+        // touched a single byte.
+        assert_eq!(img.as_bytes(), before.as_bytes());
+        assert_eq!((img.width(), img.height()), (4, 2));
     }
 
     /// Smoke test: synthesize a 4×4 PNG to a temp file, ensure the path
