@@ -90,6 +90,16 @@ pub enum LayerKind {
         /// playback on existing v7 saves.
         #[serde(default = "default_video_clip_out")]
         clip_out: f32,
+        /// P1.4.4 — when true, the layer's effective playback speed is
+        /// `speed × (current_bpm / 120)` — i.e. at 120 BPM the manual
+        /// `speed` field plays the clip at its set rate; at 60 BPM the
+        /// clip runs half-speed; at 240 BPM, double-speed. The 120 BPM
+        /// reference matches the show-day Clock module's default tempo.
+        /// `speed` continues to be the operator-facing rate; BPM-lock
+        /// just scales it. Default `false` preserves the existing free-
+        /// run behaviour.
+        #[serde(default)]
+        bpm_lock: bool,
     },
     /// v0.4 W5 — procedural FX layer driven by mask SDF. Real fields
     /// landed in P0.5.1; the scaffold carries the preset id and a
@@ -687,6 +697,7 @@ pub fn layer_from_video_path(id: impl Into<String>, path: PathBuf) -> LayerConfi
             loop_mode: LoopMode::Loop,
             clip_in: 0.0,
             clip_out: f32::INFINITY,
+            bpm_lock: false,
         },
         enabled: true,
         transform: Transform2D::default(),

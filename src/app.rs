@@ -1354,6 +1354,13 @@ struct LayerState {
     /// `Stop` is sent on Drop before this field is dropped, which
     /// causes the worker thread to exit and the handle to detach).
     _video_worker_handle: Option<std::thread::JoinHandle<()>>,
+    /// P1.4.4 — cache of the last effective playback speed dispatched
+    /// to the worker by the BPM-lock loop. Re-dispatch only happens
+    /// when this cached value would change by ≥ 1e-3, so a steady BPM
+    /// never floods the worker with redundant `SetSpeed` messages.
+    /// `None` means BPM-lock has not yet driven this layer (either
+    /// `bpm_lock = false` or the clock hasn't ticked since toggle).
+    last_bpm_locked_speed: Option<f32>,
 }
 
 impl Drop for LayerState {
@@ -3109,6 +3116,7 @@ fn rebuild_layers(
                 video_control: None,
                 video_upload_target: None,
                 _video_worker_handle: None,
+                last_bpm_locked_speed: None,
             });
             continue;
         }
@@ -3253,6 +3261,7 @@ fn rebuild_layers(
             video_control,
             video_upload_target,
             _video_worker_handle: worker_handle_opt,
+            last_bpm_locked_speed: None,
         });
     }
     Ok(out)
@@ -4420,6 +4429,46 @@ fn handle_editing_window_event(
                             if let Some(ref ctrl) = layer_state.video_control {
                                 let _ = ctrl.try_send(msg);
                             }
+                        }
+                    }
+
+                    // P1.4.4 — BPM-lock dispatch. For each Video layer
+                    // with `bpm_lock = true`, the effective speed is
+                    // `manual_speed × (current_bpm / 120)`. We only
+                    // dispatch `SetSpeed` when the cached value would
+                    // change by ≥ 1e-3, so a steady BPM never floods
+                    // the worker thread. Toggling `bpm_lock` to false
+                    // re-dispatches the manual speed once so the
+                    // worker is no longer scaled.
+                    let current_bpm = state.clock.bpm();
+                    for (layer_idx, lc) in state.project.layers.iter().enumerate() {
+                        let (manual_speed, lock_on) = match &lc.kind {
+                            schema::LayerKind::Video {
+                                speed, bpm_lock, ..
+                            } => (*speed, *bpm_lock),
+                            _ => continue,
+                        };
+                        let Some(layer_state) = state.layers.get_mut(layer_idx) else {
+                            continue;
+                        };
+                        let target = if lock_on {
+                            manual_speed * (current_bpm / 120.0).max(0.05)
+                        } else {
+                            // Once-only re-dispatch of the manual speed
+                            // when bpm_lock is toggled off mid-run, so
+                            // the worker exits the scaled regime.
+                            manual_speed
+                        };
+                        let needs_dispatch = match layer_state.last_bpm_locked_speed {
+                            None => lock_on, // first tick after lock_on
+                            Some(prev) => (prev - target).abs() > 1e-3,
+                        };
+                        if needs_dispatch {
+                            if let Some(ref ctrl) = layer_state.video_control {
+                                let _ = ctrl
+                                    .try_send(crate::video_layer::VideoControl::SetSpeed(target));
+                            }
+                            layer_state.last_bpm_locked_speed = Some(target);
                         }
                     }
                 }

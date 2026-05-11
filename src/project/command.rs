@@ -1401,6 +1401,46 @@ pub struct SetVideoClipRange {
     pub old_out: f32,
 }
 
+/// P1.4.4 — payload for [`Mutation::SetVideoBpmLock`]. Per-field
+/// Reverse on a bool; trivial round-trip.
+#[derive(Debug, Clone, Copy)]
+pub struct SetVideoBpmLock {
+    /// Index into `Project.layers`.
+    pub layer_idx: usize,
+    /// New BPM-lock state.
+    pub new: bool,
+    /// Pre-mutation state.
+    pub old: bool,
+}
+
+impl ReverseStorage for SetVideoBpmLock {
+    fn apply(self, project: &mut Project) -> Self {
+        let layer = project
+            .layers
+            .get_mut(self.layer_idx)
+            .expect("SetVideoBpmLock: layer_idx out of range");
+        match &mut layer.kind {
+            crate::project::schema::LayerKind::Video { bpm_lock, .. } => {
+                debug_assert_eq!(
+                    *bpm_lock, self.old,
+                    "SetVideoBpmLock stale Reverse: bpm_lock={} expected old={}",
+                    *bpm_lock, self.old
+                );
+                *bpm_lock = self.new;
+            }
+            _ => panic!(
+                "SetVideoBpmLock: layer {} is not a Video layer",
+                self.layer_idx
+            ),
+        }
+        SetVideoBpmLock {
+            layer_idx: self.layer_idx,
+            new: self.old,
+            old: self.new,
+        }
+    }
+}
+
 impl ReverseStorage for SetVideoClipRange {
     fn apply(self, project: &mut Project) -> Self {
         let layer = project
@@ -1519,6 +1559,9 @@ pub enum Mutation {
     /// P1.4.1 — replace `LayerKind::Video { clip_in, clip_out, .. }` for
     /// a layer (atomic pair). Delegates to [`SetVideoClipRange`].
     SetVideoClipRange(SetVideoClipRange),
+    /// P1.4.4 — replace `LayerKind::Video { bpm_lock, .. }` for a layer.
+    /// Delegates to [`SetVideoBpmLock`].
+    SetVideoBpmLock(SetVideoBpmLock),
 
     /// Insert `layer` at `position`. Reverse is `RemoveLayer { idx: position }`.
     ///
@@ -1652,6 +1695,7 @@ impl Mutation {
             Mutation::SetVideoSpeed(s) => Mutation::SetVideoSpeed(s.apply(project)),
             Mutation::SetVideoLoopMode(s) => Mutation::SetVideoLoopMode(s.apply(project)),
             Mutation::SetVideoClipRange(s) => Mutation::SetVideoClipRange(s.apply(project)),
+            Mutation::SetVideoBpmLock(s) => Mutation::SetVideoBpmLock(s.apply(project)),
             Mutation::SwapLayers(s) => Mutation::SwapLayers(s.apply(project)),
             Mutation::RelinkAssetPath(s) => Mutation::RelinkAssetPath(s.apply(project)),
             Mutation::SetLayerKind(s) => Mutation::SetLayerKind(s.apply(project)),
@@ -1791,7 +1835,8 @@ impl Mutation {
             | Mutation::SetOutputRgbMatrix(_)
             | Mutation::SetVideoSpeed(_)
             | Mutation::SetVideoLoopMode(_)
-            | Mutation::SetVideoClipRange(_) => false,
+            | Mutation::SetVideoClipRange(_)
+            | Mutation::SetVideoBpmLock(_) => false,
             Mutation::ApplyProjectSnapshot(s) => s.non_undoable,
         }
     }
@@ -2282,6 +2327,24 @@ impl Project {
             ),
         };
         Mutation::SetVideoLoopMode(SetVideoLoopMode {
+            layer_idx,
+            new,
+            old,
+        })
+    }
+
+    /// P1.4.4 — build a `SetVideoBpmLock` mutation. Captures the
+    /// layer's current `bpm_lock` as `old`. Panics if `layer_idx` is
+    /// out of range or the layer is not a `LayerKind::Video`.
+    pub fn set_video_bpm_lock_mutation(&self, layer_idx: usize, new: bool) -> Mutation {
+        let old = match &self.layers[layer_idx].kind {
+            crate::project::schema::LayerKind::Video { bpm_lock, .. } => *bpm_lock,
+            _ => panic!(
+                "set_video_bpm_lock_mutation: layer {} is not a Video layer",
+                layer_idx
+            ),
+        };
+        Mutation::SetVideoBpmLock(SetVideoBpmLock {
             layer_idx,
             new,
             old,
@@ -3622,6 +3685,9 @@ mod tests {
                 clip_in: f32,
                 clip_out: f32,
             },
+            /// P1.4.4 — toggle BPM-lock on a Video layer. Falls back
+            /// to a no-op when no Video layer exists.
+            VideoBpmLock(bool),
             /// P1.2.1 — set / clear a layer's treatment. `None` clears;
             /// `Some(preset_pick)` selects one of two preset_ids (toggle).
             /// Always targets layer index 0 (fresh_project has one layer).
@@ -4008,6 +4074,15 @@ mod tests {
                         None => project.set_gamma_mutation(project.gamma),
                     }
                 }
+                MutationKind::VideoBpmLock(v) => {
+                    let idx = project.layers.iter().position(|l| {
+                        matches!(l.kind, crate::project::schema::LayerKind::Video { .. })
+                    });
+                    match idx {
+                        Some(i) => project.set_video_bpm_lock_mutation(i, *v),
+                        None => project.set_gamma_mutation(project.gamma),
+                    }
+                }
                 // P1.2.1 — Treatment mutations target layer 0
                 // (fresh_project has exactly one layer). The harness
                 // exercises None ↔ Some toggles + the whole-HashMap
@@ -4276,6 +4351,8 @@ mod tests {
                         clip_out: start + dur,
                     }
                 }),
+                // P1.4.4 — video BPM-lock toggle.
+                any::<bool>().prop_map(MutationKind::VideoBpmLock),
                 // P1.2.1 — Treatment toggle (None / Some(tone_map | blur_mask))
                 // and params edit. The params variant falls back to a no-op
                 // when treatment is None (set_layer_treatment_params_mutation

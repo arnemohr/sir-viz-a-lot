@@ -262,17 +262,23 @@ pub fn show(
                             .id_salt(HDR_VIDEO)
                             .default_open(true)
                             .show(ui, |ui| {
-                                let (cur_speed, cur_loop_mode, cur_clip_in, cur_clip_out) =
-                                    match &project.layers[layer_idx].kind {
-                                        LayerKind::Video {
-                                            speed,
-                                            loop_mode,
-                                            clip_in,
-                                            clip_out,
-                                            ..
-                                        } => (*speed, *loop_mode, *clip_in, *clip_out),
-                                        _ => unreachable!(),
-                                    };
+                                let (
+                                    cur_speed,
+                                    cur_loop_mode,
+                                    cur_clip_in,
+                                    cur_clip_out,
+                                    cur_bpm_lock,
+                                ) = match &project.layers[layer_idx].kind {
+                                    LayerKind::Video {
+                                        speed,
+                                        loop_mode,
+                                        clip_in,
+                                        clip_out,
+                                        bpm_lock,
+                                        ..
+                                    } => (*speed, *loop_mode, *clip_in, *clip_out, *bpm_lock),
+                                    _ => unreachable!(),
+                                };
 
                                 // Speed slider — 0.25× to 4.0× covers the
                                 // useful operator range. Log scale so 1.0
@@ -421,6 +427,31 @@ pub fn show(
                                     }
                                 });
                                 let _ = dispatched;
+
+                                // P1.4.4 — BPM-lock toggle. When on, the
+                                // per-frame dispatch loop in `app.rs`
+                                // computes effective speed as
+                                // `manual_speed × (current_bpm / 120)`
+                                // and sends `VideoControl::SetSpeed` on
+                                // BPM change. The schema field is
+                                // toggled here; the dispatch lives in
+                                // `app.rs`.
+                                ui.add_space(2.0);
+                                let mut bpm_edit = cur_bpm_lock;
+                                if ui
+                                    .checkbox(
+                                        &mut bpm_edit,
+                                        "BPM-lock (scale speed with clock BPM, 120 = identity)",
+                                    )
+                                    .changed()
+                                {
+                                    st.pending_mutations.push(
+                                        project.set_video_bpm_lock_mutation(layer_idx, bpm_edit),
+                                    );
+                                    // No VideoControl on toggle — the
+                                    // per-frame loop dispatches SetSpeed
+                                    // on next BPM tick.
+                                }
                             });
 
                         ui.add_space(4.0);
