@@ -3,7 +3,7 @@
 Companion task spec for [`004-phase-1.md`](004-phase-1.md). Each task
 below is sized for a single PR.
 
-## Implementation status (2026-05-11, W1 + W6 + W2.1–W2.3 + W3.1 complete)
+## Implementation status (2026-05-11, W1 + W6 + W2.1–W2.3 + W3.1–W3.3 complete)
 
 **Shipped:**
 
@@ -81,6 +81,44 @@ below is sized for a single PR.
   shoulder=0`) produce passthrough so the preset is visually
   transparent until tuned. Picker (P1.2.3) auto-discovers the
   preset + renders the three sliders.
+- ✅ **P1.3.3** `91f27c5` — `luminance_reveal` treatment preset.
+  Rec. 601 luma → smoothstep threshold modulates alpha; RGB
+  passthrough. Defaults: 50 % threshold, 0.1 softness band,
+  non-inverted. Output is premultiplied so the downstream blend
+  matches the rest of the chain. Introduced
+  `build_single_pass_treatment` / `draw_single_pass_treatment`
+  helpers — the shared pattern now amortises across at least
+  three presets (identity / tone_map / luminance_reveal).
+- ✅ **P1.3.2** `4b24a48` — `blur_mask` treatment preset.
+  Three-pass SDF-gated edge-feather: (1) fit → dst, (2) H
+  gaussian → intermediate, (3) V gaussian → dst. Per-fragment
+  radius `= max_radius_px * pow(1 - smoothstep(0, edge_band,
+  abs(sdf)), curve)`; identity at `max_radius_px = 0`. Reuses
+  `ls.intermediate_view` (free between source blit and first
+  effect). `TreatmentInputs` gained `sdf` + `intermediate`
+  optional fields; per-frame Image/Video branch syncs SDF up
+  front (hash-gated). `build.rs` SDF_CONSUMERS extended with
+  `treat_blur` prefix so the helper is prepended at compile
+  time. Three params: max_radius_px (0..=32), edge_band
+  (0.01..=0.3 norm), falloff (0..=1).
+
+**UX fixes shipped alongside W2/W3 (post-smoke):**
+
+- ✅ **60052d4** — auto-select dropped layer. Drag-drop pushes
+  AddLayer + immediately points `scene_editor.selected` at the
+  new layer so the Selected-layer panel targets it without a
+  manual rail click. Selection is session-scoped (not undoable).
+- ✅ **60052d4** — Treatment-section placeholder now names the
+  actual layer kind ("this is a SVG layer") with `warn_fg_color`
+  rather than weak text. FX layers get a secondary line pointing
+  at the FX preset picker. Removes the "I expanded the section
+  but the combobox is missing" confusion for SVG drops.
+- ✅ **2a3330b** — Left rail width bumped 88 → 108 to give the
+  S/M/▲/▼ controls column a real ~32 px. *Note:* a follow-up
+  smoke screenshot still showed clipping; the row layout in
+  `layer_strip.rs` is the deeper root cause (per-row `row_rect`
+  appears not to track the panel width), open for a future
+  diagnose pass.
 
 **Not yet started:**
 
@@ -118,9 +156,9 @@ below is sized for a single PR.
 
 **Test status:**
 
-- 557 tests pass under `--features v3,midi` (was 551; +6 from
-  W2.2 + W3.1 registry/descriptor tests).
-- 288 tests pass under default features (was 284; +4).
+- 561 tests pass under `--features v3,midi` (was 557; +4 from
+  W3.2 + W3.3 registry/descriptor tests).
+- 292 tests pass under default features (was 288; +4).
 - 267 tests pass under `--no-default-features`.
 - 1 test passes under `--features gpu-tests` (P0.9.5; P1.7.4 will
   refresh the fixture).
@@ -132,10 +170,13 @@ below is sized for a single PR.
     findings): 7 tests + proptest harness coverage.
   - W2.2 (treatment registry / dispatch contract): 4 tests.
   - W3.1 (tone_map registry + descriptor identity defaults): 2
-    tests (registry + descriptor checks; golden-image identity
-    test deferred — `tests/golden/` has no image-layer baseline,
-    so an identity-defaults bit-exact check would also need a
-    fresh baseline to land in the same commit).
+    tests.
+  - W3.2 (blur_mask registry + max_radius_px=0 identity): 2 tests.
+  - W3.3 (luminance_reveal registry + descriptor sanity): 2 tests.
+    Golden-image identity tests for all three presets deferred —
+    `tests/golden/` has no image-layer baseline, so an
+    identity-defaults bit-exact check would also need a fresh
+    baseline to land in the same commit.
   - W4.0 (auto-play, fixture-gated): 1 test (skipped without
     fixture).
 
