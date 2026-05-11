@@ -3912,6 +3912,19 @@ fn render_m5_pipeline(
                         Some(treatment),
                         schema::LayerKind::Image { .. } | schema::LayerKind::Video { .. },
                     ) => {
+                        // P1.3.2 — multi-pass presets (`blur_mask`) need
+                        // the layer's SDF + scratch texture. Sync the SDF
+                        // up front (hash-gated, so this is a no-op when
+                        // warp geometry hasn't changed); the second sync
+                        // later in the warp pass collapses to the same
+                        // hash check. Single-pass presets ignore both
+                        // fields.
+                        ls.warp_renderer.sync_mesh_and_mask(
+                            &renderer.gpu.device,
+                            &renderer.gpu.queue,
+                            &cfg.warp,
+                        );
+                        let sdf_v = ls.warp_renderer.sdf_view();
                         let inputs = crate::render::treatments::TreatmentInputs {
                             source: tex_view,
                             fit_uniform: &ls.fit_uniform,
@@ -3919,6 +3932,8 @@ fn render_m5_pipeline(
                             clock_secs: clock.elapsed().as_secs_f32(),
                             overlay: None,
                             collage: &[],
+                            sdf: Some(sdf_v),
+                            intermediate: Some(&ls.intermediate_view),
                         };
                         treatment_pipeline.dispatch(
                             &renderer.gpu.device,

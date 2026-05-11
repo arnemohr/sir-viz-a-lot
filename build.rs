@@ -17,7 +17,7 @@ use std::path::Path;
 /// Basename prefixes whose source must be prefixed with sdf_helper.wgsl
 /// for validation. Mirrors the runtime concatenation in warp.rs (and future
 /// fx_presets.rs). Extend this list in P0.5.3 when fx_ripple_wash.wgsl ships.
-const SDF_CONSUMERS: &[&str] = &["warp", "fx_"];
+const SDF_CONSUMERS: &[&str] = &["warp", "fx_", "treat_blur"];
 
 fn main() {
     let shader_dir = Path::new("src/render/shaders");

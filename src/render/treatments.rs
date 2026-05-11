@@ -46,6 +46,9 @@ pub const TONE_MAP_PRESET_ID: &str = "tone_map";
 /// `luminance_reveal` preset id (P1.3.3).
 pub const LUMINANCE_REVEAL_PRESET_ID: &str = "luminance_reveal";
 
+/// `blur_mask` preset id (P1.3.2).
+pub const BLUR_MASK_PRESET_ID: &str = "blur_mask";
+
 /// Inputs threaded into every preset's `render` call. The struct grows over
 /// time (W3 adds `overlay` and `collage`); existing presets ignore fields
 /// they don't read.
@@ -81,6 +84,18 @@ pub struct TreatmentInputs<'a> {
     /// don't take a collage. W3 wires this against `Treatment.collage_paths`.
     #[allow(dead_code)] // W3 will populate this
     pub collage: &'a [&'a wgpu::TextureView],
+
+    /// Layer's per-frame SDF (R32Float). Populated by the caller after
+    /// `sync_mesh_and_mask`. `blur_mask` consumes this to gate the
+    /// gaussian radius by distance-to-edge; other presets ignore it.
+    pub sdf: Option<&'a wgpu::TextureView>,
+
+    /// Layer's scratch texture (same format as the effect chain's
+    /// ping-pong). `blur_mask` uses it for the horizontal-pass output
+    /// before the vertical pass writes back to `dst`. Other multi-pass
+    /// treatments may consume it the same way; single-pass presets
+    /// leave it `None`.
+    pub intermediate: Option<&'a wgpu::TextureView>,
 }
 
 /// Static descriptor for a tunable preset parameter. The Selected-layer UI
@@ -108,6 +123,7 @@ pub fn registry() -> &'static [(&'static str, &'static str)] {
         (IDENTITY_PRESET_ID, "Identity (no-op)"),
         (TONE_MAP_PRESET_ID, "Tone map"),
         (LUMINANCE_REVEAL_PRESET_ID, "Luminance reveal"),
+        (BLUR_MASK_PRESET_ID, "Blur mask (edge feather)"),
     ]
 }
 
@@ -126,6 +142,7 @@ pub fn param_descriptors(preset_id: &str) -> &'static [ParamDescriptor] {
         IDENTITY_PRESET_ID => &[],
         TONE_MAP_PRESET_ID => TONE_MAP_DESCRIPTORS,
         LUMINANCE_REVEAL_PRESET_ID => LUMINANCE_REVEAL_DESCRIPTORS,
+        BLUR_MASK_PRESET_ID => BLUR_MASK_DESCRIPTORS,
         _ => &[],
     }
 }
@@ -186,6 +203,35 @@ const LUMINANCE_REVEAL_DESCRIPTORS: &[ParamDescriptor] = &[
     },
 ];
 
+/// Static descriptors for the `blur_mask` preset (P1.3.2).
+/// Defaults: zero radius (identity = no blur), 0.1 norm-units edge band
+/// (~7 % of layer width), smooth falloff. Identity at default radius =
+/// the operator sees no change until they reach for the radius slider.
+#[allow(dead_code)] // referenced only through `param_descriptors` (v3 UI)
+const BLUR_MASK_DESCRIPTORS: &[ParamDescriptor] = &[
+    ParamDescriptor {
+        key: "max_radius_px",
+        label: "Max radius (px)",
+        min: 0.0,
+        max: 32.0,
+        default: 0.0,
+    },
+    ParamDescriptor {
+        key: "edge_band",
+        label: "Edge band (norm)",
+        min: 0.01,
+        max: 0.3,
+        default: 0.1,
+    },
+    ParamDescriptor {
+        key: "falloff",
+        label: "Falloff (0=hard, 1=smooth)",
+        min: 0.0,
+        max: 1.0,
+        default: 0.7,
+    },
+];
+
 /// Per-preset render pipelines. One field per preset; dispatch is a `match`
 /// on `preset_id`. Mirrors the `FxPresetPipeline` shape so adding a preset
 /// is "add a field + add a match arm" with no trait-object dispatch.
@@ -193,6 +239,7 @@ pub struct TreatmentPipeline {
     identity: IdentityTreatmentPipeline,
     tone_map: ToneMapTreatmentPipeline,
     luminance_reveal: LuminanceRevealTreatmentPipeline,
+    blur_mask: BlurMaskTreatmentPipeline,
 }
 
 impl TreatmentPipeline {
@@ -203,6 +250,7 @@ impl TreatmentPipeline {
             identity: IdentityTreatmentPipeline::new(device, target_format),
             tone_map: ToneMapTreatmentPipeline::new(device, target_format),
             luminance_reveal: LuminanceRevealTreatmentPipeline::new(device, target_format),
+            blur_mask: BlurMaskTreatmentPipeline::new(device, target_format),
         }
     }
 
@@ -233,6 +281,18 @@ impl TreatmentPipeline {
             LUMINANCE_REVEAL_PRESET_ID => {
                 self.luminance_reveal
                     .render(device, queue, encoder, dst, inputs);
+                true
+            }
+            BLUR_MASK_PRESET_ID => {
+                // blur_mask is multi-pass and consumes the layer's SDF +
+                // scratch texture. If either is missing (caller did not
+                // populate them, e.g. SVG/FxLayer route), skip the dispatch
+                // and let the caller's fallback render the source unblurred.
+                let (Some(sdf), Some(intermediate)) = (inputs.sdf, inputs.intermediate) else {
+                    return false;
+                };
+                self.blur_mask
+                    .render(device, queue, encoder, dst, inputs, sdf, intermediate);
                 true
             }
             _ => false,
@@ -652,6 +712,471 @@ impl LuminanceRevealTreatmentPipeline {
     }
 }
 
+/// Blur-mask treatment pipeline (P1.3.2). Multi-pass:
+///   1. Fit pass: source → dst (apply cover/contain crop into ping-pong
+///      first slot).
+///   2. H pass: dst → intermediate (horizontal gaussian, SDF-gated
+///      radius).
+///   3. V pass: intermediate → dst (vertical gaussian, same SDF math).
+///
+/// Identity at default params: `max_radius_px = 0` → blur radius is
+/// zero everywhere → V pass output equals the fit-only output, which
+/// matches the no-treatment default path. So the preset is visually
+/// transparent until the operator increases the radius slider.
+struct BlurMaskTreatmentPipeline {
+    // Fit pass (textured_quad.wgsl) — same shape as IdentityTreatmentPipeline
+    // but owned separately to keep BlurMask's pipeline state isolated.
+    fit_pipeline: wgpu::RenderPipeline,
+    fit_bgl: wgpu::BindGroupLayout,
+    fit_sampler: wgpu::Sampler,
+
+    // H + V passes — same shader-pair shape as the existing BlurPipeline,
+    // augmented with an SDF binding for per-fragment radius gating.
+    blur_h_pipeline: wgpu::RenderPipeline,
+    blur_v_pipeline: wgpu::RenderPipeline,
+    blur_bgl: wgpu::BindGroupLayout,
+    blur_sampler: wgpu::Sampler,
+    blur_sdf_sampler: wgpu::Sampler,
+    blur_params_buf: wgpu::Buffer,
+}
+
+impl BlurMaskTreatmentPipeline {
+    fn new(device: &wgpu::Device, target_format: wgpu::TextureFormat) -> Self {
+        // ---- Fit pass (textured_quad.wgsl, ALPHA_BLENDING) -----------
+        let fit_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("treat_blur_mask fit (textured_quad.wgsl)"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/textured_quad.wgsl").into()),
+        });
+
+        let fit_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("treat_blur_mask fit bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: std::num::NonZeroU64::new(16),
+                    },
+                    count: None,
+                },
+            ],
+        });
+
+        let fit_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("treat_blur_mask fit pipeline layout"),
+            bind_group_layouts: &[Some(&fit_bgl)],
+            immediate_size: 0,
+        });
+
+        let fit_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("treat_blur_mask fit pipeline"),
+            layout: Some(&fit_layout),
+            vertex: wgpu::VertexState {
+                module: &fit_shader,
+                entry_point: Some("vs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &fit_shader,
+                entry_point: Some("fs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: target_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        let fit_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("treat_blur_mask fit sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
+        });
+
+        // ---- H + V passes (treat_blur_mask_{h,v}.wgsl) ---------------
+        // Both shaders share the same bind layout: source, sampler,
+        // params, SDF. build.rs concatenates sdf_helper.wgsl at the
+        // front (SDF_CONSUMERS prefix match "treat_blur").
+        let blur_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("treat_blur_mask blur bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: std::num::NonZeroU64::new(16),
+                    },
+                    count: None,
+                },
+                // SDF texture — R32Float, unfilterable. The helper uses
+                // textureLoad, so the sampler slot is unused at runtime
+                // but the shader declaration requires a binding type.
+                // Keep the texture as the only entry to keep the bind
+                // group small.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                    },
+                    count: None,
+                },
+            ],
+        });
+
+        let blur_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("treat_blur_mask blur pipeline layout"),
+            bind_group_layouts: &[Some(&blur_bgl)],
+            immediate_size: 0,
+        });
+
+        // Both shaders need the SDF helper prepended at runtime to match
+        // build.rs's compile-time validation (which already prepended
+        // it via the SDF_CONSUMERS rule).
+        let h_src = format!(
+            "{}\n{}",
+            crate::render::sdf::SDF_HELPER_WGSL,
+            include_str!("shaders/treat_blur_mask_h.wgsl")
+        );
+        let v_src = format!(
+            "{}\n{}",
+            crate::render::sdf::SDF_HELPER_WGSL,
+            include_str!("shaders/treat_blur_mask_v.wgsl")
+        );
+        let h_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("treat_blur_mask_h.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(h_src.into()),
+        });
+        let v_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("treat_blur_mask_v.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(v_src.into()),
+        });
+
+        let blur_h_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("treat_blur_mask H pipeline"),
+            layout: Some(&blur_layout),
+            vertex: wgpu::VertexState {
+                module: &h_shader,
+                entry_point: Some("vs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &h_shader,
+                entry_point: Some("fs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: target_format,
+                    // H pass: REPLACE so the intermediate texture is
+                    // fully populated each frame (no read-back risk).
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        let blur_v_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("treat_blur_mask V pipeline"),
+            layout: Some(&blur_layout),
+            vertex: wgpu::VertexState {
+                module: &v_shader,
+                entry_point: Some("vs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &v_shader,
+                entry_point: Some("fs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: target_format,
+                    // V pass: ALPHA_BLENDING so it integrates with the
+                    // standard pre-effect ping-pong contract.
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        let blur_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("treat_blur_mask blur sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
+        });
+
+        // NonFiltering sampler for the SDF (R32Float). textureLoad
+        // doesn't use the sampler, but binding type requires one.
+        let blur_sdf_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("treat_blur_mask sdf sampler"),
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+
+        let blur_params_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("treat_blur_mask params"),
+            size: 16,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        Self {
+            fit_pipeline,
+            fit_bgl,
+            fit_sampler,
+            blur_h_pipeline,
+            blur_v_pipeline,
+            blur_bgl,
+            blur_sampler,
+            blur_sdf_sampler,
+            blur_params_buf,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        dst: &wgpu::TextureView,
+        inputs: &TreatmentInputs<'_>,
+        sdf: &wgpu::TextureView,
+        intermediate: &wgpu::TextureView,
+    ) {
+        // Read params (operator-tuned values, falling back to descriptor
+        // defaults). Pack into 16-byte uniform: [max_radius_px, edge_band,
+        // falloff, reserved].
+        let max_radius = inputs.params.get("max_radius_px").copied().unwrap_or(0.0);
+        let edge_band = inputs.params.get("edge_band").copied().unwrap_or(0.1);
+        let falloff = inputs.params.get("falloff").copied().unwrap_or(0.7);
+        let mut bytes = [0u8; 16];
+        bytes[0..4].copy_from_slice(&max_radius.to_le_bytes());
+        bytes[4..8].copy_from_slice(&edge_band.to_le_bytes());
+        bytes[8..12].copy_from_slice(&falloff.to_le_bytes());
+        queue.write_buffer(&self.blur_params_buf, 0, &bytes);
+
+        // ---- Pass 1: fit → dst (textured_quad with cover/contain) -----
+        let fit_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("treat_blur_mask fit bg"),
+            layout: &self.fit_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(inputs.source),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.fit_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: inputs.fit_uniform.as_entire_binding(),
+                },
+            ],
+        });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("treat_blur_mask fit pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: dst,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.fit_pipeline);
+            pass.set_bind_group(0, &fit_bg, &[]);
+            pass.draw(0..6, 0..1);
+        }
+
+        // ---- Pass 2: H blur → intermediate ----
+        self.run_blur_pass(
+            device,
+            encoder,
+            "treat_blur_mask H pass",
+            &self.blur_h_pipeline,
+            dst,          // source: dst (now holds fit-applied content)
+            intermediate, // target: scratch
+            sdf,
+            // H pass into intermediate uses LoadOp::Clear so the previous
+            // frame's scratch never bleeds in.
+            wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+        );
+
+        // ---- Pass 3: V blur → dst (overwrites the fit-applied content) ----
+        self.run_blur_pass(
+            device,
+            encoder,
+            "treat_blur_mask V pass",
+            &self.blur_v_pipeline,
+            intermediate, // source: scratch (H pass result)
+            dst,          // target: ping-pong first slot
+            sdf,
+            // V pass overwrites the fit-applied content with the
+            // fully-blurred result; LoadOp::Clear is correct.
+            wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run_blur_pass(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        label: &'static str,
+        pipeline: &wgpu::RenderPipeline,
+        source: &wgpu::TextureView,
+        target: &wgpu::TextureView,
+        sdf: &wgpu::TextureView,
+        load_op: wgpu::LoadOp<wgpu::Color>,
+    ) {
+        let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some(label),
+            layout: &self.blur_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(source),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.blur_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: self.blur_params_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(sdf),
+                },
+            ],
+        });
+        // The SDF NonFiltering sampler is unused at runtime (textureLoad
+        // bypasses samplers) but kept so future presets that DO want a
+        // filtered SDF sample have the slot wired. Touch to suppress
+        // unused-field warnings without changing layout.
+        let _ = &self.blur_sdf_sampler;
+
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some(label),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: target,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: load_op,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(pipeline);
+        pass.set_bind_group(0, &bg, &[]);
+        pass.draw(0..6, 0..1);
+    }
+}
+
 /// Build a single-pass treatment pipeline (one render pipeline, fit
 /// uniform at binding 2, params uniform at binding 3, ALPHA_BLENDING).
 /// Used by every W3 preset that's a simple sample → transform → emit
@@ -908,12 +1433,46 @@ mod tests {
         }
     }
 
+    /// Acceptance: the blur_mask preset is registered (P1.3.2).
+    #[test]
+    fn blur_mask_preset_is_registered() {
+        assert!(is_registered(BLUR_MASK_PRESET_ID));
+    }
+
+    /// Acceptance: blur_mask exposes max_radius_px + edge_band + falloff
+    /// with the documented defaults. The default `max_radius_px = 0` is
+    /// the key identity property — operator sees no change until they
+    /// reach for the radius slider.
+    #[test]
+    fn blur_mask_defaults_are_no_op() {
+        let descriptors = param_descriptors(BLUR_MASK_PRESET_ID);
+        assert_eq!(descriptors.len(), 3);
+
+        let by_key: std::collections::HashMap<&str, &ParamDescriptor> =
+            descriptors.iter().map(|d| (d.key, d)).collect();
+        assert_eq!(
+            by_key["max_radius_px"].default, 0.0,
+            "max_radius identity = 0 (no blur)"
+        );
+        assert!(by_key["edge_band"].default > 0.0);
+        assert!(by_key["falloff"].default >= 0.0 && by_key["falloff"].default <= 1.0);
+
+        for d in descriptors {
+            assert!(d.min < d.max, "{}: min < max", d.key);
+            assert!(
+                d.default >= d.min && d.default <= d.max,
+                "{}: default in [min, max]",
+                d.key
+            );
+        }
+    }
+
     /// Acceptance: unknown preset ids are not registered.
     #[test]
     fn unknown_preset_is_not_registered() {
         assert!(!is_registered(""));
         assert!(!is_registered("definitely-not-a-real-preset"));
-        assert!(!is_registered("blur_mask")); // not yet wired in W3
+        assert!(!is_registered("texture_overlay")); // not yet wired in W3
     }
 
     /// Acceptance: every registered preset has an entry in
