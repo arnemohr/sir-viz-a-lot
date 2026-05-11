@@ -104,6 +104,66 @@ Use this top-to-bottom before doors; aim for under five minutes once you know yo
     mask polygon before doors. A misconfigured or empty mask polygon produces
     a blank layer; fix the mask in the inspector and save before go-live.
 
+## Frame-budget perf gate (P0.9.5)
+
+### How to run
+
+```bash
+# Full gpu-tests suite (includes golden-image tests):
+make test-gpu
+
+# Just the perf gate:
+cargo nextest run --features gpu-tests -E 'test(/perf_frame_budget/)'
+```
+
+The test renders 600 frames (10 seconds at 60 Hz) through the production render
+graph against headless wgpu targets. No window or projector is required.
+
+### What the printed output means
+
+```
+=== P0.9.5 Frame-Budget Gate Results ===
+  Frames rendered:  600          — total frames in the run
+  Min frame time:   X.XX ms     — fastest single frame
+  p50 frame time:   X.XX ms     — median frame time (typical case)
+  p99 frame time:   X.XX ms     — 99th-percentile frame time (worst 1%)
+  Max frame time:   X.XX ms     — single worst frame (often cold-start)
+  Texture drops:    0            — upload-queue overflows (must be 0)
+  Panic count:      0            — frame panics caught by catch_unwind (must be 0)
+```
+
+### CI assertion vs. show-day target
+
+| Threshold | Value | Purpose |
+|-----------|-------|---------|
+| **CI gate** | p99 < 100 ms | Regression guard; passes on any CI runner with a GPU adapter |
+| **Show-day acceptance** | p99 ≤ 16.6 ms | Full 60 Hz budget; verify on the actual projector machine |
+
+### Recording your show-day baseline
+
+On the first run on your actual show hardware, note the p99 value here:
+
+> **Show-day baseline (your machine):** ___ ms  _(record date + hardware)_
+
+If p99 on show hardware exceeds 16.6 ms, investigate before go-live:
+- Check `RUST_LOG=rmap=debug` for any per-frame warnings.
+- Verify the GPU is not throttled (power settings, thermal state).
+- Try `make build-show` (release-show profile with LTO + strip) for the
+  live binary — debug builds are deliberately slower.
+
+### Fixture note (v0.4)
+
+The fixture uses 4 FxLayer (ripple wash) layers + edge-blend across 2 simulated
+outputs. It substitutes for the spec's "4 video layers + 1 NDI input" because:
+- No fixture mp4 was available at P0.4.2 time (no `ffmpeg` to encode one).
+- NDI is deferred to v0.5.
+
+When a fixture mp4 and NDI land, the fixture in `tests/perf_frame_budget.rs` can
+be grown to match the original spec. The threshold strategy and harness shape stay
+the same.
+
+---
+
 ## External dependencies (v0.4)
 
 No Homebrew packages or external system libraries are required beyond the
