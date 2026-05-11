@@ -71,6 +71,13 @@ pub enum VideoControl {
         clip_in: f32,
         clip_out: f32,
     },
+    /// P1.4.5 — seek to a specific timestamp (seconds, in asset time).
+    /// The worker rebuilds the reader on receipt with `clip_in` set to
+    /// the seek point, then restores the original `clip_in` on the next
+    /// natural loop. Intended for click-to-scrub from a thumbnail
+    /// strip; the strip UI itself is deferred to Phase 7 (needs
+    /// `AVAssetImageGenerator` FFI + egui texture registration).
+    SeekTo(f32),
     Stop,
 }
 
@@ -169,11 +176,19 @@ enum WorkerState {
         speed: f32,
         loop_mode: crate::project::schema::LoopMode,
         clip: ClipRange,
+        /// P1.4.5 — one-shot seek target. When set, the next reader
+        /// build uses this as effective `clip_in` instead of
+        /// `clip.clip_in`, then clears the field. The schema's
+        /// `clip_in` is left intact so the next natural loop returns
+        /// to the trim-in point — scrubbing is "jump to here, keep
+        /// playing, restore loop boundary at next EOF".
+        seek_override: Option<f32>,
     },
     Paused {
         speed: f32,
         loop_mode: crate::project::schema::LoopMode,
         clip: ClipRange,
+        seek_override: Option<f32>,
     },
     Dead,
 }
@@ -218,6 +233,7 @@ fn worker_loop(
             clip_in: 0.0,
             clip_out: f32::INFINITY,
         },
+        seek_override: None,
     };
 
     loop {
@@ -233,6 +249,7 @@ fn worker_loop(
                 speed,
                 loop_mode,
                 clip,
+                seek_override,
             } => {
                 // Block (not try_recv / thread::park) on the control channel
                 // per the decision record: thread::park has coalescing-wake
@@ -243,6 +260,7 @@ fn worker_loop(
                             speed,
                             loop_mode,
                             clip,
+                            seek_override,
                         };
                     }
                     Ok(VideoControl::SetSpeed(s)) => {
@@ -250,6 +268,7 @@ fn worker_loop(
                             speed: s,
                             loop_mode,
                             clip,
+                            seek_override,
                         };
                     }
                     Ok(VideoControl::SetLoopMode(m)) => {
@@ -257,6 +276,7 @@ fn worker_loop(
                             speed,
                             loop_mode: m,
                             clip,
+                            seek_override,
                         };
                     }
                     Ok(VideoControl::SetClipRange { clip_in, clip_out }) => {
@@ -264,6 +284,18 @@ fn worker_loop(
                             speed,
                             loop_mode,
                             clip: ClipRange { clip_in, clip_out },
+                            seek_override,
+                        };
+                    }
+                    Ok(VideoControl::SeekTo(t)) => {
+                        // While paused, a seek records the override and
+                        // immediately resumes playing — the operator's
+                        // intent is "jump to here and play".
+                        state = WorkerState::Playing {
+                            speed,
+                            loop_mode,
+                            clip,
+                            seek_override: Some(t),
                         };
                     }
                     Ok(VideoControl::Pause) => {
@@ -272,6 +304,7 @@ fn worker_loop(
                             speed,
                             loop_mode,
                             clip,
+                            seek_override,
                         };
                     }
                     Ok(VideoControl::Stop) | Err(_) => break,
@@ -281,11 +314,23 @@ fn worker_loop(
                 speed,
                 loop_mode,
                 clip,
+                seek_override,
             } => {
                 // Build a fresh reader for one pass with the current clip range.
+                // P1.4.5: an active `seek_override` displaces `clip_in`
+                // for this pass only; clear it on the live state so the
+                // EOF path doesn't observe a stale override (the EOF
+                // handler also clears it as belt-and-braces).
+                let effective_clip_in = seek_override.unwrap_or(clip.clip_in);
+                if let WorkerState::Playing {
+                    seek_override: so, ..
+                } = &mut state
+                {
+                    *so = None;
+                }
                 let (speed_now, loop_mode_now, clip_now) = (speed, loop_mode, clip);
                 let reader_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    build_reader(&path, clip_now.clip_in, clip_now.clip_out)
+                    build_reader(&path, effective_clip_in, clip_now.clip_out)
                 }));
                 let (reader, fps) = match reader_result {
                     Err(panic_val) => {
@@ -473,12 +518,13 @@ fn decode_pass(
         match control_rx.try_recv() {
             Ok(VideoControl::Stop) => return PassOutcome::Stop,
             Ok(VideoControl::Pause) => {
-                let (speed, loop_mode, clip) = match state {
+                let (speed, loop_mode, clip, seek_override) = match state {
                     WorkerState::Playing {
                         speed,
                         loop_mode,
                         clip,
-                    } => (*speed, *loop_mode, *clip),
+                        seek_override,
+                    } => (*speed, *loop_mode, *clip, *seek_override),
                     _ => (
                         1.0,
                         crate::project::schema::LoopMode::Loop,
@@ -486,12 +532,14 @@ fn decode_pass(
                             clip_in: 0.0,
                             clip_out: f32::INFINITY,
                         },
+                        None,
                     ),
                 };
                 *state = WorkerState::Paused {
                     speed,
                     loop_mode,
                     clip,
+                    seek_override,
                 };
                 return PassOutcome::Paused;
             }
@@ -542,6 +590,17 @@ fn decode_pass(
                     *clip = ClipRange { clip_in, clip_out };
                 }
             }
+            Ok(VideoControl::SeekTo(t)) => {
+                // P1.4.5 — record the one-shot seek override and return
+                // Eof so the outer loop rebuilds the reader at the new
+                // start position. The override is cleared at EOF or by
+                // the Playing arm after consumption, so subsequent
+                // loops resume at the schema's `clip_in`.
+                if let WorkerState::Playing { seek_override, .. } = state {
+                    *seek_override = Some(t.max(0.0));
+                    return PassOutcome::Eof;
+                }
+            }
             Ok(VideoControl::Play) => {} // already playing
             Err(crossbeam_channel::TryRecvError::Empty) => {}
             Err(crossbeam_channel::TryRecvError::Disconnected) => {
@@ -579,14 +638,22 @@ fn decode_pass(
                             | crate::project::schema::LoopMode::PingPong
                     );
                     if should_continue {
+                        // Clear any pending seek_override before EOF —
+                        // the caller's rebuild reads `clip.clip_in` for
+                        // the next pass, so a stale override would
+                        // re-seek on every loop. Single-shot semantics.
+                        if let WorkerState::Playing { seek_override, .. } = state {
+                            *seek_override = None;
+                        }
                         return PassOutcome::Eof; // caller rebuilds reader
                     } else {
-                        let (speed, loop_mode, clip) = match state {
+                        let (speed, loop_mode, clip, seek_override) = match state {
                             WorkerState::Playing {
                                 speed,
                                 loop_mode,
                                 clip,
-                            } => (*speed, *loop_mode, *clip),
+                                seek_override,
+                            } => (*speed, *loop_mode, *clip, *seek_override),
                             _ => (
                                 1.0,
                                 crate::project::schema::LoopMode::Once,
@@ -594,12 +661,14 @@ fn decode_pass(
                                     clip_in: 0.0,
                                     clip_out: f32::INFINITY,
                                 },
+                                None,
                             ),
                         };
                         *state = WorkerState::Paused {
                             speed,
                             loop_mode,
                             clip,
+                            seek_override,
                         };
                         return PassOutcome::Paused;
                     }
