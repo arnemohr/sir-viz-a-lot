@@ -661,6 +661,64 @@ mod tests {
         );
     }
 
+    /// P1.4.0 — auto-play on spawn (no explicit Play required).
+    ///
+    /// The Phase 1 acceptance criterion says an operator can drop an mp4
+    /// and see it play within one click. The drag-drop path spawns a
+    /// worker and never sends `VideoControl::Play`; the worker must
+    /// therefore enter the decode loop on its own. This test spawns
+    /// against a real fixture (when present) and asserts ≥1 frame lands
+    /// on the upload queue within ~1 s without anyone touching the
+    /// control channel.
+    ///
+    /// Skipped unless `tests/fixtures/test.mp4` is present (same fixture
+    /// gate as `natural_size_fixture_if_present`; the fixture lands in
+    /// P1.7.4). Without the fixture this contract is verified by code
+    /// review — `worker_loop` initialises `state = WorkerState::Playing`
+    /// rather than `Paused`.
+    #[cfg(all(feature = "video", target_os = "macos"))]
+    #[test]
+    fn auto_plays_on_spawn_without_explicit_play() {
+        let fixture = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/test.mp4"
+        ));
+        if !fixture.exists() {
+            // No fixture committed — skip. Land P1.7.4 to exercise this.
+            return;
+        }
+
+        let q = TextureUploadQueue::new();
+        let sender = q.sender();
+        let target = UploadTargetId(7777);
+        let (handle, control_tx) = spawn(fixture.to_path_buf(), target, sender);
+
+        // Poll the queue for up to ~1 s. The worker must produce frames
+        // entirely from its own initial Playing state — we never send Play.
+        let deadline = std::time::Instant::now() + Duration::from_millis(1000);
+        let mut out = Vec::new();
+        let saw_frame = loop {
+            q.drain_into(&mut out);
+            if !out.is_empty() {
+                break true;
+            }
+            if std::time::Instant::now() >= deadline {
+                break false;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+
+        // Shut the worker down regardless of outcome.
+        let _ = control_tx.send(VideoControl::Stop);
+        let _ = handle.join();
+
+        assert!(
+            saw_frame,
+            "video worker did not push a frame within 1 s of spawn — \
+             auto-play regression (worker_loop's initial state must be Playing)",
+        );
+    }
+
     /// `natural_size` integration test.
     ///
     /// Skipped unless `tests/fixtures/test.mp4` is present — see the note in
