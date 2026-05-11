@@ -787,6 +787,63 @@ fn show_treatment_section(
                 .push(project.set_layer_treatment_mutation(layer_idx, Some(new_treatment)));
         }
     }
+
+    // ----- P1.3.6 — collage slot pickers (up to COLLAGE_SLOTS) -----
+    if matches!(
+        active_preset.as_deref(),
+        Some(crate::render::treatments::COLLAGE_PRESET_ID)
+    ) {
+        ui.add_space(4.0);
+        ui.label(format!(
+            "Collage slots (up to {}; empty slots fall back to source)",
+            crate::render::treatments::COLLAGE_SLOTS
+        ));
+        let current_paths = project.layers[layer_idx]
+            .treatment
+            .as_ref()
+            .map(|t| t.collage_paths.clone())
+            .unwrap_or_default();
+        for slot in 0..crate::render::treatments::COLLAGE_SLOTS {
+            ui.horizontal(|ui| {
+                ui.label(format!("Slot {slot}"));
+                let display = current_paths
+                    .get(slot)
+                    .map(|p| {
+                        p.file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("(invalid path)")
+                            .to_string()
+                    })
+                    .unwrap_or_else(|| "(empty)".to_string());
+                ui.weak(display);
+                if ui.button("Pick…").clicked()
+                    && let Some(path) = crate::windows::file_dialogs::pick_overlay_file()
+                {
+                    let mut new_treatment = project.layers[layer_idx]
+                        .treatment
+                        .clone()
+                        .expect("collage preset is active");
+                    while new_treatment.collage_paths.len() <= slot {
+                        new_treatment.collage_paths.push(std::path::PathBuf::new());
+                    }
+                    new_treatment.collage_paths[slot] = path;
+                    st.pending_mutations
+                        .push(project.set_layer_treatment_mutation(layer_idx, Some(new_treatment)));
+                }
+                if current_paths.get(slot).is_some() && ui.button("✕").clicked() {
+                    let mut new_treatment = project.layers[layer_idx]
+                        .treatment
+                        .clone()
+                        .expect("collage preset is active");
+                    if slot < new_treatment.collage_paths.len() {
+                        new_treatment.collage_paths.remove(slot);
+                    }
+                    st.pending_mutations
+                        .push(project.set_layer_treatment_mutation(layer_idx, Some(new_treatment)));
+                }
+            });
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

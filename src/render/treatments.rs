@@ -55,6 +55,15 @@ pub const TEXTURE_OVERLAY_PRESET_ID: &str = "texture_overlay";
 /// `palette_extract` preset id (P1.3.5).
 pub const PALETTE_EXTRACT_PRESET_ID: &str = "palette_extract";
 
+/// `collage` preset id (P1.3.6).
+pub const COLLAGE_PRESET_ID: &str = "collage";
+
+/// Number of collage slots supported by the v0.5 `collage` preset.
+/// Fixed at 4 (a 2×2 grid) — true variable-N collage requires either
+/// dynamically-built bind groups or a texture array binding, deferred
+/// to Phase 7.
+pub const COLLAGE_SLOTS: usize = 4;
+
 /// Inputs threaded into every preset's `render` call. The struct grows over
 /// time (W3 adds `overlay` and `collage`); existing presets ignore fields
 /// they don't read.
@@ -132,6 +141,7 @@ pub fn registry() -> &'static [(&'static str, &'static str)] {
         (BLUR_MASK_PRESET_ID, "Blur mask (edge feather)"),
         (TEXTURE_OVERLAY_PRESET_ID, "Texture overlay"),
         (PALETTE_EXTRACT_PRESET_ID, "Palette / posterize"),
+        (COLLAGE_PRESET_ID, "Collage (2×2)"),
     ]
 }
 
@@ -153,6 +163,7 @@ pub fn param_descriptors(preset_id: &str) -> &'static [ParamDescriptor] {
         BLUR_MASK_PRESET_ID => BLUR_MASK_DESCRIPTORS,
         TEXTURE_OVERLAY_PRESET_ID => TEXTURE_OVERLAY_DESCRIPTORS,
         PALETTE_EXTRACT_PRESET_ID => PALETTE_EXTRACT_DESCRIPTORS,
+        COLLAGE_PRESET_ID => COLLAGE_DESCRIPTORS,
         _ => &[],
     }
 }
@@ -210,6 +221,25 @@ const LUMINANCE_REVEAL_DESCRIPTORS: &[ParamDescriptor] = &[
         min: 0.0,
         max: 1.0,
         default: 0.0,
+    },
+];
+
+/// Static descriptors for the `collage` preset (P1.3.6).
+#[allow(dead_code)] // referenced only through `param_descriptors` (v3 UI)
+const COLLAGE_DESCRIPTORS: &[ParamDescriptor] = &[
+    ParamDescriptor {
+        key: "mix",
+        label: "Mix (0 = source only, 1 = collage)",
+        min: 0.0,
+        max: 1.0,
+        default: 0.0,
+    },
+    ParamDescriptor {
+        key: "gap",
+        label: "Gap (0 = touching, 0.1 = wide seam)",
+        min: 0.0,
+        max: 0.1,
+        default: 0.02,
     },
 ];
 
@@ -313,6 +343,7 @@ pub struct TreatmentPipeline {
     blur_mask: BlurMaskTreatmentPipeline,
     texture_overlay: TextureOverlayTreatmentPipeline,
     palette_extract: PaletteExtractTreatmentPipeline,
+    collage: CollageTreatmentPipeline,
 }
 
 impl TreatmentPipeline {
@@ -326,6 +357,7 @@ impl TreatmentPipeline {
             blur_mask: BlurMaskTreatmentPipeline::new(device, target_format),
             texture_overlay: TextureOverlayTreatmentPipeline::new(device, target_format),
             palette_extract: PaletteExtractTreatmentPipeline::new(device, target_format),
+            collage: CollageTreatmentPipeline::new(device, target_format),
         }
     }
 
@@ -386,6 +418,14 @@ impl TreatmentPipeline {
             PALETTE_EXTRACT_PRESET_ID => {
                 self.palette_extract
                     .render(device, queue, encoder, dst, inputs);
+                true
+            }
+            COLLAGE_PRESET_ID => {
+                // collage always renders — empty slots fall back to
+                // source inside the shader (slot_mask bit cleared). At
+                // mix=0 the operator sees pure source even with 4
+                // slots populated, so we never refuse the dispatch.
+                self.collage.render(device, queue, encoder, dst, inputs);
                 true
             }
             _ => false,
@@ -1456,6 +1496,244 @@ fn draw_single_pass_treatment(
     pass.draw(0..6, 0..1);
 }
 
+/// Collage treatment pipeline (P1.3.6). Fixed 2×2 grid of up to four
+/// `collage_paths` textures. Empty slots fall back to source (signalled
+/// via the `slot_mask` bit in the params uniform). When `inputs.collage`
+/// is empty the slot textures are bound to the source view as a
+/// harmless placeholder — wgpu requires all bindings populated even if
+/// the shader doesn't read them.
+struct CollageTreatmentPipeline {
+    pipeline: wgpu::RenderPipeline,
+    bind_group_layout: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
+    slot_sampler: wgpu::Sampler,
+    params_buf: wgpu::Buffer,
+}
+
+impl CollageTreatmentPipeline {
+    fn new(device: &wgpu::Device, target_format: wgpu::TextureFormat) -> Self {
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("treat_collage.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/treat_collage.wgsl").into()),
+        });
+
+        let texture_entry = |binding: u32| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                multisampled: false,
+                view_dimension: wgpu::TextureViewDimension::D2,
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+            },
+            count: None,
+        };
+        let sampler_entry = |binding: u32| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+            count: None,
+        };
+        let uniform_entry = |binding: u32| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: std::num::NonZeroU64::new(16),
+            },
+            count: None,
+        };
+
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("treat_collage bgl"),
+            entries: &[
+                texture_entry(0),
+                sampler_entry(1),
+                uniform_entry(2),
+                uniform_entry(3),
+                texture_entry(4),
+                texture_entry(5),
+                texture_entry(6),
+                texture_entry(7),
+                sampler_entry(8),
+            ],
+        });
+
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("treat_collage pipeline layout"),
+            bind_group_layouts: &[Some(&bind_group_layout)],
+            immediate_size: 0,
+        });
+
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("treat_collage pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: target_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("treat_collage source sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
+        });
+        let slot_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("treat_collage slot sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
+        });
+
+        let params_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("treat_collage params"),
+            size: 16,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        Self {
+            pipeline,
+            bind_group_layout,
+            sampler,
+            slot_sampler,
+            params_buf,
+        }
+    }
+
+    fn render(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        dst: &wgpu::TextureView,
+        inputs: &TreatmentInputs<'_>,
+    ) {
+        let mix_amt = inputs.params.get("mix").copied().unwrap_or(0.0);
+        let gap = inputs.params.get("gap").copied().unwrap_or(0.02);
+
+        // Build the slot_mask: bit i set if the slot view is provided.
+        let mut mask: u32 = 0;
+        for (i, _) in inputs.collage.iter().take(COLLAGE_SLOTS).enumerate() {
+            mask |= 1 << i;
+        }
+
+        let mut bytes = [0u8; 16];
+        bytes[0..4].copy_from_slice(&mix_amt.to_le_bytes());
+        bytes[4..8].copy_from_slice(&gap.to_le_bytes());
+        bytes[8..12].copy_from_slice(&(mask as f32).to_le_bytes());
+        queue.write_buffer(&self.params_buf, 0, &bytes);
+
+        // Slot textures: provided ones use the caller's view; empty
+        // slots fall back to the source view (harmless — slot_mask
+        // tells the shader to read source for those cells anyway).
+        let slot_views: [&wgpu::TextureView; COLLAGE_SLOTS] = [
+            inputs.collage.first().copied().unwrap_or(inputs.source),
+            inputs.collage.get(1).copied().unwrap_or(inputs.source),
+            inputs.collage.get(2).copied().unwrap_or(inputs.source),
+            inputs.collage.get(3).copied().unwrap_or(inputs.source),
+        ];
+
+        let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("treat_collage bg"),
+            layout: &self.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(inputs.source),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: inputs.fit_uniform.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: self.params_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(slot_views[0]),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::TextureView(slot_views[1]),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: wgpu::BindingResource::TextureView(slot_views[2]),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: wgpu::BindingResource::TextureView(slot_views[3]),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: wgpu::BindingResource::Sampler(&self.slot_sampler),
+                },
+            ],
+        });
+
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("treat_collage pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: dst,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &bg, &[]);
+        pass.draw(0..6, 0..1);
+    }
+}
+
 /// Palette-extract / posterize treatment pipeline (P1.3.5). Single
 /// pass; uses the shared single-pass treatment helper.
 struct PaletteExtractTreatmentPipeline {
@@ -1872,7 +2150,7 @@ mod tests {
     fn unknown_preset_is_not_registered() {
         assert!(!is_registered(""));
         assert!(!is_registered("definitely-not-a-real-preset"));
-        assert!(!is_registered("collage")); // not yet wired in W3
+        assert!(!is_registered("foo_unknown")); // not a real preset
     }
 
     /// Acceptance: every registered preset has an entry in

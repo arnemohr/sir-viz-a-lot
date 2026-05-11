@@ -3974,13 +3974,46 @@ fn render_m5_pipeline(
                         let overlay_view_ref: Option<&wgpu::TextureView> =
                             overlay_tex_opt.as_ref().map(|(_, v)| v);
 
+                        // P1.3.6 — collage paths load through the same
+                        // ImageTextureCache. We bound the load to the
+                        // shader's 4-slot limit (`COLLAGE_SLOTS`). The
+                        // `collage_textures` vec OWNS the (Texture, View)
+                        // pairs for the duration of the dispatch so the
+                        // bind group's TextureView borrows stay valid.
+                        let mut collage_textures: Vec<(wgpu::Texture, wgpu::TextureView)> =
+                            Vec::new();
+                        for p in treatment
+                            .collage_paths
+                            .iter()
+                            .take(crate::render::treatments::COLLAGE_SLOTS)
+                        {
+                            match image_texture_cache.lookup_or_upload(
+                                &renderer.gpu.device,
+                                &renderer.gpu.queue,
+                                p,
+                            ) {
+                                Ok((tex, view, _dims)) => collage_textures.push((tex, view)),
+                                Err(err) => {
+                                    tracing::warn!(
+                                        target: "rmap::ux",
+                                        event = "treatment_collage_load_failed",
+                                        path = %p.display(),
+                                        err = %err,
+                                        "collage: failed to load slot; cell falls back to source",
+                                    );
+                                }
+                            }
+                        }
+                        let collage_views: Vec<&wgpu::TextureView> =
+                            collage_textures.iter().map(|(_, v)| v).collect();
+
                         let inputs = crate::render::treatments::TreatmentInputs {
                             source: tex_view,
                             fit_uniform: &ls.fit_uniform,
                             params: &treatment.params,
                             clock_secs: clock.elapsed().as_secs_f32(),
                             overlay: overlay_view_ref,
-                            collage: &[],
+                            collage: &collage_views,
                             sdf: Some(sdf_v),
                             intermediate: Some(&ls.intermediate_view),
                         };
