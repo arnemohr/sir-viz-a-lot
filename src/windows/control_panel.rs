@@ -1892,7 +1892,12 @@ fn modulator_slider(
         let label_resp = ui.label(label);
         label_resp.context_menu(|ui| {
             if ui.button("Learn next MIDI CC").clicked() {
-                crate::controls::midi_learn::arm(learn_target);
+                // Pre-compute the range-derived scale/offset so the captured
+                // `MidiBound` sweeps the full parameter range — same shape
+                // `modulator_for_source(BindingSource::Midi, &range)` produces.
+                let scale = range.end() - range.start();
+                let offset = *range.start();
+                crate::controls::midi_learn::arm(learn_target, scale, offset);
                 ui.close_menu();
             }
         });

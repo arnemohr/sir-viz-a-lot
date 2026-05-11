@@ -130,11 +130,15 @@ impl MidiSource {
                         // The `take_target_if_armed` check + clear is atomic
                         // (single Mutex critical section).
                         #[cfg(feature = "v3")]
-                        if let Some(target) = crate::controls::midi_learn::take_target_if_armed() {
+                        if let Some((target, scale, offset)) =
+                            crate::controls::midi_learn::take_target_if_armed()
+                        {
                             let _ = tx_for_callback.try_send(Command::MidiLearnCapture {
                                 target,
                                 channel,
                                 cc,
+                                scale,
+                                offset,
                             });
                             return;
                         }

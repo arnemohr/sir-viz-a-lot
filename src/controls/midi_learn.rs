@@ -25,9 +25,19 @@ pub struct LearnTarget {
 }
 
 /// Inner state. `None` when not armed.
+///
+/// `scale` and `offset` are derived at arm-time from the parameter's range
+/// (`scale = range.end() - range.start()`, `offset = *range.start()`) so a
+/// captured binding maps the CC's full 0..1 sweep to the parameter's full
+/// range — matching what the binding picker produces when manually
+/// switched to `BindingSource::Midi`. They're stashed in `LearnInner`
+/// rather than `LearnTarget` to keep `LearnTarget` pure identity
+/// (Copy + PartialEq + Eq for `is_armed_for` comparisons).
 #[derive(Debug, Clone)]
 struct LearnInner {
     target: LearnTarget,
+    scale: f32,
+    offset: f32,
     armed_at: Instant,
 }
 
@@ -39,11 +49,16 @@ fn slot() -> &'static Mutex<Option<LearnInner>> {
 }
 
 /// Arm learn-mode for `target`. Replaces any prior target (the
-/// operator can re-aim mid-listen).
-pub fn arm(target: LearnTarget) {
+/// operator can re-aim mid-listen). `scale` and `offset` are computed
+/// from the parameter's range (see [`LearnInner`]) so the captured
+/// `MidiBound` sweeps the parameter's full range — same shape the
+/// picker produces.
+pub fn arm(target: LearnTarget, scale: f32, offset: f32) {
     let mut g = slot().lock().expect("midi_learn state poisoned");
     *g = Some(LearnInner {
         target,
+        scale,
+        offset,
         armed_at: Instant::now(),
     });
 }
@@ -87,14 +102,18 @@ pub fn poll_timeout() -> Option<LearnTarget> {
     }
 }
 
-/// MIDI callback: if armed, take the target and clear in one critical
+/// MIDI callback: if armed, take the target (plus the stashed
+/// `scale` / `offset` from arm-time) and clear in one critical
 /// section. The caller (callback thread) then emits a
-/// `Command::MidiLearnCapture` carrying both `target` and `(channel, cc)`.
-pub fn take_target_if_armed() -> Option<LearnTarget> {
+/// `Command::MidiLearnCapture` carrying everything needed to build
+/// `Modulator::MidiBound { cc, channel, scale, offset }` without
+/// further range lookup.
+pub fn take_target_if_armed() -> Option<(LearnTarget, f32, f32)> {
     let mut g = slot().lock().ok()?;
-    let t = g.as_ref().map(|i| i.target)?;
+    let inner = g.as_ref()?;
+    let captured = (inner.target, inner.scale, inner.offset);
     *g = None;
-    Some(t)
+    Some(captured)
 }
 
 #[cfg(test)]
@@ -122,7 +141,7 @@ mod tests {
 
         // --- T1: arm_and_cancel_roundtrip ---
         let ta = make_target(0);
-        arm(ta);
+        arm(ta, 1.0, 0.0);
         assert!(is_active(), "should be active after arm");
         cancel();
         assert!(!is_active(), "should be inactive after cancel");
@@ -130,16 +149,22 @@ mod tests {
         // --- T2: is_armed_for_matches_target ---
         let ta = make_target(1);
         let tb = make_target(2);
-        arm(ta);
+        arm(ta, 1.0, 0.0);
         assert!(is_armed_for(ta), "armed for ta");
         assert!(!is_armed_for(tb), "not armed for tb");
         cancel();
 
         // --- T3: take_target_if_armed_clears_state ---
         let ta = make_target(3);
-        arm(ta);
+        // Arm with the full-range mapping the UI computes (span=255, start=0
+        // for a typical 8-bit-ish param). The take must return both.
+        arm(ta, 255.0, 0.0);
         let taken = take_target_if_armed();
-        assert_eq!(taken, Some(ta), "taken target matches armed");
+        assert_eq!(
+            taken,
+            Some((ta, 255.0, 0.0)),
+            "taken target + scale/offset matches armed"
+        );
         assert!(!is_active(), "no longer active after take");
 
         // --- T4: take_target_if_armed_when_unarmed_returns_none ---
@@ -148,7 +173,7 @@ mod tests {
 
         // --- T5: poll_timeout_fires_after_30s ---
         let ta = make_target(4);
-        arm(ta);
+        arm(ta, 1.0, 0.0);
         // Backdating armed_at to simulate 31 s elapsed.
         {
             let mut g = slot().lock().unwrap();
@@ -166,7 +191,7 @@ mod tests {
 
         // --- T6: poll_timeout_does_not_fire_before_30s ---
         let ta = make_target(5);
-        arm(ta);
+        arm(ta, 1.0, 0.0);
         // Do NOT backdating armed_at — it's fresh.
         let early = poll_timeout();
         assert!(early.is_none(), "poll_timeout returns None before 30 s");

@@ -136,6 +136,13 @@ pub enum Command {
         target: crate::controls::midi_learn::LearnTarget,
         channel: u8,
         cc: u8,
+        /// Range-derived scale captured at arm-time so the resulting
+        /// `MidiBound` sweeps the parameter's full range. See
+        /// [`crate::controls::midi_learn::LearnInner`] for the formula.
+        scale: f32,
+        /// Range-derived offset captured at arm-time (the parameter's
+        /// `range.start()`).
+        offset: f32,
     },
 }
 

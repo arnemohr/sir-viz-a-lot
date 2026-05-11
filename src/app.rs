@@ -1107,6 +1107,8 @@ fn apply_command(state: &mut EditingState, event: Command) -> SideEffect {
             target,
             channel,
             cc,
+            scale,
+            offset,
         } => {
             // Validate that the target layer + effect are still in range.
             let layer_ok = state
@@ -1127,14 +1129,15 @@ fn apply_command(state: &mut EditingState, event: Command) -> SideEffect {
                 ));
                 return SideEffect::None;
             }
-            // scale=1.0/offset=0.0: maps the CC [0,1] range directly to the
-            // parameter. The operator can fine-tune via the binding picker after
-            // the learn completes.
+            // `scale` and `offset` were captured at arm-time from the row's
+            // range, so the CC's 0..1 sweep maps to the parameter's full
+            // range — same shape `modulator_for_source(BindingSource::Midi,
+            // &range)` produces when the picker is manually switched to MIDI.
             let new_mod = crate::modulators::Modulator::MidiBound {
                 cc,
                 channel,
-                scale: 1.0,
-                offset: 0.0,
+                scale,
+                offset,
             };
             let mutation = state.project.set_modulator_mutation(
                 target.layer_idx,
