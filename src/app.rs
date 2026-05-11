@@ -3112,11 +3112,17 @@ fn rebuild_layers(
                 });
             }
             schema::LayerKind::Video { .. } => {
-                // P0.4.2 — allocate video_texture, spawn worker stub.
-                // Part 2's AVFoundation decoder replaces the worker body
-                // without touching this init path.
-                let (vid_tex, vid_view) =
-                    make_video_texture(device, width.max(1), height.max(1), surface_format);
+                // P0.4.2b — allocate video_texture at the asset's native
+                // resolution (probed via natural_size) so decoded frames match
+                // the texture dimensions exactly. Falls back to output size
+                // when the feature is off or the probe fails.
+                #[cfg(all(feature = "video", target_os = "macos"))]
+                let (tex_w, tex_h) = crate::video_layer::natural_size(&asset_path)
+                    .unwrap_or((width.max(1), height.max(1)));
+                #[cfg(not(all(feature = "video", target_os = "macos")))]
+                let (tex_w, tex_h) = (width.max(1), height.max(1));
+
+                let (vid_tex, vid_view) = make_video_texture(device, tex_w, tex_h, surface_format);
                 // Stable upload target id: reuse the SVG LayerId counter
                 // (same monotonic source) cast to u64.
                 let target = crate::render::texture_upload::UploadTargetId(layer_id.0);
@@ -3130,7 +3136,9 @@ fn rebuild_layers(
                 tracing::debug!(
                     path = %asset_path.display(),
                     target = ?target,
-                    "video worker stub spawned (P0.4.2a; no decoder)",
+                    tex_w,
+                    tex_h,
+                    "video worker spawned (P0.4.2b; AVFoundation decoder)",
                 );
             }
             schema::LayerKind::FxLayer { .. } | schema::LayerKind::Ndi { .. } => {
@@ -3281,12 +3289,13 @@ fn resize_m5_gpu(state: &mut EditingState) {
         if layer.fx_texture.is_some() {
             layer.fx_texture = Some(make_fx_texture(device, w, h, fmt));
         }
-        // P0.4.2: video_texture is output-sized; recreate on resize so the
-        // drain's format/dim check in the per-frame loop stays consistent.
-        // Part 2's decoder will reckon with native-vs-output sizing then.
-        if layer.video_texture.is_some() {
-            layer.video_texture = Some(make_video_texture(device, w, h, fmt));
-        }
+        // P0.4.2b: video_texture is decoder-native-sized (set at layer init via
+        // natural_size probe). Do NOT recreate it at output size on resize —
+        // that would make the frame dimensions disagree with the drain's
+        // format/dim check and silently black out the layer. The texture stays
+        // at decoder resolution; the warp pass scales it to output size.
+        // Phase 1 follow-up: if the asset dims change at runtime, the drain
+        // can reallocate; for v0.4 the size is fixed at init.
         // P0.1.2 placeholder: only raster-shaped layers (Svg/Image/Video)
         // need a raster-job re-send on resize. FxLayer / Ndi are skipped.
         let Some(path) = state.project.layers[i]
