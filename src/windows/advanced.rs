@@ -45,6 +45,8 @@ const HDR_DIAGNOSTICS: &str = "adv_diagnostics";
 const HDR_DISPLAY_OUTPUT: &str = "adv_display_output";
 // P0.4.3 — video-specific sub-section inside "Selected layer".
 const HDR_VIDEO: &str = "adv_video";
+// P1.2.3 — treatment picker sub-section inside "Selected layer".
+const HDR_TREATMENT: &str = "adv_treatment";
 
 /// Render the Advanced panel body. Called from `control_panel::show` when
 /// `st.advanced_open` is `true`, inside a `SidePanel::right("rmap_advanced")`.
@@ -234,6 +236,23 @@ pub fn show(
                     ui.add_space(4.0);
 
                     // --------------------------------------------------------
+                    // P1.2.3 — Treatment picker. Sits between Blend mode and
+                    // the Video section so the operator's mental model is
+                    // "treat then effect". Visible only for Image / Video
+                    // layers; SVG / FxLayer get an explanatory placeholder.
+                    // --------------------------------------------------------
+                    egui::CollapsingHeader::new("Treatment")
+                        .id_salt(HDR_TREATMENT)
+                        .default_open(false)
+                        .show(ui, |ui| {
+                            glossary_label(ui, GlossaryTerm::Treatment);
+                            ui.add_space(4.0);
+                            show_treatment_section(ui, project, st, layer_idx);
+                        });
+
+                    ui.add_space(4.0);
+
+                    // --------------------------------------------------------
                     // P0.4.3 — Video-specific controls. Only rendered when the
                     // selected layer is a LayerKind::Video.
                     // --------------------------------------------------------
@@ -397,6 +416,154 @@ pub fn show(
         });
 
     ControlPanelAction::None
+}
+
+// ---------------------------------------------------------------------------
+// Treatment section body (P1.2.3)
+// ---------------------------------------------------------------------------
+/// Render the Treatment picker for the selected layer.
+///
+/// - Image / Video: combobox of registered presets + "None"; per-param
+///   sliders for the active preset. Edits dispatch `SetLayerTreatment` /
+///   `SetLayerTreatmentParams` on drag-release (matches the Video speed
+///   slider pattern so mid-drag jitter does not flood the undo stack).
+/// - SVG / FxLayer: explanatory label; no controls. Treatments are an
+///   image-grammar concept; FxLayer carries its own preset library.
+fn show_treatment_section(
+    ui: &mut Ui,
+    project: &mut Project,
+    st: &mut ControlPanelState,
+    layer_idx: usize,
+) {
+    let is_image_or_video = matches!(
+        project.layers[layer_idx].kind,
+        LayerKind::Image { .. } | LayerKind::Video { .. }
+    );
+    if !is_image_or_video {
+        ui.label(
+            "Treatments apply to image and video layers; FX layers use their own preset library.",
+        );
+        return;
+    }
+
+    // ----- Preset combobox -----
+    let current_preset_id: Option<String> = project.layers[layer_idx]
+        .treatment
+        .as_ref()
+        .map(|t| t.preset_id.clone());
+    let registry = crate::render::treatments::registry();
+
+    // Label rendered in the combobox selected slot.
+    let current_label: &str = match &current_preset_id {
+        None => "None",
+        Some(id) => registry
+            .iter()
+            .find(|(rid, _)| *rid == id.as_str())
+            .map(|(_, label)| *label)
+            // Unknown preset (hand-edited project) — surface the raw id so
+            // the operator notices and the audit hint maps cleanly.
+            .unwrap_or(id.as_str()),
+    };
+
+    let mut staged_change: Option<Option<String>> = None;
+    ui.horizontal(|ui| {
+        ui.label("Preset");
+        egui::ComboBox::from_id_salt(("adv_treatment_preset", layer_idx))
+            .selected_text(current_label)
+            .show_ui(ui, |ui| {
+                // "None" option — clears the treatment.
+                if ui
+                    .selectable_label(current_preset_id.is_none(), "None")
+                    .clicked()
+                    && current_preset_id.is_some()
+                {
+                    staged_change = Some(None);
+                }
+                for (preset_id, label) in registry {
+                    let is_current = current_preset_id.as_deref() == Some(*preset_id);
+                    if ui.selectable_label(is_current, *label).clicked() && !is_current {
+                        staged_change = Some(Some((*preset_id).to_string()));
+                    }
+                }
+            });
+    });
+
+    if let Some(new_preset) = staged_change {
+        // Build new Treatment by carrying over params keys that the new
+        // preset documents; missing keys are filled with descriptor
+        // defaults. This means switching presets does not lose the
+        // operator's earlier slider tweaks for shared parameter names
+        // (intentional: identity → tone_map → identity round-trips
+        // common params like "exposure").
+        let next: Option<crate::project::schema::Treatment> = match new_preset {
+            None => None,
+            Some(preset_id) => {
+                let descriptors = crate::render::treatments::param_descriptors(preset_id.as_str());
+                let mut params: std::collections::HashMap<String, f32> =
+                    std::collections::HashMap::new();
+                let old_params = project.layers[layer_idx]
+                    .treatment
+                    .as_ref()
+                    .map(|t| t.params.clone())
+                    .unwrap_or_default();
+                for d in descriptors {
+                    let v = old_params.get(d.key).copied().unwrap_or(d.default);
+                    params.insert(d.key.to_string(), v);
+                }
+                Some(crate::project::schema::Treatment {
+                    preset_id,
+                    params,
+                    overlay_path: None,
+                    collage_paths: Vec::new(),
+                })
+            }
+        };
+        st.pending_mutations
+            .push(project.set_layer_treatment_mutation(layer_idx, next));
+    }
+
+    // ----- Per-param sliders (only when a preset is active) -----
+    let preset_id_for_params = project.layers[layer_idx]
+        .treatment
+        .as_ref()
+        .map(|t| t.preset_id.clone());
+    if let Some(preset_id) = preset_id_for_params {
+        let descriptors = crate::render::treatments::param_descriptors(preset_id.as_str());
+        if descriptors.is_empty() {
+            ui.add_space(2.0);
+            ui.weak("This preset has no tunable parameters.");
+        } else {
+            ui.add_space(4.0);
+            // Read current params HashMap; we'll write a new map on
+            // drag-release and dispatch the mutation. Reading via clone
+            // keeps the borrow on `project` short.
+            let current_params: std::collections::HashMap<String, f32> = project.layers[layer_idx]
+                .treatment
+                .as_ref()
+                .expect("treatment is_some — guarded by preset_id_for_params")
+                .params
+                .clone();
+            for d in descriptors {
+                let cur = current_params.get(d.key).copied().unwrap_or(d.default);
+                let mut edit = cur;
+                let resp = ui.add(egui::Slider::new(&mut edit, d.min..=d.max).text(d.label));
+                // Dispatch on drag-release / focus-loss so the mutation
+                // history records one undoable step per gesture rather
+                // than one per drag tick.
+                if (resp.drag_stopped() || resp.lost_focus()) && (edit - cur).abs() > 1e-6 {
+                    let mut next_params = current_params.clone();
+                    next_params.insert(d.key.to_string(), edit);
+                    st.pending_mutations
+                        .push(project.set_layer_treatment_params_mutation(layer_idx, next_params));
+                    // After dispatch, stop iterating: the next frame
+                    // will read the freshly-written params. Continuing
+                    // here would compare subsequent sliders against a
+                    // stale `current_params` clone.
+                    break;
+                }
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
