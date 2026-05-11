@@ -84,15 +84,13 @@ pub fn show(
             ui.label("Overlap:");
             let mut overlap_px = cfg.overlap_px;
             let resp = ui.add(egui::Slider::new(&mut overlap_px, 0u32..=512).suffix(" px"));
-            if resp.drag_stopped() || resp.lost_focus() {
-                if overlap_px != cfg.overlap_px {
-                    let new_cfg = EdgeBlendConfig {
-                        overlap_px,
-                        falloff_curve: cfg.falloff_curve,
-                    };
-                    st.pending_mutations
-                        .push(project.set_edge_blend_mutation(Some(new_cfg)));
-                }
+            if (resp.drag_stopped() || resp.lost_focus()) && overlap_px != cfg.overlap_px {
+                let new_cfg = EdgeBlendConfig {
+                    overlap_px,
+                    falloff_curve: cfg.falloff_curve,
+                };
+                st.pending_mutations
+                    .push(project.set_edge_blend_mutation(Some(new_cfg)));
             }
         });
 
@@ -137,15 +135,13 @@ pub fn show(
     // Collect a snapshot of target count + fallback indices to avoid
     // a borrow conflict between `project.output_targets` (needed for
     // the header) and `show_rgb_matrix_editor` (takes `&mut Project`).
-    let target_count = project.output_targets.len();
     let fallback_indices: Vec<usize> = project
         .output_targets
         .iter()
         .map(|t| t.fallback_index)
         .collect();
 
-    for i in 0..target_count {
-        let fallback_index = fallback_indices[i];
+    for (i, &fallback_index) in fallback_indices.iter().enumerate() {
         let name = monitor_names
             .get(fallback_index)
             .cloned()
