@@ -3,7 +3,7 @@
 Companion task spec for [`004-phase-0.md`](004-phase-0.md). Each task
 below is sized for a single PR.
 
-## Implementation status (2026-05-11, after W5 + release housekeeping)
+## Implementation status (2026-05-11, after W4 video integration)
 
 **Shipped (commit SHAs):**
 
@@ -35,11 +35,39 @@ below is sized for a single PR.
 - ✅ **P0.3.2** `9a0b2e4` — Audio-drop counter + diagnostics surface
   with glossary popover. *Deferred:* texture-upload queue counter
   joins the aggregate when W4.2 wires the drain.
-- ✅ **P0.4.1** `caecba9` — Decoder decision record only
-  (`specs/004-phase-0-decoder-decision.md`): AVFoundation via
-  objc2. *Deferred:* W4.2 / W4.3 / W4.4 integration (worker thread,
-  render path, Selected-layer UI) — needs the
-  `objc2-av-foundation` dep added and dev-environment validation.
+- ✅ **P0.4.1** `caecba9` — Decoder decision record
+  (`specs/004-phase-0-decoder-decision.md`): AVFoundation via objc2.
+- ✅ **P0.4.2** `04489f0` (part a: schema + worker scaffold +
+  render integration) + `350c277` (part b: AVFoundation decoder).
+  Part (a) extends `LayerKind::Video { path, speed, loop_seamless }`
+  with serde-default fallbacks (non-breaking on v7); adds
+  `src/video_layer/{mod,worker}.rs` with a control-channel
+  scaffold; `LayerState.video_texture` allocated per video layer;
+  `EditingState.texture_upload_queue` drained per-frame to
+  `Queue::write_texture`; video layers flow through the existing
+  effect chain + warp pipeline (mirrors P0.5.3 FxLayer wiring);
+  drag-and-drop accepts `.mp4 / .mov / .m4v`; missing video files
+  produce `MissingAsset` audit warnings. Part (b) adds the `video`
+  cargo feature (default-on, macOS-gated) with
+  `objc2-av-foundation 0.3.2` + `objc2-core-media 0.3.2` +
+  `objc2-core-video 0.3.2`. The worker's body is `#[cfg(feature =
+  "video")]` and decodes: `AVAsset → AVAssetReader →
+  CMSampleBuffer → CVPixelBuffer (BGRA8) → bytes pushed to
+  TextureUploadQueue`. Hardware H.264 via VideoToolbox.
+  `natural_size(path)` probes the asset's track dimensions so the
+  texture is allocated to match the decoder. Seamless loop on EOF
+  via reader rebuild. Pause blocks on `control_rx.recv()`. Decoder
+  errors transition the worker to a dead state (no panic).
+- ✅ **P0.4.3** `f4dde1a` — Video speed + loop UI. `SetVideoSpeed`
+  + `SetVideoLoopSeamless` mutations with `ReverseStorage` impls +
+  proptest harness coverage. Selected-layer panel renders a "Video"
+  collapsing section when the selected layer is `LayerKind::Video`:
+  log-scale speed slider (0.25..=4.0×, dispatches on
+  drag-release/focus-loss) + "Seamless loop" checkbox.
+  `ControlPanelState.pending_video_controls` carries `VideoControl`
+  messages alongside mutations; the app-side drain forwards each
+  to the matching worker via `state.layers[layer_idx].video_control
+  .try_send`.
 - ✅ **P0.5.1** `b32fcc5` — `LayerKind::FxLayer { preset_id, params }`
   real fields + `SetLayerKind` Mutation (whole-enum Reverse).
 - ✅ **P0.6.1** `5196c64` — NDI binding decision record only
@@ -156,21 +184,11 @@ below is sized for a single PR.
 
 **Not yet started:**
 
-- **P0.4.2 / P0.4.3** — Video playback. P0.4.1's decision record
-  picked AVFoundation via objc2 (no system dep, no system-frameworks
-  install — ships with macOS). Implementation needs:
-  `objc2-av-foundation` Cargo dep, decoder worker thread, frame
-  producer for `TextureUploadQueue` (P0.3.1's queue ready), render
-  integration mirroring P0.5.3's FxLayer shape (texture allocated
-  at layer init, filled per-frame from the decoder, then flows
-  through the existing effect chain). Drag-and-drop in
-  `layer_from_dropped_path` extended to mp4/mov/m4v. P0.4.3
-  follows with playback-speed UI.
-- **P0.9.5** — Show-day frame-budget perf gate. Deferred until
-  P0.4.2 lands so the fixture (4 video layers + bindings + edge-
-  blend) measures the full v0.4 surface; otherwise the gate
-  benchmarks a strict subset and the recorded baseline doesn't
-  reflect the acceptance line.
+- **P0.9.5** — Show-day frame-budget perf gate. Now unblocked
+  (P0.4.2 ✅ ships the full v0.4 surface that the fixture targets:
+  4 video layers + bindings + edge-blend). Harness scaffolding +
+  baseline measurement against the headless wgpu adapter is the
+  remaining lift.
 
 **Deferred to v0.5:**
 
@@ -185,11 +203,17 @@ below is sized for a single PR.
 
 **Test status:**
 
-- 495 tests pass under `--features v3,midi`.
-- 262 tests pass under default features.
+- 523 tests pass under `--features v3,midi`.
+- 270 tests pass under default features (video feature is part of
+  default; macOS-only).
+- 254 tests pass under `--no-default-features` (video feature off;
+  worker stub body active; AVFoundation deps absent).
 - New tests by workstream:
   - W2 (modulator path + components + MIDI-learn state): ~13 tests.
   - W3 (texture-upload queue): 5 tests.
+  - W4 (video schema migration + drag-drop extension + audit
+    missing-file + worker scaffold smoke + per-field Mutations
+    + `natural_size` probe error path): ~14 tests.
   - W5 (FxLayer round-trip + SDF helper smoke + ripple wash params
     + demo project load): ~5 tests.
   - W7 (reconcile + per-target audit + edge-blend schema /
