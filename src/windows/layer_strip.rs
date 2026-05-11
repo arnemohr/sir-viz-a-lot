@@ -221,6 +221,82 @@ pub fn show(
                 );
                 painter.rect_filled(thumb_rect, egui::CornerRadius::same(2), thumb_colour);
 
+                // ── P1.5.1 video-row anatomy ─────────────────────────────
+                // For Video layers, overlay (a) a loop-mode glyph in the
+                // top-right corner of the thumbnail, and (b) two small
+                // in/out markers along the thumbnail's bottom edge if
+                // the layer carries a non-default trim. The inline scrub
+                // bar (with hover thumbnails + click-to-seek) is deferred
+                // to Phase 7 — it needs the thumbnail-extraction FFI
+                // (P1.4.5's deferred half).
+                if let schema::LayerKind::Video {
+                    loop_mode,
+                    clip_in,
+                    clip_out,
+                    ..
+                } = &layer.kind
+                {
+                    // (a) loop glyph: ∞ / → / ⇆.
+                    let glyph = match loop_mode {
+                        schema::LoopMode::Loop => "∞",
+                        schema::LoopMode::Once => "→",
+                        schema::LoopMode::PingPong => "⇆",
+                    };
+                    painter.text(
+                        egui::pos2(thumb_rect.right() - 3.0, thumb_rect.top() + 1.0),
+                        egui::Align2::RIGHT_TOP,
+                        glyph,
+                        egui::FontId::proportional(11.0),
+                        egui::Color32::WHITE.linear_multiply(dim * 0.9),
+                    );
+
+                    // (b) in/out markers. Only draw when the operator
+                    // has trimmed away from the default (full clip).
+                    // Position is normalised to thumb_rect width;
+                    // absolute durations aren't known here (no asset
+                    // probe), so we treat clip_in / clip_out as
+                    // operator-facing seconds and clamp visually to
+                    // a representative 0..60 s window. This is a
+                    // **status indicator**, not a precise scrub —
+                    // operators read the in/out values precisely from
+                    // the Advanced > Video section.
+                    let trimmed_in = *clip_in > 0.05;
+                    let trimmed_out = clip_out.is_finite();
+                    if trimmed_in || trimmed_out {
+                        let bar_y = thumb_rect.bottom() - 3.0;
+                        let bar_left = thumb_rect.left() + 2.0;
+                        let bar_right = thumb_rect.right() - 2.0;
+                        let bar_width = bar_right - bar_left;
+                        // Thin grey backdrop for the trim region.
+                        painter.line_segment(
+                            [egui::pos2(bar_left, bar_y), egui::pos2(bar_right, bar_y)],
+                            egui::Stroke::new(1.0, egui::Color32::from_white_alpha(60)),
+                        );
+                        // 60 s reference window — for clips longer
+                        // than that the markers saturate at 1.0.
+                        let ref_window = 60.0_f32;
+                        let in_t = (clip_in / ref_window).clamp(0.0, 1.0);
+                        let out_t = if clip_out.is_finite() {
+                            (clip_out / ref_window).clamp(0.0, 1.0)
+                        } else {
+                            1.0
+                        };
+                        let mark = |t: f32, color: egui::Color32| {
+                            let x = bar_left + t * bar_width;
+                            painter.line_segment(
+                                [egui::pos2(x, bar_y - 2.0), egui::pos2(x, bar_y + 2.0)],
+                                egui::Stroke::new(1.5, color),
+                            );
+                        };
+                        if trimmed_in {
+                            mark(in_t, theme::ACCENT);
+                        }
+                        if trimmed_out {
+                            mark(out_t, theme::ACCENT);
+                        }
+                    }
+                }
+
                 // ── layer id label ──────────────────────────────────────
                 // `painter.text` does not auto-truncate; long filenames
                 // (e.g. "skokugel_complete_20250511.png") would overflow
