@@ -4292,6 +4292,23 @@ fn handle_editing_window_event(
                         state.undo_stack.push(m, &mut state.project);
                     }
                 }
+                // P0.4.3 — drain VideoControl messages emitted by the
+                // Video section in advanced.rs. Each message accompanies a
+                // SetVideoSpeed / SetVideoLoopSeamless mutation that went
+                // through the undo stack above; we forward it directly to
+                // the matching worker via `try_send` (unbounded channel).
+                #[cfg(feature = "v3")]
+                {
+                    let pending_vc =
+                        std::mem::take(&mut state.control_panel.pending_video_controls);
+                    for (layer_idx, msg) in pending_vc {
+                        if let Some(layer_state) = state.layers.get(layer_idx) {
+                            if let Some(ref ctrl) = layer_state.video_control {
+                                let _ = ctrl.try_send(msg);
+                            }
+                        }
+                    }
+                }
                 match panel_action {
                     ControlPanelAction::None =>
                     {

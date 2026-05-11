@@ -246,6 +246,13 @@ pub struct ControlPanelState {
     /// v2 builds carry no undo machinery; the field is gated.
     #[cfg(feature = "v3")]
     pub pending_mutations: Vec<Mutation>,
+    /// P0.4.3 — `VideoControl` messages to dispatch to worker threads
+    /// during this frame. Each entry is `(layer_idx, message)`. The app
+    /// drains this alongside `pending_mutations` and routes each message
+    /// to `state.layers[layer_idx].video_control` via `try_send`. Gated
+    /// with `pending_mutations` since both require v3 undo infrastructure.
+    #[cfg(feature = "v3")]
+    pub pending_video_controls: Vec<(usize, crate::video_layer::VideoControl)>,
     /// Buffer for the Layers tab "add layer" path field. Under v3 the layer
     /// list lives in layer_strip; these fields exist on the shared struct for
     /// API compatibility but are only read from v2 code paths.

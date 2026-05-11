@@ -20,7 +20,7 @@
 
 use egui::Ui;
 
-use crate::project::schema::{BlendMode, Project};
+use crate::project::schema::{BlendMode, LayerKind, Project};
 use crate::windows::control_panel::{
     ControlPanelAction, ControlPanelState, EffectChange, command_checkbox, command_dragvalue_u32,
     command_slider, effect_label, show_effect,
@@ -43,6 +43,8 @@ const HDR_DIAGNOSTICS: &str = "adv_diagnostics";
 // 003-T3.28 — per-display tone override section. Sits between Master and the
 // per-layer block so the operator's mental model is "global → display → layer".
 const HDR_DISPLAY_OUTPUT: &str = "adv_display_output";
+// P0.4.3 — video-specific sub-section inside "Selected layer".
+const HDR_VIDEO: &str = "adv_video";
 
 /// Render the Advanced panel body. Called from `control_panel::show` when
 /// `st.advanced_open` is `true`, inside a `SidePanel::right("rmap_advanced")`.
@@ -229,6 +231,67 @@ pub fn show(
                         });
 
                     ui.add_space(4.0);
+
+                    // --------------------------------------------------------
+                    // P0.4.3 — Video-specific controls. Only rendered when the
+                    // selected layer is a LayerKind::Video.
+                    // --------------------------------------------------------
+                    #[cfg(feature = "v3")]
+                    if matches!(project.layers[layer_idx].kind, LayerKind::Video { .. }) {
+                        egui::CollapsingHeader::new("Video")
+                            .id_salt(HDR_VIDEO)
+                            .default_open(true)
+                            .show(ui, |ui| {
+                                let (cur_speed, cur_loop) = match &project.layers[layer_idx].kind {
+                                    LayerKind::Video {
+                                        speed,
+                                        loop_seamless,
+                                        ..
+                                    } => (*speed, *loop_seamless),
+                                    _ => unreachable!(),
+                                };
+
+                                // Speed slider — 0.25× to 4.0× covers the
+                                // useful operator range. Log scale so 1.0
+                                // sits near the midpoint.
+                                ui.label("Playback speed");
+                                let mut speed_edit = cur_speed;
+                                let resp = ui.add(
+                                    egui::Slider::new(&mut speed_edit, 0.25_f32..=4.0_f32)
+                                        .suffix("×")
+                                        .logarithmic(true),
+                                );
+                                // Dispatch only on drag-release / focus-loss
+                                // so the worker is not slammed with mid-drag
+                                // control messages.
+                                if (resp.drag_stopped() || resp.lost_focus())
+                                    && (speed_edit - cur_speed).abs() > 1e-6
+                                {
+                                    st.pending_mutations.push(
+                                        project.set_video_speed_mutation(layer_idx, speed_edit),
+                                    );
+                                    st.pending_video_controls.push((
+                                        layer_idx,
+                                        crate::video_layer::VideoControl::SetSpeed(speed_edit),
+                                    ));
+                                }
+
+                                // Seamless loop toggle.
+                                let mut loop_edit = cur_loop;
+                                if ui.checkbox(&mut loop_edit, "Seamless loop").changed() {
+                                    st.pending_mutations
+                                        .push(project.set_video_loop_seamless_mutation(
+                                            layer_idx, loop_edit,
+                                        ));
+                                    st.pending_video_controls.push((
+                                        layer_idx,
+                                        crate::video_layer::VideoControl::SetLoop(loop_edit),
+                                    ));
+                                }
+                            });
+
+                        ui.add_space(4.0);
+                    }
 
                     // --------------------------------------------------------
                     // T3.13 + T3.14 — Effect chain editor (includes modulator picker)
