@@ -3,7 +3,7 @@
 Companion task spec for [`004-phase-0.md`](004-phase-0.md). Each task
 below is sized for a single PR.
 
-## Implementation status (2026-05-11, late session)
+## Implementation status (2026-05-11, after W5 + release housekeeping)
 
 **Shipped (commit SHAs):**
 
@@ -123,15 +123,54 @@ below is sized for a single PR.
   `show_rgb_matrix_editor` is now parameterised on `output_idx`
   so the editor serves both the 1-projector Advanced surface and
   the multi-projector OutputPanel sub-cards.
+- ✅ **P0.5.2** `a8fefba` — SDF helper for shader consumers. New
+  `src/render/shaders/sdf_helper.wgsl` with
+  `sample_sdf_bilinear` / `sample_sdf_gradient` / `sample_sdf`
+  taking the SDF texture as a function parameter (no global bind
+  coupling). Exposed via `crate::render::sdf::SDF_HELPER_WGSL`;
+  build.rs prefix table prepends it for consumers whose filename
+  starts with `warp` or `fx_`. `warp.wgsl` refactored to use the
+  helper (math identical → existing golden tests stay bit-exact).
+  Narrow interpretation per advisor — Color/Blur/Transform are
+  deliberately NOT plumbed (none of them consume SDF). **Spec
+  correction:** the baker doesn't produce gradient; gradient is
+  shader-side via central finite differences.
+- ✅ **P0.5.3** `fbb4edc` — Mask-edge ripple wash preset + FxLayer
+  real render path. New `src/render/fx_presets.rs` with
+  `FxPresetPipeline::new_ripple_wash` + `FxParamsUniform`
+  (fixed-shape struct, presets fill in what they read). New
+  `src/render/shaders/fx_ripple_wash.wgsl` consumes the P0.5.2 SDF
+  helper. `LayerState.fx_texture: Option<(Texture, View)>` allocated
+  per FxLayer at output size; per-frame loop syncs the mask SDF,
+  runs the preset pipeline into `fx_texture`, then the layer flows
+  through the existing effect chain + warp unchanged. New demo
+  `assets/demos/fx-ripple-wash.rmap.json` wired into `DEMO_LIST`.
+- ✅ **P0.9.1–P0.9.4** `a2d58c1` — v0.4.0 release housekeeping.
+  Version bump 0.3.1 → 0.4.0; `cargo build --profile release-show`
+  clean (~74 s, 11 MB stripped binary); `cargo bundle --profile
+  release-show` produces `.app` (no `[package.metadata.bundle]`
+  configured — uses defaults). CHANGELOG + README + show-day
+  checklist refreshed with v0.4 capabilities; system-deps audit
+  confirms v0.4 has zero Homebrew dependencies (AVFoundation when
+  video lands ships with macOS; NDI deferred to v0.5).
 
 **Not yet started:**
 
-- **P0.5.2 / P0.5.3** — SDF inputs to effect shaders + the
-  `Mask-edge ripple wash` proof preset. WGSL + render-pipeline
-  work; not started.
-- **P0.9.1 – P0.9.5** — Release housekeeping (version bump, soak,
-  changelog, README, system-deps for ffmpeg, frame-budget perf
-  gate). Tail-end; depends on all other workstreams.
+- **P0.4.2 / P0.4.3** — Video playback. P0.4.1's decision record
+  picked AVFoundation via objc2 (no system dep, no system-frameworks
+  install — ships with macOS). Implementation needs:
+  `objc2-av-foundation` Cargo dep, decoder worker thread, frame
+  producer for `TextureUploadQueue` (P0.3.1's queue ready), render
+  integration mirroring P0.5.3's FxLayer shape (texture allocated
+  at layer init, filled per-frame from the decoder, then flows
+  through the existing effect chain). Drag-and-drop in
+  `layer_from_dropped_path` extended to mp4/mov/m4v. P0.4.3
+  follows with playback-speed UI.
+- **P0.9.5** — Show-day frame-budget perf gate. Deferred until
+  P0.4.2 lands so the fixture (4 video layers + bindings + edge-
+  blend) measures the full v0.4 surface; otherwise the gate
+  benchmarks a strict subset and the recorded baseline doesn't
+  reflect the acceptance line.
 
 **Deferred to v0.5:**
 
@@ -146,12 +185,13 @@ below is sized for a single PR.
 
 **Test status:**
 
-- 491 tests pass under `--features v3,midi`.
-- 259 tests pass under default features.
+- 495 tests pass under `--features v3,midi`.
+- 262 tests pass under default features.
 - New tests by workstream:
   - W2 (modulator path + components + MIDI-learn state): ~13 tests.
   - W3 (texture-upload queue): 5 tests.
-  - W5 (FxLayer round-trip): 1 test.
+  - W5 (FxLayer round-trip + SDF helper smoke + ripple wash params
+    + demo project load): ~5 tests.
   - W7 (reconcile + per-target audit + edge-blend schema /
     mutation / uniform byte-layout): ~12 tests.
   - W8 (RGB matrix render + per-output mutation, out-of-range
