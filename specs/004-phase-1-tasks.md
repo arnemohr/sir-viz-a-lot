@@ -3,11 +3,49 @@
 Companion task spec for [`004-phase-1.md`](004-phase-1.md). Each task
 below is sized for a single PR.
 
-## Implementation status (2026-05-11)
+## Implementation status (2026-05-11, W1 + W6 complete)
 
-**Shipped:** *(none yet — Phase 1 just opened.)*
+**Shipped:**
 
-**Not yet started:** every task below.
+- ✅ **P1.1.1** `9b83f4d` — WEBP + GIF first-frame drag-and-drop
+  support. `image` crate 0.25's default feature set already ships
+  webp + gif decoders; `layer_from_dropped_path` accepts both
+  extensions and routes through the image path. Toast updated to
+  enumerate every supported extension. 6 new unit tests covering
+  every extension class.
+- ✅ **P1.1.2** `3603b4c` — Image texture cache. `ImageTextureCache`
+  in `src/image_layer.rs` dedupes uploads when multiple layers
+  reference the same `(path, mtime)`. wgpu 29's `Texture` is
+  internally Arc-counted; cloning a cache hit is a cheap reference
+  bump. Cache lives on `EditingState` and `RenderGraph`; the layer-
+  init image path and the SVG-watcher hot-reload site both route
+  through it. 5 CPU-only key-equality tests.
+- ✅ **P1.1.3** `e2f4da0` — Glossary entries for 13 Phase 1 domain
+  terms (Treatment, ToneMap, BlurMask, LuminanceReveal,
+  TextureOverlay, PaletteExtract, Collage, FocalPoint, InOutPoints,
+  LoopMode, BpmLockedPlayback, ReversePlayback, ThumbnailScrub).
+  `EXPECTED_VARIANT_COUNT` bumped 26 → 39; existing exhaustiveness
+  tests cover the new variants.
+- ✅ **P1.1.4** `b148af1` — Safe image preprocessing. EXIF
+  orientation handling in `upload_image_rgba8` (phone-portrait
+  JPEGs land upright). Memory bounds (MAX_DIM = 4096) already
+  existed; this commit adds a loud `tracing::warn!` on downscale.
+  **Deferred from spec:** the `AuditKind::ImageDownscaled` audit
+  finding (audit runs before rebuild_layers — would need a re-
+  architecture); live toast (same reason). 2 new tests covering
+  the rotate-90 axis-swap + non-EXIF no-op invariants.
+- ✅ **P1.4.0** `b3099ae` — Video worker auto-play verification.
+  `worker_loop` initialises `state = WorkerState::Playing` so
+  drag-drop already satisfies "drop within one click". No code
+  change needed; added a fixture-gated test that exercises the
+  contract directly (skips when `tests/fixtures/test.mp4` is
+  absent; P1.7.4 will populate it).
+- ✅ **P1.6.1** `135001d` — Texture-upload drop count aggregated
+  into the diagnostics widget. Closes the P0.3.2 deferred wiring
+  (video worker is now a real producer). Counter is summed with
+  the audio drop count; tooltip splits the breakdown.
+
+**Not yet started:**
 
 **Carryover from Phase 0:**
 
@@ -41,14 +79,19 @@ below is sized for a single PR.
   due to a Rust 1.92 / clippy upgrade. Cleanup is orthogonal to
   Phase 1 scope; the v3,midi clippy target is clean.
 
-**Test status:** *(placeholder; filled in by snapshot commits as
-workstreams ship)*
+**Test status:**
 
-- *N tests pass under `--features v3,midi` (baseline 523).*
-- *N tests pass under default features (baseline 270).*
-- *N tests pass under `--no-default-features` (baseline 254).*
-- *1 test passes under `--features gpu-tests` (P0.9.5; P1.7.4
-  replaces the fixture).*
+- 537 tests pass under `--features v3,midi` (was 523 at Phase 0
+  close; +14 from W1 + W6 + W4.0).
+- 284 tests pass under default features (was 270; +14 same reason).
+- 1 test passes under `--features gpu-tests` (P0.9.5; P1.7.4 will
+  refresh the fixture).
+- New tests by workstream:
+  - W1.1 (drag-drop dispatch): 6 tests.
+  - W1.2 (image cache key equality + clear): 5 tests.
+  - W1.4 (EXIF rotate-90 + no-transform no-op): 2 tests.
+  - W4.0 (auto-play, fixture-gated): 1 test (skipped without
+    fixture).
 
 ---
 
