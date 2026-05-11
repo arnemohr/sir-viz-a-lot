@@ -201,7 +201,7 @@ fn relativize_layer_paths(project: &mut Project, project_dir: &Path) {
                     *svg_path = rel;
                 }
             }
-            LayerKind::Video { path } => {
+            LayerKind::Video { path, .. } => {
                 if let Some(rel) = relative_under(path, &canon_dir) {
                     *path = rel;
                 }

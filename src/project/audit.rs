@@ -775,6 +775,56 @@ mod tests {
         std::fs::remove_file(&tmp).ok();
     }
 
+    /// P0.4.2 — a `LayerKind::Video` layer pointing at a missing path
+    /// triggers a Warn `MissingAsset` finding (same as Image/SVG).
+    /// `LayerKind::asset_path()` already returns `Some(path)` for Video,
+    /// so the existing audit check covers it automatically — this test
+    /// confirms the behavior.
+    #[test]
+    fn audit_missing_video_asset_emits_warning() {
+        let mut p = fresh_project();
+        p.layers.push(crate::project::schema::layer_from_video_path(
+            "vid0",
+            std::path::PathBuf::from("/definitely/does/not/exist/sample.mp4"),
+        ));
+        let findings = ProjectAudit::run(&p, &AuditEnv::default());
+        let f = findings
+            .iter()
+            .find(|f| {
+                matches!(
+                    f.kind,
+                    AuditKind::MissingAsset { layer_idx, .. } if layer_idx == 1
+                )
+            })
+            .expect("expected MissingAsset for missing video path");
+        assert_eq!(
+            f.severity,
+            Severity::Warn,
+            "missing video asset should be Warn"
+        );
+        assert!(
+            f.autofix.is_none(),
+            "MissingAsset autofix lives at toast-action layer (T2.24)"
+        );
+    }
+
+    /// P0.4.2 — drag-and-drop: `layer_from_dropped_path` is in app.rs and
+    /// not tested here, but the schema constructor `layer_from_video_path`
+    /// is exercised in schema tests. Confirm extensions mp4/mov/m4v produce
+    /// a Video kind (via constructor; the dropped-path wiring is app-level).
+    #[test]
+    fn layer_from_video_path_produces_video_kind_audit() {
+        use crate::project::schema::{LayerKind, layer_from_video_path};
+        for ext in ["mp4", "mov", "m4v"] {
+            let path = std::path::PathBuf::from(format!("/tmp/show.{ext}"));
+            let lc = layer_from_video_path(format!("vid_{ext}"), path.clone());
+            assert!(
+                matches!(lc.kind, LayerKind::Video { .. }),
+                "layer_from_video_path must produce Video kind for .{ext}",
+            );
+        }
+    }
+
     /// 003-T1.39 — output_target.fallback_index >= AuditEnv.monitor_count triggers
     /// MonitorOutOfRange with a SetOutputMonitorIndex autofix that resets
     /// the index to 0.

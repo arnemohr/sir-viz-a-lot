@@ -789,7 +789,7 @@ impl ReverseStorage for RelinkAssetPath {
             crate::project::schema::LayerKind::Svg { svg_path } => {
                 *svg_path = self.new_path.clone();
             }
-            crate::project::schema::LayerKind::Video { path } => {
+            crate::project::schema::LayerKind::Video { path, .. } => {
                 *path = self.new_path.clone();
             }
             crate::project::schema::LayerKind::FxLayer { .. }

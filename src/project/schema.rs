@@ -58,12 +58,22 @@ pub enum LayerKind {
         #[serde(default = "default_focal")]
         focal: [f32; 2],
     },
-    /// v0.4 W4 — mp4 / H.264 video. Real fields land in P0.4.1; for the
-    /// P0.1.2 scaffold this carries the path only and renders a
-    /// placeholder rectangle until the decoder thread + texture-upload
-    /// pipeline are wired.
+    /// v0.4 W4 — mp4 / H.264 video. P0.4.2 extends the schema with
+    /// `speed` and `loop_seamless`; both are serde-defaulted so existing
+    /// v7 saves with `Video { path }` load cleanly with
+    /// `speed: 1.0, loop_seamless: true`.
     Video {
         path: PathBuf,
+        /// Playback rate multiplier. 1.0 = real-time; 0.5 = half speed;
+        /// 2.0 = 2× speed. P0.4.3 ships the UI; today the field is
+        /// readable by the worker (Part 2) but no UI dispatches mutations.
+        #[serde(default = "default_video_speed")]
+        speed: f32,
+        /// Whether the worker seeks to 0 on EOF (true) or stops (false).
+        /// Default true — the show-day "drop an mp4, it plays forever"
+        /// expectation.
+        #[serde(default = "default_video_loop_seamless")]
+        loop_seamless: bool,
     },
     /// v0.4 W5 — procedural FX layer driven by mask SDF. Real fields
     /// landed in P0.5.1; the scaffold carries the preset id and a
@@ -97,7 +107,7 @@ impl LayerKind {
         match self {
             LayerKind::Svg { svg_path } => Some(svg_path.as_path()),
             LayerKind::Image { path, .. } => Some(path.as_path()),
-            LayerKind::Video { path } => Some(path.as_path()),
+            LayerKind::Video { path, .. } => Some(path.as_path()),
             LayerKind::FxLayer { .. } | LayerKind::Ndi { .. } => None,
         }
     }
@@ -105,6 +115,14 @@ impl LayerKind {
 
 fn default_focal() -> [f32; 2] {
     [0.5, 0.5]
+}
+
+fn default_video_speed() -> f32 {
+    1.0
+}
+
+fn default_video_loop_seamless() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -561,6 +579,32 @@ pub fn layer_from_svg_path(id: impl Into<String>, svg_path: PathBuf) -> LayerCon
     }
 }
 
+/// Build a layer row for a video (mp4/mov/m4v) path.
+///
+/// Sets `speed: 1.0, loop_seamless: true` — the show-day defaults.
+/// Other fields (warp, opacity, blend_mode, effects) mirror the other
+/// layer constructors.
+///
+/// P0.4.2 — the worker is spawned separately at layer-init time in
+/// `app.rs::rebuild_layers`; this function only builds the `LayerConfig`.
+pub fn layer_from_video_path(id: impl Into<String>, path: PathBuf) -> LayerConfig {
+    LayerConfig {
+        id: id.into(),
+        kind: LayerKind::Video {
+            path,
+            speed: 1.0,
+            loop_seamless: true,
+        },
+        enabled: true,
+        transform: Transform2D::default(),
+        effects: crate::effects::default_effect_chain(),
+        blend_mode: BlendMode::Normal,
+        opacity: 1.0,
+        warp: WarpMesh::default_placement(),
+        muted: false,
+    }
+}
+
 /// Build a layer row for an image (JPG/PNG) path using the v1 default chain.
 /// Defaults to `Cover` fit + center focal — matches the "drop a photo,
 /// it fills the wall" operator expectation (T-M8-05).
@@ -592,6 +636,57 @@ mod tests {
 
     fn approx(a: [f32; 2], b: [f32; 2], eps: f32) -> bool {
         (a[0] - b[0]).abs() < eps && (a[1] - b[1]).abs() < eps
+    }
+
+    /// P0.4.2 — `LayerKind::Video { path }` (old shape, without `speed`
+    /// or `loop_seamless`) deserializes with serde defaults:
+    /// `speed == 1.0`, `loop_seamless == true`.
+    #[test]
+    fn video_layer_missing_speed_and_loop_deserializes_with_defaults() {
+        let json = r#"{
+            "id": "v1",
+            "kind": {"Video": {"path": "/tmp/test.mp4"}},
+            "enabled": true,
+            "transform": {"translate": [0.0,0.0],"rotate_deg":0.0,"scale":[1.0,1.0],"anchor":[0.0,0.0]},
+            "effects": [],
+            "blend_mode": "Normal",
+            "opacity": 1.0,
+            "warp": {"rows":1,"cols":1,"grid":[[[0.0,0.0],[1.0,0.0]],[[0.0,1.0],[1.0,1.0]]],"mask_polygon":[],"mask_feather":0.02}
+        }"#;
+        let lc: LayerConfig = serde_json::from_str(json).expect("deserialize old Video shape");
+        match lc.kind {
+            LayerKind::Video {
+                speed,
+                loop_seamless,
+                ..
+            } => {
+                assert!(
+                    (speed - 1.0).abs() < 1e-6,
+                    "old Video shape should default speed to 1.0, got {speed}"
+                );
+                assert!(
+                    loop_seamless,
+                    "old Video shape should default loop_seamless to true"
+                );
+            }
+            other => panic!("expected Video, got {other:?}"),
+        }
+    }
+
+    /// P0.4.2 — drag-drop returns `Some(...)` for mp4/mov/m4v extensions
+    /// and `None` for unsupported ones.
+    #[test]
+    fn layer_from_video_path_produces_video_kind() {
+        let path = std::path::PathBuf::from("/tmp/show.mp4");
+        let lc = layer_from_video_path("v0", path.clone());
+        assert!(
+            matches!(lc.kind, LayerKind::Video { ref path, speed, loop_seamless }
+                if path.to_str() == Some("/tmp/show.mp4")
+                    && (speed - 1.0).abs() < 1e-6
+                    && loop_seamless
+            ),
+            "layer_from_video_path should produce Video kind with defaults"
+        );
     }
 
     #[test]

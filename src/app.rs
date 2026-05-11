@@ -566,6 +566,13 @@ struct EditingState {
     /// Initialised to 0 at session start.
     #[cfg(feature = "v3")]
     prior_bar_idx: u64,
+    /// P0.4.2 — shared texture-upload queue for all video workers (and
+    /// future NDI receivers). Allocated once per session in
+    /// `assemble_editing_state`; each video worker receives a clone of
+    /// the sender via `texture_upload_queue.sender()`. The render thread
+    /// drains up to `MAX_DRAIN_PER_FRAME` frames at the start of each
+    /// render call, before the layer loop.
+    texture_upload_queue: crate::render::texture_upload::TextureUploadQueue,
 }
 
 impl EditingState {
@@ -731,6 +738,10 @@ fn layer_from_dropped_path(
         Some("svg") => Some(schema::layer_from_svg_path(id, path_buf)),
         Some("png") | Some("jpg") | Some("jpeg") => {
             Some(schema::layer_from_image_path(id, path_buf))
+        }
+        // P0.4.2 — video extensions.
+        Some("mp4") | Some("mov") | Some("m4v") => {
+            Some(schema::layer_from_video_path(id, path_buf))
         }
         _ => None,
     }
@@ -1225,6 +1236,7 @@ fn rebuild_layers_for_state(state: &mut EditingState) {
         w,
         h,
         fmt,
+        &state.texture_upload_queue,
     ) {
         Ok(layers) => {
             state.layers = layers;
@@ -1301,6 +1313,44 @@ struct LayerState {
     /// this texture each frame, after which the layer flows through
     /// the normal effect chain + warp pipeline unchanged.
     fx_texture: Option<(wgpu::Texture, wgpu::TextureView)>,
+    /// P0.4.2 — for `LayerKind::Video` layers, the texture that the
+    /// video worker's frames are uploaded into. Allocated at layer
+    /// init at output size in `make_video_texture`. The per-frame
+    /// `TextureUploadQueue` drain calls `Queue::write_texture` against
+    /// this texture; the per-frame layer loop binds it as the layer's
+    /// source view (mirrors the FxLayer texture wiring).
+    video_texture: Option<(wgpu::Texture, wgpu::TextureView)>,
+    /// P0.4.2 — control channel handle for the per-layer video worker.
+    /// Dropped on layer removal — the worker thread exits when the
+    /// sender is dropped (its `recv()` returns Err). The receiver side
+    /// lives in the worker thread.
+    video_control: Option<crossbeam_channel::Sender<crate::video_layer::VideoControl>>,
+    /// P0.4.2 — the video worker's `UploadTargetId` for matching
+    /// drained frames to this layer's `video_texture`. Stable per
+    /// `LayerState`.
+    video_upload_target: Option<crate::render::texture_upload::UploadTargetId>,
+    /// P0.4.2 — worker thread handle (owned for shutdown coherence;
+    /// `Stop` is sent on Drop before this field is dropped, which
+    /// causes the worker thread to exit and the handle to detach).
+    _video_worker_handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for LayerState {
+    fn drop(&mut self) {
+        // P0.4.2 — signal the video worker to stop, then let the fields
+        // drop. The worker exits when it receives Stop or when the sender
+        // is dropped (Err path). JoinHandle::drop does not block — the
+        // thread becomes detached, which is fine because the worker exits
+        // cleanly on its own via the Stop message or sender disconnect.
+        if let Some(ref ctrl) = self.video_control {
+            // Best-effort: if the worker already exited, the channel is
+            // disconnected and try_send returns Err — that's fine.
+            let _ = ctrl.send(crate::video_layer::VideoControl::Stop);
+        }
+        // Fields drop in declaration order after this impl returns.
+        // video_control drops here → channel disconnects → worker's
+        // recv() returns Err and the thread exits (if it hasn't already).
+    }
 }
 
 fn create_layer_uniform_buffers(
@@ -1504,6 +1554,10 @@ struct RenderGraph {
     warp_rt: wgpu::Texture,
     warp_rt_view: wgpu::TextureView,
     layers: Vec<LayerState>,
+    /// P0.4.2 — texture-upload queue for video workers and future NDI receivers.
+    /// Allocated here so it outlives the individual layer states; moved into
+    /// `EditingState` via `assemble_editing_state`.
+    upload_queue: crate::render::texture_upload::TextureUploadQueue,
 }
 
 /// 003-T1.11: build the per-projector render graph (compositor +
@@ -1532,7 +1586,19 @@ fn init_render_graph(
     let fx_pipeline =
         crate::render::fx_presets::FxPresetPipeline::new_ripple_wash(device, surface_format);
     let (warp_rt, warp_rt_view) = make_warp_render_target(device, w, h, surface_format);
-    let layers = rebuild_layers(device, queue, project, project_path, w, h, surface_format)?;
+    // P0.4.2 — create the shared texture-upload queue before rebuild_layers
+    // so we can hand a sender clone to each Video worker.
+    let upload_queue = crate::render::texture_upload::TextureUploadQueue::new();
+    let layers = rebuild_layers(
+        device,
+        queue,
+        project,
+        project_path,
+        w,
+        h,
+        surface_format,
+        &upload_queue,
+    )?;
 
     Ok(RenderGraph {
         svg_pipeline,
@@ -1544,6 +1610,7 @@ fn init_render_graph(
         warp_rt,
         warp_rt_view,
         layers,
+        upload_queue,
     })
 }
 
@@ -1919,6 +1986,9 @@ fn assemble_editing_state(
         pending_cue: None,
         #[cfg(feature = "v3")]
         prior_bar_idx: 0,
+        // P0.4.2 — move the upload queue from the render graph into
+        // EditingState so the per-frame drain can access it.
+        texture_upload_queue: graph.upload_queue,
     }
 }
 
@@ -2930,6 +3000,7 @@ fn build_initial_project(svg_path: Option<PathBuf>) -> Project {
     project
 }
 
+#[allow(clippy::too_many_arguments)]
 fn rebuild_layers(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -2938,6 +3009,7 @@ fn rebuild_layers(
     width: u32,
     height: u32,
     surface_format: wgpu::TextureFormat,
+    upload_queue: &crate::render::texture_upload::TextureUploadQueue,
 ) -> Result<Vec<LayerState>> {
     let mut out = Vec::with_capacity(project.layers.len());
     for lc in project.layers.iter() {
@@ -2988,6 +3060,11 @@ fn rebuild_layers(
                 _warp_texture: warp_texture,
                 warp_view,
                 fx_texture: Some((fx_texture, fx_view)),
+                // P0.4.2 — not a video layer.
+                video_texture: None,
+                video_control: None,
+                video_upload_target: None,
+                _video_worker_handle: None,
             });
             continue;
         }
@@ -3016,6 +3093,13 @@ fn rebuild_layers(
         let generation = 1u64;
 
         let mut texture_aspect = 1.0_f32;
+        // P0.4.2 — per-layer video fields; populated in the Video arm below.
+        let mut video_texture: Option<(wgpu::Texture, wgpu::TextureView)> = None;
+        let mut video_control: Option<crossbeam_channel::Sender<crate::video_layer::VideoControl>> =
+            None;
+        let mut video_upload_target: Option<crate::render::texture_upload::UploadTargetId> = None;
+        let mut worker_handle_opt: Option<std::thread::JoinHandle<()>> = None;
+
         match &lc.kind {
             schema::LayerKind::Svg { .. } => {
                 // Existing path: enqueue raster job, worker reads file +
@@ -3028,11 +3112,25 @@ fn rebuild_layers(
                 });
             }
             schema::LayerKind::Video { .. } => {
-                // P0.1.2 placeholder — texture-upload pipeline (W3.1) +
-                // decoder thread (P0.4.1) wire real frames here.
+                // P0.4.2 — allocate video_texture, spawn worker stub.
+                // Part 2's AVFoundation decoder replaces the worker body
+                // without touching this init path.
+                let (vid_tex, vid_view) =
+                    make_video_texture(device, width.max(1), height.max(1), surface_format);
+                // Stable upload target id: reuse the SVG LayerId counter
+                // (same monotonic source) cast to u64.
+                let target = crate::render::texture_upload::UploadTargetId(layer_id.0);
+                let upload_sender = upload_queue.sender();
+                let (worker_handle, control_tx) =
+                    crate::video_layer::spawn(asset_path.clone(), target, upload_sender);
+                video_texture = Some((vid_tex, vid_view));
+                video_control = Some(control_tx);
+                video_upload_target = Some(target);
+                worker_handle_opt = Some(worker_handle);
                 tracing::debug!(
                     path = %asset_path.display(),
-                    "Video layer placeholder — render path lands in P0.4.2",
+                    target = ?target,
+                    "video worker stub spawned (P0.4.2a; no decoder)",
                 );
             }
             schema::LayerKind::FxLayer { .. } | schema::LayerKind::Ndi { .. } => {
@@ -3094,6 +3192,11 @@ fn rebuild_layers(
             _warp_texture: warp_texture,
             warp_view,
             fx_texture: None,
+            // P0.4.2 — populated above for Video layers; None for all others.
+            video_texture,
+            video_control,
+            video_upload_target,
+            _video_worker_handle: worker_handle_opt,
         });
     }
     Ok(out)
@@ -3178,6 +3281,12 @@ fn resize_m5_gpu(state: &mut EditingState) {
         if layer.fx_texture.is_some() {
             layer.fx_texture = Some(make_fx_texture(device, w, h, fmt));
         }
+        // P0.4.2: video_texture is output-sized; recreate on resize so the
+        // drain's format/dim check in the per-frame loop stays consistent.
+        // Part 2's decoder will reckon with native-vs-output sizing then.
+        if layer.video_texture.is_some() {
+            layer.video_texture = Some(make_video_texture(device, w, h, fmt));
+        }
         // P0.1.2 placeholder: only raster-shaped layers (Svg/Image/Video)
         // need a raster-job re-send on resize. FxLayer / Ndi are skipped.
         let Some(path) = state.project.layers[i]
@@ -3194,6 +3303,39 @@ fn resize_m5_gpu(state: &mut EditingState) {
             generation: layer.generation,
         });
     }
+}
+
+/// P0.4.2 — Allocate the per-Video-layer upload texture. Sized to the
+/// projector output so decoded frames flow through the existing effect chain
+/// and warp pipeline at native output resolution. Uses the surface format
+/// consistent with the FxLayer texture allocation.
+fn make_video_texture(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+    format: wgpu::TextureFormat,
+) -> (wgpu::Texture, wgpu::TextureView) {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("video layer upload texture"),
+        size: wgpu::Extent3d {
+            width: width.max(1),
+            height: height.max(1),
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        // TEXTURE_BINDING: read by the effect chain.
+        // COPY_DST: written by Queue::write_texture in the per-frame drain.
+        // RENDER_ATTACHMENT: so it can serve as an intermediate if needed.
+        usage: wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_DST
+            | wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    (texture, view)
 }
 
 /// P0.5.3 — Allocate the per-FxLayer output texture. Sized to the projector
@@ -3632,6 +3774,7 @@ fn render_m5_pipeline(
                 };
 
             // Resolve the source texture view: FxLayer uses fx_tex_view;
+            // Video layers use video_texture (uploaded by the drain above);
             // other layers fall through to the SvgLayer GPU texture.
             let tex_view: &wgpu::TextureView = match fx_tex_view {
                 Some(v) => v,
@@ -3641,10 +3784,22 @@ fn render_m5_pipeline(
                         // skip rather than rendering a blank quad.
                         continue;
                     }
-                    let Some(v) = ls.layer.texture_view() else {
-                        continue;
-                    };
-                    v
+                    // P0.4.2 — Video: bind video_texture as the source view.
+                    // In Part 1 (stub worker) no frames are uploaded so the
+                    // texture is black; Part 2's decoder fills it each frame.
+                    if matches!(cfg.kind, schema::LayerKind::Video { .. }) {
+                        if let Some((_tex, vid_view)) = ls.video_texture.as_ref() {
+                            vid_view
+                        } else {
+                            // Missing video_texture — skip this layer.
+                            continue;
+                        }
+                    } else {
+                        let Some(v) = ls.layer.texture_view() else {
+                            continue;
+                        };
+                        v
+                    }
                 }
             };
 
@@ -4671,6 +4826,69 @@ fn handle_editing_window_event(
                 }
                 first_err.map_or(Ok(()), Err)
             } else if !state.project.layers.is_empty() {
+                // P0.4.2 — drain the texture-upload queue before the layer
+                // loop. Video workers (and future NDI receivers) push frames
+                // here; the render thread does the actual `Queue::write_texture`
+                // so GPU command ordering stays deterministic. In Part 1 (stub
+                // worker) the queue is always empty and this is a no-op.
+                {
+                    let mut drained: Vec<crate::render::texture_upload::TextureFrame> = Vec::new();
+                    state.texture_upload_queue.drain_into(&mut drained);
+                    for frame in &drained {
+                        // Find the layer whose video_upload_target matches
+                        // frame.target. O(N) layers per frame — fine for v0.4
+                        // scene sizes.
+                        let Some(ls) = state
+                            .layers
+                            .iter()
+                            .find(|ls| ls.video_upload_target == Some(frame.target))
+                        else {
+                            // Stale frame (layer removed) — drop silently.
+                            continue;
+                        };
+                        let Some((tex, _view)) = ls.video_texture.as_ref() else {
+                            continue;
+                        };
+                        // Format / dim mismatch → skip rather than panic.
+                        if frame.format != tex.format()
+                            || frame.width != tex.width()
+                            || frame.height != tex.height()
+                        {
+                            tracing::warn!(
+                                target: "rmap::video",
+                                frame_fmt = ?frame.format,
+                                tex_fmt = ?tex.format(),
+                                frame_w = frame.width,
+                                frame_h = frame.height,
+                                tex_w = tex.width(),
+                                tex_h = tex.height(),
+                                "video frame format/dim mismatch; dropping",
+                            );
+                            continue;
+                        }
+                        state.renderer.gpu.queue.write_texture(
+                            wgpu::TexelCopyTextureInfo {
+                                texture: tex,
+                                mip_level: 0,
+                                origin: wgpu::Origin3d::ZERO,
+                                aspect: wgpu::TextureAspect::All,
+                            },
+                            &frame.pixels,
+                            wgpu::TexelCopyBufferLayout {
+                                offset: 0,
+                                // Assumes 4 bytes per pixel (RGBA8 / BGRA8).
+                                bytes_per_row: Some(frame.width * 4),
+                                rows_per_image: Some(frame.height),
+                            },
+                            wgpu::Extent3d {
+                                width: frame.width,
+                                height: frame.height,
+                                depth_or_array_layers: 1,
+                            },
+                        );
+                    }
+                }
+
                 // Split-borrow: bind outputs from state.outputs before taking
                 // &mut borrows on state.layers and state.overlay. Passes 1-4
                 // run once (shared canvas work); passes 5-6 loop per output
