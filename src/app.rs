@@ -4111,6 +4111,15 @@ fn handle_editing_window_event(
                         state.undo_stack.push(mutation, &mut state.project);
                         state.dirty = true;
                         rebuild_layers_for_state(state);
+                        // UX: auto-select the freshly-dropped layer so the
+                        // Selected-layer panel (Treatment / Video / Effect
+                        // chain) targets it immediately. Matches what every
+                        // DAW / mapping tool does — drop a thing, the thing
+                        // is selected. Selection state is session-scoped
+                        // (not undoable), so this is a plain field write,
+                        // not a Mutation.
+                        state.scene_editor.selected =
+                            Some(crate::windows::scene_editor::Selection::Layer(position));
                         state.toast_queue.push(crate::windows::toast::Toast::new(
                             crate::windows::toast::ToastKind::Info,
                             format!("Added {basename}"),

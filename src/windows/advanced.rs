@@ -435,14 +435,20 @@ fn show_treatment_section(
     st: &mut ControlPanelState,
     layer_idx: usize,
 ) {
-    let is_image_or_video = matches!(
-        project.layers[layer_idx].kind,
-        LayerKind::Image { .. } | LayerKind::Video { .. }
-    );
-    if !is_image_or_video {
-        ui.label(
-            "Treatments apply to image and video layers; FX layers use their own preset library.",
+    let kind_str = match project.layers[layer_idx].kind {
+        LayerKind::Image { .. } | LayerKind::Video { .. } => None,
+        LayerKind::Svg { .. } => Some("SVG"),
+        LayerKind::FxLayer { .. } => Some("FX"),
+        LayerKind::Ndi { .. } => Some("NDI"),
+    };
+    if let Some(label) = kind_str {
+        ui.colored_label(
+            ui.visuals().warn_fg_color,
+            format!("Treatments apply to image and video layers — this is a {label} layer."),
         );
+        if label == "FX" {
+            ui.weak("FX layers use their own preset library (see the FX preset picker).");
+        }
         return;
     }
 
