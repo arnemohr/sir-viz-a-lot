@@ -3,8 +3,12 @@
 rmap is a single-machine projection-mapping tool for small live shows. Load a
 still image or SVG, drag the warp corners onto your wall or screen, dial in a
 mask polygon to hide the edges, and save the whole setup as a project file you
-can reload at the next event. The launcher opens a bundled demo so you can
-explore the canvas immediately — no command-line flags required.
+can reload at the next event. Up to two projectors are supported, with edge
+blend and per-projector RGB colour calibration. The launcher opens a bundled
+demo so you can explore the canvas immediately — no command-line flags required.
+
+**Supported media:** SVG, PNG, JPG (stable); video decode — decoder selected
+(AVFoundation), integration in flight.
 
 <!-- TODO: screenshot of launcher -->
 
@@ -20,10 +24,11 @@ explore the canvas immediately — no command-line flags required.
    cargo run --release
    ```
 
-2. The launcher window opens. Click **Try a demo** to choose from three bundled
+2. The launcher window opens. Click **Try a demo** to choose from four bundled
    demos: **window-glow** (a lit architectural still), **film-strip** (a
-   multi-layer composition), and **test-grid** (an alignment grid useful for
-   verifying warp accuracy).
+   multi-layer composition), **test-grid** (an alignment grid useful for
+   verifying warp accuracy), and **fx-ripple-wash** (a mask-edge FX preset
+   demo).
 
 3. To use your own content, click **Open a recent show** (if you have one) or
    drag a JPG, PNG, or SVG onto the canvas once a project is open.
@@ -53,14 +58,49 @@ Every layer row in the left rail carries two toggle buttons:
 Both toggles survive undo and scene recall, making them safe for silently
 subbing a layer in or out mid-cue before committing to a scene save.
 
+## Multi-projector (v0.4)
+
+The launcher's output picker lets you assign up to two projectors. An
+identify-flash highlights each output so you can confirm which display is
+which. The `output_targets` list in the project file stores one entry per
+projector; the render loop applies passes 1–4 once and passes 5–6 (including
+edge-blend and colour calibration) per output.
+
+**Edge blend** — set an overlap width and the edge-blend WGSL applies a
+multiply-blend gradient so the intensity across the seam sums to 1.0. The
+edge-blend gradient test pattern in the show-day strip makes alignment
+verification fast.
+
+**Per-projector RGB matrix** — a 3×3 colour matrix in the OutputPanel corrects
+white-point and colour-temperature per projector. The identity matrix is
+bit-equivalent to the un-matrixed path; a non-identity state is marked in the
+panel header.
+
+## OSC and MIDI bindings (v0.4)
+
+Right-click any parameter row to open the binding picker. Choose **OSC** to
+bind to an incoming OSC address, or **MIDI** to use MIDI-learn: arm the
+parameter, send a CC from your controller, and the binding is captured and
+added to the undo stack. Scale and offset are derived from the CC range
+automatically. Active OSC bindings are summarised in the Advanced panel's OSC
+section before go-live.
+
+## FX layers (v0.4)
+
+Add an FX layer from the layer picker. Each FX layer holds a `preset_id` and
+a parameter map. The shipped preset, `mask_edge_ripple_wash`, applies an
+animated ripple wash along the edges of the layer's mask polygon. The demo
+project `fx-ripple-wash` in the launcher shows the preset in action.
+
 ## Docs
 
 - [Show-day operator checklist](docs/show-day-checklist.md) — macOS-focused
-  pre-show steps, cables, and verifying display-sleep prevention.
+  pre-show steps, cables, verifying display-sleep prevention, and v0.4
+  two-projector / binding / FX checks.
 - [Keyboard accelerators](specs/keyboard-accelerators.md) — every key binding
   with its source location.
-- [Capability scope](specs/v3-capability-scope.md) — what v3 ships, what v3.1
-  catches, and what v0.4 will own.
+- [Capability scope](specs/v3-capability-scope.md) — v3 feature scope and
+  historical v3.1 deferred-item list.
 
 ## Tests
 
@@ -90,13 +130,14 @@ make ci
 cargo run --release -- --help
 ```
 
-- **`*.rmap.json`** — full project (layers, warp, scenes, gamma, `output_target`,
-  optional `output_windowed`). The `output_target` field records the projector
-  display's UUID; on load, rmap matches the saved UUID first, falls back to the
-  saved index, then falls back to display 0 with an audit warning. This means a
-  `.rmap.json` saved on machine A opens onto the same physical projector on
-  machine B as long as the display UUID is recognised — no `--monitor` flag
-  required.
+- **`*.rmap.json`** — full project (layers, warp, scenes, gamma,
+  `output_targets` list, optional `output_windowed`). Each `OutputTarget`
+  records the projector display's UUID; on load, rmap matches the saved UUID
+  first, falls back to the saved index, then falls back to display 0 with an
+  audit warning. This means a `.rmap.json` saved on machine A opens onto the
+  same physical projector on machine B as long as the display UUID is recognised
+  — no `--monitor` flag required. Projects from schema v6 and earlier migrate
+  automatically.
 - **`*.svg`** — bootstrap one layer; warp defaults are added automatically.
 - **`--monitor INDEX`** — output monitor (overrides the value saved in the
   project file). Use `--list-monitors` to print indices.
@@ -131,9 +172,10 @@ list of all key bindings is in
   undo, launcher, project audit). Currently behind the flag while v3 ships
   incrementally; planned to flip to default at M3.
 - `gpu-tests` — headless wgpu golden-image harness. Off by default.
-- `audio`, `midi`, `osc` — live input sources. Do not promote to default. When
-  the `audio` feature is enabled and an audio input source is active, an 8-band
-  FFT meter appears above the cue strip.
+- `midi`, `osc` — MIDI CC and OSC live input sources. **Default-on** as of
+  v0.4; binding pickers and MIDI-learn are available out of the box.
+- `audio` — 8-band FFT audio input source. Off by default; when enabled, a
+  meter strip appears above the cue strip. Do not promote to default.
 
 ### Build profiles
 

@@ -4,6 +4,86 @@ All notable changes to rmap are documented here.
 
 ---
 
+## v0.4.0 — 2026-05-11
+
+v0.4 is the first multi-projector release. It adds two-output support with
+edge-blend, per-projector RGB calibration, an FX layer preset system, OSC +
+MIDI binding pickers with MIDI-learn, and a texture-upload queue skeleton for
+the pending video integration.
+
+### What changed
+
+**Multi-projector (W7)**
+
+- Launcher multi-output picker lets you assign up to two projectors before
+  opening a project; an identify-flash helps confirm which display is which.
+- Schema migrated v6 → v7: `output_target` field renamed to
+  `output_targets: Vec<OutputTarget>`; existing projects migrate automatically
+  on load.
+- Second `OutputWindow` lifecycle: per-frame render loop runs passes 1–4 once
+  and passes 5–6 per output; closing the second output shrinks the vec; each
+  display holds its own sleep assertion.
+- Edge-blend overlap rendering: `EdgeBlendConfig` + multiply-blend WGSL let
+  you dial in a clean blend across the physical overlap between two projectors.
+- Alignment cross and edge-blend gradient test patterns added to the show-day
+  toolkit.
+- Output mode pill in the toolbar (minimum-viable toggle for windowed/fullscreen
+  per output).
+
+**Per-projector colour calibration (W8)**
+
+- `OutputPanel` scaffold surfaces per-projector controls when two outputs are
+  active.
+- Per-projector RGB matrix render path: a 3×3 matrix is applied in the shader
+  per output for white-point and colour-temperature correction.
+- RGB matrix editing UI: 3×3 spinner grid, identity reset, non-identity state
+  indicator, and a "Calibrate" stub (hardware measurement workflow — Phase 7).
+
+**FX layers (W5)**
+
+- `LayerKind::FxLayer { preset_id, params }` with real fields and mutations;
+  SDF helper WGSL is accessible to procedural shaders.
+- One preset shipped: `mask_edge_ripple_wash` — applies an animated edge-ripple
+  wash against the layer's mask polygon.
+- Demo project `assets/demos/fx-ripple-wash.rmap.json` bundled.
+
+**OSC + MIDI bindings (W2)**
+
+- `Modulator::OscBound` and `Modulator::MidiBound` with per-source value
+  registries.
+- `BindingPicker` + `ParameterRow` UI components; the modulator slider is
+  migrated to `BindingPicker`.
+- Read-only OSC bindings summary in the Advanced panel.
+- MIDI-learn workflow: right-click a parameter → "Learn next MIDI CC" → first
+  incoming CC is captured and bound; range-derived scale/offset; action is
+  undoable.
+
+**Live-input defaults (W1)**
+
+- `osc` and `midi` cargo features are now default-on; no feature flag required
+  to use OSC or MIDI bindings at runtime.
+- Schema version bumped v6 → v7 (see Multi-projector above).
+- Glossary entries added for new v0.4 domain terms.
+
+**Diagnostics (W3)**
+
+- Thread-safe texture-upload queue skeleton; per-instance dropped-frame counter
+  surfaces in the Diagnostics section of the Advanced panel.
+
+### Deferred from v0.4
+
+- **Video playback** — decoder technology selected (AVFoundation via objc2,
+  ships with macOS, no system dependency); integration tracking in P0.4.2.
+  Schema placeholder `LayerKind::Video` exists and is forward-compatible but
+  renders nothing in this release.
+- **NDI input** — deferred to v0.5; decision record on file (community `ndi`
+  crate). No system dependency in v0.4.
+- **Automated frame-budget performance gate** — deferred until the video
+  integration lands so the fixture measures the full v0.4 surface; harness
+  ships alongside P0.4.2.
+
+---
+
 ## v0.3.1 — 2026-05-10
 
 v3.1 is a stabilisation release built on top of the v3 canvas-first editor. It

@@ -58,3 +58,61 @@ Use this top-to-bottom before doors; aim for under five minutes once you know yo
 17. **Drop targets** — Drag SVG / PNG / JPG files onto the **control window's left rail** to add a layer. Dropping on the projector window does nothing (intentional: the drop target is unambiguous).
 18. **Layer manipulation** — Click a layer thumbnail in the left rail to select it; drag its warp corners directly on the canvas to translate/scale. Solo (S) or mute (M) from the layer row as needed.
 19. **Mask zones** — Pick a starter shape from the **inspector panel's mask section** (window-rectangle, arch-portal, circle-spotlight, void-block); drag each vertex of the painted overlay onto the real venue feature. Double-click an edge to insert a vertex; Shift-click a vertex to delete (won't drop below 3).
+
+## Two-projector setup (v0.4)
+
+20. **Monitor identification** — In the launcher's output picker, click
+    **Identify** next to each output; a full-screen flash confirms which
+    physical display is which before you assign it.
+21. **Display-sleep assertions** — With both output windows active, run:
+
+    ```bash
+    pmset -g assertions
+    ```
+
+    Confirm there is one sleep-prevention assertion per display (two total).
+    If either is missing, verify the output window for that display is fully
+    initialised before go-live.
+22. **Edge-blend calibration** — Enable the **edge-blend gradient test
+    pattern** from the show-day strip. Physically inspect the overlap on the
+    wall: the gradient should fall off smoothly and the summed brightness
+    across the seam should look even (approximately 1.0 combined). Adjust
+    the overlap width in the OutputPanel until the seam is invisible at show
+    distance.
+
+## MIDI controller (v0.4)
+
+23. **Controller visibility** — Open the binding picker (right-click any
+    parameter row) and confirm your MIDI controller appears in the source
+    list. If it doesn't, check that the controller is plugged in and
+    recognised by macOS before launching rmap.
+24. **MIDI-learn smoke** — Right-click a parameter, choose **Learn next MIDI
+    CC**, send a CC from the controller; confirm the binding appears and the
+    parameter responds. This should be done before the show — not during it.
+
+## OSC sender (v0.4)
+
+25. **Binding summary** — Open the Advanced panel's OSC section. Confirm
+    every expected OSC address appears in the read-only bindings summary.
+    Send a test value from your patch; verify the bound parameter moves.
+    Check this before going to go-live.
+
+## FX layer presets (v0.4)
+
+26. **Preset render check** — If the show includes an FX layer using the
+    `mask_edge_ripple_wash` preset, confirm it renders against the correct
+    mask polygon before doors. A misconfigured or empty mask polygon produces
+    a blank layer; fix the mask in the inspector and save before go-live.
+
+## External dependencies (v0.4)
+
+No Homebrew packages or external system libraries are required beyond the
+toolchain managed by `mise install`. Specifically:
+
+- **Video** — the decoder will use AVFoundation (ships with macOS); no
+  Homebrew install is needed. Video integration tracking in P0.4.2.
+- **NDI** — deferred to v0.5; the NewTek/Vizrt NDI SDK will be required
+  when that integration lands.
+
+Run `mise install` once per checkout (`make setup`) to ensure the pinned
+Rust toolchain and cargo subcommands (nextest, cargo-bundle) are available.
