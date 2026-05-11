@@ -40,6 +40,9 @@ use std::collections::HashMap;
 /// through a separate pipeline owned by this module.
 pub const IDENTITY_PRESET_ID: &str = "identity";
 
+/// `tone_map` preset id (P1.3.1).
+pub const TONE_MAP_PRESET_ID: &str = "tone_map";
+
 /// Inputs threaded into every preset's `render` call. The struct grows over
 /// time (W3 adds `overlay` and `collage`); existing presets ignore fields
 /// they don't read.
@@ -97,9 +100,11 @@ pub struct ParamDescriptor {
 
 /// `(preset_id, display_label)` pairs for every preset registered with the
 /// renderer. The Selected-layer UI sources its combobox options from this.
-#[allow(dead_code)] // wired by P1.2.3 (Selected-layer treatment picker)
 pub fn registry() -> &'static [(&'static str, &'static str)] {
-    &[(IDENTITY_PRESET_ID, "Identity (no-op)")]
+    &[
+        (IDENTITY_PRESET_ID, "Identity (no-op)"),
+        (TONE_MAP_PRESET_ID, "Tone map"),
+    ]
 }
 
 /// `true` if `preset_id` corresponds to a registered preset. CPU-only;
@@ -111,19 +116,48 @@ pub fn is_registered(preset_id: &str) -> bool {
 
 /// Param descriptors for the named preset. Returns an empty slice for
 /// unknown presets and for presets with no tunable parameters (identity).
-#[allow(dead_code)] // wired by P1.2.3 (per-param sliders)
 pub fn param_descriptors(preset_id: &str) -> &'static [ParamDescriptor] {
     match preset_id {
         IDENTITY_PRESET_ID => &[],
+        TONE_MAP_PRESET_ID => TONE_MAP_DESCRIPTORS,
         _ => &[],
     }
 }
+
+/// Static descriptors for the `tone_map` preset's three params.
+/// At all defaults (`exposure=0, contrast=1, shoulder=0`) the shader is
+/// a passthrough — the preset is visually transparent until the operator
+/// tunes a slider.
+const TONE_MAP_DESCRIPTORS: &[ParamDescriptor] = &[
+    ParamDescriptor {
+        key: "exposure",
+        label: "Exposure (stops)",
+        min: -2.0,
+        max: 2.0,
+        default: 0.0,
+    },
+    ParamDescriptor {
+        key: "contrast",
+        label: "Contrast",
+        min: 0.5,
+        max: 1.5,
+        default: 1.0,
+    },
+    ParamDescriptor {
+        key: "shoulder",
+        label: "Highlight rolloff",
+        min: 0.0,
+        max: 1.0,
+        default: 0.0,
+    },
+];
 
 /// Per-preset render pipelines. One field per preset; dispatch is a `match`
 /// on `preset_id`. Mirrors the `FxPresetPipeline` shape so adding a preset
 /// is "add a field + add a match arm" with no trait-object dispatch.
 pub struct TreatmentPipeline {
     identity: IdentityTreatmentPipeline,
+    tone_map: ToneMapTreatmentPipeline,
 }
 
 impl TreatmentPipeline {
@@ -132,6 +166,7 @@ impl TreatmentPipeline {
     pub fn new(device: &wgpu::Device, target_format: wgpu::TextureFormat) -> Self {
         Self {
             identity: IdentityTreatmentPipeline::new(device, target_format),
+            tone_map: ToneMapTreatmentPipeline::new(device, target_format),
         }
     }
 
@@ -144,6 +179,7 @@ impl TreatmentPipeline {
     pub fn dispatch(
         &self,
         device: &wgpu::Device,
+        queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         dst: &wgpu::TextureView,
         inputs: &TreatmentInputs<'_>,
@@ -152,6 +188,10 @@ impl TreatmentPipeline {
         match preset_id {
             IDENTITY_PRESET_ID => {
                 self.identity.render(device, encoder, dst, inputs);
+                true
+            }
+            TONE_MAP_PRESET_ID => {
+                self.tone_map.render(device, queue, encoder, dst, inputs);
                 true
             }
             _ => false,
@@ -316,6 +356,201 @@ impl IdentityTreatmentPipeline {
     }
 }
 
+/// Tone-map treatment pipeline (P1.3.1). Reads exposure / contrast /
+/// shoulder from `inputs.params`, applies the S-curve to each sampled
+/// fragment, and writes into `dst` with alpha preserved.
+struct ToneMapTreatmentPipeline {
+    pipeline: wgpu::RenderPipeline,
+    bind_group_layout: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
+    params_buf: wgpu::Buffer,
+}
+
+impl ToneMapTreatmentPipeline {
+    fn new(device: &wgpu::Device, target_format: wgpu::TextureFormat) -> Self {
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("treat_tone_map.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/treat_tone_map.wgsl").into()),
+        });
+
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("treatment tone_map bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                // fit_uniform (16 bytes)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: std::num::NonZeroU64::new(16),
+                    },
+                    count: None,
+                },
+                // tone_map params (16 bytes)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: std::num::NonZeroU64::new(16),
+                    },
+                    count: None,
+                },
+            ],
+        });
+
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("treatment tone_map pipeline layout"),
+            bind_group_layouts: &[Some(&bind_group_layout)],
+            immediate_size: 0,
+        });
+
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("treatment tone_map pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: target_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("treatment tone_map sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
+        });
+
+        let params_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("treatment tone_map params"),
+            size: 16,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        Self {
+            pipeline,
+            bind_group_layout,
+            sampler,
+            params_buf,
+        }
+    }
+
+    fn render(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        dst: &wgpu::TextureView,
+        inputs: &TreatmentInputs<'_>,
+    ) {
+        // Resolve params: exposure / contrast / shoulder fall back to the
+        // descriptor defaults documented in `TONE_MAP_DESCRIPTORS`. The
+        // identity defaults make the shader bit-exact passthrough.
+        let exposure = inputs.params.get("exposure").copied().unwrap_or(0.0);
+        let contrast = inputs.params.get("contrast").copied().unwrap_or(1.0);
+        let shoulder = inputs.params.get("shoulder").copied().unwrap_or(0.0);
+
+        let mut bytes = [0u8; 16];
+        bytes[0..4].copy_from_slice(&exposure.to_le_bytes());
+        bytes[4..8].copy_from_slice(&contrast.to_le_bytes());
+        bytes[8..12].copy_from_slice(&shoulder.to_le_bytes());
+        // bytes[12..16] reserved (zero).
+        queue.write_buffer(&self.params_buf, 0, &bytes);
+
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("treatment tone_map bind group"),
+            layout: &self.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(inputs.source),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: inputs.fit_uniform.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: self.params_buf.as_entire_binding(),
+                },
+            ],
+        });
+
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("treatment tone_map pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: dst,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.draw(0..6, 0..1);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -326,12 +561,43 @@ mod tests {
         assert!(is_registered(IDENTITY_PRESET_ID));
     }
 
+    /// Acceptance: the tone_map preset is registered (P1.3.1).
+    #[test]
+    fn tone_map_preset_is_registered() {
+        assert!(is_registered(TONE_MAP_PRESET_ID));
+    }
+
+    /// Acceptance: tone_map's three documented params have descriptors,
+    /// and all defaults round-trip through the identity case (exposure=0,
+    /// contrast=1, shoulder=0 ⇒ shader passthrough).
+    #[test]
+    fn tone_map_descriptor_defaults_are_identity() {
+        let descriptors = param_descriptors(TONE_MAP_PRESET_ID);
+        assert_eq!(descriptors.len(), 3, "tone_map exposes exactly 3 params");
+
+        let by_key: std::collections::HashMap<&str, &ParamDescriptor> =
+            descriptors.iter().map(|d| (d.key, d)).collect();
+        assert_eq!(by_key["exposure"].default, 0.0, "exposure identity = 0");
+        assert_eq!(by_key["contrast"].default, 1.0, "contrast identity = 1");
+        assert_eq!(by_key["shoulder"].default, 0.0, "shoulder identity = 0");
+
+        // Min/max sanity: ranges are non-degenerate and bracket the default.
+        for d in descriptors {
+            assert!(d.min < d.max, "{}: min < max", d.key);
+            assert!(
+                d.default >= d.min && d.default <= d.max,
+                "{}: default in [min, max]",
+                d.key
+            );
+        }
+    }
+
     /// Acceptance: unknown preset ids are not registered.
     #[test]
     fn unknown_preset_is_not_registered() {
         assert!(!is_registered(""));
         assert!(!is_registered("definitely-not-a-real-preset"));
-        assert!(!is_registered("tone_map")); // not yet wired in W3
+        assert!(!is_registered("blur_mask")); // not yet wired in W3
     }
 
     /// Acceptance: every registered preset has an entry in

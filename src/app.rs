@@ -3922,6 +3922,7 @@ fn render_m5_pipeline(
                         };
                         treatment_pipeline.dispatch(
                             &renderer.gpu.device,
+                            &renderer.gpu.queue,
                             &mut encoder,
                             src_view,
                             &inputs,
