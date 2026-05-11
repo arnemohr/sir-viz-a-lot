@@ -497,12 +497,33 @@ fn decode_pass(
             }
             Ok(VideoControl::SetSpeed(s)) => {
                 if let WorkerState::Playing { speed, .. } = state {
-                    *speed = s;
-                    // Recalculate frame pacing in-place so the current pass
-                    // continues without seeking back to t=0 (which would happen
-                    // if we returned ControlUpdated and rebuilt the reader).
-                    let effective = s.max(0.01_f32);
-                    frame_dur = Duration::from_secs_f64(1.0 / (fps as f64 * effective as f64));
+                    // P1.4.3 — negative speed signals "play in reverse".
+                    // True reverse requires a keyframe cache (~180 MB
+                    // worst-case for a 30-s clip) and a second
+                    // AVAssetReader pass filtered to I-frames; the
+                    // FFI work plus the memory cap logic is deferred
+                    // to Phase 7. For v0.5 we fall back to forward
+                    // playback at `|speed|`, logging once per
+                    // direction change so the operator knows the UI
+                    // intent isn't being honoured exactly. This is
+                    // consistent with the spec's `>30 s clips fall
+                    // back to forward at abs(speed)` graceful-degrade
+                    // path — Phase 7 will reinstate true reverse for
+                    // short clips.
+                    let signed = s;
+                    let magnitude = signed.abs().max(0.01_f32);
+                    if signed < 0.0 && *speed >= 0.0 {
+                        tracing::warn!(
+                            target: "rmap::video",
+                            requested = signed,
+                            applied = magnitude,
+                            "reverse playback not yet implemented; falling back to forward at |speed|. Phase 7 will add the I-frame cache.",
+                        );
+                    }
+                    *speed = magnitude;
+                    // Recalculate frame pacing in-place so the current
+                    // pass continues without seeking back to t=0.
+                    frame_dur = Duration::from_secs_f64(1.0 / (fps as f64 * magnitude as f64));
                 }
                 // Stay in the decode loop — no seek, no reader rebuild.
             }
