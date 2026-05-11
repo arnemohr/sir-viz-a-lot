@@ -61,6 +61,33 @@ pub enum GlossaryTerm {
     MidiLearn,
     /// P0.3.2 (W3) — frames dropped due to bounded-queue overflow.
     DroppedFrames,
+    /// P1.1.3 (W2) — named image-grammar preset applied to an Image
+    /// or Video layer before the per-pixel effect chain.
+    Treatment,
+    /// P1.1.3 (W3 / P1.3.1) — tone-map preset.
+    ToneMap,
+    /// P1.1.3 (W3 / P1.3.2) — blur-mask preset.
+    BlurMask,
+    /// P1.1.3 (W3 / P1.3.3) — luminance-reveal preset.
+    LuminanceReveal,
+    /// P1.1.3 (W3 / P1.3.4) — texture-overlay preset.
+    TextureOverlay,
+    /// P1.1.3 (W3 / P1.3.5) — palette-extract preset.
+    PaletteExtract,
+    /// P1.1.3 (W3 / P1.3.6) — collage preset.
+    Collage,
+    /// P1.1.3 (W2 / P1.2.4) — Cover-fit crop anchor.
+    FocalPoint,
+    /// P1.1.3 (W4 / P1.4.1) — clip-range trim points.
+    InOutPoints,
+    /// P1.1.3 (W4 / P1.4.2) — Once / Loop / PingPong end-of-clip policy.
+    LoopMode,
+    /// P1.1.3 (W4 / P1.4.4) — clip rate locked to current BPM.
+    BpmLockedPlayback,
+    /// P1.1.3 (W4 / P1.4.3) — negative-rate playback via keyframe cache.
+    ReversePlayback,
+    /// P1.1.3 (W4 / P1.4.5) — pre-decoded thumbnail strip with seek.
+    ThumbnailScrub,
 }
 
 /// A single glossary entry: a short headline and a 1–2 sentence body.
@@ -239,6 +266,96 @@ pub fn entry(t: GlossaryTerm) -> GlossaryEntry {
                    render thread; investigate before it becomes visible \
                    on the projector.",
         },
+        GlossaryTerm::Treatment => GlossaryEntry {
+            headline: "Treatment",
+            body: "A named image-grammar preset applied to an Image or Video \
+                   layer before the per-pixel effect chain.  Picks one preset \
+                   per layer (tone map, blur mask, luminance reveal, etc.); \
+                   parameters tune the look without exposing dozens of \
+                   sliders.",
+        },
+        GlossaryTerm::ToneMap => GlossaryEntry {
+            headline: "Tone Map",
+            body: "S-curve exposure + contrast + highlight-rolloff applied \
+                   per layer.  Lifts shadows and softens blown highlights so \
+                   mixed-light footage matches the rest of the scene without \
+                   touching the master gamma slider.",
+        },
+        GlossaryTerm::BlurMask => GlossaryEntry {
+            headline: "Blur Mask",
+            body: "Gaussian blur gated by the layer's mask SDF: pixels near \
+                   the mask edge get heavy blur, pixels deep inside stay \
+                   sharp.  Feathers a photo's silhouette into the background \
+                   without losing detail in the centre.",
+        },
+        GlossaryTerm::LuminanceReveal => GlossaryEntry {
+            headline: "Luminance Reveal",
+            body: "Pixels brighter than the threshold show; everything else \
+                   becomes transparent.  A soft band around the threshold \
+                   smooths the cut.  Useful for keying out dark backgrounds \
+                   without a proper chroma key (Phase 7).",
+        },
+        GlossaryTerm::TextureOverlay => GlossaryEntry {
+            headline: "Texture Overlay",
+            body: "A second image multiplies into the source — paper grain, \
+                   noise, film texture, sky gradient.  Pick the overlay file \
+                   via the preset; opacity + tint tune how much of the \
+                   overlay's colour reaches the result.",
+        },
+        GlossaryTerm::PaletteExtract => GlossaryEntry {
+            headline: "Palette Extract",
+            body: "Posterises the source down to a few colours derived from \
+                   the image itself (median-cut at layer load; video uses \
+                   the first decoded frame).  Dither smooths transitions; \
+                   vibrance exaggerates the extracted palette's saturation.",
+        },
+        GlossaryTerm::Collage => GlossaryEntry {
+            headline: "Collage",
+            body: "Composites up to four images on one layer in a grid \
+                   (1×2, 2×1, or 2×2).  Spacing creates visible gaps between \
+                   cells.  Richer authored compositions land alongside scene \
+                   grammars in Phase 4.",
+        },
+        GlossaryTerm::FocalPoint => GlossaryEntry {
+            headline: "Focal Point",
+            body: "When the layer's fit mode is Cover, the focal point is \
+                   the normalised position the crop centres on.  Click the \
+                   preview thumbnail to anchor it on the subject (e.g. a \
+                   face) so resizing the layer keeps the subject in frame.",
+        },
+        GlossaryTerm::InOutPoints => GlossaryEntry {
+            headline: "In / Out Points",
+            body: "Trim a video clip to play only between two timestamps. \
+                   Seamless-loop wraps from the out-point back to the in-\
+                   point instead of clip 0 → end.  Drag the markers on the \
+                   scrub bar to set them.",
+        },
+        GlossaryTerm::LoopMode => GlossaryEntry {
+            headline: "Loop Mode",
+            body: "What happens when a video clip reaches its out-point.  \
+                   Once stops on the last frame; Loop wraps to the in-point; \
+                   PingPong alternates forward and reverse on each end.",
+        },
+        GlossaryTerm::BpmLockedPlayback => GlossaryEntry {
+            headline: "BPM-Locked Playback",
+            body: "Locks the clip's playback rate to the current BPM so the \
+                   clip plays exactly N beats per loop.  Tap-tempo changes \
+                   propagate to the rate on the next frame without re-\
+                   encoding.",
+        },
+        GlossaryTerm::ReversePlayback => GlossaryEntry {
+            headline: "Reverse Playback",
+            body: "Negative speed plays the clip backwards.  v0.5 uses a \
+                   pre-decoded keyframe cache (capped at 30-second clips); \
+                   longer clips fall back to forward playback at the \
+                   absolute rate with a hint.",
+        },
+        GlossaryTerm::ThumbnailScrub => GlossaryEntry {
+            headline: "Thumbnail Scrub",
+            body: "A timeline strip showing pre-decoded mini-frames from the \
+                   clip.  Hover to preview a position; click to seek the \
+                   playhead there.  Drag the edges to set in/out points.",
+        },
     }
 }
 
@@ -281,6 +398,20 @@ pub fn all_terms() -> &'static [GlossaryTerm] {
         GlossaryTerm::RgbMatrix,
         GlossaryTerm::MidiLearn,
         GlossaryTerm::DroppedFrames,
+        // P1.1.3 — Phase 1 domain terms.
+        GlossaryTerm::Treatment,
+        GlossaryTerm::ToneMap,
+        GlossaryTerm::BlurMask,
+        GlossaryTerm::LuminanceReveal,
+        GlossaryTerm::TextureOverlay,
+        GlossaryTerm::PaletteExtract,
+        GlossaryTerm::Collage,
+        GlossaryTerm::FocalPoint,
+        GlossaryTerm::InOutPoints,
+        GlossaryTerm::LoopMode,
+        GlossaryTerm::BpmLockedPlayback,
+        GlossaryTerm::ReversePlayback,
+        GlossaryTerm::ThumbnailScrub,
     ]
 }
 
@@ -357,7 +488,7 @@ mod tests {
     #[test]
     fn all_terms_covers_every_variant() {
         // Bump this when you add a new GlossaryTerm variant.
-        const EXPECTED_VARIANT_COUNT: usize = 26;
+        const EXPECTED_VARIANT_COUNT: usize = 39;
         assert_eq!(
             super::all_terms().len(),
             EXPECTED_VARIANT_COUNT,
