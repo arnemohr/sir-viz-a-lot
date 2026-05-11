@@ -49,6 +49,9 @@ pub const LUMINANCE_REVEAL_PRESET_ID: &str = "luminance_reveal";
 /// `blur_mask` preset id (P1.3.2).
 pub const BLUR_MASK_PRESET_ID: &str = "blur_mask";
 
+/// `texture_overlay` preset id (P1.3.4).
+pub const TEXTURE_OVERLAY_PRESET_ID: &str = "texture_overlay";
+
 /// Inputs threaded into every preset's `render` call. The struct grows over
 /// time (W3 adds `overlay` and `collage`); existing presets ignore fields
 /// they don't read.
@@ -124,6 +127,7 @@ pub fn registry() -> &'static [(&'static str, &'static str)] {
         (TONE_MAP_PRESET_ID, "Tone map"),
         (LUMINANCE_REVEAL_PRESET_ID, "Luminance reveal"),
         (BLUR_MASK_PRESET_ID, "Blur mask (edge feather)"),
+        (TEXTURE_OVERLAY_PRESET_ID, "Texture overlay"),
     ]
 }
 
@@ -143,6 +147,7 @@ pub fn param_descriptors(preset_id: &str) -> &'static [ParamDescriptor] {
         TONE_MAP_PRESET_ID => TONE_MAP_DESCRIPTORS,
         LUMINANCE_REVEAL_PRESET_ID => LUMINANCE_REVEAL_DESCRIPTORS,
         BLUR_MASK_PRESET_ID => BLUR_MASK_DESCRIPTORS,
+        TEXTURE_OVERLAY_PRESET_ID => TEXTURE_OVERLAY_DESCRIPTORS,
         _ => &[],
     }
 }
@@ -203,6 +208,41 @@ const LUMINANCE_REVEAL_DESCRIPTORS: &[ParamDescriptor] = &[
     },
 ];
 
+/// Static descriptors for the `texture_overlay` preset (P1.3.4).
+/// Defaults: mix = 0 (identity passthrough; preset visually transparent
+/// until `mix` slides above zero), no offset, Normal blend.
+#[allow(dead_code)] // referenced only through `param_descriptors` (v3 UI)
+const TEXTURE_OVERLAY_DESCRIPTORS: &[ParamDescriptor] = &[
+    ParamDescriptor {
+        key: "mix",
+        label: "Mix (0 = source only, 1 = full overlay)",
+        min: 0.0,
+        max: 1.0,
+        default: 0.0,
+    },
+    ParamDescriptor {
+        key: "offset_x",
+        label: "Offset X",
+        min: -1.0,
+        max: 1.0,
+        default: 0.0,
+    },
+    ParamDescriptor {
+        key: "offset_y",
+        label: "Offset Y",
+        min: -1.0,
+        max: 1.0,
+        default: 0.0,
+    },
+    ParamDescriptor {
+        key: "blend_mode",
+        label: "Blend (0=Normal, 1=Multiply, 2=Screen, 3=Add)",
+        min: 0.0,
+        max: 3.0,
+        default: 1.0,
+    },
+];
+
 /// Static descriptors for the `blur_mask` preset (P1.3.2).
 /// Defaults: zero radius (identity = no blur), 0.1 norm-units edge band
 /// (~7 % of layer width), smooth falloff. Identity at default radius =
@@ -240,6 +280,7 @@ pub struct TreatmentPipeline {
     tone_map: ToneMapTreatmentPipeline,
     luminance_reveal: LuminanceRevealTreatmentPipeline,
     blur_mask: BlurMaskTreatmentPipeline,
+    texture_overlay: TextureOverlayTreatmentPipeline,
 }
 
 impl TreatmentPipeline {
@@ -251,6 +292,7 @@ impl TreatmentPipeline {
             tone_map: ToneMapTreatmentPipeline::new(device, target_format),
             luminance_reveal: LuminanceRevealTreatmentPipeline::new(device, target_format),
             blur_mask: BlurMaskTreatmentPipeline::new(device, target_format),
+            texture_overlay: TextureOverlayTreatmentPipeline::new(device, target_format),
         }
     }
 
@@ -293,6 +335,19 @@ impl TreatmentPipeline {
                 };
                 self.blur_mask
                     .render(device, queue, encoder, dst, inputs, sdf, intermediate);
+                true
+            }
+            TEXTURE_OVERLAY_PRESET_ID => {
+                // texture_overlay needs `inputs.overlay` populated by the
+                // caller (loaded from `Treatment.overlay_path` via the
+                // ImageTextureCache). Missing overlay → skip + caller
+                // falls back to the default blit, so a half-configured
+                // treatment renders the source unaltered.
+                let Some(overlay) = inputs.overlay else {
+                    return false;
+                };
+                self.texture_overlay
+                    .render(device, queue, encoder, dst, inputs, overlay);
                 true
             }
             _ => false,
@@ -1363,6 +1418,240 @@ fn draw_single_pass_treatment(
     pass.draw(0..6, 0..1);
 }
 
+/// Texture-overlay treatment pipeline (P1.3.4). Six-binding bind
+/// group: source + sampler + fit + params + overlay + overlay-sampler.
+/// `inputs.overlay` is the caller-supplied texture view loaded from
+/// `Treatment.overlay_path` via the ImageTextureCache.
+struct TextureOverlayTreatmentPipeline {
+    pipeline: wgpu::RenderPipeline,
+    bind_group_layout: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
+    overlay_sampler: wgpu::Sampler,
+    params_buf: wgpu::Buffer,
+}
+
+impl TextureOverlayTreatmentPipeline {
+    fn new(device: &wgpu::Device, target_format: wgpu::TextureFormat) -> Self {
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("treat_texture_overlay.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(
+                include_str!("shaders/treat_texture_overlay.wgsl").into(),
+            ),
+        });
+
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("treat_texture_overlay bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: std::num::NonZeroU64::new(16),
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: std::num::NonZeroU64::new(16),
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("treat_texture_overlay pipeline layout"),
+            bind_group_layouts: &[Some(&bind_group_layout)],
+            immediate_size: 0,
+        });
+
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("treat_texture_overlay pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: target_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("treat_texture_overlay source sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
+        });
+
+        // Overlay sampler tiles via Repeat so a small overlay (e.g. a
+        // grunge texture) covers the layer through the shader's
+        // `fract(uv + offset)` sample.
+        let overlay_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("treat_texture_overlay overlay sampler"),
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            address_mode_w: wgpu::AddressMode::Repeat,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
+        });
+
+        let params_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("treat_texture_overlay params"),
+            size: 16,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        Self {
+            pipeline,
+            bind_group_layout,
+            sampler,
+            overlay_sampler,
+            params_buf,
+        }
+    }
+
+    fn render(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        dst: &wgpu::TextureView,
+        inputs: &TreatmentInputs<'_>,
+        overlay: &wgpu::TextureView,
+    ) {
+        let mix_amt = inputs.params.get("mix").copied().unwrap_or(0.0);
+        let off_x = inputs.params.get("offset_x").copied().unwrap_or(0.0);
+        let off_y = inputs.params.get("offset_y").copied().unwrap_or(0.0);
+        let blend = inputs.params.get("blend_mode").copied().unwrap_or(1.0);
+
+        let mut bytes = [0u8; 16];
+        bytes[0..4].copy_from_slice(&mix_amt.to_le_bytes());
+        bytes[4..8].copy_from_slice(&off_x.to_le_bytes());
+        bytes[8..12].copy_from_slice(&off_y.to_le_bytes());
+        bytes[12..16].copy_from_slice(&blend.to_le_bytes());
+        queue.write_buffer(&self.params_buf, 0, &bytes);
+
+        let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("treat_texture_overlay bg"),
+            layout: &self.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(inputs.source),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: inputs.fit_uniform.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: self.params_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(overlay),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::Sampler(&self.overlay_sampler),
+                },
+            ],
+        });
+
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("treat_texture_overlay pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: dst,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &bg, &[]);
+        pass.draw(0..6, 0..1);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1467,12 +1756,28 @@ mod tests {
         }
     }
 
+    /// Acceptance: the texture_overlay preset is registered (P1.3.4).
+    #[test]
+    fn texture_overlay_preset_is_registered() {
+        assert!(is_registered(TEXTURE_OVERLAY_PRESET_ID));
+    }
+
+    /// Acceptance: texture_overlay defaults give an identity (mix=0).
+    #[test]
+    fn texture_overlay_defaults_are_identity() {
+        let descriptors = param_descriptors(TEXTURE_OVERLAY_PRESET_ID);
+        assert_eq!(descriptors.len(), 4);
+        let by_key: std::collections::HashMap<&str, &ParamDescriptor> =
+            descriptors.iter().map(|d| (d.key, d)).collect();
+        assert_eq!(by_key["mix"].default, 0.0, "mix=0 → identity");
+    }
+
     /// Acceptance: unknown preset ids are not registered.
     #[test]
     fn unknown_preset_is_not_registered() {
         assert!(!is_registered(""));
         assert!(!is_registered("definitely-not-a-real-preset"));
-        assert!(!is_registered("texture_overlay")); // not yet wired in W3
+        assert!(!is_registered("palette_extract")); // not yet wired in W3
     }
 
     /// Acceptance: every registered preset has an entry in

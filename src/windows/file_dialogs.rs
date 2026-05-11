@@ -34,6 +34,18 @@ pub fn pick_image_to_add() -> Option<PathBuf> {
         .pick_file()
 }
 
+/// P1.3.4 — pick an image file to use as the `texture_overlay`
+/// treatment's overlay asset. Same supported extensions as
+/// `pick_image_to_add`; ships through the same rfd backend so the
+/// operator gets the platform-native picker.
+#[allow(dead_code)] // wired by `windows::advanced` (v3-gated)
+pub fn pick_overlay_file() -> Option<PathBuf> {
+    FileDialog::new()
+        .set_title("Pick overlay image")
+        .add_filter("Images (JPG, PNG, WEBP)", &["jpg", "jpeg", "png", "webp"])
+        .pick_file()
+}
+
 /// 003-T2.13 — pick a destination for `Save as…`. Suggests `default_name`
 /// (the operator's working filename) and ensures the result ends in
 /// `.rmap.json` regardless of what they typed.

@@ -3754,6 +3754,7 @@ fn render_m5_pipeline(
     clock: &Clock,
     fx_pipeline: &crate::render::fx_presets::FxPresetPipeline,
     treatment_pipeline: &crate::render::treatments::TreatmentPipeline,
+    image_texture_cache: &crate::image_layer::ImageTextureCache,
 ) -> std::result::Result<(), RenderError> {
     crate::show_day::panic_restore::run_frame_assert_unwind_safe(|| {
         // --- Passes 1-4: raster / effects / warp / composite into warp_rt ---
@@ -3937,12 +3938,48 @@ fn render_m5_pipeline(
                             &cfg.warp,
                         );
                         let sdf_v = ls.warp_renderer.sdf_view();
+
+                        // P1.3.4 — texture_overlay loads `overlay_path`
+                        // through the shared `ImageTextureCache`. The
+                        // cache returns a clone of the underlying
+                        // wgpu::Texture (Arc-counted internally) so
+                        // repeated frames are zero-cost after the first
+                        // upload. Failure to load (missing file, decode
+                        // error) logs a warn and leaves `overlay` as
+                        // None — the dispatch arm then returns false
+                        // and the caller's default blit renders the
+                        // source unaltered.
+                        let overlay_tex_opt: Option<(wgpu::Texture, wgpu::TextureView)> = treatment
+                            .overlay_path
+                            .as_ref()
+                            .and_then(|p| {
+                                match image_texture_cache.lookup_or_upload(
+                                    &renderer.gpu.device,
+                                    &renderer.gpu.queue,
+                                    p,
+                                ) {
+                                    Ok((tex, view, _dims)) => Some((tex, view)),
+                                    Err(err) => {
+                                        tracing::warn!(
+                                            target: "rmap::ux",
+                                            event = "treatment_overlay_load_failed",
+                                            path = %p.display(),
+                                            err = %err,
+                                            "texture_overlay: failed to load overlay; rendering source unaltered",
+                                        );
+                                        None
+                                    }
+                                }
+                            });
+                        let overlay_view_ref: Option<&wgpu::TextureView> =
+                            overlay_tex_opt.as_ref().map(|(_, v)| v);
+
                         let inputs = crate::render::treatments::TreatmentInputs {
                             source: tex_view,
                             fit_uniform: &ls.fit_uniform,
                             params: &treatment.params,
                             clock_secs: clock.elapsed().as_secs_f32(),
-                            overlay: None,
+                            overlay: overlay_view_ref,
                             collage: &[],
                             sdf: Some(sdf_v),
                             intermediate: Some(&ls.intermediate_view),
@@ -5121,6 +5158,7 @@ fn handle_editing_window_event(
                     &state.clock,
                     &state.fx_pipeline,
                     &state.treatment_pipeline,
+                    &state.image_texture_cache,
                 )
             } else {
                 // Empty project — render a blank frame for each output.

@@ -737,6 +737,56 @@ fn show_treatment_section(
             }
         }
     }
+
+    // ----- P1.3.4 — Texture-overlay path picker -----
+    // Only relevant for the `texture_overlay` preset; other presets
+    // don't read `overlay_path`. Picking a file dispatches a fresh
+    // `SetLayerTreatment` mutation with the new path (since
+    // `overlay_path` is part of the Treatment struct, we replace the
+    // whole struct via the existing builder; the params HashMap is
+    // preserved).
+    let current_overlay_path = project.layers[layer_idx]
+        .treatment
+        .as_ref()
+        .and_then(|t| t.overlay_path.clone());
+    let active_preset = project.layers[layer_idx]
+        .treatment
+        .as_ref()
+        .map(|t| t.preset_id.clone());
+    if matches!(
+        active_preset.as_deref(),
+        Some(crate::render::treatments::TEXTURE_OVERLAY_PRESET_ID)
+    ) {
+        ui.add_space(4.0);
+        ui.label("Overlay image");
+        ui.horizontal(|ui| {
+            let display = current_overlay_path
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "(none — click Pick to choose a file)".to_string());
+            ui.weak(display);
+        });
+        if ui.button("Pick overlay file…").clicked() {
+            if let Some(path) = crate::windows::file_dialogs::pick_overlay_file() {
+                let mut new_treatment = project.layers[layer_idx]
+                    .treatment
+                    .clone()
+                    .expect("texture_overlay preset is active");
+                new_treatment.overlay_path = Some(path);
+                st.pending_mutations
+                    .push(project.set_layer_treatment_mutation(layer_idx, Some(new_treatment)));
+            }
+        }
+        if current_overlay_path.is_some() && ui.button("Clear overlay").clicked() {
+            let mut new_treatment = project.layers[layer_idx]
+                .treatment
+                .clone()
+                .expect("texture_overlay preset is active");
+            new_treatment.overlay_path = None;
+            st.pending_mutations
+                .push(project.set_layer_treatment_mutation(layer_idx, Some(new_treatment)));
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
