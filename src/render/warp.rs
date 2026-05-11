@@ -176,9 +176,17 @@ pub struct WarpRenderer {
 
 impl WarpRenderer {
     pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
+        // P0.5.2: prepend the SDF helper so warp.wgsl can call sample_sdf_bilinear(t_sdf, uv).
+        // The helper declares no global bindings — warp.wgsl's own @group(0) @binding(2) t_sdf
+        // is passed as an explicit function argument.
+        let warp_wgsl_full = format!(
+            "{}\n{}",
+            crate::render::sdf::SDF_HELPER_WGSL,
+            include_str!("shaders/warp.wgsl"),
+        );
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("warp.wgsl"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/warp.wgsl").into()),
+            label: Some("warp shader (with sdf helper)"),
+            source: wgpu::ShaderSource::Wgsl(warp_wgsl_full.into()),
         });
 
         let bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {

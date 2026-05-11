@@ -3,6 +3,14 @@
 
 pub const SDF_SIZE: usize = 256;
 
+/// P0.5.2 — WGSL helper source string. Consumers (e.g. warp,
+/// FxLayer presets) prepend this to their own shader source at
+/// pipeline build time via Rust string concatenation. The helper
+/// exposes `sample_sdf_bilinear`, `sample_sdf_gradient`, and
+/// `sample_sdf` — all taking the SDF texture as a function parameter
+/// so consumers control their own bind slots.
+pub const SDF_HELPER_WGSL: &str = include_str!("shaders/sdf_helper.wgsl");
+
 /// Point-in-polygon (ray cast along +X).
 pub fn point_in_polygon(x: f32, y: f32, poly: &[[f32; 2]]) -> bool {
     if poly.len() < 3 {
@@ -73,6 +81,25 @@ pub fn bake_polygon_sdf(poly: &[[f32; 2]], size: usize) -> Vec<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// P0.5.2 smoke test: confirms the helper constant contains all three
+    /// exported function signatures. Not a functional test — just guards
+    /// against accidental truncation or wrong file path.
+    #[test]
+    fn sdf_helper_wgsl_contains_all_functions() {
+        assert!(
+            SDF_HELPER_WGSL.contains("fn sample_sdf_bilinear("),
+            "SDF_HELPER_WGSL missing sample_sdf_bilinear"
+        );
+        assert!(
+            SDF_HELPER_WGSL.contains("fn sample_sdf_gradient("),
+            "SDF_HELPER_WGSL missing sample_sdf_gradient"
+        );
+        assert!(
+            SDF_HELPER_WGSL.contains("fn sample_sdf("),
+            "SDF_HELPER_WGSL missing sample_sdf"
+        );
+    }
 
     fn square_poly() -> Vec<[f32; 2]> {
         vec![[0.25, 0.25], [0.75, 0.25], [0.75, 0.75], [0.25, 0.75]]
