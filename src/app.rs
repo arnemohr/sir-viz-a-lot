@@ -573,6 +573,12 @@ struct EditingState {
     /// drains up to `MAX_DRAIN_PER_FRAME` frames at the start of each
     /// render call, before the layer loop.
     texture_upload_queue: crate::render::texture_upload::TextureUploadQueue,
+    /// P1.1.2 — image texture cache. Multiple Image layers pointing at
+    /// the same `(path, mtime)` share a single GPU allocation via
+    /// `wgpu::Texture::clone()` (cheap Arc bump in wgpu 29). Built once
+    /// per session in `assemble_editing_state`; consulted by the layer-
+    /// init path when constructing Image layers.
+    image_texture_cache: crate::image_layer::ImageTextureCache,
 }
 
 impl EditingState {
@@ -1246,6 +1252,7 @@ fn rebuild_layers_for_state(state: &mut EditingState) {
         h,
         fmt,
         &state.texture_upload_queue,
+        &state.image_texture_cache,
     ) {
         Ok(layers) => {
             state.layers = layers;
@@ -1567,6 +1574,10 @@ struct RenderGraph {
     /// Allocated here so it outlives the individual layer states; moved into
     /// `EditingState` via `assemble_editing_state`.
     upload_queue: crate::render::texture_upload::TextureUploadQueue,
+    /// P1.1.2 — image texture cache. Same lifetime story as `upload_queue`:
+    /// allocated here so the first `rebuild_layers` can populate it, then
+    /// moved into `EditingState`.
+    image_texture_cache: crate::image_layer::ImageTextureCache,
 }
 
 /// 003-T1.11: build the per-projector render graph (compositor +
@@ -1598,6 +1609,9 @@ fn init_render_graph(
     // P0.4.2 — create the shared texture-upload queue before rebuild_layers
     // so we can hand a sender clone to each Video worker.
     let upload_queue = crate::render::texture_upload::TextureUploadQueue::new();
+    // P1.1.2 — image cache lives at session scope; first rebuild populates
+    // it; subsequent rebuilds and hot-reloads share it.
+    let image_texture_cache = crate::image_layer::ImageTextureCache::new();
     let layers = rebuild_layers(
         device,
         queue,
@@ -1607,6 +1621,7 @@ fn init_render_graph(
         h,
         surface_format,
         &upload_queue,
+        &image_texture_cache,
     )?;
 
     Ok(RenderGraph {
@@ -1620,6 +1635,7 @@ fn init_render_graph(
         warp_rt_view,
         layers,
         upload_queue,
+        image_texture_cache,
     })
 }
 
@@ -1998,6 +2014,11 @@ fn assemble_editing_state(
         // P0.4.2 — move the upload queue from the render graph into
         // EditingState so the per-frame drain can access it.
         texture_upload_queue: graph.upload_queue,
+        // P1.1.2 — move the image cache from the render graph into
+        // EditingState. `init_render_graph` may have already populated
+        // entries from the initial `rebuild_layers` pass; rebuilds and
+        // hot-reloads thereafter reuse those entries.
+        image_texture_cache: graph.image_texture_cache,
     }
 }
 
@@ -3010,6 +3031,7 @@ fn build_initial_project(svg_path: Option<PathBuf>) -> Project {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn rebuild_layers(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -3019,6 +3041,7 @@ fn rebuild_layers(
     height: u32,
     surface_format: wgpu::TextureFormat,
     upload_queue: &crate::render::texture_upload::TextureUploadQueue,
+    image_cache: &crate::image_layer::ImageTextureCache,
 ) -> Result<Vec<LayerState>> {
     let mut out = Vec::with_capacity(project.layers.len());
     for lc in project.layers.iter() {
@@ -3163,7 +3186,10 @@ fn rebuild_layers(
                 // 003-T2.23 follow-up: load via the resolved
                 // `asset_path`, not the as-stored `path`, so relative
                 // paths under a portable project work.
-                match crate::image_layer::upload_image_rgba8(device, queue, &asset_path) {
+                // P1.1.2 — go through the image cache; multiple layers
+                // pointing at the same `(path, mtime)` share a single
+                // wgpu::Texture (cheap Arc bump under the hood).
+                match image_cache.lookup_or_upload(device, queue, &asset_path) {
                     Ok((texture, view, dims)) => {
                         layer.set_uploaded_texture(texture, view);
                         texture_aspect = dims.0.max(1) as f32 / dims.1.max(1) as f32;
@@ -3171,7 +3197,8 @@ fn rebuild_layers(
                             path = %asset_path.display(),
                             width = dims.0,
                             height = dims.1,
-                            "image layer loaded",
+                            cache_size = image_cache.len(),
+                            "image layer loaded (cache lookup/upload)",
                         );
                     }
                     Err(err) => tracing::warn!(
@@ -4704,7 +4731,15 @@ fn handle_editing_window_event(
                             // worker round-trip. Failure leaves the previous
                             // texture in place — operator sees stale frame
                             // rather than a black layer mid-show.
-                            match crate::image_layer::upload_image_rgba8(
+                            //
+                            // P1.1.2 — re-upload goes through the cache.
+                            // The file's mtime has changed (that's why the
+                            // watcher fired), so the cache evicts the stale
+                            // entry and uploads fresh bytes. Other layers
+                            // sharing the old texture keep rendering the old
+                            // content until their next rebuild — operator
+                            // sees the new content on this layer immediately.
+                            match state.image_texture_cache.lookup_or_upload(
                                 &state.renderer.gpu.device,
                                 &state.renderer.gpu.queue,
                                 &asset_path,
