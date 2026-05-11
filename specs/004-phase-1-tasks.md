@@ -3,7 +3,7 @@
 Companion task spec for [`004-phase-1.md`](004-phase-1.md). Each task
 below is sized for a single PR.
 
-## Implementation status (2026-05-11, W1 + W6 + W2.1 complete)
+## Implementation status (2026-05-11, W1 + W6 + W2.1–W2.3 + W3.1 complete)
 
 **Shipped:**
 
@@ -56,6 +56,31 @@ below is sized for a single PR.
   `overlay_path`, missing `collage_paths` entries (one per slot
   with indexed messages). 14 new tests across the project + audit
   modules. Architectural unblocker for W2.2 + W2.3 + every W3 preset.
+- ✅ **P1.2.2** `e3ac16a` — `TreatmentPipeline` render integration.
+  New `src/render/treatments.rs` module + identity preset proves
+  the bind-group contract through a separate `wgpu::RenderPipeline`
+  (not aliased to `svg_pipeline`). Per-frame layer order in
+  `render_m5_pipeline` now routes Image / Video layers with a
+  registered treatment through the dispatch arm; unknown
+  preset_id falls back to the default blit so the source still
+  appears. `TreatmentInputs<'a>` carries reserved `overlay` +
+  `collage` fields so W3 presets won't churn the signature.
+  4 CPU-only registry tests.
+- ✅ **P1.2.3** `3b0c697` — Selected-layer treatment picker UI.
+  New "Treatment" CollapsingHeader inside Advanced > Selected
+  layer, between Blend mode and Video. Combobox lists every
+  registered preset; per-param sliders dispatch on drag-release
+  (matches the P0.4.3 video-speed pattern so the undo stack
+  records one entry per gesture). Switching presets preserves
+  shared param keys, falling back to descriptor defaults.
+  SVG / FxLayer get an explanatory placeholder.
+- ✅ **P1.3.1** `d325127` — `tone_map` treatment preset. WGSL
+  shader `treat_tone_map.wgsl` with exposure (-2..=+2 stops) +
+  contrast (0.5..=1.5) + shoulder (0..=1, linear ↔ Reinhard
+  crossfade). Identity defaults (`exposure=0, contrast=1,
+  shoulder=0`) produce passthrough so the preset is visually
+  transparent until tuned. Picker (P1.2.3) auto-discovers the
+  preset + renders the three sliders.
 
 **Not yet started:**
 
@@ -87,16 +112,16 @@ below is sized for a single PR.
 
 **Pre-existing issues (carried from Phase 0):**
 
-- `make lint` (clippy `--all-features`) fails on `src/project/mod.rs`
-  due to a Rust 1.92 / clippy upgrade. Cleanup is orthogonal to
-  Phase 1 scope; the v3,midi clippy target is clean.
+- _(none — `make lint` was unblocked in `4edb85c` with the
+  `perf_frame_budget` clippy cleanup; all targets now pass
+  clippy `--all-features` cleanly.)_
 
 **Test status:**
 
-- 551 tests pass under `--features v3,midi` (was 523 at Phase 0
-  close; +28 from W1 + W6 + W4.0 + W2.1).
-- 284 tests pass under default features (was 270; +14).
-- 267 tests pass under `--no-default-features` (was 254; +13).
+- 557 tests pass under `--features v3,midi` (was 551; +6 from
+  W2.2 + W3.1 registry/descriptor tests).
+- 288 tests pass under default features (was 284; +4).
+- 267 tests pass under `--no-default-features`.
 - 1 test passes under `--features gpu-tests` (P0.9.5; P1.7.4 will
   refresh the fixture).
 - New tests by workstream:
@@ -105,6 +130,12 @@ below is sized for a single PR.
   - W1.4 (EXIF rotate-90 + no-transform no-op): 2 tests.
   - W2.1 (treatment Mutations round-trip + builder panic + audit
     findings): 7 tests + proptest harness coverage.
+  - W2.2 (treatment registry / dispatch contract): 4 tests.
+  - W3.1 (tone_map registry + descriptor identity defaults): 2
+    tests (registry + descriptor checks; golden-image identity
+    test deferred — `tests/golden/` has no image-layer baseline,
+    so an identity-defaults bit-exact check would also need a
+    fresh baseline to land in the same commit).
   - W4.0 (auto-play, fixture-gated): 1 test (skipped without
     fixture).
 
