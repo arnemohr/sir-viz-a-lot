@@ -408,6 +408,12 @@ struct EditingState {
     svg_pipeline: SvgLayerPipeline,
     compositor: Compositor,
     gamma: GammaPipeline,
+    /// P0.5.3 — FX preset pipeline. v0.4 ships one preset
+    /// (`mask_edge_ripple_wash`); Phase 2 will grow this into a
+    /// registry indexed by `preset_id`. Built once in `init_render_graph`
+    /// and shared across all FxLayer layers in the scene (the pipeline
+    /// itself is stateless; per-layer state lives in `LayerState.fx_texture`).
+    fx_pipeline: crate::render::fx_presets::FxPresetPipeline,
     /// P0.7.3 — edge-blend multiply pass applied after gamma, before overlay.
     /// Only emitted when `outputs.len() >= 2 && project.edge_blend.is_some()`.
     edge_blend: EdgeBlendPipeline,
@@ -1289,6 +1295,12 @@ struct LayerState {
     warp_renderer: WarpRenderer,
     _warp_texture: wgpu::Texture,
     warp_view: wgpu::TextureView,
+    /// P0.5.3 — FxLayer procedural output texture. `Some` only for
+    /// `LayerKind::FxLayer` layers; `None` for all other kinds.
+    /// Allocated at output size; the preset pipeline renders into
+    /// this texture each frame, after which the layer flows through
+    /// the normal effect chain + warp pipeline unchanged.
+    fx_texture: Option<(wgpu::Texture, wgpu::TextureView)>,
 }
 
 fn create_layer_uniform_buffers(
@@ -1486,6 +1498,9 @@ struct RenderGraph {
     /// P0.7.3 — edge-blend multiply pipeline (always built; conditionally emitted).
     edge_blend: EdgeBlendPipeline,
     overlay: OverlayPipeline,
+    /// P0.5.3 — ripple-wash FX preset pipeline. One pipeline shared across all
+    /// FxLayer layers; per-layer output lives in `LayerState.fx_texture`.
+    fx_pipeline: crate::render::fx_presets::FxPresetPipeline,
     warp_rt: wgpu::Texture,
     warp_rt_view: wgpu::TextureView,
     layers: Vec<LayerState>,
@@ -1512,6 +1527,10 @@ fn init_render_graph(
     let gamma = GammaPipeline::new(device, surface_format);
     let edge_blend = EdgeBlendPipeline::new(device, surface_format);
     let overlay = OverlayPipeline::new(device, surface_format);
+    // P0.5.3 — build the ripple-wash FX preset pipeline against the same
+    // surface format as every other intermediate texture in the graph.
+    let fx_pipeline =
+        crate::render::fx_presets::FxPresetPipeline::new_ripple_wash(device, surface_format);
     let (warp_rt, warp_rt_view) = make_warp_render_target(device, w, h, surface_format);
     let layers = rebuild_layers(device, queue, project, project_path, w, h, surface_format)?;
 
@@ -1521,6 +1540,7 @@ fn init_render_graph(
         gamma,
         edge_blend,
         overlay,
+        fx_pipeline,
         warp_rt,
         warp_rt_view,
         layers,
@@ -1845,6 +1865,7 @@ fn assemble_editing_state(
         svg_pipeline: graph.svg_pipeline,
         compositor: graph.compositor,
         gamma: graph.gamma,
+        fx_pipeline: graph.fx_pipeline,
         edge_blend: graph.edge_blend,
         overlay: graph.overlay,
         warp_rt: graph.warp_rt,
@@ -2555,6 +2576,7 @@ fn launcher_render(
                     ("window-glow", "Window Glow"),
                     ("film-strip", "Film Strip"),
                     ("test-grid", "Test Grid"),
+                    ("fx-ripple-wash", "Ripple Wash"),
                 ];
 
                 let badge = !prefs.first_launch_completed;
@@ -2919,15 +2941,63 @@ fn rebuild_layers(
 ) -> Result<Vec<LayerState>> {
     let mut out = Vec::with_capacity(project.layers.len());
     for lc in project.layers.iter() {
+        // P0.5.3: FxLayer gets its own construction path — it has no asset
+        // on disk and renders procedurally into fx_texture each frame.
+        // Ndi continues to be deferred (P0.6); skip it as before.
+        if matches!(lc.kind, schema::LayerKind::Ndi { .. }) {
+            continue;
+        }
+
+        // P0.5.3 — FxLayer branch: allocate fx_texture; no raster worker
+        // or file watcher needed.
+        if let schema::LayerKind::FxLayer { .. } = &lc.kind {
+            let effect_pipeline =
+                EffectPipeline::new(device, width.max(1), height.max(1), surface_format);
+            let (intermediate_texture, intermediate_view) =
+                make_intermediate_texture(device, width.max(1), height.max(1), surface_format);
+            let (fx_texture, fx_view) =
+                make_fx_texture(device, width.max(1), height.max(1), surface_format);
+            let (color_uniform, blur_uniform, transform_uniform, compositor_uniform, fit_uniform) =
+                create_layer_uniform_buffers(device);
+            let warp_renderer = WarpRenderer::new(device, surface_format);
+            let (warp_texture, warp_view) =
+                make_layer_warp_texture(device, width, height, surface_format);
+            // Dummy worker channels — never sent to for FxLayer, but the
+            // LayerState struct requires them. The receiver will always be
+            // empty; the watcher watches zero paths.
+            let (job_tx, result_rx) = Worker::spawn();
+            let (watcher, watch_rx) = Watcher::new(&[])?;
+            out.push(LayerState {
+                layer: SvgLayer::pending(PathBuf::from("<fx_layer>")),
+                layer_id: LayerId::next(),
+                generation: 1,
+                job_tx,
+                result_rx,
+                watch_rx,
+                _watcher: watcher,
+                effect_pipeline,
+                _intermediate_texture: intermediate_texture,
+                intermediate_view,
+                color_uniform,
+                blur_uniform,
+                transform_uniform,
+                compositor_uniform,
+                fit_uniform,
+                texture_aspect: 1.0,
+                warp_renderer,
+                _warp_texture: warp_texture,
+                warp_view,
+                fx_texture: Some((fx_texture, fx_view)),
+            });
+            continue;
+        }
+
         // 003-T2.23 follow-up: relative asset paths must be resolved
         // against the project file's parent dir before the file
         // watcher / image loader / SVG worker get them. Without this
         // the demo project (T-003-T2.8) and any portable project
         // saved via save_portable would fail at render init with a
         // notify "No path was found" error.
-        // P0.1.2 placeholder: variants without an asset path (`FxLayer`,
-        // `Ndi`) skip the SvgLayer-shaped pipeline entirely. W5 / W6
-        // wire dedicated render paths.
         let Some(stored) = lc.kind.asset_path().map(|p| p.to_path_buf()) else {
             continue;
         };
@@ -2966,7 +3036,7 @@ fn rebuild_layers(
                 );
             }
             schema::LayerKind::FxLayer { .. } | schema::LayerKind::Ndi { .. } => {
-                // Unreachable: filtered by the asset_path guard above.
+                // Unreachable: handled above before the asset_path guard.
                 // Kept for exhaustiveness.
             }
             schema::LayerKind::Image { .. } => {
@@ -3023,6 +3093,7 @@ fn rebuild_layers(
             warp_renderer,
             _warp_texture: warp_texture,
             warp_view,
+            fx_texture: None,
         });
     }
     Ok(out)
@@ -3103,6 +3174,10 @@ fn resize_m5_gpu(state: &mut EditingState) {
         layer._warp_texture = wtex;
         layer.warp_view = wview;
         layer.generation = layer.generation.wrapping_add(1);
+        // P0.5.3: FxLayer fx_texture is output-sized; recreate on resize.
+        if layer.fx_texture.is_some() {
+            layer.fx_texture = Some(make_fx_texture(device, w, h, fmt));
+        }
         // P0.1.2 placeholder: only raster-shaped layers (Svg/Image/Video)
         // need a raster-job re-send on resize. FxLayer / Ndi are skipped.
         let Some(path) = state.project.layers[i]
@@ -3119,6 +3194,33 @@ fn resize_m5_gpu(state: &mut EditingState) {
             generation: layer.generation,
         });
     }
+}
+
+/// P0.5.3 — Allocate the per-FxLayer output texture. Sized to the projector
+/// output (same as other per-layer intermediates). Uses the surface format so
+/// it flows transparently into the existing effect chain + warp pipeline.
+fn make_fx_texture(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+    format: wgpu::TextureFormat,
+) -> (wgpu::Texture, wgpu::TextureView) {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("fx layer output"),
+        size: wgpu::Extent3d {
+            width: width.max(1),
+            height: height.max(1),
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    (texture, view)
 }
 
 /// Allocate the scratch intermediate texture used by multi-pass effects
@@ -3442,6 +3544,7 @@ fn render_m5_pipeline(
     external_registry: &ExternalRegistry,
     _surface_format: wgpu::TextureFormat,
     clock: &Clock,
+    fx_pipeline: &crate::render::fx_presets::FxPresetPipeline,
 ) -> std::result::Result<(), RenderError> {
     crate::show_day::panic_restore::run_frame_assert_unwind_safe(|| {
         // --- Passes 1-4: raster / effects / warp / composite into warp_rt ---
@@ -3483,19 +3586,80 @@ fn render_m5_pipeline(
             if !project.layer_is_visible(idx) {
                 continue;
             }
-            let Some(tex_view) = ls.layer.texture_view() else {
-                continue;
+
+            // P0.5.3 — FxLayer: sync SDF, run the preset pipeline into
+            // fx_texture, then use fx_view as the source for the effect chain.
+            // Unknown preset_id → no fx_texture written → layer invisible
+            // (matches the P0.5.1 audit-warns-but-renders contract).
+            let fx_tex_view: Option<&wgpu::TextureView> =
+                if let schema::LayerKind::FxLayer { preset_id, params } = &cfg.kind {
+                    if preset_id == crate::render::fx_presets::RIPPLE_WASH_PRESET_ID {
+                        if let Some((_tex, fx_view)) = ls.fx_texture.as_ref() {
+                            // sync_mesh_and_mask updates the SDF from cfg.warp;
+                            // call it here so sdf_view() is up to date before
+                            // fx_pipeline.render reads it.
+                            ls.warp_renderer.sync_mesh_and_mask(
+                                &renderer.gpu.device,
+                                &renderer.gpu.queue,
+                                &cfg.warp,
+                            );
+                            let params_uniform =
+                                crate::render::fx_presets::FxParamsUniform::for_ripple_wash(params);
+                            let clock_secs = clock.elapsed().as_secs_f32();
+                            // Collect the views before calling render so the
+                            // borrow checker sees separate field borrows.
+                            let sdf_v = ls.warp_renderer.sdf_view();
+                            fx_pipeline.render(
+                                &renderer.gpu.device,
+                                &renderer.gpu.queue,
+                                &mut encoder,
+                                fx_view,
+                                sdf_v,
+                                clock_secs,
+                                &params_uniform,
+                            );
+                            Some(fx_view)
+                        } else {
+                            None
+                        }
+                    } else {
+                        // Unknown preset_id — the P0.5.1 audit already emitted
+                        // a warning. Skip rendering this layer.
+                        None
+                    }
+                } else {
+                    None
+                };
+
+            // Resolve the source texture view: FxLayer uses fx_tex_view;
+            // other layers fall through to the SvgLayer GPU texture.
+            let tex_view: &wgpu::TextureView = match fx_tex_view {
+                Some(v) => v,
+                None => {
+                    if matches!(cfg.kind, schema::LayerKind::FxLayer { .. }) {
+                        // FxLayer with unknown preset or missing fx_texture —
+                        // skip rather than rendering a blank quad.
+                        continue;
+                    }
+                    let Some(v) = ls.layer.texture_view() else {
+                        continue;
+                    };
+                    v
+                }
             };
+
             // T-M8-04: write per-layer fit-mode uniform.
             //   SVG layers: Stretch + identity aspect (resvg pixmap is
             //   sized to the output; stretching is the no-op case).
             //   Image layers: Cover/Contain/Stretch + texture's actual
             //   aspect + focal.
+            //   FxLayer: Stretch with centred focal (output-sized texture,
+            //   no fit-mode concept — the SDF is always output-normalised).
             let (mode_id, focal) = match &cfg.kind {
                 schema::LayerKind::Svg { .. } => (0u32, [0.5f32, 0.5]),
-                // P0.1.2 placeholder — Video / FxLayer / Ndi default to
-                // Stretch with centred focal until W4 / W5 / W6 wire
-                // variant-specific fit modes.
+                // P0.1.2 placeholder — Video / Ndi default to Stretch until
+                // W4 / W6 wire variant-specific fit modes.
+                // FxLayer: Stretch; output-sized texture maps 1:1.
                 schema::LayerKind::Video { .. }
                 | schema::LayerKind::FxLayer { .. }
                 | schema::LayerKind::Ndi { .. } => (0u32, [0.5f32, 0.5]),
@@ -3556,6 +3720,9 @@ fn render_m5_pipeline(
             // `LoadOp::Clear` so the previous frame's contents (or another
             // layer's earlier write to a different layer's warp_view)
             // never bleed in.
+            // Note: for FxLayer, sync_mesh_and_mask was already called above
+            // (before fx_pipeline.render). The second call here is a no-op
+            // because sync_mesh_and_mask gates on a mesh-geometry hash.
             ls.warp_renderer.sync_mesh_and_mask(
                 &renderer.gpu.device,
                 &renderer.gpu.queue,
@@ -4534,6 +4701,7 @@ fn handle_editing_window_event(
                     &state.external_registry,
                     surface_format,
                     &state.clock,
+                    &state.fx_pipeline,
                 )
             } else {
                 // Empty project — render a blank frame for each output.
@@ -5664,6 +5832,73 @@ mod tests {
             "layer 1 (image verifier) warp carries a mask",
         );
 
+        assert!(project.output_windowed, "demo opens windowed for safety");
+    }
+
+    /// 004-P0.5.3 — fx-ripple-wash demo presence and shape. Verifies the
+    /// file resolves via `ProjectSource::Demo`, audits clean, has exactly
+    /// one `FxLayer` with the ripple-wash preset and a polygon mask, and
+    /// opens windowed so it doesn't fullscreen on CI.
+    #[cfg(feature = "v3")]
+    #[test]
+    fn demo_loads_fx_ripple_wash() {
+        use crate::controls::ProjectSource;
+        let demo_path = std::path::PathBuf::from("assets/demos/fx-ripple-wash.rmap.json");
+        if !demo_path.exists() {
+            eprintln!(
+                "demo_loads_fx_ripple_wash: skipping — `{}` not present (004-P0.5.3 bundle).",
+                demo_path.display(),
+            );
+            return;
+        }
+
+        let (project, returned_path) =
+            resolve_project_source(&ProjectSource::Demo("fx-ripple-wash"))
+                .expect("fx-ripple-wash demo project loads");
+        assert!(
+            returned_path
+                .as_deref()
+                .map(|p| p == demo_path.as_path())
+                .unwrap_or(false),
+            "Demo source should return the bundled path"
+        );
+
+        // FxLayer with an unknown preset_id would fire an audit warning,
+        // but the known ripple-wash preset is not checked by the audit
+        // (it has no asset path to verify). So findings should be empty.
+        let env = crate::project::audit::AuditEnv {
+            monitor_count: 1,
+            live_monitor_uuids: Vec::new(),
+        };
+        let findings = crate::project::audit::ProjectAudit::run_with_path(
+            &project,
+            &env,
+            Some(demo_path.as_path()),
+        );
+        assert!(
+            findings.is_empty(),
+            "fx-ripple-wash demo should audit clean, got: {findings:?}"
+        );
+
+        // Shape: 1 FxLayer with the ripple-wash preset + polygon mask.
+        assert_eq!(
+            project.layers.len(),
+            1,
+            "fx-ripple-wash demo has exactly one layer"
+        );
+        assert!(
+            matches!(
+                &project.layers[0].kind,
+                crate::project::schema::LayerKind::FxLayer { preset_id, .. }
+                    if preset_id == crate::render::fx_presets::RIPPLE_WASH_PRESET_ID
+            ),
+            "layer 0 must be FxLayer with preset_id 'mask_edge_ripple_wash', got {:?}",
+            project.layers[0].kind,
+        );
+        assert!(
+            !project.layers[0].warp.mask_polygon.is_empty(),
+            "fx-ripple-wash demo layer warp carries a polygon mask (required for SDF)",
+        );
         assert!(project.output_windowed, "demo opens windowed for safety");
     }
 
