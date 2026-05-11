@@ -1364,6 +1364,7 @@ mod tests {
             opacity: 1.0,
             warp: WarpMesh::identity(),
             muted: false,
+            treatment: None,
         }
     }
 
@@ -1429,6 +1430,7 @@ mod tests {
             opacity: 1.0,
             warp: WarpMesh::identity(),
             muted: false,
+            treatment: None,
         };
         mutate_transform_effect(&mut layer, |t, _r, _sx, _sy| {
             *t = [0.25, 0.0];

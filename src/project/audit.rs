@@ -403,6 +403,84 @@ impl ProjectAudit {
                     });
                 }
             }
+
+            // P1.2.1 — Treatment audit. Three checks per layer that
+            // carries `treatment.is_some()`:
+            //   (1) unknown preset_id  → Warn (mirrors P0.5.1 FxLayer)
+            //   (2) missing overlay_path file        → Warn MissingAsset
+            //   (3) missing collage_paths[i] file    → Warn MissingAsset
+            //
+            // The preset registry isn't built yet (P1.3 ships it) so we
+            // can't validate preset_id against a live list of known
+            // presets today. The check is wired but currently accepts
+            // every id; W3 tasks tighten it once `treatments::registry`
+            // exists.
+            if let Some(treatment) = layer.treatment.as_ref() {
+                // (1) unknown preset_id — placeholder until W3 ships
+                // the registry. The empty-string case is the only
+                // detectable error today (caller dispatched a
+                // SetLayerTreatment with an empty preset_id).
+                if treatment.preset_id.is_empty() {
+                    findings.push(AuditFinding {
+                        kind: AuditKind::EmptyProject, // closest existing kind; W3 may add a dedicated variant
+                        severity: Severity::Warn,
+                        message: format!(
+                            "Layer {} has a treatment with no preset_id; it will render as a no-op.",
+                            layer.id,
+                        ),
+                        autofix: None,
+                    });
+                }
+
+                // (2) missing overlay_path
+                if let Some(overlay) = treatment.overlay_path.as_ref() {
+                    let resolved = match project_path.and_then(|p| p.parent()) {
+                        Some(dir) if overlay.is_relative() => dir.join(overlay),
+                        _ => overlay.to_path_buf(),
+                    };
+                    if !resolved.exists() {
+                        findings.push(AuditFinding {
+                            kind: AuditKind::MissingAsset {
+                                layer_idx,
+                                path: overlay.clone(),
+                            },
+                            severity: Severity::Warn,
+                            message: format!(
+                                "Layer {}: treatment overlay '{}' is missing. The overlay will be skipped.",
+                                layer.id,
+                                overlay.display(),
+                            ),
+                            autofix: None,
+                        });
+                    }
+                }
+
+                // (3) missing collage_paths entries — one finding per
+                // missing entry, indexed in the message so the operator
+                // can find which slot is broken.
+                for (entry_idx, collage) in treatment.collage_paths.iter().enumerate() {
+                    let resolved = match project_path.and_then(|p| p.parent()) {
+                        Some(dir) if collage.is_relative() => dir.join(collage),
+                        _ => collage.to_path_buf(),
+                    };
+                    if !resolved.exists() {
+                        findings.push(AuditFinding {
+                            kind: AuditKind::MissingAsset {
+                                layer_idx,
+                                path: collage.clone(),
+                            },
+                            severity: Severity::Warn,
+                            message: format!(
+                                "Layer {}: collage slot {} ('{}') is missing.",
+                                layer.id,
+                                entry_idx,
+                                collage.display(),
+                            ),
+                            autofix: None,
+                        });
+                    }
+                }
+            }
         }
 
         // --- Per-layer warp checks (v4) ---
@@ -575,6 +653,7 @@ mod tests {
             opacity: 1.0,
             warp: crate::project::schema::WarpMesh::identity(),
             muted: false,
+            treatment: None,
         });
         p
     }
@@ -626,6 +705,7 @@ mod tests {
             opacity: 1.0,
             warp: crate::project::schema::WarpMesh::identity(),
             muted: false,
+            treatment: None,
         });
 
         let findings = ProjectAudit::run(&p, &AuditEnv::default());
@@ -823,6 +903,92 @@ mod tests {
                 "layer_from_video_path must produce Video kind for .{ext}",
             );
         }
+    }
+
+    /// P1.2.1 — a missing treatment `overlay_path` surfaces a Warn
+    /// `MissingAsset` finding (mirrors the missing-image-asset path).
+    #[test]
+    fn audit_missing_treatment_overlay_emits_warning() {
+        use crate::project::schema::Treatment;
+        let mut p = fresh_project();
+        p.layers[0].treatment = Some(Treatment {
+            preset_id: "texture_overlay".into(),
+            params: std::collections::HashMap::new(),
+            overlay_path: Some(std::path::PathBuf::from(
+                "/definitely/does/not/exist/grain.png",
+            )),
+            collage_paths: vec![],
+        });
+        let findings = ProjectAudit::run(&p, &AuditEnv::default());
+        let f = findings
+            .iter()
+            .find(|f| {
+                matches!(
+                    &f.kind,
+                    AuditKind::MissingAsset { layer_idx: 0, path }
+                        if path.ends_with("grain.png")
+                )
+            })
+            .expect("expected MissingAsset for treatment overlay path");
+        assert_eq!(f.severity, Severity::Warn);
+    }
+
+    /// P1.2.1 — missing entries in `collage_paths` surface one
+    /// finding each, indexed by slot.
+    #[test]
+    fn audit_missing_collage_entries_each_emit_one_finding() {
+        use crate::project::schema::Treatment;
+        let mut p = fresh_project();
+        p.layers[0].treatment = Some(Treatment {
+            preset_id: "collage".into(),
+            params: std::collections::HashMap::new(),
+            overlay_path: None,
+            collage_paths: vec![
+                std::path::PathBuf::from("/nonexistent/a.png"),
+                std::path::PathBuf::from("/nonexistent/b.png"),
+            ],
+        });
+        let findings = ProjectAudit::run(&p, &AuditEnv::default());
+        let missing: Vec<_> = findings
+            .iter()
+            .filter(|f| {
+                matches!(
+                    &f.kind,
+                    AuditKind::MissingAsset { layer_idx: 0, path }
+                        if path.starts_with("/nonexistent/")
+                )
+            })
+            .collect();
+        assert_eq!(missing.len(), 2, "one finding per missing collage entry");
+        for f in &missing {
+            assert_eq!(f.severity, Severity::Warn);
+        }
+        // Messages must include the slot index so the operator can
+        // find which entry needs relinking.
+        assert!(missing.iter().any(|f| f.message.contains("slot 0")));
+        assert!(missing.iter().any(|f| f.message.contains("slot 1")));
+    }
+
+    /// P1.2.1 — empty preset_id is a Warn finding (placeholder until
+    /// W3 ships the preset registry; today it's the only detectable
+    /// "unknown preset" failure mode).
+    #[test]
+    fn audit_empty_treatment_preset_id_emits_warning() {
+        use crate::project::schema::Treatment;
+        let mut p = fresh_project();
+        p.layers[0].treatment = Some(Treatment {
+            preset_id: String::new(),
+            params: std::collections::HashMap::new(),
+            overlay_path: None,
+            collage_paths: vec![],
+        });
+        let findings = ProjectAudit::run(&p, &AuditEnv::default());
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.severity == Severity::Warn && f.message.contains("no preset_id")),
+            "expected a Warn finding for an empty preset_id",
+        );
     }
 
     /// 003-T1.39 — output_target.fallback_index >= AuditEnv.monitor_count triggers

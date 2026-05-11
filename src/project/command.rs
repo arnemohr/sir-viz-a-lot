@@ -859,6 +859,90 @@ impl ReverseStorage for SetLayerKind {
     }
 }
 
+/// P1.2.1 — Payload for [`Mutation::SetLayerTreatment`].
+///
+/// Whole-`Option` Reverse so a `None ↔ Some(Treatment)` toggle
+/// round-trips byte-equally. This is the mutation that handles
+/// preset switches AND `overlay_path` / `collage_paths` edits — the
+/// UI constructs a new `Treatment` with the desired field values and
+/// dispatches this. Per-field path mutations would risk silently
+/// dropping unrelated fields on the `None → Some` direction.
+#[derive(Debug, Clone)]
+pub struct SetLayerTreatment {
+    /// Index into `Project.layers`.
+    pub layer_idx: usize,
+    /// Value to write (`None` removes the treatment).
+    pub new: Option<crate::project::schema::Treatment>,
+    /// Pre-mutation value.
+    pub old: Option<crate::project::schema::Treatment>,
+}
+
+impl ReverseStorage for SetLayerTreatment {
+    fn apply(self, project: &mut Project) -> Self {
+        let layer = project
+            .layers
+            .get_mut(self.layer_idx)
+            .expect("SetLayerTreatment: layer_idx out of range");
+        debug_assert_eq!(
+            layer.treatment, self.old,
+            "SetLayerTreatment stale Reverse for layer_idx={}",
+            self.layer_idx,
+        );
+        layer.treatment = self.new.clone();
+        SetLayerTreatment {
+            layer_idx: self.layer_idx,
+            new: self.old,
+            old: self.new,
+        }
+    }
+}
+
+/// P1.2.1 — Payload for [`Mutation::SetLayerTreatmentParams`].
+///
+/// Whole-`HashMap` snapshot Reverse (parallels `SetFxLayerParams`
+/// from P0.5.1). Per-key Reverse would lose unrelated keys silently
+/// when a preset switch races a param edit. Only touches the
+/// `params` field — `preset_id`, `overlay_path`, and `collage_paths`
+/// flow through [`SetLayerTreatment`].
+///
+/// **Apply contract:** the layer's `treatment` must be `Some` at
+/// apply time. The mutation panics with a clear message otherwise —
+/// the UI dispatch site is responsible for guarding (param sliders
+/// only render when treatment is active).
+#[derive(Debug, Clone)]
+pub struct SetLayerTreatmentParams {
+    /// Index into `Project.layers`. Layer must have `treatment.is_some()`.
+    pub layer_idx: usize,
+    /// Replacement params HashMap (replaces the whole map, not per-key).
+    pub new: std::collections::HashMap<String, f32>,
+    /// Pre-mutation params (snapshot; `apply` `debug_assert!`s match).
+    pub old: std::collections::HashMap<String, f32>,
+}
+
+impl ReverseStorage for SetLayerTreatmentParams {
+    fn apply(self, project: &mut Project) -> Self {
+        let layer = project
+            .layers
+            .get_mut(self.layer_idx)
+            .expect("SetLayerTreatmentParams: layer_idx out of range");
+        let treatment = layer.treatment.as_mut().expect(
+            "SetLayerTreatmentParams: layer has no treatment — \
+             dispatch site must guard via `treatment.is_some()`",
+        );
+        debug_assert_eq!(
+            treatment.params, self.old,
+            "SetLayerTreatmentParams stale Reverse for layer_idx={}",
+            self.layer_idx,
+        );
+        treatment.params = self.new.clone();
+        SetLayerTreatmentParams {
+            layer_idx: self.layer_idx,
+            new: self.old,
+            old: self.new,
+        }
+    }
+}
+
 /// Payload for [`Mutation::SetModulator`].
 ///
 /// Whole-enum Reverse (rule 1): stores the full old `Modulator` value so a
@@ -1396,6 +1480,17 @@ pub enum Mutation {
     /// [`SetLayerKind`].
     SetLayerKind(SetLayerKind),
 
+    /// P1.2.1 — replace a layer's `treatment` (whole-`Option`
+    /// snapshot Reverse). Delegates to [`SetLayerTreatment`].
+    /// Handles preset switches, `overlay_path` edits, and
+    /// `collage_paths` edits.
+    SetLayerTreatment(SetLayerTreatment),
+
+    /// P1.2.1 — replace a layer's `treatment.params` map (whole-
+    /// `HashMap` snapshot Reverse). Delegates to
+    /// [`SetLayerTreatmentParams`].
+    SetLayerTreatmentParams(SetLayerTreatmentParams),
+
     /// P0.8.2 — wholesale replace `Project.output_target.rgb_matrix`.
     /// Per-cell edits in the W8.3 calibration UI emit one of these
     /// per change. Delegates to [`SetOutputRgbMatrix`].
@@ -1487,6 +1582,10 @@ impl Mutation {
             Mutation::SwapLayers(s) => Mutation::SwapLayers(s.apply(project)),
             Mutation::RelinkAssetPath(s) => Mutation::RelinkAssetPath(s.apply(project)),
             Mutation::SetLayerKind(s) => Mutation::SetLayerKind(s.apply(project)),
+            Mutation::SetLayerTreatment(s) => Mutation::SetLayerTreatment(s.apply(project)),
+            Mutation::SetLayerTreatmentParams(s) => {
+                Mutation::SetLayerTreatmentParams(s.apply(project))
+            }
             Mutation::SetOutputRgbMatrix(s) => Mutation::SetOutputRgbMatrix(s.apply(project)),
             Mutation::SetModulator(s) => Mutation::SetModulator(s.apply(project)),
             Mutation::ResetLayerWarpMesh(s) => Mutation::ResetLayerWarpMesh(s.apply(project)),
@@ -1614,6 +1713,8 @@ impl Mutation {
             | Mutation::SetEdgeBlend(_)
             | Mutation::RelinkAssetPath(_)
             | Mutation::SetLayerKind(_)
+            | Mutation::SetLayerTreatment(_)
+            | Mutation::SetLayerTreatmentParams(_)
             | Mutation::SetOutputRgbMatrix(_)
             | Mutation::SetVideoSpeed(_)
             | Mutation::SetVideoLoopSeamless(_) => false,
@@ -1724,6 +1825,52 @@ impl Project {
         Mutation::SetEdgeBlend(SetEdgeBlend {
             new,
             old: self.edge_blend,
+        })
+    }
+
+    /// P1.2.1 — build a `SetLayerTreatment` mutation for the given
+    /// layer index. Captures the layer's current `treatment` as `old`.
+    /// Pass `None` to remove the treatment; `Some(t)` to set / replace
+    /// it. Panics if `layer_idx` is out of range — callers must guard
+    /// first (the UI dispatch site has `layer_idx < layers.len()` as
+    /// an invariant).
+    pub fn set_layer_treatment_mutation(
+        &self,
+        layer_idx: usize,
+        new: Option<crate::project::schema::Treatment>,
+    ) -> Mutation {
+        let old = self.layers[layer_idx].treatment.clone();
+        Mutation::SetLayerTreatment(SetLayerTreatment {
+            layer_idx,
+            new,
+            old,
+        })
+    }
+
+    /// P1.2.1 — build a `SetLayerTreatmentParams` mutation for the
+    /// given layer index. Captures the layer's current
+    /// `treatment.params` as `old`. **Panics** if the layer has no
+    /// treatment — the UI dispatch site must only call this when the
+    /// preset is active (param sliders render only when
+    /// `treatment.is_some()`).
+    pub fn set_layer_treatment_params_mutation(
+        &self,
+        layer_idx: usize,
+        new: std::collections::HashMap<String, f32>,
+    ) -> Mutation {
+        let old = self.layers[layer_idx]
+            .treatment
+            .as_ref()
+            .expect(
+                "set_layer_treatment_params_mutation called on a \
+                 layer with no treatment — UI dispatch site must guard",
+            )
+            .params
+            .clone();
+        Mutation::SetLayerTreatmentParams(SetLayerTreatmentParams {
+            layer_idx,
+            new,
+            old,
         })
     }
 
@@ -2228,6 +2375,132 @@ mod tests {
         };
         assert!(!p.set_edge_blend_mutation(Some(cfg)).needs_layer_rebuild());
         assert!(!p.set_edge_blend_mutation(None).needs_layer_rebuild());
+    }
+
+    /// P1.2.1 — `SetLayerTreatment` round-trip across the four
+    /// state transitions:
+    ///   None → Some(t1) → None  (enable then disable)
+    ///   Some(a) → Some(b)        (switch preset / params atomically)
+    #[test]
+    fn set_layer_treatment_round_trips() {
+        use crate::project::schema::Treatment;
+
+        let mut p = fresh_project();
+        assert!(p.layers[0].treatment.is_none());
+
+        let t1 = Treatment {
+            preset_id: "tone_map".into(),
+            params: {
+                let mut m = std::collections::HashMap::new();
+                m.insert("exposure".to_string(), 0.5);
+                m
+            },
+            overlay_path: None,
+            collage_paths: vec![],
+        };
+
+        // None → Some(t1)
+        let m = p.set_layer_treatment_mutation(0, Some(t1.clone()));
+        let reverse = m.apply(&mut p);
+        assert_eq!(p.layers[0].treatment, Some(t1.clone()));
+
+        // Some(t1) → None (via reverse)
+        let _ = reverse.apply(&mut p);
+        assert!(p.layers[0].treatment.is_none());
+
+        // Some(a) → Some(b)
+        p.layers[0].treatment = Some(t1.clone());
+        let t2 = Treatment {
+            preset_id: "blur_mask".into(),
+            params: std::collections::HashMap::new(),
+            overlay_path: None,
+            collage_paths: vec![],
+        };
+        let m = p.set_layer_treatment_mutation(0, Some(t2.clone()));
+        let reverse = m.apply(&mut p);
+        assert_eq!(p.layers[0].treatment, Some(t2));
+        let _ = reverse.apply(&mut p);
+        assert_eq!(p.layers[0].treatment, Some(t1));
+    }
+
+    /// P1.2.1 — `SetLayerTreatmentParams` snapshots the whole map so
+    /// a preset switch racing a param edit doesn't lose keys silently.
+    #[test]
+    fn set_layer_treatment_params_round_trips() {
+        use crate::project::schema::Treatment;
+
+        let mut p = fresh_project();
+        p.layers[0].treatment = Some(Treatment {
+            preset_id: "tone_map".into(),
+            params: {
+                let mut m = std::collections::HashMap::new();
+                m.insert("exposure".to_string(), 0.0);
+                m.insert("contrast".to_string(), 1.0);
+                m
+            },
+            overlay_path: None,
+            collage_paths: vec![],
+        });
+
+        let mut new_params = std::collections::HashMap::new();
+        new_params.insert("exposure".to_string(), 0.5);
+        new_params.insert("contrast".to_string(), 1.2);
+        new_params.insert("shoulder".to_string(), 0.7);
+
+        let m = p.set_layer_treatment_params_mutation(0, new_params.clone());
+        let reverse = m.apply(&mut p);
+        assert_eq!(p.layers[0].treatment.as_ref().unwrap().params, new_params);
+
+        // Reverse restores the original 2-key map (including dropping
+        // the new `shoulder` key — whole-map snapshot, not merge).
+        let _ = reverse.apply(&mut p);
+        let restored = &p.layers[0].treatment.as_ref().unwrap().params;
+        assert_eq!(restored.len(), 2);
+        assert!(restored.contains_key("exposure"));
+        assert!(restored.contains_key("contrast"));
+        assert!(
+            !restored.contains_key("shoulder"),
+            "whole-map Reverse must drop keys not present pre-mutation"
+        );
+    }
+
+    /// P1.2.1 — both treatment mutations are undoable + don't trigger
+    /// a layer-GPU rebuild (the treatment runs inside the existing
+    /// per-layer render pipeline; no layer-Vec reshape).
+    #[test]
+    fn treatment_mutations_are_undoable_and_no_rebuild() {
+        use crate::project::schema::Treatment;
+        let mut p = fresh_project();
+
+        let t = Treatment {
+            preset_id: "tone_map".into(),
+            params: std::collections::HashMap::new(),
+            overlay_path: None,
+            collage_paths: vec![],
+        };
+
+        let m1 = p.set_layer_treatment_mutation(0, Some(t.clone()));
+        assert!(!m1.is_non_undoable());
+        assert!(!m1.needs_layer_rebuild());
+
+        // Need a populated treatment for set_layer_treatment_params_mutation.
+        p.layers[0].treatment = Some(t);
+        let m2 = p.set_layer_treatment_params_mutation(0, std::collections::HashMap::new());
+        assert!(!m2.is_non_undoable());
+        assert!(!m2.needs_layer_rebuild());
+    }
+
+    /// P1.2.1 — builder panics on a layer without a treatment when
+    /// asked for `set_layer_treatment_params_mutation`. The UI must
+    /// guard this; the panic catches contract violations in tests.
+    #[test]
+    #[should_panic(
+        expected = "set_layer_treatment_params_mutation called on a layer with no treatment"
+    )]
+    fn set_layer_treatment_params_mutation_panics_on_no_treatment() {
+        let p = fresh_project();
+        // `fresh_project`'s layer has treatment: None — panic expected.
+        let _ = p.set_layer_treatment_params_mutation(0, std::collections::HashMap::new());
     }
 
     /// 003-T3.28 — overrides are user-driven and Cmd-Z reversible.
@@ -3216,6 +3489,19 @@ mod tests {
             /// P0.4.3 — toggle the seamless-loop flag of a Video layer.
             /// Falls back to a no-op when no Video layer exists.
             VideoLoopSeamless(bool),
+            /// P1.2.1 — set / clear a layer's treatment. `None` clears;
+            /// `Some(preset_pick)` selects one of two preset_ids (toggle).
+            /// Always targets layer index 0 (fresh_project has one layer).
+            SetLayerTreatment(Option<bool>),
+            /// P1.2.1 — set the treatment params HashMap. The strategy
+            /// generates one or two key/value pairs; `to_mutation` falls
+            /// back to a no-op if the layer's treatment is None (the
+            /// builder panics otherwise — we don't want spurious test
+            /// failures when the preceding step cleared the treatment).
+            SetLayerTreatmentParams {
+                exposure: f32,
+                contrast: f32,
+            },
         }
 
         fn to_mutation(kind: &MutationKind, project: &Project) -> Mutation {
@@ -3580,6 +3866,42 @@ mod tests {
                         None => project.set_gamma_mutation(project.gamma), // no-op fallback
                     }
                 }
+                // P1.2.1 — Treatment mutations target layer 0
+                // (fresh_project has exactly one layer). The harness
+                // exercises None ↔ Some toggles + the whole-HashMap
+                // params replacement.
+                MutationKind::SetLayerTreatment(preset_pick) => {
+                    if project.layers.is_empty() {
+                        project.set_gamma_mutation(project.gamma) // no-op
+                    } else {
+                        let new =
+                            preset_pick.map(|use_tone_map| crate::project::schema::Treatment {
+                                preset_id: if use_tone_map {
+                                    "tone_map".into()
+                                } else {
+                                    "blur_mask".into()
+                                },
+                                params: std::collections::HashMap::new(),
+                                overlay_path: None,
+                                collage_paths: vec![],
+                            });
+                        project.set_layer_treatment_mutation(0, new)
+                    }
+                }
+                MutationKind::SetLayerTreatmentParams { exposure, contrast } => {
+                    if project.layers.is_empty() || project.layers[0].treatment.is_none() {
+                        // The builder panics on no-treatment; emit a
+                        // no-op gamma instead. The harness will reach
+                        // this branch after a preceding step cleared
+                        // the treatment, which is a valid sequence.
+                        project.set_gamma_mutation(project.gamma)
+                    } else {
+                        let mut new = std::collections::HashMap::new();
+                        new.insert("exposure".to_string(), *exposure);
+                        new.insert("contrast".to_string(), *contrast);
+                        project.set_layer_treatment_params_mutation(0, new)
+                    }
+                }
             }
         }
 
@@ -3796,6 +4118,16 @@ mod tests {
                 // fixture has no Video layers.
                 (0.25_f32..=4.0_f32).prop_map(MutationKind::VideoSpeed),
                 any::<bool>().prop_map(MutationKind::VideoLoopSeamless),
+                // P1.2.1 — Treatment toggle (None / Some(tone_map | blur_mask))
+                // and params edit. The params variant falls back to a no-op
+                // when treatment is None (set_layer_treatment_params_mutation
+                // panics otherwise — the fallback keeps proptest sequences
+                // valid even when a preceding step cleared the treatment).
+                proptest::option::weighted(0.5, any::<bool>())
+                    .prop_map(MutationKind::SetLayerTreatment),
+                (-2.0_f32..=2.0_f32, 0.5_f32..=1.5_f32).prop_map(|(exposure, contrast)| {
+                    MutationKind::SetLayerTreatmentParams { exposure, contrast }
+                },),
             ]
         }
 

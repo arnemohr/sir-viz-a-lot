@@ -125,6 +125,51 @@ fn default_video_loop_seamless() -> bool {
     true
 }
 
+/// P1.2.1 (W2) — image-grammar preset applied to an Image or Video
+/// layer *before* the per-pixel effect chain (Color → Blur →
+/// Transform → External). Mirrors `LayerKind::FxLayer`'s preset
+/// shape (P0.5.1) but lives next to the layer's source instead of
+/// being its source: the layer's image / video is rasterised /
+/// decoded first, then the active treatment shader operates on
+/// those pixels, then the effect chain runs.
+///
+/// **One treatment per layer.** Phase 1 ships `Option<Treatment>`
+/// rather than `Vec<Treatment>` despite the spec's "pipeline"
+/// wording — matches the FxLayer one-preset shape operators
+/// already learned, and the v0.5 presets (tone_map, blur_mask,
+/// luminance_reveal, texture_overlay, palette_extract, collage)
+/// aren't useful to chain. Growing to `Vec<Treatment>` is a
+/// non-breaking serde change if Phase 4 zone grammars need
+/// composition.
+///
+/// **Non-bumping addition.** `LayerConfig.treatment` lands on v7
+/// with `#[serde(default)]` so existing projects load with
+/// `treatment == None`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Treatment {
+    /// Registered preset id (e.g. `"tone_map"`). Unknown ids are
+    /// audit-warned and render as no-ops at frame time.
+    pub preset_id: String,
+    /// Per-preset parameter overrides. Missing keys fall back to
+    /// the preset's documented defaults; extra keys are ignored.
+    /// `HashMap<String, f32>` matches the FxLayer pattern and
+    /// avoids schema churn as new presets ship.
+    #[serde(default)]
+    pub params: std::collections::HashMap<String, f32>,
+    /// Optional second-texture path for presets that consume one
+    /// (P1.3.4 `texture_overlay`). `None` for presets that don't
+    /// read it. The HashMap above can't carry paths, hence the
+    /// dedicated field.
+    #[serde(default)]
+    pub overlay_path: Option<PathBuf>,
+    /// Image paths for presets that compose multiple sources
+    /// (P1.3.6 `collage` — capped at 4 entries; the shader's grid
+    /// shape supports 1×2 / 2×1 / 2×2 layouts). Empty for presets
+    /// that don't read it.
+    #[serde(default)]
+    pub collage_paths: Vec<PathBuf>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LayerConfig {
     pub id: String,
@@ -148,6 +193,13 @@ pub struct LayerConfig {
     /// fixtures loading unchanged.
     #[serde(default)]
     pub muted: bool,
+    /// P1.2.1 — optional image-grammar treatment applied before the
+    /// effect chain. Only meaningful for `LayerKind::Image` and
+    /// `LayerKind::Video` (FxLayer / NDI / SVG ignore it).
+    /// `#[serde(default)]` keeps v7 projects loading with
+    /// `treatment == None`.
+    #[serde(default)]
+    pub treatment: Option<Treatment>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -576,6 +628,7 @@ pub fn layer_from_svg_path(id: impl Into<String>, svg_path: PathBuf) -> LayerCon
         opacity: 1.0,
         warp: WarpMesh::default_placement(),
         muted: false,
+        treatment: None,
     }
 }
 
@@ -602,6 +655,7 @@ pub fn layer_from_video_path(id: impl Into<String>, path: PathBuf) -> LayerConfi
         opacity: 1.0,
         warp: WarpMesh::default_placement(),
         muted: false,
+        treatment: None,
     }
 }
 
@@ -627,6 +681,7 @@ pub fn layer_from_image_path(id: impl Into<String>, path: PathBuf) -> LayerConfi
         opacity: 1.0,
         warp: WarpMesh::default_placement(),
         muted: false,
+        treatment: None,
     }
 }
 

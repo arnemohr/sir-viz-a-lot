@@ -467,6 +467,7 @@ mod tests {
                 mask_feather: 0.05,
             },
             muted: false,
+            treatment: None,
         });
         original.scenes.push(Scene {
             name: "intro".into(),
@@ -507,6 +508,7 @@ mod tests {
                 mask_feather: 0.1,
             },
             muted: false,
+            treatment: None,
         });
         p.scenes.push(Scene {
             name: "slot1".into(),
@@ -557,6 +559,7 @@ mod tests {
             opacity: 1.0,
             warp: WarpMesh::identity(),
             muted: false,
+            treatment: None,
         });
         p.scenes.push(Scene {
             name: "1".into(),
@@ -611,6 +614,7 @@ mod tests {
             opacity: 1.0,
             warp: WarpMesh::identity(),
             muted: false,
+            treatment: None,
         });
         // Save slot 0
         p.scenes.push(Scene {
@@ -673,6 +677,7 @@ mod tests {
             opacity: 1.0,
             warp: WarpMesh::identity(),
             muted: false,
+            treatment: None,
         });
         let mut stack = UndoStack::new();
 
@@ -740,6 +745,7 @@ mod tests {
             opacity: 1.0,
             warp: WarpMesh::identity(),
             muted: false,
+            treatment: None,
         });
         // Save cue 1 (scenes.len() goes 0 → 1).
         p.scenes.push(Scene {
@@ -792,6 +798,7 @@ mod tests {
             opacity: 1.0,
             warp: WarpMesh::identity(),
             muted: false,
+            treatment: None,
         });
         // Save cue 0 with 1 layer.
         let cue0 = snapshot(&p);
@@ -809,6 +816,7 @@ mod tests {
             opacity: 0.5,
             warp: WarpMesh::identity(),
             muted: false,
+            treatment: None,
         });
 
         // Recall cue 0 via restore_scene — the freshly added lyr_2 must
@@ -853,6 +861,7 @@ mod tests {
             opacity: 1.0,
             warp: WarpMesh::identity(),
             muted: false,
+            treatment: None,
         });
         let a = snapshot(&p);
         // Modify a numeric float field so interpolate has something real to
@@ -1023,6 +1032,7 @@ mod tests {
             opacity: 1.0,
             warp: WarpMesh::identity(),
             muted: false,
+            treatment: None,
         });
 
         let project_path = dir.join("show.rmap.json");
@@ -1094,6 +1104,7 @@ mod tests {
             opacity: 1.0,
             warp: WarpMesh::identity(),
             muted: false,
+            treatment: None,
         });
 
         let project_path = dir.join("show.rmap.json");
@@ -1305,6 +1316,7 @@ mod tests {
             opacity: 1.0,
             warp: WarpMesh::identity(),
             muted: false,
+            treatment: None,
         });
         assert!(!p.has_absolute_asset_paths());
 
@@ -1323,6 +1335,7 @@ mod tests {
             opacity: 1.0,
             warp: WarpMesh::identity(),
             muted: false,
+            treatment: None,
         });
         assert!(p.has_absolute_asset_paths());
     }
@@ -1346,6 +1359,7 @@ mod tests {
             opacity: 1.0,
             warp: WarpMesh::identity(),
             muted: false,
+            treatment: None,
         });
         let snap = snapshot(&p);
         let mut q = Project::default();
@@ -1373,6 +1387,7 @@ mod tests {
             opacity: 1.0,
             warp: WarpMesh::identity(),
             muted: false,
+            treatment: None,
         });
         let snap2 = snapshot(&p2);
         let mut q2 = Project::default();
@@ -1402,6 +1417,7 @@ mod tests {
             opacity: 1.0,
             warp: WarpMesh::identity(),
             muted: false,
+            treatment: None,
         });
         let snap = snapshot(&p);
         // restore_scene: saves scenes, restores rest
@@ -1446,6 +1462,7 @@ mod tests {
             opacity: 1.0,
             warp: WarpMesh::identity(),
             muted: false,
+            treatment: None,
         });
 
         p.save(&path).expect("save");
