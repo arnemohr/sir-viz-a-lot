@@ -3,7 +3,7 @@
 Companion task spec for [`004-phase-1.md`](004-phase-1.md). Each task
 below is sized for a single PR.
 
-## Implementation status (2026-05-11, W1 + W6 complete)
+## Implementation status (2026-05-11, W1 + W6 + W2.1 complete)
 
 **Shipped:**
 
@@ -44,6 +44,18 @@ below is sized for a single PR.
   into the diagnostics widget. Closes the P0.3.2 deferred wiring
   (video worker is now a real producer). Counter is summed with
   the audio drop count; tooltip splits the breakdown.
+- ✅ **P1.2.1** `4e2d682` — `LayerConfig.treatment` schema +
+  Mutation. Non-bumping addition on v7: `Treatment { preset_id,
+  params, overlay_path, collage_paths }` + `Option<Treatment>` on
+  every layer. Two new mutations (`SetLayerTreatment` whole-Option
+  Reverse + `SetLayerTreatmentParams` whole-HashMap Reverse), both
+  user-driven (`is_non_undoable() == false`) and no-rebuild.
+  Builders on `Project`; proptest harness covers both via existing
+  round-trip sequences. Audit emits Warn findings for: empty
+  `preset_id` (placeholder for W3's preset registry), missing
+  `overlay_path`, missing `collage_paths` entries (one per slot
+  with indexed messages). 14 new tests across the project + audit
+  modules. Architectural unblocker for W2.2 + W2.3 + every W3 preset.
 
 **Not yet started:**
 
@@ -81,15 +93,18 @@ below is sized for a single PR.
 
 **Test status:**
 
-- 537 tests pass under `--features v3,midi` (was 523 at Phase 0
-  close; +14 from W1 + W6 + W4.0).
-- 284 tests pass under default features (was 270; +14 same reason).
+- 551 tests pass under `--features v3,midi` (was 523 at Phase 0
+  close; +28 from W1 + W6 + W4.0 + W2.1).
+- 284 tests pass under default features (was 270; +14).
+- 267 tests pass under `--no-default-features` (was 254; +13).
 - 1 test passes under `--features gpu-tests` (P0.9.5; P1.7.4 will
   refresh the fixture).
 - New tests by workstream:
   - W1.1 (drag-drop dispatch): 6 tests.
   - W1.2 (image cache key equality + clear): 5 tests.
   - W1.4 (EXIF rotate-90 + no-transform no-op): 2 tests.
+  - W2.1 (treatment Mutations round-trip + builder panic + audit
+    findings): 7 tests + proptest harness coverage.
   - W4.0 (auto-play, fixture-gated): 1 test (skipped without
     fixture).
 
