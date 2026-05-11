@@ -201,6 +201,18 @@ pub fn show(
             ui.toggle_value(&mut st.advanced_open, "Advanced");
             ui.add_space(8.0);
 
+            // P0.7.5 — Output panel toggle. The minimum-viable "Output
+            // mode pill": opens `OutputPanel` (P0.8.1) as a peer right-side
+            // SidePanel. Advanced's per-output sections are skipped while
+            // this is open (mutual exclusion avoids duplicate egui IDs and
+            // matches the spec's mode-pill semantic). Always shown — the
+            // schema invariant guarantees `output_targets.len() >= 1`.
+            #[cfg(feature = "v3")]
+            {
+                ui.toggle_value(&mut st.output_panel_open, "Output");
+                ui.add_space(8.0);
+            }
+
             // Warp toggle: any non-Warp mode ↔ Warp
             let mut is_warp = scene.mode == EditMode::Warp;
             if ui.toggle_value(&mut is_warp, "Warp").clicked() {

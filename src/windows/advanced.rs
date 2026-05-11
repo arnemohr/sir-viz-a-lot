@@ -125,33 +125,45 @@ pub fn show(
             // 0 output targets should not happen (schema invariant), but we
             // defensively render nothing rather than panic or log.
             // ----------------------------------------------------------------
-            match project.output_targets.len() {
-                0 => {
-                    // Schema invariant violated — skip both surfaces silently.
-                }
-                1 => {
-                    // Single projector: existing "Display output" unchanged.
-                    egui::CollapsingHeader::new("Display output")
-                        .id_salt(HDR_DISPLAY_OUTPUT)
-                        .default_open(false)
-                        .show(ui, |ui| {
-                            glossary_label(ui, GlossaryTerm::DisplayOverride);
-                            ui.label(
-                                "Override the master tone for the projector only. The \
-                                 control-window preview always shows the pre-gamma image.",
-                            );
-                            show_display_overrides(ui, project, st);
-                        });
-                }
-                _ => {
-                    // ≥2 projectors: output panel replaces the single-output
-                    // "Display output" CollapsingHeader entirely.
-                    egui::CollapsingHeader::new("Output panel")
-                        .id_salt("adv_output_panel")
-                        .default_open(false)
-                        .show(ui, |ui| {
-                            crate::windows::output_panel::show(ui, project, st, monitor_names);
-                        });
+            // P0.7.5: when the toolbar's "Output" toggle is on, the peer
+            // OutputPanel SidePanel owns the per-output surface and the
+            // Advanced panel skips its duplicate. Avoids egui Grid-ID
+            // collisions (`rmap_rgb_matrix_grid_0` would appear in both
+            // surfaces simultaneously otherwise).
+            #[cfg(feature = "v3")]
+            let suppress_per_output = st.output_panel_open;
+            #[cfg(not(feature = "v3"))]
+            let suppress_per_output = false;
+
+            if !suppress_per_output {
+                match project.output_targets.len() {
+                    0 => {
+                        // Schema invariant violated — skip both surfaces silently.
+                    }
+                    1 => {
+                        // Single projector: existing "Display output" unchanged.
+                        egui::CollapsingHeader::new("Display output")
+                            .id_salt(HDR_DISPLAY_OUTPUT)
+                            .default_open(false)
+                            .show(ui, |ui| {
+                                glossary_label(ui, GlossaryTerm::DisplayOverride);
+                                ui.label(
+                                    "Override the master tone for the projector only. The \
+                                     control-window preview always shows the pre-gamma image.",
+                                );
+                                show_display_overrides(ui, project, st);
+                            });
+                    }
+                    _ => {
+                        // ≥2 projectors: output panel replaces the single-output
+                        // "Display output" CollapsingHeader entirely.
+                        egui::CollapsingHeader::new("Output panel")
+                            .id_salt("adv_output_panel")
+                            .default_open(false)
+                            .show(ui, |ui| {
+                                crate::windows::output_panel::show(ui, project, st, monitor_names);
+                            });
+                    }
                 }
             }
 

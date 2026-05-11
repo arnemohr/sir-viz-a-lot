@@ -282,6 +282,17 @@ pub struct ControlPanelState {
     /// operator can scan the full vocabulary without hovering over each label.
     #[cfg(feature = "v3")]
     pub glossary_open: bool,
+    /// P0.7.5 — whether the Output panel is rendered as a peer right-side
+    /// `SidePanel` (alongside Advanced, not inside it). Toggled by the
+    /// "Output" button in the toolbar; visible only when
+    /// `output_targets.len() >= 1`. The minimum-viable "Output mode pill":
+    /// the full Warp/Mask/Content cluster + canvas mode-tint border that
+    /// the spec describes is M3 follow-on work that hasn't landed yet, so
+    /// for v0.4 we ship a plain toolbar toggle that reaches the same
+    /// `OutputPanel` content. Advanced's embedded OutputPanel header
+    /// (P0.8.1) co-exists with this — the two paths reach identical UI.
+    #[cfg(feature = "v3")]
+    pub output_panel_open: bool,
 }
 
 pub enum ControlPanelAction {
@@ -513,6 +524,40 @@ pub fn show(
                     match act {
                         ControlPanelAction::None => {}
                         _ => action = act,
+                    }
+                });
+        }
+    }
+
+    // P0.7.5 — Output panel as a peer right-side SidePanel. Opens when
+    // the toolbar's "Output" toggle sets `st.output_panel_open`. Animated
+    // width mirrors the Advanced panel so the open/close feel matches.
+    // Mutual exclusion with Advanced's per-output sections is enforced
+    // inside `advanced::show` (it checks `st.output_panel_open` and
+    // skips the duplicate surfaces) — keeps egui Grid IDs unique.
+    #[cfg(feature = "v3")]
+    {
+        const OUTPUT_PANEL_MAX_WIDTH: f32 = 360.0;
+        let out_anim_id = ui.id().with("output_panel_open");
+        let out_t =
+            anim::animate_bool_to(ui, out_anim_id, st.output_panel_open, anim::TRANSITION_MS);
+        let out_width = out_t * OUTPUT_PANEL_MAX_WIDTH;
+
+        if out_width >= 1.0 {
+            egui::SidePanel::right("rmap_output_panel")
+                .resizable(false)
+                .exact_width(out_width)
+                .show_inside(ui, |ui| {
+                    if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                        st.output_panel_open = false;
+                        return;
+                    }
+                    ui.heading("Output");
+                    ui.separator();
+                    let act =
+                        crate::windows::output_panel::show(ui, project, st, &inputs.monitor_names);
+                    if !matches!(act, ControlPanelAction::None) {
+                        action = act;
                     }
                 });
         }
