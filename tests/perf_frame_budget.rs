@@ -626,8 +626,8 @@ impl WarpPipeline {
         });
 
         // Return without queue access — caller writes vb/ib via queue.write_buffer
-        // before any render calls.
-        let warp = Self {
+        // before any render calls (call `init_buffers(queue)` before first render).
+        Self {
             pipeline,
             bgl,
             sampler,
@@ -635,9 +635,7 @@ impl WarpPipeline {
             vertex_buffer,
             index_buffer,
             index_count: 6,
-        };
-        // Caller must call init_buffers(queue) before first render.
-        warp
+        }
     }
 
     fn init_buffers(&self, queue: &wgpu::Queue, polygon_has_3_pts: bool) {
@@ -1224,6 +1222,7 @@ impl EdgeBlendPipeline {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn render(
         &self,
         device: &wgpu::Device,
@@ -1474,6 +1473,7 @@ fn perf_frame_budget() {
 // Per-frame render sequence
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 fn render_frame(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -1481,7 +1481,7 @@ fn render_frame(
     compositor: &Compositor,
     gamma: &GammaPipeline,
     edge_blend: &EdgeBlendPipeline,
-    layers: &mut Vec<LayerGpu>,
+    layers: &mut [LayerGpu],
     output_targets: &[(wgpu::Texture, wgpu::TextureView)],
     warp_rt_view: &wgpu::TextureView,
     clock_secs: f32,
