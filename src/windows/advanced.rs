@@ -340,7 +340,8 @@ fn show_effect_chain(
             .default_open(true)
             .show(ui, |ui| {
                 // T3.17: pass inside_advanced = true → show JSON for External
-                if let Some(change) = show_effect(ui, idx, effect, true) {
+                // P0.2.5: pass layer_idx for the MIDI-learn context menu.
+                if let Some(change) = show_effect(ui, idx, effect, true, layer_idx) {
                     staged_changes.push((idx, change));
                 }
             });

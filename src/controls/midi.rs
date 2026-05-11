@@ -125,6 +125,19 @@ impl MidiSource {
                         let channel = message[0] & 0x0F;
                         let cc = message[1].min(127);
                         let value = (message[2] & 0x7F) as f32 / 127.0;
+                        // P0.2.5: if learn-mode is armed, capture this CC
+                        // as the binding target and skip the registry write.
+                        // The `take_target_if_armed` check + clear is atomic
+                        // (single Mutex critical section).
+                        #[cfg(feature = "v3")]
+                        if let Some(target) = crate::controls::midi_learn::take_target_if_armed() {
+                            let _ = tx_for_callback.try_send(Command::MidiLearnCapture {
+                                target,
+                                channel,
+                                cc,
+                            });
+                            return;
+                        }
                         if let Ok(mut g) = registry_for_callback.write() {
                             let ch = channel as usize;
                             let i = cc as usize;

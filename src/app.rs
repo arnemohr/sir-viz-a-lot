@@ -1095,6 +1095,70 @@ fn apply_command(state: &mut EditingState, event: Command) -> SideEffect {
             );
             SideEffect::None
         }
+        // P0.2.5 — MIDI callback captured a CC while learn-mode was armed.
+        // Build a `SetModulator(MidiBound)` mutation and push through undo.
+        //
+        // Index validation: `set_modulator_mutation` panics on out-of-range
+        // inputs, so we validate layer / effect bounds explicitly first.
+        // A stale target (layer deleted between arm and capture) is dropped
+        // with a toast rather than a panic.
+        #[cfg(all(feature = "v3", feature = "midi"))]
+        Command::MidiLearnCapture {
+            target,
+            channel,
+            cc,
+        } => {
+            // Validate that the target layer + effect are still in range.
+            let layer_ok = state
+                .project
+                .layers
+                .get(target.layer_idx)
+                .map(|l| target.effect_idx < l.effects.len())
+                .unwrap_or(false);
+            if !layer_ok {
+                tracing::warn!(
+                    layer_idx = target.layer_idx,
+                    effect_idx = target.effect_idx,
+                    "MidiLearnCapture: target out of range; dropping",
+                );
+                state.toast_queue.push(crate::windows::toast::Toast::new(
+                    crate::windows::toast::ToastKind::Warn,
+                    "Couldn't bind (layer no longer exists).",
+                ));
+                return SideEffect::None;
+            }
+            // scale=1.0/offset=0.0: maps the CC [0,1] range directly to the
+            // parameter. The operator can fine-tune via the binding picker after
+            // the learn completes.
+            let new_mod = crate::modulators::Modulator::MidiBound {
+                cc,
+                channel,
+                scale: 1.0,
+                offset: 0.0,
+            };
+            let mutation = state.project.set_modulator_mutation(
+                target.layer_idx,
+                target.effect_idx,
+                target.field,
+                new_mod,
+            );
+            state.undo_stack.push(mutation, &mut state.project);
+            state.dirty = true;
+            // Channels are 0-indexed internally; operator-facing label is 1-indexed.
+            state.toast_queue.push(crate::windows::toast::Toast::new(
+                crate::windows::toast::ToastKind::Info,
+                format!("Bound to CC {} on channel {}.", cc, channel + 1),
+            ));
+            tracing::info!(
+                target: "rmap::ux",
+                event = "midi_learn_captured",
+                layer_idx = target.layer_idx,
+                effect_idx = target.effect_idx,
+                channel,
+                cc,
+            );
+            SideEffect::None
+        }
     }
 }
 
@@ -3692,6 +3756,15 @@ fn handle_editing_window_event(
                 #[cfg(feature = "v3")]
                 {
                     state.toast_queue.drain_expired();
+                    // P0.2.5: poll for MIDI-learn timeout (30 s). If the
+                    // operator armed a parameter and no CC arrived in time,
+                    // clear the learn state and notify via toast.
+                    if crate::controls::midi_learn::poll_timeout().is_some() {
+                        state.toast_queue.push(crate::windows::toast::Toast::new(
+                            crate::windows::toast::ToastKind::Warn,
+                            "MIDI-learn timed out (30 s).",
+                        ));
+                    }
                 }
                 // 003-T2.17 — escalate the "Connecting to projector…"
                 // copy to a sticky error toast if the scene texture
@@ -4044,7 +4117,19 @@ fn handle_editing_window_event(
             // `Named`), so logical-key matching is not reliable for
             // single letters across layouts.
             match key_event.physical_key {
-                PhysicalKey::Code(KeyCode::Escape) => event_loop.exit(),
+                PhysicalKey::Code(KeyCode::Escape) => {
+                    // P0.2.5: ESC cancels MIDI-learn when armed; takes priority
+                    // over the normal "exit app" path so the operator can safely
+                    // hit ESC without closing the show.
+                    #[cfg(feature = "v3")]
+                    if crate::controls::midi_learn::is_active() {
+                        crate::controls::midi_learn::cancel();
+                    } else {
+                        event_loop.exit();
+                    }
+                    #[cfg(not(feature = "v3"))]
+                    event_loop.exit();
+                }
                 PhysicalKey::Code(KeyCode::KeyB) => {
                     // 003-T1.32: route through apply_command so telemetry
                     // sees one canonical event regardless of source.

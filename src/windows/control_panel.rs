@@ -1074,14 +1074,15 @@ fn show_effects_tab(ui: &mut Ui, project: &mut Project, st: &mut ControlPanelSta
             .show(ui, |ui| {
                 #[cfg(feature = "v3")]
                 {
-                    if let Some(change) = show_effect(ui, idx, effect, true) {
+                    if let Some(change) = show_effect(ui, idx, effect, true, layer_idx) {
                         staged_changes.push((idx, change));
                     }
                 }
                 #[cfg(not(feature = "v3"))]
                 {
                     // v2 has no Advanced panel; always show JSON for External.
-                    let _ = show_effect(ui, idx, effect, true);
+                    // layer_idx is unused in non-v3 but present for signature uniformity.
+                    let _ = show_effect(ui, idx, effect, true, layer_idx);
                 }
             });
     }
@@ -1582,11 +1583,20 @@ pub(super) fn show_effect(
     idx: usize,
     effect: &mut Effect,
     inside_advanced: bool,
+    // P0.2.5: layer index, needed to construct `LearnTarget` for the
+    // MIDI-learn context menu inside `modulator_slider` (v3 only).
+    // Present unconditionally so all call sites have a consistent signature;
+    // the non-v3 path ignores it.
+    layer_idx: usize,
 ) -> Option<EffectChange> {
     // `mut` is required under v3 (assignment inside cfg block); lint disagrees
     // in non-v3 builds where the write sites are compiled out.
     #[allow(unused_mut)]
     let mut change: Option<EffectChange> = None;
+    // layer_idx is used only by the v3 modulator_slider context menu; suppress
+    // the dead-code lint in non-v3 builds.
+    #[cfg(not(feature = "v3"))]
+    let _ = layer_idx;
     match effect {
         Effect::Color {
             hue,
@@ -1604,6 +1614,7 @@ pub(super) fn show_effect(
                     -180.0..=180.0,
                     ModulatorField::ColorHue,
                     idx,
+                    layer_idx,
                 ));
                 change = change.or(modulator_slider(
                     ui,
@@ -1613,6 +1624,7 @@ pub(super) fn show_effect(
                     0.0..=2.0,
                     ModulatorField::ColorSaturation,
                     idx,
+                    layer_idx,
                 ));
                 change = change.or(modulator_slider(
                     ui,
@@ -1622,6 +1634,7 @@ pub(super) fn show_effect(
                     -1.0..=1.0,
                     ModulatorField::ColorBrightness,
                     idx,
+                    layer_idx,
                 ));
                 change = change.or(modulator_slider(
                     ui,
@@ -1631,6 +1644,7 @@ pub(super) fn show_effect(
                     0.0..=2.0,
                     ModulatorField::ColorContrast,
                     idx,
+                    layer_idx,
                 ));
             }
             #[cfg(not(feature = "v3"))]
@@ -1671,6 +1685,7 @@ pub(super) fn show_effect(
                     0.0..=32.0,
                     ModulatorField::BlurRadius,
                     idx,
+                    layer_idx,
                 ));
             }
             #[cfg(not(feature = "v3"))]
@@ -1720,6 +1735,7 @@ pub(super) fn show_effect(
                     -180.0..=180.0,
                     ModulatorField::TransformRotateDeg,
                     idx,
+                    layer_idx,
                 ));
                 change = change.or(modulator_slider(
                     ui,
@@ -1729,6 +1745,7 @@ pub(super) fn show_effect(
                     0.1..=3.0,
                     ModulatorField::TransformScaleX,
                     idx,
+                    layer_idx,
                 ));
                 change = change.or(modulator_slider(
                     ui,
@@ -1738,6 +1755,7 @@ pub(super) fn show_effect(
                     0.1..=3.0,
                     ModulatorField::TransformScaleY,
                     idx,
+                    layer_idx,
                 ));
             }
             #[cfg(not(feature = "v3"))]
@@ -1843,6 +1861,8 @@ fn modulator_for_source(
 /// Returns `Some(EffectChange::ModulatorSwitch { .. })` in v3 mode on a
 /// variant switch; in non-v3 it writes directly to `*m` and returns `None`.
 #[cfg(feature = "v3")]
+// P0.2.5 added `layer_idx` for the MIDI-learn context menu; clippy counts 8.
+#[allow(clippy::too_many_arguments)]
 fn modulator_slider(
     ui: &mut Ui,
     salt: (usize, &'static str),
@@ -1851,13 +1871,46 @@ fn modulator_slider(
     range: std::ops::RangeInclusive<f32>,
     field: ModulatorField,
     effect_idx: usize,
+    layer_idx: usize,
 ) -> Option<EffectChange> {
     use crate::windows::components::binding_picker::{BindingSource, binding_picker};
 
     let mut change: Option<EffectChange> = None;
 
+    // P0.2.5: build the learn target for this row; used for the context menu
+    // and the armed-state pulse.
+    let learn_target = crate::controls::midi_learn::LearnTarget {
+        layer_idx,
+        effect_idx,
+        field,
+    };
+
     ui.horizontal(|ui| {
-        ui.label(label);
+        // P0.2.5: label response carries the right-click context menu for
+        // "Learn next MIDI CC". The menu arms the global learn state; any
+        // subsequent CC in the MIDI callback fires `MidiLearnCapture`.
+        let label_resp = ui.label(label);
+        label_resp.context_menu(|ui| {
+            if ui.button("Learn next MIDI CC").clicked() {
+                crate::controls::midi_learn::arm(learn_target);
+                ui.close_menu();
+            }
+        });
+
+        // P0.2.5: pulsing accent dot while this row is the armed learn target.
+        // We modulate alpha via a sine of the current egui time, giving a smooth
+        // 2 Hz pulse with no external animation state. `request_repaint_after`
+        // drives continuous redraws at ~50 ms intervals while armed.
+        if crate::controls::midi_learn::is_armed_for(learn_target) {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(50));
+            let t = ui.input(|i| i.time);
+            let alpha = ((t * std::f64::consts::TAU).sin() * 0.5 + 0.5) as f32;
+            let warm =
+                egui::Color32::from_rgba_unmultiplied(0xd0, 0xa0, 0x40, (alpha * 255.0) as u8);
+            ui.colored_label(warm, "●");
+        }
+
         // P0.2.3b/c — replace the bespoke ComboBox + Static/Sine arms
         // with the shared `BindingPicker`. Operators can now switch
         // to any of the 8 sources (was: only Static / Sine were

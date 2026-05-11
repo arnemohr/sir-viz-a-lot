@@ -8,6 +8,12 @@
 pub mod keyboard;
 #[cfg(feature = "midi")]
 pub mod midi;
+/// P0.2.5 — process-wide MIDI-learn state (armed target, timeout, take).
+/// Gated on v3 because `LearnTarget` embeds `ModulatorField` from
+/// `project::command`, which is itself v3-only. The right-click menu that
+/// arms learn-mode lives exclusively in the v3 `modulator_slider`.
+#[cfg(feature = "v3")]
+pub mod midi_learn;
 #[cfg(feature = "osc")]
 pub mod osc;
 
@@ -117,6 +123,20 @@ pub enum Command {
     /// The child surface is dropped; the next frame skips preview rendering.
     #[cfg(feature = "v3")]
     ClosePreview,
+    /// P0.2.5 — MIDI callback captured a CC while learn-mode was armed.
+    /// Carries the target parameter address and the raw `(channel, cc)` pair.
+    /// Dispatched from the midir callback thread; handled in `apply_command`
+    /// by building a `SetModulator(MidiBound)` mutation on the undo stack.
+    ///
+    /// Double-gated: `midi` because it originates in the MIDI callback;
+    /// `v3` because `apply_command` needs `set_modulator_mutation` and the
+    /// undo stack, both of which are v3-only.
+    #[cfg(all(feature = "v3", feature = "midi"))]
+    MidiLearnCapture {
+        target: crate::controls::midi_learn::LearnTarget,
+        channel: u8,
+        cc: u8,
+    },
 }
 
 /// A pluggable input. v1 ships [`KeyboardSource`] (T-M4-09); v0.4
