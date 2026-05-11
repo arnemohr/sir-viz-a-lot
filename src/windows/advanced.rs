@@ -47,6 +47,8 @@ const HDR_DISPLAY_OUTPUT: &str = "adv_display_output";
 const HDR_VIDEO: &str = "adv_video";
 // P1.2.3 — treatment picker sub-section inside "Selected layer".
 const HDR_TREATMENT: &str = "adv_treatment";
+// P1.2.4 — fit-mode + focal-point sub-section inside "Selected layer".
+const HDR_SOURCE_FIT: &str = "adv_source_fit";
 
 /// Render the Advanced panel body. Called from `control_panel::show` when
 /// `st.advanced_open` is `true`, inside a `SidePanel::right("rmap_advanced")`.
@@ -251,6 +253,27 @@ pub fn show(
                         });
 
                     ui.add_space(4.0);
+
+                    // --------------------------------------------------------
+                    // P1.2.4 — Source fit (cover/contain/stretch) + focal
+                    // point. Shown for Image and Video layers; both carry
+                    // the same fit + focal fields. SVG / FxLayer / NDI
+                    // hide this section since they don't have a
+                    // resampled raster source.
+                    // --------------------------------------------------------
+                    let kind_has_fit = matches!(
+                        project.layers[layer_idx].kind,
+                        LayerKind::Image { .. } | LayerKind::Video { .. }
+                    );
+                    if kind_has_fit {
+                        egui::CollapsingHeader::new("Source fit")
+                            .id_salt(HDR_SOURCE_FIT)
+                            .default_open(false)
+                            .show(ui, |ui| {
+                                show_source_fit_section(ui, project, st, layer_idx);
+                            });
+                        ui.add_space(4.0);
+                    }
 
                     // --------------------------------------------------------
                     // P0.4.3 — Video-specific controls. Only rendered when the
@@ -719,6 +742,69 @@ fn show_treatment_section(
 // ---------------------------------------------------------------------------
 // Effect chain section body (T3.13 + T3.14)
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Source-fit section body (P1.2.4)
+// ---------------------------------------------------------------------------
+/// Render the fit-mode picker + focal-point sliders for Image and Video
+/// layers. Both carry identical `fit` + `focal` fields; this section
+/// edits them through one mutation pair (`SetLayerFit` is not shipped
+/// — fit is read-only in the v0.5 UI; an Image fit picker landed in
+/// P0.1.2 elsewhere). Focal sliders are visible only for `Cover`
+/// (focal is meaningless for Contain / Stretch).
+///
+/// **Out of scope:** click-to-set focal on a thumbnail preview. The
+/// 16:9 preview-thumbnail approach the spec describes needs egui
+/// texture registration of the image / video frame, which is the same
+/// infra that P1.4.5's thumbnail strip needs — deferred together to
+/// Phase 7. Numeric sliders are the v0.5 affordance.
+fn show_source_fit_section(
+    ui: &mut Ui,
+    project: &mut Project,
+    st: &mut ControlPanelState,
+    layer_idx: usize,
+) {
+    let (cur_fit, cur_focal) = match &project.layers[layer_idx].kind {
+        crate::project::schema::LayerKind::Image { fit, focal, .. }
+        | crate::project::schema::LayerKind::Video { fit, focal, .. } => (*fit, *focal),
+        _ => return,
+    };
+
+    // Read-only fit display + Cover-only focal sliders.
+    ui.horizontal(|ui| {
+        ui.label("Fit");
+        let label = match cur_fit {
+            crate::project::schema::FitMode::Cover => "Cover",
+            crate::project::schema::FitMode::Contain => "Contain",
+            crate::project::schema::FitMode::Stretch => "Stretch",
+        };
+        ui.weak(label);
+        ui.weak("(set on import for now; click-to-set focal coming in Phase 7)");
+    });
+
+    if !matches!(cur_fit, crate::project::schema::FitMode::Cover) {
+        ui.add_space(2.0);
+        ui.weak("Focal point applies only to `Cover` fit. Switch to Cover to enable.");
+        return;
+    }
+
+    ui.add_space(4.0);
+    ui.label("Focal point (normalised 0-1; 0.5/0.5 = centre)");
+    let mut fx = cur_focal[0];
+    let mut fy = cur_focal[1];
+    let resp_x = ui.add(egui::Slider::new(&mut fx, 0.0_f32..=1.0_f32).text("X"));
+    let resp_y = ui.add(egui::Slider::new(&mut fy, 0.0_f32..=1.0_f32).text("Y"));
+
+    let changed = (resp_x.drag_stopped() || resp_x.lost_focus())
+        || (resp_y.drag_stopped() || resp_y.lost_focus());
+    if changed {
+        let new = [fx.clamp(0.0, 1.0), fy.clamp(0.0, 1.0)];
+        if (new[0] - cur_focal[0]).abs() > 1e-4 || (new[1] - cur_focal[1]).abs() > 1e-4 {
+            st.pending_mutations
+                .push(project.set_layer_focal_mutation(layer_idx, new));
+        }
+    }
+}
+
 fn show_effect_chain(
     ui: &mut Ui,
     project: &mut Project,

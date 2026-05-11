@@ -1401,6 +1401,51 @@ pub struct SetVideoClipRange {
     pub old_out: f32,
 }
 
+/// P1.2.4 — payload for [`Mutation::SetLayerFocal`].
+///
+/// Applies to `LayerKind::Image` and `LayerKind::Video` — both
+/// carry an identical `focal: [f32; 2]` field. Per-field Reverse
+/// is sufficient because we're not crossing variant identity (the
+/// layer's `kind` discriminant is unchanged by this mutation).
+#[derive(Debug, Clone, Copy)]
+pub struct SetLayerFocal {
+    /// Index into `Project.layers`.
+    pub layer_idx: usize,
+    /// New focal point (normalised [0, 1]²).
+    pub new: [f32; 2],
+    /// Pre-mutation focal point.
+    pub old: [f32; 2],
+}
+
+impl ReverseStorage for SetLayerFocal {
+    fn apply(self, project: &mut Project) -> Self {
+        let layer = project
+            .layers
+            .get_mut(self.layer_idx)
+            .expect("SetLayerFocal: layer_idx out of range");
+        let focal_ref: &mut [f32; 2] = match &mut layer.kind {
+            crate::project::schema::LayerKind::Image { focal, .. }
+            | crate::project::schema::LayerKind::Video { focal, .. } => focal,
+            _ => panic!(
+                "SetLayerFocal: layer {} is not an Image or Video layer",
+                self.layer_idx
+            ),
+        };
+        debug_assert!(
+            (focal_ref[0] - self.old[0]).abs() < 1e-4 && (focal_ref[1] - self.old[1]).abs() < 1e-4,
+            "SetLayerFocal stale Reverse: focal={:?} expected={:?}",
+            focal_ref,
+            self.old
+        );
+        *focal_ref = self.new;
+        SetLayerFocal {
+            layer_idx: self.layer_idx,
+            new: self.old,
+            old: self.new,
+        }
+    }
+}
+
 /// P1.4.4 — payload for [`Mutation::SetVideoBpmLock`]. Per-field
 /// Reverse on a bool; trivial round-trip.
 #[derive(Debug, Clone, Copy)]
@@ -1562,6 +1607,9 @@ pub enum Mutation {
     /// P1.4.4 — replace `LayerKind::Video { bpm_lock, .. }` for a layer.
     /// Delegates to [`SetVideoBpmLock`].
     SetVideoBpmLock(SetVideoBpmLock),
+    /// P1.2.4 — replace `LayerKind::{Image,Video} { focal, .. }` for a
+    /// layer. Delegates to [`SetLayerFocal`].
+    SetLayerFocal(SetLayerFocal),
 
     /// Insert `layer` at `position`. Reverse is `RemoveLayer { idx: position }`.
     ///
@@ -1696,6 +1744,7 @@ impl Mutation {
             Mutation::SetVideoLoopMode(s) => Mutation::SetVideoLoopMode(s.apply(project)),
             Mutation::SetVideoClipRange(s) => Mutation::SetVideoClipRange(s.apply(project)),
             Mutation::SetVideoBpmLock(s) => Mutation::SetVideoBpmLock(s.apply(project)),
+            Mutation::SetLayerFocal(s) => Mutation::SetLayerFocal(s.apply(project)),
             Mutation::SwapLayers(s) => Mutation::SwapLayers(s.apply(project)),
             Mutation::RelinkAssetPath(s) => Mutation::RelinkAssetPath(s.apply(project)),
             Mutation::SetLayerKind(s) => Mutation::SetLayerKind(s.apply(project)),
@@ -1836,7 +1885,8 @@ impl Mutation {
             | Mutation::SetVideoSpeed(_)
             | Mutation::SetVideoLoopMode(_)
             | Mutation::SetVideoClipRange(_)
-            | Mutation::SetVideoBpmLock(_) => false,
+            | Mutation::SetVideoBpmLock(_)
+            | Mutation::SetLayerFocal(_) => false,
             Mutation::ApplyProjectSnapshot(s) => s.non_undoable,
         }
     }
@@ -2327,6 +2377,26 @@ impl Project {
             ),
         };
         Mutation::SetVideoLoopMode(SetVideoLoopMode {
+            layer_idx,
+            new,
+            old,
+        })
+    }
+
+    /// P1.2.4 — build a `SetLayerFocal` mutation. Captures the layer's
+    /// current focal as `old`. Panics if `layer_idx` is out of range
+    /// or the layer is not an Image / Video layer (those are the only
+    /// kinds that carry a `focal` field).
+    pub fn set_layer_focal_mutation(&self, layer_idx: usize, new: [f32; 2]) -> Mutation {
+        let old = match &self.layers[layer_idx].kind {
+            crate::project::schema::LayerKind::Image { focal, .. }
+            | crate::project::schema::LayerKind::Video { focal, .. } => *focal,
+            _ => panic!(
+                "set_layer_focal_mutation: layer {} is not an Image or Video layer",
+                layer_idx
+            ),
+        };
+        Mutation::SetLayerFocal(SetLayerFocal {
             layer_idx,
             new,
             old,
@@ -3688,6 +3758,10 @@ mod tests {
             /// P1.4.4 — toggle BPM-lock on a Video layer. Falls back
             /// to a no-op when no Video layer exists.
             VideoBpmLock(bool),
+            /// P1.2.4 — set the focal point on an Image / Video layer.
+            /// Falls back to a no-op when neither variant is present
+            /// in the project.
+            LayerFocal([f32; 2]),
             /// P1.2.1 — set / clear a layer's treatment. `None` clears;
             /// `Some(preset_pick)` selects one of two preset_ids (toggle).
             /// Always targets layer index 0 (fresh_project has one layer).
@@ -4083,6 +4157,19 @@ mod tests {
                         None => project.set_gamma_mutation(project.gamma),
                     }
                 }
+                MutationKind::LayerFocal(new) => {
+                    let idx = project.layers.iter().position(|l| {
+                        matches!(
+                            l.kind,
+                            crate::project::schema::LayerKind::Image { .. }
+                                | crate::project::schema::LayerKind::Video { .. }
+                        )
+                    });
+                    match idx {
+                        Some(i) => project.set_layer_focal_mutation(i, *new),
+                        None => project.set_gamma_mutation(project.gamma),
+                    }
+                }
                 // P1.2.1 — Treatment mutations target layer 0
                 // (fresh_project has exactly one layer). The harness
                 // exercises None ↔ Some toggles + the whole-HashMap
@@ -4353,6 +4440,9 @@ mod tests {
                 }),
                 // P1.4.4 — video BPM-lock toggle.
                 any::<bool>().prop_map(MutationKind::VideoBpmLock),
+                // P1.2.4 — focal point in [0, 1]².
+                (0.0_f32..=1.0_f32, 0.0_f32..=1.0_f32)
+                    .prop_map(|(x, y)| { MutationKind::LayerFocal([x, y]) }),
                 // P1.2.1 — Treatment toggle (None / Some(tone_map | blur_mask))
                 // and params edit. The params variant falls back to a no-op
                 // when treatment is None (set_layer_treatment_params_mutation

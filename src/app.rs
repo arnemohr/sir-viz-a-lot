@@ -3879,13 +3879,16 @@ fn render_m5_pipeline(
             //   no fit-mode concept — the SDF is always output-normalised).
             let (mode_id, focal) = match &cfg.kind {
                 schema::LayerKind::Svg { .. } => (0u32, [0.5f32, 0.5]),
-                // P0.1.2 placeholder — Video / Ndi default to Stretch until
-                // W4 / W6 wire variant-specific fit modes.
-                // FxLayer: Stretch; output-sized texture maps 1:1.
-                schema::LayerKind::Video { .. }
-                | schema::LayerKind::FxLayer { .. }
-                | schema::LayerKind::Ndi { .. } => (0u32, [0.5f32, 0.5]),
-                schema::LayerKind::Image { fit, focal, .. } => {
+                // P0.1.2 placeholder — Ndi defaults to Stretch until W6
+                // wires its source-aware fit. FxLayer: Stretch;
+                // output-sized texture maps 1:1.
+                schema::LayerKind::FxLayer { .. } | schema::LayerKind::Ndi { .. } => {
+                    (0u32, [0.5f32, 0.5])
+                }
+                // P1.2.4 — Video honours its own fit + focal, parity
+                // with Image.
+                schema::LayerKind::Image { fit, focal, .. }
+                | schema::LayerKind::Video { fit, focal, .. } => {
                     let id = match fit {
                         schema::FitMode::Stretch => 0u32,
                         schema::FitMode::Cover => 1,

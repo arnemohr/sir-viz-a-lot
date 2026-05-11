@@ -100,6 +100,16 @@ pub enum LayerKind {
         /// run behaviour.
         #[serde(default)]
         bpm_lock: bool,
+        /// P1.2.4 — fit-mode for the decoded frame (Cover/Contain/Stretch).
+        /// Mirrors `LayerKind::Image::fit`. Defaults to `Stretch` which
+        /// matches the pre-P1.2.4 hardcoded behaviour, so v7 saves load
+        /// unchanged.
+        #[serde(default)]
+        fit: FitMode,
+        /// P1.2.4 — focal point for `Cover` mode (normalised [0,1]²).
+        /// Mirrors `LayerKind::Image::focal`. Defaults to `[0.5, 0.5]`.
+        #[serde(default = "default_focal")]
+        focal: [f32; 2],
     },
     /// v0.4 W5 — procedural FX layer driven by mask SDF. Real fields
     /// landed in P0.5.1; the scaffold carries the preset id and a
@@ -698,6 +708,8 @@ pub fn layer_from_video_path(id: impl Into<String>, path: PathBuf) -> LayerConfi
             clip_in: 0.0,
             clip_out: f32::INFINITY,
             bpm_lock: false,
+            fit: FitMode::default(),
+            focal: default_focal(),
         },
         enabled: true,
         transform: Transform2D::default(),
