@@ -42,6 +42,7 @@ pub mod overlay;
 pub mod pipeline;
 pub mod sdf;
 pub mod texture_upload;
+pub mod treatments;
 pub mod warp;
 
 use std::iter;

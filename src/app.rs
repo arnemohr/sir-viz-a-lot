@@ -414,6 +414,11 @@ struct EditingState {
     /// and shared across all FxLayer layers in the scene (the pipeline
     /// itself is stateless; per-layer state lives in `LayerState.fx_texture`).
     fx_pipeline: crate::render::fx_presets::FxPresetPipeline,
+    /// P1.2.2 — Treatment preset pipelines. Runs before the effect chain
+    /// for Image / Video layers that carry a `LayerConfig.treatment`. v0.4
+    /// ships only the identity preset; W3 grows the registry into the
+    /// real preset library (tone_map / blur_mask / luminance_reveal / ...).
+    treatment_pipeline: crate::render::treatments::TreatmentPipeline,
     /// P0.7.3 — edge-blend multiply pass applied after gamma, before overlay.
     /// Only emitted when `outputs.len() >= 2 && project.edge_blend.is_some()`.
     edge_blend: EdgeBlendPipeline,
@@ -1567,6 +1572,9 @@ struct RenderGraph {
     /// P0.5.3 — ripple-wash FX preset pipeline. One pipeline shared across all
     /// FxLayer layers; per-layer output lives in `LayerState.fx_texture`.
     fx_pipeline: crate::render::fx_presets::FxPresetPipeline,
+    /// P1.2.2 — treatment pipelines (shared across all layers that carry a
+    /// `LayerConfig.treatment`).
+    treatment_pipeline: crate::render::treatments::TreatmentPipeline,
     warp_rt: wgpu::Texture,
     warp_rt_view: wgpu::TextureView,
     layers: Vec<LayerState>,
@@ -1605,6 +1613,9 @@ fn init_render_graph(
     // surface format as every other intermediate texture in the graph.
     let fx_pipeline =
         crate::render::fx_presets::FxPresetPipeline::new_ripple_wash(device, surface_format);
+    // P1.2.2 — treatment pipelines (identity for v0.4; W3 will grow the registry).
+    let treatment_pipeline =
+        crate::render::treatments::TreatmentPipeline::new(device, surface_format);
     let (warp_rt, warp_rt_view) = make_warp_render_target(device, w, h, surface_format);
     // P0.4.2 — create the shared texture-upload queue before rebuild_layers
     // so we can hand a sender clone to each Video worker.
@@ -1631,6 +1642,7 @@ fn init_render_graph(
         edge_blend,
         overlay,
         fx_pipeline,
+        treatment_pipeline,
         warp_rt,
         warp_rt_view,
         layers,
@@ -1958,6 +1970,7 @@ fn assemble_editing_state(
         compositor: graph.compositor,
         gamma: graph.gamma,
         fx_pipeline: graph.fx_pipeline,
+        treatment_pipeline: graph.treatment_pipeline,
         edge_blend: graph.edge_blend,
         overlay: graph.overlay,
         warp_rt: graph.warp_rt,
@@ -3031,7 +3044,6 @@ fn build_initial_project(svg_path: Option<PathBuf>) -> Project {
 }
 
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 fn rebuild_layers(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -3732,6 +3744,7 @@ fn render_m5_pipeline(
     _surface_format: wgpu::TextureFormat,
     clock: &Clock,
     fx_pipeline: &crate::render::fx_presets::FxPresetPipeline,
+    treatment_pipeline: &crate::render::treatments::TreatmentPipeline,
 ) -> std::result::Result<(), RenderError> {
     crate::show_day::panic_restore::run_frame_assert_unwind_safe(|| {
         // --- Passes 1-4: raster / effects / warp / composite into warp_rt ---
@@ -3885,13 +3898,47 @@ fn render_m5_pipeline(
             ls.effect_pipeline.reset_for_layer_pass();
             {
                 let (src_view, _dst_view) = ls.effect_pipeline.current_pair();
-                svg_pipeline.render(
-                    &renderer.gpu.device,
-                    &mut encoder,
-                    src_view,
-                    tex_view,
-                    &ls.fit_uniform,
-                );
+                // P1.2.2 — Treatment pipeline (Image / Video only). When a
+                // registered preset_id is present, route the source through
+                // the treatment pipeline instead of the default svg_pipeline
+                // blit. Unknown preset → dispatch returns false → fall back
+                // to the default blit so the source still appears (the audit
+                // already emitted a Warn for the bad preset_id). Layers that
+                // are not Image / Video carry no treatment by audit/UI
+                // construction, but the layer-kind gate is belt-and-braces
+                // against a hand-edited JSON file.
+                let treatment_handled = match (&cfg.treatment, &cfg.kind) {
+                    (
+                        Some(treatment),
+                        schema::LayerKind::Image { .. } | schema::LayerKind::Video { .. },
+                    ) => {
+                        let inputs = crate::render::treatments::TreatmentInputs {
+                            source: tex_view,
+                            fit_uniform: &ls.fit_uniform,
+                            params: &treatment.params,
+                            clock_secs: clock.elapsed().as_secs_f32(),
+                            overlay: None,
+                            collage: &[],
+                        };
+                        treatment_pipeline.dispatch(
+                            &renderer.gpu.device,
+                            &mut encoder,
+                            src_view,
+                            &inputs,
+                            &treatment.preset_id,
+                        )
+                    }
+                    _ => false,
+                };
+                if !treatment_handled {
+                    svg_pipeline.render(
+                        &renderer.gpu.device,
+                        &mut encoder,
+                        src_view,
+                        tex_view,
+                        &ls.fit_uniform,
+                    );
+                }
             }
             for effect in &cfg.effects {
                 {
@@ -4996,6 +5043,7 @@ fn handle_editing_window_event(
                     surface_format,
                     &state.clock,
                     &state.fx_pipeline,
+                    &state.treatment_pipeline,
                 )
             } else {
                 // Empty project — render a blank frame for each output.
