@@ -262,11 +262,15 @@ pub fn show(
                             .id_salt(HDR_VIDEO)
                             .default_open(true)
                             .show(ui, |ui| {
-                                let (cur_speed, cur_loop_mode) =
+                                let (cur_speed, cur_loop_mode, cur_clip_in, cur_clip_out) =
                                     match &project.layers[layer_idx].kind {
                                         LayerKind::Video {
-                                            speed, loop_mode, ..
-                                        } => (*speed, *loop_mode),
+                                            speed,
+                                            loop_mode,
+                                            clip_in,
+                                            clip_out,
+                                            ..
+                                        } => (*speed, *loop_mode, *clip_in, *clip_out),
                                         _ => unreachable!(),
                                     };
 
@@ -338,6 +342,85 @@ pub fn show(
                                         }
                                     }
                                 });
+
+                                // P1.4.1 — In / Out points. Two number
+                                // inputs with `f32::INFINITY` displayed as
+                                // an empty / sentinel value for "no trim".
+                                // Edits are clamped (clip_in < clip_out,
+                                // clip_in >= 0) before dispatch; invalid
+                                // ranges are silently rejected without a
+                                // mutation so undo doesn't carry a bad
+                                // value forward.
+                                ui.add_space(2.0);
+                                ui.label("In / Out points (s)");
+                                let mut in_edit = cur_clip_in;
+                                let mut out_edit_display = if cur_clip_out.is_finite() {
+                                    cur_clip_out
+                                } else {
+                                    0.0
+                                };
+                                let out_is_sentinel = !cur_clip_out.is_finite();
+                                let mut dispatched = false;
+                                ui.horizontal(|ui| {
+                                    ui.label("In");
+                                    let in_resp = ui.add(
+                                        egui::DragValue::new(&mut in_edit)
+                                            .range(0.0_f32..=3600.0_f32)
+                                            .speed(0.05)
+                                            .max_decimals(2),
+                                    );
+                                    ui.label("Out");
+                                    let mut out_drag_val = if out_is_sentinel {
+                                        f32::INFINITY
+                                    } else {
+                                        out_edit_display
+                                    };
+                                    let out_resp = ui.add(
+                                        egui::DragValue::new(&mut out_drag_val)
+                                            .range(0.0_f32..=3600.0_f32)
+                                            .speed(0.05)
+                                            .max_decimals(2)
+                                            .custom_formatter(|v, _| {
+                                                if v.is_infinite() {
+                                                    "end".to_string()
+                                                } else {
+                                                    format!("{v:.2}")
+                                                }
+                                            }),
+                                    );
+                                    out_edit_display = out_drag_val;
+                                    if (in_resp.drag_stopped() || in_resp.lost_focus())
+                                        || (out_resp.drag_stopped() || out_resp.lost_focus())
+                                    {
+                                        let new_in = in_edit.max(0.0);
+                                        let new_out = if out_drag_val.is_finite() {
+                                            out_drag_val
+                                        } else {
+                                            f32::INFINITY
+                                        };
+                                        let in_changed = (new_in - cur_clip_in).abs() > 1e-4;
+                                        let out_changed = !((new_out.is_infinite()
+                                            && cur_clip_out.is_infinite())
+                                            || (new_out - cur_clip_out).abs() < 1e-4);
+                                        let valid = new_in >= 0.0 && new_out > new_in;
+                                        if (in_changed || out_changed) && valid {
+                                            st.pending_mutations.push(
+                                                project.set_video_clip_range_mutation(
+                                                    layer_idx, new_in, new_out,
+                                                ),
+                                            );
+                                            st.pending_video_controls.push((
+                                                layer_idx,
+                                                crate::video_layer::VideoControl::SetClipRange {
+                                                    clip_in: new_in,
+                                                    clip_out: new_out,
+                                                },
+                                            ));
+                                            dispatched = true;
+                                        }
+                                    }
+                                });
+                                let _ = dispatched;
                             });
 
                         ui.add_space(4.0);

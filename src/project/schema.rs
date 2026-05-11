@@ -79,6 +79,17 @@ pub enum LayerKind {
         /// P1.4.3 wires the reverse-decode path.
         #[serde(default)]
         loop_mode: LoopMode,
+        /// P1.4.1 — in-point (seconds, 0.0..=clip_out). The worker
+        /// starts decode at this offset and rewinds here on loop. Default
+        /// 0.0 plays from the start.
+        #[serde(default)]
+        clip_in: f32,
+        /// P1.4.1 — out-point (seconds, > clip_in). The worker stops
+        /// decode here. Default `f32::INFINITY` is the sentinel for
+        /// "end of clip" — no trim. Serde defaults preserve full-clip
+        /// playback on existing v7 saves.
+        #[serde(default = "default_video_clip_out")]
+        clip_out: f32,
     },
     /// v0.4 W5 — procedural FX layer driven by mask SDF. Real fields
     /// landed in P0.5.1; the scaffold carries the preset id and a
@@ -124,6 +135,12 @@ fn default_focal() -> [f32; 2] {
 
 fn default_video_speed() -> f32 {
     1.0
+}
+
+/// P1.4.1 — sentinel "no out-point trim" value. The worker treats
+/// any `clip_out >= asset.duration` as "play to end".
+fn default_video_clip_out() -> f32 {
+    f32::INFINITY
 }
 
 /// P1.4.2 — EOF behaviour for [`LayerKind::Video`].
@@ -668,6 +685,8 @@ pub fn layer_from_video_path(id: impl Into<String>, path: PathBuf) -> LayerConfi
             path,
             speed: 1.0,
             loop_mode: LoopMode::Loop,
+            clip_in: 0.0,
+            clip_out: f32::INFINITY,
         },
         enabled: true,
         transform: Transform2D::default(),
@@ -755,7 +774,7 @@ mod tests {
         let path = std::path::PathBuf::from("/tmp/show.mp4");
         let lc = layer_from_video_path("v0", path.clone());
         assert!(
-            matches!(lc.kind, LayerKind::Video { ref path, speed, loop_mode }
+            matches!(lc.kind, LayerKind::Video { ref path, speed, loop_mode, .. }
                 if path.to_str() == Some("/tmp/show.mp4")
                     && (speed - 1.0).abs() < 1e-6
                     && loop_mode == LoopMode::Loop

@@ -122,6 +122,7 @@ objc2-av-foundation = { version = "0.3", optional = true, features = [
 objc2-core-media = { version = "0.3", optional = true, features = [
     "CMBase",
     "CMTime",
+    "CMTimeRange",
     "CMSampleBuffer",
     "CMFormatDescription",
     "objc2-core-video",

@@ -63,6 +63,14 @@ pub enum VideoControl {
     Pause,
     SetSpeed(f32),
     SetLoopMode(crate::project::schema::LoopMode),
+    /// P1.4.1 — in/out points (seconds). Worker rebuilds the reader on
+    /// receipt so the timeRange property is honoured for the rest of
+    /// this pass; the next loop-around rebuilds with the new range
+    /// regardless.
+    SetClipRange {
+        clip_in: f32,
+        clip_out: f32,
+    },
     Stop,
 }
 
@@ -147,14 +155,25 @@ pub fn natural_size(path: &Path) -> Option<(u32, u32)> {
 // ---------------------------------------------------------------------------
 
 #[cfg(all(feature = "video", target_os = "macos"))]
+#[derive(Debug, Clone, Copy)]
+struct ClipRange {
+    /// Seconds (≥ 0). 0 means "start of asset".
+    clip_in: f32,
+    /// Seconds (> clip_in). `f32::INFINITY` means "end of asset".
+    clip_out: f32,
+}
+
+#[cfg(all(feature = "video", target_os = "macos"))]
 enum WorkerState {
     Playing {
         speed: f32,
         loop_mode: crate::project::schema::LoopMode,
+        clip: ClipRange,
     },
     Paused {
         speed: f32,
         loop_mode: crate::project::schema::LoopMode,
+        clip: ClipRange,
     },
     Dead,
 }
@@ -190,10 +209,15 @@ fn worker_loop(
 
     // Start in Playing (auto-play on layer-add). Loop is the show-day
     // default (drop an mp4, it plays forever); SetLoopMode flips to
-    // Once / PingPong on operator action.
+    // Once / PingPong on operator action. P1.4.1: default clip range
+    // is (0, +inf) = "play the whole asset".
     let mut state = WorkerState::Playing {
         speed: 1.0,
         loop_mode: crate::project::schema::LoopMode::Loop,
+        clip: ClipRange {
+            clip_in: 0.0,
+            clip_out: f32::INFINITY,
+        },
     };
 
     loop {
@@ -205,38 +229,64 @@ fn worker_loop(
                     Ok(_) => {}
                 }
             }
-            WorkerState::Paused { speed, loop_mode } => {
+            WorkerState::Paused {
+                speed,
+                loop_mode,
+                clip,
+            } => {
                 // Block (not try_recv / thread::park) on the control channel
                 // per the decision record: thread::park has coalescing-wake
                 // bugs under rapid play/pause toggles.
                 match control_rx.recv() {
                     Ok(VideoControl::Play) => {
-                        state = WorkerState::Playing { speed, loop_mode };
+                        state = WorkerState::Playing {
+                            speed,
+                            loop_mode,
+                            clip,
+                        };
                     }
                     Ok(VideoControl::SetSpeed(s)) => {
                         state = WorkerState::Paused {
                             speed: s,
                             loop_mode,
+                            clip,
                         };
                     }
                     Ok(VideoControl::SetLoopMode(m)) => {
                         state = WorkerState::Paused {
                             speed,
                             loop_mode: m,
+                            clip,
+                        };
+                    }
+                    Ok(VideoControl::SetClipRange { clip_in, clip_out }) => {
+                        state = WorkerState::Paused {
+                            speed,
+                            loop_mode,
+                            clip: ClipRange { clip_in, clip_out },
                         };
                     }
                     Ok(VideoControl::Pause) => {
                         // Already paused; idempotent.
-                        state = WorkerState::Paused { speed, loop_mode };
+                        state = WorkerState::Paused {
+                            speed,
+                            loop_mode,
+                            clip,
+                        };
                     }
                     Ok(VideoControl::Stop) | Err(_) => break,
                 }
             }
-            WorkerState::Playing { speed, loop_mode } => {
-                // Build a fresh reader for one pass.
-                let (speed_now, loop_mode_now) = (speed, loop_mode);
-                let reader_result =
-                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| build_reader(&path)));
+            WorkerState::Playing {
+                speed,
+                loop_mode,
+                clip,
+            } => {
+                // Build a fresh reader for one pass with the current clip range.
+                let (speed_now, loop_mode_now, clip_now) = (speed, loop_mode, clip);
+                let reader_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    build_reader(&path, clip_now.clip_in, clip_now.clip_out)
+                }));
                 let (reader, fps) = match reader_result {
                     Err(panic_val) => {
                         tracing::error!(
@@ -306,13 +356,23 @@ fn worker_loop(
 
 /// Construct an `AVURLAsset` → `AVAssetReader` ready for BGRA8 reading.
 /// Returns `(reader, nominal_fps)`.
+///
+/// P1.4.1 — `clip_in` and `clip_out` (seconds) are applied as the
+/// reader's `timeRange` *before* `startReading`. The reader then only
+/// emits samples in `[clip_in, clip_out)`. When `clip_out >=
+/// asset.duration` (or is `f32::INFINITY`), the duration is set to
+/// `kCMTimePositiveInfinity` and the reader plays to the end of the
+/// asset.
 #[cfg(all(feature = "video", target_os = "macos"))]
 fn build_reader(
     path: &Path,
+    clip_in: f32,
+    clip_out: f32,
 ) -> Result<(objc2::rc::Retained<objc2_av_foundation::AVAssetReader>, f32), String> {
     use objc2_av_foundation::{
         AVAssetReader, AVAssetReaderTrackOutput, AVMediaTypeVideo, AVURLAsset,
     };
+    use objc2_core_media::{CMTime, CMTimeRange, kCMTimePositiveInfinity};
     use objc2_core_video::{kCVPixelBufferPixelFormatTypeKey, kCVPixelFormatType_32BGRA};
     use objc2_foundation::{NSDictionary, NSNumber, NSString, NSURL};
 
@@ -353,6 +413,23 @@ fn build_reader(
         // Construct reader.
         let reader = AVAssetReader::assetReaderWithAsset_error(asset.as_ref())
             .map_err(|e| format!("AVAssetReader init failed: {:?}", e))?;
+
+        // P1.4.1 — apply clip range as the reader's timeRange. Done
+        // BEFORE startReading per AVAssetReader docs ("timeRange must
+        // be set before reading begins"). Timescale 600 matches what
+        // QuickTime / mp4 typically use as a common multiple of common
+        // frame rates (24/25/30/60).
+        let start_ct = CMTime::new((clip_in.max(0.0) * 600.0) as i64, 600);
+        let duration_ct = if clip_out.is_finite() && clip_out > clip_in {
+            CMTime::new(((clip_out - clip_in).max(0.0) * 600.0) as i64, 600)
+        } else {
+            kCMTimePositiveInfinity
+        };
+        let range = CMTimeRange {
+            start: start_ct,
+            duration: duration_ct,
+        };
+        reader.setTimeRange(range);
 
         // Construct track output with BGRA settings.
         let track_output = AVAssetReaderTrackOutput::assetReaderTrackOutputWithTrack_outputSettings(
@@ -396,11 +473,26 @@ fn decode_pass(
         match control_rx.try_recv() {
             Ok(VideoControl::Stop) => return PassOutcome::Stop,
             Ok(VideoControl::Pause) => {
-                let (speed, loop_mode) = match state {
-                    WorkerState::Playing { speed, loop_mode } => (*speed, *loop_mode),
-                    _ => (1.0, crate::project::schema::LoopMode::Loop),
+                let (speed, loop_mode, clip) = match state {
+                    WorkerState::Playing {
+                        speed,
+                        loop_mode,
+                        clip,
+                    } => (*speed, *loop_mode, *clip),
+                    _ => (
+                        1.0,
+                        crate::project::schema::LoopMode::Loop,
+                        ClipRange {
+                            clip_in: 0.0,
+                            clip_out: f32::INFINITY,
+                        },
+                    ),
                 };
-                *state = WorkerState::Paused { speed, loop_mode };
+                *state = WorkerState::Paused {
+                    speed,
+                    loop_mode,
+                    clip,
+                };
                 return PassOutcome::Paused;
             }
             Ok(VideoControl::SetSpeed(s)) => {
@@ -419,6 +511,15 @@ fn decode_pass(
                     *loop_mode = m;
                 }
                 // Loop-mode change takes effect at next EOF; continue current pass.
+            }
+            Ok(VideoControl::SetClipRange { clip_in, clip_out }) => {
+                // P1.4.1 — change takes effect on the next reader rebuild
+                // (i.e. at the next EOF, or when the operator pauses and
+                // unpauses). The current decode pass continues to honour
+                // the old timeRange that was baked into the reader.
+                if let WorkerState::Playing { clip, .. } = state {
+                    *clip = ClipRange { clip_in, clip_out };
+                }
             }
             Ok(VideoControl::Play) => {} // already playing
             Err(crossbeam_channel::TryRecvError::Empty) => {}
@@ -459,11 +560,26 @@ fn decode_pass(
                     if should_continue {
                         return PassOutcome::Eof; // caller rebuilds reader
                     } else {
-                        let (speed, loop_mode) = match state {
-                            WorkerState::Playing { speed, loop_mode } => (*speed, *loop_mode),
-                            _ => (1.0, crate::project::schema::LoopMode::Once),
+                        let (speed, loop_mode, clip) = match state {
+                            WorkerState::Playing {
+                                speed,
+                                loop_mode,
+                                clip,
+                            } => (*speed, *loop_mode, *clip),
+                            _ => (
+                                1.0,
+                                crate::project::schema::LoopMode::Once,
+                                ClipRange {
+                                    clip_in: 0.0,
+                                    clip_out: f32::INFINITY,
+                                },
+                            ),
                         };
-                        *state = WorkerState::Paused { speed, loop_mode };
+                        *state = WorkerState::Paused {
+                            speed,
+                            loop_mode,
+                            clip,
+                        };
                         return PassOutcome::Paused;
                     }
                 } else {

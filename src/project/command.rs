@@ -1380,6 +1380,68 @@ impl ReverseStorage for SetVideoLoopMode {
     }
 }
 
+/// P1.4.1 — payload for [`Mutation::SetVideoClipRange`].
+///
+/// In/out points are written as a pair (atomic undo restores both at
+/// once). The Reverse stores `(old_in, old_out)`; the `apply` impl
+/// `debug_assert!`s both old values match before writing the new pair.
+/// Validation (clip_in < clip_out) is enforced at the builder site so
+/// `apply` always receives a well-formed range.
+#[derive(Debug, Clone, Copy)]
+pub struct SetVideoClipRange {
+    /// Index into `Project.layers`.
+    pub layer_idx: usize,
+    /// New in-point (seconds, ≥ 0).
+    pub new_in: f32,
+    /// New out-point (seconds, > new_in; `f32::INFINITY` means "end").
+    pub new_out: f32,
+    /// Pre-mutation in-point.
+    pub old_in: f32,
+    /// Pre-mutation out-point.
+    pub old_out: f32,
+}
+
+impl ReverseStorage for SetVideoClipRange {
+    fn apply(self, project: &mut Project) -> Self {
+        let layer = project
+            .layers
+            .get_mut(self.layer_idx)
+            .expect("SetVideoClipRange: layer_idx out of range");
+        match &mut layer.kind {
+            crate::project::schema::LayerKind::Video {
+                clip_in, clip_out, ..
+            } => {
+                debug_assert!(
+                    (*clip_in - self.old_in).abs() < 1e-4,
+                    "SetVideoClipRange stale Reverse: clip_in={} expected={}",
+                    *clip_in,
+                    self.old_in
+                );
+                debug_assert!(
+                    (*clip_out - self.old_out).abs() < 1e-4
+                        || (clip_out.is_infinite() && self.old_out.is_infinite()),
+                    "SetVideoClipRange stale Reverse: clip_out={} expected={}",
+                    *clip_out,
+                    self.old_out
+                );
+                *clip_in = self.new_in;
+                *clip_out = self.new_out;
+            }
+            _ => panic!(
+                "SetVideoClipRange: layer {} is not a Video layer",
+                self.layer_idx
+            ),
+        }
+        SetVideoClipRange {
+            layer_idx: self.layer_idx,
+            new_in: self.old_in,
+            new_out: self.old_out,
+            old_in: self.new_in,
+            old_out: self.new_out,
+        }
+    }
+}
+
 /// 003-T1.14 — typed project mutations.
 ///
 /// Each variant carries the previous value of every field it
@@ -1454,6 +1516,9 @@ pub enum Mutation {
     /// Delegates to [`SetVideoLoopMode`]. Replaces the P0.4.3
     /// `SetVideoLoopSeamless` boolean mutation.
     SetVideoLoopMode(SetVideoLoopMode),
+    /// P1.4.1 — replace `LayerKind::Video { clip_in, clip_out, .. }` for
+    /// a layer (atomic pair). Delegates to [`SetVideoClipRange`].
+    SetVideoClipRange(SetVideoClipRange),
 
     /// Insert `layer` at `position`. Reverse is `RemoveLayer { idx: position }`.
     ///
@@ -1586,6 +1651,7 @@ impl Mutation {
             Mutation::SetLayerEffects(s) => Mutation::SetLayerEffects(s.apply(project)),
             Mutation::SetVideoSpeed(s) => Mutation::SetVideoSpeed(s.apply(project)),
             Mutation::SetVideoLoopMode(s) => Mutation::SetVideoLoopMode(s.apply(project)),
+            Mutation::SetVideoClipRange(s) => Mutation::SetVideoClipRange(s.apply(project)),
             Mutation::SwapLayers(s) => Mutation::SwapLayers(s.apply(project)),
             Mutation::RelinkAssetPath(s) => Mutation::RelinkAssetPath(s.apply(project)),
             Mutation::SetLayerKind(s) => Mutation::SetLayerKind(s.apply(project)),
@@ -1724,7 +1790,8 @@ impl Mutation {
             | Mutation::SetLayerTreatmentParams(_)
             | Mutation::SetOutputRgbMatrix(_)
             | Mutation::SetVideoSpeed(_)
-            | Mutation::SetVideoLoopMode(_) => false,
+            | Mutation::SetVideoLoopMode(_)
+            | Mutation::SetVideoClipRange(_) => false,
             Mutation::ApplyProjectSnapshot(s) => s.non_undoable,
         }
     }
@@ -2218,6 +2285,37 @@ impl Project {
             layer_idx,
             new,
             old,
+        })
+    }
+
+    /// P1.4.1 — build a `SetVideoClipRange` mutation. Captures the
+    /// current `(clip_in, clip_out)` as `old_in, old_out`. Panics if
+    /// `layer_idx` is out of range or the layer is not a
+    /// `LayerKind::Video`. Caller is expected to validate
+    /// `new_in < new_out` and `new_in >= 0` — invalid ranges build into
+    /// an obviously-wrong mutation that `debug_assert!` will catch in
+    /// test, but release builds carry the bad value forward.
+    pub fn set_video_clip_range_mutation(
+        &self,
+        layer_idx: usize,
+        new_in: f32,
+        new_out: f32,
+    ) -> Mutation {
+        let (old_in, old_out) = match &self.layers[layer_idx].kind {
+            crate::project::schema::LayerKind::Video {
+                clip_in, clip_out, ..
+            } => (*clip_in, *clip_out),
+            _ => panic!(
+                "set_video_clip_range_mutation: layer {} is not a Video layer",
+                layer_idx
+            ),
+        };
+        Mutation::SetVideoClipRange(SetVideoClipRange {
+            layer_idx,
+            new_in,
+            new_out,
+            old_in,
+            old_out,
         })
     }
 }
@@ -3518,6 +3616,12 @@ mod tests {
             /// P1.4.2 — set the loop mode of a Video layer (Once / Loop /
             /// PingPong). Falls back to a no-op when no Video layer exists.
             VideoLoopMode(crate::project::schema::LoopMode),
+            /// P1.4.1 — set the (clip_in, clip_out) pair on a Video layer.
+            /// Falls back to a no-op when no Video layer exists.
+            VideoClipRange {
+                clip_in: f32,
+                clip_out: f32,
+            },
             /// P1.2.1 — set / clear a layer's treatment. `None` clears;
             /// `Some(preset_pick)` selects one of two preset_ids (toggle).
             /// Always targets layer index 0 (fresh_project has one layer).
@@ -3895,6 +3999,15 @@ mod tests {
                         None => project.set_gamma_mutation(project.gamma), // no-op fallback
                     }
                 }
+                MutationKind::VideoClipRange { clip_in, clip_out } => {
+                    let idx = project.layers.iter().position(|l| {
+                        matches!(l.kind, crate::project::schema::LayerKind::Video { .. })
+                    });
+                    match idx {
+                        Some(i) => project.set_video_clip_range_mutation(i, *clip_in, *clip_out),
+                        None => project.set_gamma_mutation(project.gamma),
+                    }
+                }
                 // P1.2.1 — Treatment mutations target layer 0
                 // (fresh_project has exactly one layer). The harness
                 // exercises None ↔ Some toggles + the whole-HashMap
@@ -4154,6 +4267,14 @@ mod tests {
                         _ => crate::project::schema::LoopMode::PingPong,
                     };
                     MutationKind::VideoLoopMode(mode)
+                }),
+                // P1.4.1 — video clip range (clip_in < clip_out). Both
+                // values bounded so the proptest doesn't generate NaN.
+                (0.0_f32..60.0_f32, 0.05_f32..1.0_f32).prop_map(|(start, dur)| {
+                    MutationKind::VideoClipRange {
+                        clip_in: start,
+                        clip_out: start + dur,
+                    }
                 }),
                 // P1.2.1 — Treatment toggle (None / Some(tone_map | blur_mask))
                 // and params edit. The params variant falls back to a no-op
