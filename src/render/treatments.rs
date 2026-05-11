@@ -52,6 +52,9 @@ pub const BLUR_MASK_PRESET_ID: &str = "blur_mask";
 /// `texture_overlay` preset id (P1.3.4).
 pub const TEXTURE_OVERLAY_PRESET_ID: &str = "texture_overlay";
 
+/// `palette_extract` preset id (P1.3.5).
+pub const PALETTE_EXTRACT_PRESET_ID: &str = "palette_extract";
+
 /// Inputs threaded into every preset's `render` call. The struct grows over
 /// time (W3 adds `overlay` and `collage`); existing presets ignore fields
 /// they don't read.
@@ -128,6 +131,7 @@ pub fn registry() -> &'static [(&'static str, &'static str)] {
         (LUMINANCE_REVEAL_PRESET_ID, "Luminance reveal"),
         (BLUR_MASK_PRESET_ID, "Blur mask (edge feather)"),
         (TEXTURE_OVERLAY_PRESET_ID, "Texture overlay"),
+        (PALETTE_EXTRACT_PRESET_ID, "Palette / posterize"),
     ]
 }
 
@@ -148,6 +152,7 @@ pub fn param_descriptors(preset_id: &str) -> &'static [ParamDescriptor] {
         LUMINANCE_REVEAL_PRESET_ID => LUMINANCE_REVEAL_DESCRIPTORS,
         BLUR_MASK_PRESET_ID => BLUR_MASK_DESCRIPTORS,
         TEXTURE_OVERLAY_PRESET_ID => TEXTURE_OVERLAY_DESCRIPTORS,
+        PALETTE_EXTRACT_PRESET_ID => PALETTE_EXTRACT_DESCRIPTORS,
         _ => &[],
     }
 }
@@ -202,6 +207,32 @@ const LUMINANCE_REVEAL_DESCRIPTORS: &[ParamDescriptor] = &[
     ParamDescriptor {
         key: "invert",
         label: "Invert (0/1)",
+        min: 0.0,
+        max: 1.0,
+        default: 0.0,
+    },
+];
+
+/// Static descriptors for the `palette_extract` preset (P1.3.5).
+#[allow(dead_code)] // referenced only through `param_descriptors` (v3 UI)
+const PALETTE_EXTRACT_DESCRIPTORS: &[ParamDescriptor] = &[
+    ParamDescriptor {
+        key: "levels",
+        label: "Levels per channel (1-8)",
+        min: 1.0,
+        max: 8.0,
+        default: 4.0,
+    },
+    ParamDescriptor {
+        key: "mix",
+        label: "Mix (0 = source, 1 = posterised)",
+        min: 0.0,
+        max: 1.0,
+        default: 0.0,
+    },
+    ParamDescriptor {
+        key: "dither",
+        label: "Dither (0 = banded, 1 = noisy)",
         min: 0.0,
         max: 1.0,
         default: 0.0,
@@ -281,6 +312,7 @@ pub struct TreatmentPipeline {
     luminance_reveal: LuminanceRevealTreatmentPipeline,
     blur_mask: BlurMaskTreatmentPipeline,
     texture_overlay: TextureOverlayTreatmentPipeline,
+    palette_extract: PaletteExtractTreatmentPipeline,
 }
 
 impl TreatmentPipeline {
@@ -293,6 +325,7 @@ impl TreatmentPipeline {
             luminance_reveal: LuminanceRevealTreatmentPipeline::new(device, target_format),
             blur_mask: BlurMaskTreatmentPipeline::new(device, target_format),
             texture_overlay: TextureOverlayTreatmentPipeline::new(device, target_format),
+            palette_extract: PaletteExtractTreatmentPipeline::new(device, target_format),
         }
     }
 
@@ -348,6 +381,11 @@ impl TreatmentPipeline {
                 };
                 self.texture_overlay
                     .render(device, queue, encoder, dst, inputs, overlay);
+                true
+            }
+            PALETTE_EXTRACT_PRESET_ID => {
+                self.palette_extract
+                    .render(device, queue, encoder, dst, inputs);
                 true
             }
             _ => false,
@@ -1418,6 +1456,63 @@ fn draw_single_pass_treatment(
     pass.draw(0..6, 0..1);
 }
 
+/// Palette-extract / posterize treatment pipeline (P1.3.5). Single
+/// pass; uses the shared single-pass treatment helper.
+struct PaletteExtractTreatmentPipeline {
+    pipeline: wgpu::RenderPipeline,
+    bind_group_layout: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
+    params_buf: wgpu::Buffer,
+}
+
+impl PaletteExtractTreatmentPipeline {
+    fn new(device: &wgpu::Device, target_format: wgpu::TextureFormat) -> Self {
+        let (pipeline, bind_group_layout, sampler, params_buf) = build_single_pass_treatment(
+            device,
+            target_format,
+            "treat_palette_extract.wgsl",
+            include_str!("shaders/treat_palette_extract.wgsl"),
+        );
+        Self {
+            pipeline,
+            bind_group_layout,
+            sampler,
+            params_buf,
+        }
+    }
+
+    fn render(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        dst: &wgpu::TextureView,
+        inputs: &TreatmentInputs<'_>,
+    ) {
+        let levels = inputs.params.get("levels").copied().unwrap_or(4.0);
+        let mix_amt = inputs.params.get("mix").copied().unwrap_or(0.0);
+        let dither = inputs.params.get("dither").copied().unwrap_or(0.0);
+
+        let mut bytes = [0u8; 16];
+        bytes[0..4].copy_from_slice(&levels.to_le_bytes());
+        bytes[4..8].copy_from_slice(&mix_amt.to_le_bytes());
+        bytes[8..12].copy_from_slice(&dither.to_le_bytes());
+        queue.write_buffer(&self.params_buf, 0, &bytes);
+
+        draw_single_pass_treatment(
+            device,
+            encoder,
+            dst,
+            inputs,
+            &self.pipeline,
+            &self.bind_group_layout,
+            &self.sampler,
+            &self.params_buf,
+            "treat_palette_extract",
+        );
+    }
+}
+
 /// Texture-overlay treatment pipeline (P1.3.4). Six-binding bind
 /// group: source + sampler + fit + params + overlay + overlay-sampler.
 /// `inputs.overlay` is the caller-supplied texture view loaded from
@@ -1777,7 +1872,7 @@ mod tests {
     fn unknown_preset_is_not_registered() {
         assert!(!is_registered(""));
         assert!(!is_registered("definitely-not-a-real-preset"));
-        assert!(!is_registered("palette_extract")); // not yet wired in W3
+        assert!(!is_registered("collage")); // not yet wired in W3
     }
 
     /// Acceptance: every registered preset has an entry in
