@@ -1331,42 +1331,48 @@ impl ReverseStorage for SetVideoSpeed {
     }
 }
 
-/// P0.4.3 — payload for [`Mutation::SetVideoLoopSeamless`].
+/// P1.4.2 — payload for [`Mutation::SetVideoLoopMode`].
 ///
-/// Per-field Reverse: `loop_seamless` is a plain `bool` inside
+/// Per-field Reverse: `loop_mode` is a plain Copy enum inside
 /// `LayerKind::Video`. Same rationale as [`SetVideoSpeed`] — per-field
 /// is sufficient because no variant replacement is involved.
+///
+/// Replaced the P0.4.3 `SetVideoLoopSeamless` boolean mutation; old
+/// saves loading via `migrate::migrate` have their `loop_seamless`
+/// field normalised to the matching `LoopMode` variant before serde
+/// ever sees the new shape, so no compatibility shim is needed at
+/// this layer.
 #[derive(Debug, Clone)]
-pub struct SetVideoLoopSeamless {
+pub struct SetVideoLoopMode {
     /// Index into `Project.layers`.
     pub layer_idx: usize,
-    /// New loop flag value.
-    pub new: bool,
-    /// Pre-mutation loop flag value.
-    pub old: bool,
+    /// New loop mode.
+    pub new: crate::project::schema::LoopMode,
+    /// Pre-mutation loop mode.
+    pub old: crate::project::schema::LoopMode,
 }
 
-impl ReverseStorage for SetVideoLoopSeamless {
+impl ReverseStorage for SetVideoLoopMode {
     fn apply(self, project: &mut Project) -> Self {
         let layer = project
             .layers
             .get_mut(self.layer_idx)
-            .expect("SetVideoLoopSeamless: layer_idx out of range");
+            .expect("SetVideoLoopMode: layer_idx out of range");
         match &mut layer.kind {
-            crate::project::schema::LayerKind::Video { loop_seamless, .. } => {
+            crate::project::schema::LayerKind::Video { loop_mode, .. } => {
                 debug_assert_eq!(
-                    *loop_seamless, self.old,
-                    "SetVideoLoopSeamless stale Reverse: layer {} loop_seamless={}, expected old={}",
-                    self.layer_idx, *loop_seamless, self.old
+                    *loop_mode, self.old,
+                    "SetVideoLoopMode stale Reverse: layer {} loop_mode={:?}, expected old={:?}",
+                    self.layer_idx, *loop_mode, self.old
                 );
-                *loop_seamless = self.new;
+                *loop_mode = self.new;
             }
             _ => panic!(
-                "SetVideoLoopSeamless: layer {} is not a Video layer",
+                "SetVideoLoopMode: layer {} is not a Video layer",
                 self.layer_idx
             ),
         }
-        SetVideoLoopSeamless {
+        SetVideoLoopMode {
             layer_idx: self.layer_idx,
             new: self.old,
             old: self.new,
@@ -1444,9 +1450,10 @@ pub enum Mutation {
     /// P0.4.3 — replace `LayerKind::Video { speed, .. }` for a layer.
     /// Delegates to [`SetVideoSpeed`].
     SetVideoSpeed(SetVideoSpeed),
-    /// P0.4.3 — replace `LayerKind::Video { loop_seamless, .. }` for a layer.
-    /// Delegates to [`SetVideoLoopSeamless`].
-    SetVideoLoopSeamless(SetVideoLoopSeamless),
+    /// P1.4.2 — replace `LayerKind::Video { loop_mode, .. }` for a layer.
+    /// Delegates to [`SetVideoLoopMode`]. Replaces the P0.4.3
+    /// `SetVideoLoopSeamless` boolean mutation.
+    SetVideoLoopMode(SetVideoLoopMode),
 
     /// Insert `layer` at `position`. Reverse is `RemoveLayer { idx: position }`.
     ///
@@ -1578,7 +1585,7 @@ impl Mutation {
             Mutation::SetLayerBlendMode(s) => Mutation::SetLayerBlendMode(s.apply(project)),
             Mutation::SetLayerEffects(s) => Mutation::SetLayerEffects(s.apply(project)),
             Mutation::SetVideoSpeed(s) => Mutation::SetVideoSpeed(s.apply(project)),
-            Mutation::SetVideoLoopSeamless(s) => Mutation::SetVideoLoopSeamless(s.apply(project)),
+            Mutation::SetVideoLoopMode(s) => Mutation::SetVideoLoopMode(s.apply(project)),
             Mutation::SwapLayers(s) => Mutation::SwapLayers(s.apply(project)),
             Mutation::RelinkAssetPath(s) => Mutation::RelinkAssetPath(s.apply(project)),
             Mutation::SetLayerKind(s) => Mutation::SetLayerKind(s.apply(project)),
@@ -1717,7 +1724,7 @@ impl Mutation {
             | Mutation::SetLayerTreatmentParams(_)
             | Mutation::SetOutputRgbMatrix(_)
             | Mutation::SetVideoSpeed(_)
-            | Mutation::SetVideoLoopSeamless(_) => false,
+            | Mutation::SetVideoLoopMode(_) => false,
             Mutation::ApplyProjectSnapshot(s) => s.non_undoable,
         }
     }
@@ -2191,18 +2198,23 @@ impl Project {
         })
     }
 
-    /// P0.4.3 — build a `SetVideoLoopSeamless` mutation. Captures the current
-    /// `loop_seamless` as `old`. Panics if `layer_idx` is out of range or if
-    /// the layer is not a `LayerKind::Video`.
-    pub fn set_video_loop_seamless_mutation(&self, layer_idx: usize, new: bool) -> Mutation {
+    /// P1.4.2 — build a `SetVideoLoopMode` mutation. Captures the current
+    /// `loop_mode` as `old`. Panics if `layer_idx` is out of range or if
+    /// the layer is not a `LayerKind::Video`. Replaces the P0.4.3
+    /// `set_video_loop_seamless_mutation`.
+    pub fn set_video_loop_mode_mutation(
+        &self,
+        layer_idx: usize,
+        new: crate::project::schema::LoopMode,
+    ) -> Mutation {
         let old = match &self.layers[layer_idx].kind {
-            crate::project::schema::LayerKind::Video { loop_seamless, .. } => *loop_seamless,
+            crate::project::schema::LayerKind::Video { loop_mode, .. } => *loop_mode,
             _ => panic!(
-                "set_video_loop_seamless_mutation: layer {} is not a Video layer",
+                "set_video_loop_mode_mutation: layer {} is not a Video layer",
                 layer_idx
             ),
         };
-        Mutation::SetVideoLoopSeamless(SetVideoLoopSeamless {
+        Mutation::SetVideoLoopMode(SetVideoLoopMode {
             layer_idx,
             new,
             old,
@@ -3198,7 +3210,7 @@ mod tests {
         );
     }
 
-    // ── P0.4.3 — SetVideoSpeed / SetVideoLoopSeamless unit tests ─────────────
+    // ── SetVideoSpeed (P0.4.3) + SetVideoLoopMode (P1.4.2) unit tests ─────────────
 
     /// Helper: produce a project with one Video layer at index 0.
     fn fresh_video_project() -> crate::project::schema::Project {
@@ -3243,31 +3255,43 @@ mod tests {
         }
     }
 
-    /// P0.4.3 — `SetVideoLoopSeamless` apply + undo round-trips.
+    /// P1.4.2 — `SetVideoLoopMode` apply + undo round-trips across the
+    /// three enum variants.
     #[test]
-    fn set_video_loop_seamless_apply_undo_round_trip() {
-        for (start, target) in [(false, true), (true, false), (false, false), (true, true)] {
+    fn set_video_loop_mode_apply_undo_round_trip() {
+        use crate::project::schema::LoopMode;
+        let combos = [
+            (LoopMode::Once, LoopMode::Loop),
+            (LoopMode::Loop, LoopMode::Once),
+            (LoopMode::Loop, LoopMode::PingPong),
+            (LoopMode::PingPong, LoopMode::Loop),
+            (LoopMode::Once, LoopMode::Once),
+        ];
+        for (start, target) in combos {
             let mut p = fresh_video_project();
             match &mut p.layers[0].kind {
-                crate::project::schema::LayerKind::Video { loop_seamless, .. } => {
-                    *loop_seamless = start;
+                crate::project::schema::LayerKind::Video { loop_mode, .. } => {
+                    *loop_mode = start;
                 }
                 _ => unreachable!(),
             }
             let before = serde_json::to_value(&p).unwrap();
-            let m = p.set_video_loop_seamless_mutation(0, target);
+            let m = p.set_video_loop_mode_mutation(0, target);
             let reverse = m.apply(&mut p);
-            let got_loop = match &p.layers[0].kind {
-                crate::project::schema::LayerKind::Video { loop_seamless, .. } => *loop_seamless,
+            let got = match &p.layers[0].kind {
+                crate::project::schema::LayerKind::Video { loop_mode, .. } => *loop_mode,
                 _ => unreachable!(),
             };
             assert_eq!(
-                got_loop, target,
-                "apply should write `target`={target} ({start} → {target})"
+                got, target,
+                "apply should write `target`={target:?} ({start:?} → {target:?})"
             );
             reverse.apply(&mut p);
             let after = serde_json::to_value(&p).unwrap();
-            assert_eq!(before, after, "byte-equal after undo ({start} → {target})");
+            assert_eq!(
+                before, after,
+                "byte-equal after undo ({start:?} → {target:?})"
+            );
         }
     }
 
@@ -3282,14 +3306,14 @@ mod tests {
         );
     }
 
-    /// P0.4.3 — `SetVideoLoopSeamless` mutation is undoable.
+    /// P1.4.2 — `SetVideoLoopMode` mutation is undoable.
     #[test]
-    fn set_video_loop_seamless_is_undoable() {
+    fn set_video_loop_mode_is_undoable() {
         let p = fresh_video_project();
         assert!(
-            !p.set_video_loop_seamless_mutation(0, false)
+            !p.set_video_loop_mode_mutation(0, crate::project::schema::LoopMode::Once)
                 .is_non_undoable(),
-            "SetVideoLoopSeamless should be undoable"
+            "SetVideoLoopMode should be undoable"
         );
     }
 
@@ -3301,12 +3325,12 @@ mod tests {
         let _ = p.set_video_speed_mutation(0, 2.0);
     }
 
-    /// P0.4.3 — builder panics when the layer is not `LayerKind::Video`.
+    /// P1.4.2 — builder panics when the layer is not `LayerKind::Video`.
     #[test]
     #[should_panic(expected = "is not a Video layer")]
-    fn set_video_loop_seamless_builder_panics_on_non_video_layer() {
+    fn set_video_loop_mode_builder_panics_on_non_video_layer() {
         let p = fresh_project(); // SVG layer at index 0
-        let _ = p.set_video_loop_seamless_mutation(0, false);
+        let _ = p.set_video_loop_mode_mutation(0, crate::project::schema::LoopMode::Once);
     }
 
     /// P0.4.3 — via undo stack: push a `SetVideoSpeed` mutation and undo
@@ -3338,25 +3362,30 @@ mod tests {
         );
     }
 
-    /// P0.4.3 — via undo stack: push a `SetVideoLoopSeamless` mutation and undo it.
+    /// P1.4.2 — via undo stack: push a `SetVideoLoopMode` mutation and undo it.
     #[test]
-    fn set_video_loop_seamless_undo_via_stack() {
+    fn set_video_loop_mode_undo_via_stack() {
+        use crate::project::schema::LoopMode;
         use crate::project::undo::UndoStack;
         let mut p = fresh_video_project();
         match &mut p.layers[0].kind {
-            crate::project::schema::LayerKind::Video { loop_seamless, .. } => {
-                *loop_seamless = true;
+            crate::project::schema::LayerKind::Video { loop_mode, .. } => {
+                *loop_mode = LoopMode::Loop;
             }
             _ => unreachable!(),
         }
         let before = serde_json::to_value(&p).unwrap();
         let mut stack = UndoStack::new();
-        stack.push(p.set_video_loop_seamless_mutation(0, false), &mut p);
+        stack.push(p.set_video_loop_mode_mutation(0, LoopMode::Once), &mut p);
         let after_apply = match &p.layers[0].kind {
-            crate::project::schema::LayerKind::Video { loop_seamless, .. } => *loop_seamless,
+            crate::project::schema::LayerKind::Video { loop_mode, .. } => *loop_mode,
             _ => unreachable!(),
         };
-        assert!(!after_apply, "loop_seamless should be false after apply");
+        assert_eq!(
+            after_apply,
+            LoopMode::Once,
+            "loop_mode should be Once after apply"
+        );
         stack.undo(&mut p);
         let after_undo = serde_json::to_value(&p).unwrap();
         assert_eq!(
@@ -3486,9 +3515,9 @@ mod tests {
             /// P0.4.3 — set the playback speed of a Video layer (0.25..=4.0).
             /// Falls back to a no-op when no Video layer exists in the fixture.
             VideoSpeed(f32),
-            /// P0.4.3 — toggle the seamless-loop flag of a Video layer.
-            /// Falls back to a no-op when no Video layer exists.
-            VideoLoopSeamless(bool),
+            /// P1.4.2 — set the loop mode of a Video layer (Once / Loop /
+            /// PingPong). Falls back to a no-op when no Video layer exists.
+            VideoLoopMode(crate::project::schema::LoopMode),
             /// P1.2.1 — set / clear a layer's treatment. `None` clears;
             /// `Some(preset_pick)` selects one of two preset_ids (toggle).
             /// Always targets layer index 0 (fresh_project has one layer).
@@ -3857,12 +3886,12 @@ mod tests {
                         None => project.set_gamma_mutation(project.gamma), // no-op fallback
                     }
                 }
-                MutationKind::VideoLoopSeamless(v) => {
+                MutationKind::VideoLoopMode(v) => {
                     let idx = project.layers.iter().position(|l| {
                         matches!(l.kind, crate::project::schema::LayerKind::Video { .. })
                     });
                     match idx {
-                        Some(i) => project.set_video_loop_seamless_mutation(i, *v),
+                        Some(i) => project.set_video_loop_mode_mutation(i, *v),
                         None => project.set_gamma_mutation(project.gamma), // no-op fallback
                     }
                 }
@@ -4113,11 +4142,19 @@ mod tests {
                             }
                         }
                     ),
-                // P0.4.3 — video speed (0.25..=4.0) and loop toggle.
-                // Falls back to a no-op in `to_mutation` when the project
-                // fixture has no Video layers.
+                // P0.4.3 — video speed (0.25..=4.0). Falls back to a no-op
+                // in `to_mutation` when the project fixture has no Video
+                // layers.
                 (0.25_f32..=4.0_f32).prop_map(MutationKind::VideoSpeed),
-                any::<bool>().prop_map(MutationKind::VideoLoopSeamless),
+                // P1.4.2 — video loop mode (Once / Loop / PingPong).
+                (0u8..=2u8).prop_map(|n| {
+                    let mode = match n {
+                        0 => crate::project::schema::LoopMode::Once,
+                        1 => crate::project::schema::LoopMode::Loop,
+                        _ => crate::project::schema::LoopMode::PingPong,
+                    };
+                    MutationKind::VideoLoopMode(mode)
+                }),
                 // P1.2.1 — Treatment toggle (None / Some(tone_map | blur_mask))
                 // and params edit. The params variant falls back to a no-op
                 // when treatment is None (set_layer_treatment_params_mutation

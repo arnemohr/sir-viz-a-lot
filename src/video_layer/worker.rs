@@ -47,16 +47,22 @@ use crate::render::texture_upload::{TextureFrameSender, UploadTargetId};
 // ---------------------------------------------------------------------------
 
 /// Control messages the UI / mutation layer dispatches to the worker.
-// P0.4.2a (Part 1): Play/Pause/SetSpeed/SetLoop are not yet dispatched
-// by the UI — that lands in P0.4.3. They are public API so Part 2/3 can
-// add producers without changing this file's interface.
+//
+// P0.4.2a (Part 1): Play/Pause/SetSpeed are not yet dispatched by the
+// UI — that lands in P0.4.3. They are public API so Part 2/3 can add
+// producers without changing this file's interface.
+//
+// P1.4.2: replaced the boolean `SetLoop(bool)` with
+// `SetLoopMode(LoopMode)` so the worker can distinguish Once / Loop /
+// PingPong. PingPong is a forward-only stub for now — see the
+// `Playing` state's EOF handling in `worker_loop`.
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub enum VideoControl {
     Play,
     Pause,
     SetSpeed(f32),
-    SetLoop(bool),
+    SetLoopMode(crate::project::schema::LoopMode),
     Stop,
 }
 
@@ -142,8 +148,14 @@ pub fn natural_size(path: &Path) -> Option<(u32, u32)> {
 
 #[cfg(all(feature = "video", target_os = "macos"))]
 enum WorkerState {
-    Playing { speed: f32, loop_seamless: bool },
-    Paused { speed: f32, loop_seamless: bool },
+    Playing {
+        speed: f32,
+        loop_mode: crate::project::schema::LoopMode,
+    },
+    Paused {
+        speed: f32,
+        loop_mode: crate::project::schema::LoopMode,
+    },
     Dead,
 }
 
@@ -176,10 +188,12 @@ fn worker_loop(
         "video worker starting (AVFoundation decoder)",
     );
 
-    // Start in Playing (auto-play on layer-add).
+    // Start in Playing (auto-play on layer-add). Loop is the show-day
+    // default (drop an mp4, it plays forever); SetLoopMode flips to
+    // Once / PingPong on operator action.
     let mut state = WorkerState::Playing {
         speed: 1.0,
-        loop_seamless: true,
+        loop_mode: crate::project::schema::LoopMode::Loop,
     };
 
     loop {
@@ -191,48 +205,36 @@ fn worker_loop(
                     Ok(_) => {}
                 }
             }
-            WorkerState::Paused {
-                speed,
-                loop_seamless,
-            } => {
+            WorkerState::Paused { speed, loop_mode } => {
                 // Block (not try_recv / thread::park) on the control channel
                 // per the decision record: thread::park has coalescing-wake
                 // bugs under rapid play/pause toggles.
                 match control_rx.recv() {
                     Ok(VideoControl::Play) => {
-                        state = WorkerState::Playing {
-                            speed,
-                            loop_seamless,
-                        };
+                        state = WorkerState::Playing { speed, loop_mode };
                     }
                     Ok(VideoControl::SetSpeed(s)) => {
                         state = WorkerState::Paused {
                             speed: s,
-                            loop_seamless,
+                            loop_mode,
                         };
                     }
-                    Ok(VideoControl::SetLoop(l)) => {
+                    Ok(VideoControl::SetLoopMode(m)) => {
                         state = WorkerState::Paused {
                             speed,
-                            loop_seamless: l,
+                            loop_mode: m,
                         };
                     }
                     Ok(VideoControl::Pause) => {
                         // Already paused; idempotent.
-                        state = WorkerState::Paused {
-                            speed,
-                            loop_seamless,
-                        };
+                        state = WorkerState::Paused { speed, loop_mode };
                     }
                     Ok(VideoControl::Stop) | Err(_) => break,
                 }
             }
-            WorkerState::Playing {
-                speed,
-                loop_seamless,
-            } => {
+            WorkerState::Playing { speed, loop_mode } => {
                 // Build a fresh reader for one pass.
-                let (speed_now, loop_seamless_now) = (speed, loop_seamless);
+                let (speed_now, loop_mode_now) = (speed, loop_mode);
                 let reader_result =
                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| build_reader(&path)));
                 let (reader, fps) = match reader_result {
@@ -274,9 +276,13 @@ fn worker_loop(
 
                 match outcome {
                     PassOutcome::Eof => {
-                        // loop_seamless was true (decode_pass only returns Eof
-                        // when loop_seamless) — fall through to rebuild reader.
-                        let _ = loop_seamless_now;
+                        // PassOutcome::Eof is returned for Loop AND PingPong
+                        // (PingPong is currently a forward-only stub — see
+                        // P1.4.3 for the reverse-decode follow-up). Once
+                        // returns Paused from decode_pass directly. Fall
+                        // through here to rebuild the reader for the next
+                        // pass.
+                        let _ = loop_mode_now;
                         // state is still Playing; outer loop rebuilds.
                     }
                     PassOutcome::Stop => break,
@@ -390,17 +396,11 @@ fn decode_pass(
         match control_rx.try_recv() {
             Ok(VideoControl::Stop) => return PassOutcome::Stop,
             Ok(VideoControl::Pause) => {
-                let (speed, loop_seamless) = match state {
-                    WorkerState::Playing {
-                        speed,
-                        loop_seamless,
-                    } => (*speed, *loop_seamless),
-                    _ => (1.0, true),
+                let (speed, loop_mode) = match state {
+                    WorkerState::Playing { speed, loop_mode } => (*speed, *loop_mode),
+                    _ => (1.0, crate::project::schema::LoopMode::Loop),
                 };
-                *state = WorkerState::Paused {
-                    speed,
-                    loop_seamless,
-                };
+                *state = WorkerState::Paused { speed, loop_mode };
                 return PassOutcome::Paused;
             }
             Ok(VideoControl::SetSpeed(s)) => {
@@ -414,11 +414,11 @@ fn decode_pass(
                 }
                 // Stay in the decode loop — no seek, no reader rebuild.
             }
-            Ok(VideoControl::SetLoop(l)) => {
-                if let WorkerState::Playing { loop_seamless, .. } = state {
-                    *loop_seamless = l;
+            Ok(VideoControl::SetLoopMode(m)) => {
+                if let WorkerState::Playing { loop_mode, .. } = state {
+                    *loop_mode = m;
                 }
-                // Loop flag change takes effect at next EOF; continue current pass.
+                // Loop-mode change takes effect at next EOF; continue current pass.
             }
             Ok(VideoControl::Play) => {} // already playing
             Err(crossbeam_channel::TryRecvError::Empty) => {}
@@ -441,24 +441,29 @@ fn decode_pass(
                 // EOF or error.
                 let status = unsafe { reader.status() };
                 if status == AVAssetReaderStatus::Completed {
-                    let loop_seamless = match state {
-                        WorkerState::Playing { loop_seamless, .. } => *loop_seamless,
-                        _ => false,
+                    // P1.4.2 — EOF dispatch by loop mode:
+                    //  Once     → transition to Paused (show last frame).
+                    //  Loop     → return Eof so the outer loop rebuilds reader.
+                    //  PingPong → currently the same as Loop (forward-only
+                    //             stub; P1.4.3 will replace the second pass
+                    //             with a reverse decode).
+                    let current_mode = match state {
+                        WorkerState::Playing { loop_mode, .. } => *loop_mode,
+                        _ => crate::project::schema::LoopMode::Once,
                     };
-                    if loop_seamless {
+                    let should_continue = matches!(
+                        current_mode,
+                        crate::project::schema::LoopMode::Loop
+                            | crate::project::schema::LoopMode::PingPong
+                    );
+                    if should_continue {
                         return PassOutcome::Eof; // caller rebuilds reader
                     } else {
-                        let (speed, loop_seamless) = match state {
-                            WorkerState::Playing {
-                                speed,
-                                loop_seamless,
-                            } => (*speed, *loop_seamless),
-                            _ => (1.0, false),
+                        let (speed, loop_mode) = match state {
+                            WorkerState::Playing { speed, loop_mode } => (*speed, *loop_mode),
+                            _ => (1.0, crate::project::schema::LoopMode::Once),
                         };
-                        *state = WorkerState::Paused {
-                            speed,
-                            loop_seamless,
-                        };
+                        *state = WorkerState::Paused { speed, loop_mode };
                         return PassOutcome::Paused;
                     }
                 } else {

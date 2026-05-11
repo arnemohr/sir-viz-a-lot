@@ -26,6 +26,15 @@ pub fn migrate(mut value: Value) -> Result<(Value, MigrationOutcome), ProjectErr
         .unwrap_or(0) as u32;
     let mut outcome = MigrationOutcome::default();
 
+    // P1.4.2 — always-on field normalisation. Runs before the
+    // version-gated migrations and on the no-migration-needed path so
+    // saves that already match `CURRENT_SCHEMA_VERSION` but were
+    // written with an older field name (here: Video.loop_seamless) get
+    // converted to the new field name (Video.loop_mode) before serde
+    // parses the typed struct. This avoids bumping the schema version
+    // for a strictly additive rename.
+    normalize_video_loop_mode(&mut value);
+
     match version {
         v if v == CURRENT_SCHEMA_VERSION => Ok((value, outcome)),
         // v0 (no field) and v1 are bit-compatible with v2 — only difference is
@@ -68,6 +77,38 @@ pub fn migrate(mut value: Value) -> Result<(Value, MigrationOutcome), ProjectErr
             Ok((value, outcome))
         }
         v => Err(ProjectError::UnsupportedVersion(v)),
+    }
+}
+
+/// P1.4.2 — convert the legacy `LayerKind::Video.loop_seamless: bool`
+/// field to `loop_mode: "Loop" | "Once"`. Walks every layer; on any
+/// Video variant that carries `loop_seamless`, the field is removed
+/// and `loop_mode` is set to the matching enum variant. Idempotent
+/// (subsequent calls find no `loop_seamless` and do nothing).
+fn normalize_video_loop_mode(value: &mut Value) {
+    let Some(layers) = value.get_mut("layers").and_then(|v| v.as_array_mut()) else {
+        return;
+    };
+    for layer in layers.iter_mut() {
+        let Some(kind) = layer.get_mut("kind") else {
+            continue;
+        };
+        let Some(video) = kind.get_mut("Video").and_then(|v| v.as_object_mut()) else {
+            continue;
+        };
+        if let Some(old) = video.remove("loop_seamless") {
+            let variant = if old.as_bool().unwrap_or(true) {
+                "Loop"
+            } else {
+                "Once"
+            };
+            // Don't overwrite a `loop_mode` that's already present
+            // (some hand-edited project might carry both during a
+            // half-applied edit; trust the new field).
+            video
+                .entry("loop_mode")
+                .or_insert(Value::String(variant.into()));
+        }
     }
 }
 
@@ -925,5 +966,81 @@ mod tests {
         let g = &p.layers[0].warp.grid;
         assert!((g[0][0][0] - 0.1).abs() < 1e-4);
         assert!((g[1][1][0] - 0.9).abs() < 1e-4);
+    }
+
+    /// P1.4.2 — a v7 save written before the loop_seamless → loop_mode
+    /// rename loads with the correct enum variant (always-on
+    /// normalisation pass; no schema-version bump).
+    #[test]
+    fn loop_seamless_true_normalises_to_loop_mode_loop() {
+        let v = serde_json::json!({
+            "schema_version": CURRENT_SCHEMA_VERSION,
+            "layers": [{
+                "id": "v0",
+                "kind": { "Video": { "path": "/tmp/x.mp4", "speed": 1.0, "loop_seamless": true } },
+                "enabled": true,
+                "transform": {
+                    "translate": [0.0, 0.0], "rotate_deg": 0.0,
+                    "scale": [1.0, 1.0], "anchor": [0.5, 0.5]
+                },
+                "effects": [],
+                "blend_mode": "Normal",
+                "opacity": 1.0,
+                "warp": {
+                    "rows": 1, "cols": 1,
+                    "grid": [[[0.0, 0.0], [1.0, 0.0]], [[0.0, 1.0], [1.0, 1.0]]],
+                    "mask_polygon": [], "mask_feather": 0.02
+                }
+            }]
+        });
+        let (out, _) = migrate(v).expect("migrate");
+        let p: Project = serde_json::from_value(out).expect("deserialize");
+        match &p.layers[0].kind {
+            crate::project::schema::LayerKind::Video { loop_mode, .. } => {
+                assert_eq!(
+                    *loop_mode,
+                    crate::project::schema::LoopMode::Loop,
+                    "loop_seamless: true should normalise to LoopMode::Loop"
+                );
+            }
+            _ => panic!("expected Video layer"),
+        }
+    }
+
+    /// P1.4.2 — `loop_seamless: false` normalises to `LoopMode::Once`.
+    #[test]
+    fn loop_seamless_false_normalises_to_loop_mode_once() {
+        let v = serde_json::json!({
+            "schema_version": CURRENT_SCHEMA_VERSION,
+            "layers": [{
+                "id": "v0",
+                "kind": { "Video": { "path": "/tmp/x.mp4", "speed": 1.0, "loop_seamless": false } },
+                "enabled": true,
+                "transform": {
+                    "translate": [0.0, 0.0], "rotate_deg": 0.0,
+                    "scale": [1.0, 1.0], "anchor": [0.5, 0.5]
+                },
+                "effects": [],
+                "blend_mode": "Normal",
+                "opacity": 1.0,
+                "warp": {
+                    "rows": 1, "cols": 1,
+                    "grid": [[[0.0, 0.0], [1.0, 0.0]], [[0.0, 1.0], [1.0, 1.0]]],
+                    "mask_polygon": [], "mask_feather": 0.02
+                }
+            }]
+        });
+        let (out, _) = migrate(v).expect("migrate");
+        let p: Project = serde_json::from_value(out).expect("deserialize");
+        match &p.layers[0].kind {
+            crate::project::schema::LayerKind::Video { loop_mode, .. } => {
+                assert_eq!(
+                    *loop_mode,
+                    crate::project::schema::LoopMode::Once,
+                    "loop_seamless: false should normalise to LoopMode::Once"
+                );
+            }
+            _ => panic!("expected Video layer"),
+        }
     }
 }

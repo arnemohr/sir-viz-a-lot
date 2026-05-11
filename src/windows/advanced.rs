@@ -262,14 +262,13 @@ pub fn show(
                             .id_salt(HDR_VIDEO)
                             .default_open(true)
                             .show(ui, |ui| {
-                                let (cur_speed, cur_loop) = match &project.layers[layer_idx].kind {
-                                    LayerKind::Video {
-                                        speed,
-                                        loop_seamless,
-                                        ..
-                                    } => (*speed, *loop_seamless),
-                                    _ => unreachable!(),
-                                };
+                                let (cur_speed, cur_loop_mode) =
+                                    match &project.layers[layer_idx].kind {
+                                        LayerKind::Video {
+                                            speed, loop_mode, ..
+                                        } => (*speed, *loop_mode),
+                                        _ => unreachable!(),
+                                    };
 
                                 // Speed slider — 0.25× to 4.0× covers the
                                 // useful operator range. Log scale so 1.0
@@ -296,18 +295,49 @@ pub fn show(
                                     ));
                                 }
 
-                                // Seamless loop toggle.
-                                let mut loop_edit = cur_loop;
-                                if ui.checkbox(&mut loop_edit, "Seamless loop").changed() {
-                                    st.pending_mutations
-                                        .push(project.set_video_loop_seamless_mutation(
-                                            layer_idx, loop_edit,
-                                        ));
-                                    st.pending_video_controls.push((
+                                // P1.4.2 — loop mode combobox (replaces the
+                                // P0.4.3 seamless-loop checkbox).
+                                ui.horizontal(|ui| {
+                                    ui.label("Loop mode");
+                                    let mut staged: Option<crate::project::schema::LoopMode> = None;
+                                    egui::ComboBox::from_id_salt((
+                                        "adv_video_loop_mode",
                                         layer_idx,
-                                        crate::video_layer::VideoControl::SetLoop(loop_edit),
-                                    ));
-                                }
+                                    ))
+                                    .selected_text(loop_mode_label(cur_loop_mode))
+                                    .show_ui(ui, |ui| {
+                                        for mode in [
+                                            crate::project::schema::LoopMode::Loop,
+                                            crate::project::schema::LoopMode::Once,
+                                            crate::project::schema::LoopMode::PingPong,
+                                        ] {
+                                            if ui
+                                                .selectable_label(
+                                                    cur_loop_mode == mode,
+                                                    loop_mode_label(mode),
+                                                )
+                                                .clicked()
+                                            {
+                                                staged = Some(mode);
+                                            }
+                                        }
+                                    });
+                                    if let Some(new_mode) = staged {
+                                        if new_mode != cur_loop_mode {
+                                            st.pending_mutations.push(
+                                                project.set_video_loop_mode_mutation(
+                                                    layer_idx, new_mode,
+                                                ),
+                                            );
+                                            st.pending_video_controls.push((
+                                                layer_idx,
+                                                crate::video_layer::VideoControl::SetLoopMode(
+                                                    new_mode,
+                                                ),
+                                            ));
+                                        }
+                                    }
+                                });
                             });
 
                         ui.add_space(4.0);
@@ -1048,6 +1078,16 @@ fn show_project_section(
 // ---------------------------------------------------------------------------
 // Local helpers
 // ---------------------------------------------------------------------------
+
+/// Human-readable label for a [`crate::project::schema::LoopMode`] in the
+/// Selected-layer Video combobox.
+fn loop_mode_label(m: crate::project::schema::LoopMode) -> &'static str {
+    match m {
+        crate::project::schema::LoopMode::Once => "Once (stop at end)",
+        crate::project::schema::LoopMode::Loop => "Loop (seamless)",
+        crate::project::schema::LoopMode::PingPong => "Ping-pong (reverse on end)",
+    }
+}
 
 fn blend_label(m: BlendMode) -> &'static str {
     match m {

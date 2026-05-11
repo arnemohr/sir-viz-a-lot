@@ -59,9 +59,13 @@ pub enum LayerKind {
         focal: [f32; 2],
     },
     /// v0.4 W4 — mp4 / H.264 video. P0.4.2 extends the schema with
-    /// `speed` and `loop_seamless`; both are serde-defaulted so existing
-    /// v7 saves with `Video { path }` load cleanly with
-    /// `speed: 1.0, loop_seamless: true`.
+    /// `speed` and (initially) `loop_seamless`; P1.4.2 replaces the
+    /// boolean with the [`LoopMode`] enum. Both fields are
+    /// serde-defaulted so existing v7 saves with `Video { path }` load
+    /// cleanly with `speed: 1.0, loop_mode: Loop`. Old v7 saves that
+    /// carried the boolean `loop_seamless` get normalised to the
+    /// matching enum variant during `migrate::migrate` (always-on
+    /// normalisation step, not version-gated).
     Video {
         path: PathBuf,
         /// Playback rate multiplier. 1.0 = real-time; 0.5 = half speed;
@@ -69,11 +73,12 @@ pub enum LayerKind {
         /// readable by the worker (Part 2) but no UI dispatches mutations.
         #[serde(default = "default_video_speed")]
         speed: f32,
-        /// Whether the worker seeks to 0 on EOF (true) or stops (false).
-        /// Default true — the show-day "drop an mp4, it plays forever"
-        /// expectation.
-        #[serde(default = "default_video_loop_seamless")]
-        loop_seamless: bool,
+        /// EOF behaviour. `Loop` (default) seeks back to clip start;
+        /// `Once` pauses on EOF; `PingPong` reverses direction —
+        /// currently a forward-only stub (functionally `Loop`) until
+        /// P1.4.3 wires the reverse-decode path.
+        #[serde(default)]
+        loop_mode: LoopMode,
     },
     /// v0.4 W5 — procedural FX layer driven by mask SDF. Real fields
     /// landed in P0.5.1; the scaffold carries the preset id and a
@@ -121,8 +126,24 @@ fn default_video_speed() -> f32 {
     1.0
 }
 
-fn default_video_loop_seamless() -> bool {
-    true
+/// P1.4.2 — EOF behaviour for [`LayerKind::Video`].
+///
+/// `Loop` is the show-day default ("drop an mp4, it plays forever").
+/// `Once` stops the worker at EOF (pauses the layer's last decoded
+/// frame). `PingPong` reverses direction at EOF — currently a
+/// forward-only stub (effectively `Loop`) until P1.4.3 wires the
+/// reverse-decode path. The stub's behaviour is documented at the
+/// worker dispatch site.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LoopMode {
+    /// Stop at EOF — show the last decoded frame.
+    Once,
+    /// Seek back to clip start on EOF (default).
+    #[default]
+    Loop,
+    /// Reverse direction at each end. Stub: behaves as `Loop` until
+    /// P1.4.3 lands the reverse-decode path.
+    PingPong,
 }
 
 /// P1.2.1 (W2) — image-grammar preset applied to an Image or Video
@@ -634,7 +655,7 @@ pub fn layer_from_svg_path(id: impl Into<String>, svg_path: PathBuf) -> LayerCon
 
 /// Build a layer row for a video (mp4/mov/m4v) path.
 ///
-/// Sets `speed: 1.0, loop_seamless: true` — the show-day defaults.
+/// Sets `speed: 1.0, loop_mode: Loop` — the show-day defaults.
 /// Other fields (warp, opacity, blend_mode, effects) mirror the other
 /// layer constructors.
 ///
@@ -646,7 +667,7 @@ pub fn layer_from_video_path(id: impl Into<String>, path: PathBuf) -> LayerConfi
         kind: LayerKind::Video {
             path,
             speed: 1.0,
-            loop_seamless: true,
+            loop_mode: LoopMode::Loop,
         },
         enabled: true,
         transform: Transform2D::default(),
@@ -694,8 +715,8 @@ mod tests {
     }
 
     /// P0.4.2 — `LayerKind::Video { path }` (old shape, without `speed`
-    /// or `loop_seamless`) deserializes with serde defaults:
-    /// `speed == 1.0`, `loop_seamless == true`.
+    /// or `loop_mode`) deserializes with serde defaults:
+    /// `speed == 1.0`, `loop_mode == LoopMode::Loop`.
     #[test]
     fn video_layer_missing_speed_and_loop_deserializes_with_defaults() {
         let json = r#"{
@@ -711,17 +732,16 @@ mod tests {
         let lc: LayerConfig = serde_json::from_str(json).expect("deserialize old Video shape");
         match lc.kind {
             LayerKind::Video {
-                speed,
-                loop_seamless,
-                ..
+                speed, loop_mode, ..
             } => {
                 assert!(
                     (speed - 1.0).abs() < 1e-6,
                     "old Video shape should default speed to 1.0, got {speed}"
                 );
-                assert!(
-                    loop_seamless,
-                    "old Video shape should default loop_seamless to true"
+                assert_eq!(
+                    loop_mode,
+                    LoopMode::Loop,
+                    "old Video shape should default loop_mode to Loop"
                 );
             }
             other => panic!("expected Video, got {other:?}"),
@@ -735,10 +755,10 @@ mod tests {
         let path = std::path::PathBuf::from("/tmp/show.mp4");
         let lc = layer_from_video_path("v0", path.clone());
         assert!(
-            matches!(lc.kind, LayerKind::Video { ref path, speed, loop_seamless }
+            matches!(lc.kind, LayerKind::Video { ref path, speed, loop_mode }
                 if path.to_str() == Some("/tmp/show.mp4")
                     && (speed - 1.0).abs() < 1e-6
-                    && loop_seamless
+                    && loop_mode == LoopMode::Loop
             ),
             "layer_from_video_path should produce Video kind with defaults"
         );
