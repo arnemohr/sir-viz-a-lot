@@ -104,6 +104,40 @@ Use this top-to-bottom before doors; aim for under five minutes once you know yo
     mask polygon before doors. A misconfigured or empty mask polygon produces
     a blank layer; fix the mask in the inspector and save before go-live.
 
+## Treatment presets + video grammar (v0.5)
+
+27. **Identity-at-defaults sanity** — for any layer carrying a treatment,
+    confirm the preset's default-parameter pass is visually transparent
+    (drop the slider to its leftmost / default value and verify no change
+    against the source). All six v0.5 presets are bit-exact identity at
+    default; if you see a shift, the project file may carry hand-edited
+    params from an older draft — reset to default before doors.
+
+28. **External assets exist** — for `texture_overlay` and `collage` layers,
+    confirm each `overlay_path` / `collage_paths` entry points at a file
+    that's actually on disk in the show machine's filesystem. Missing
+    assets log a `treatment_overlay_load_failed` / `treatment_collage_load_failed`
+    warn and fall back to source for the affected slot — operator gets
+    no visible toast, so check the trace before doors.
+
+29. **Video trim sanity** — if any Video layer uses `clip_in` / `clip_out`,
+    scrub through the trim range in Advanced and confirm playback honours
+    it. The decoder's `timeRange` is set on each reader rebuild
+    (next-EOF or pause+play); a stale trim set mid-set won't take effect
+    until then.
+
+30. **BPM-lock test** — if any Video layer has BPM-lock on, tap a tempo
+    in the top chrome and confirm the layer's playback rate scales with
+    it. 120 BPM = identity; halving the BPM should halve the rate. If
+    the rate doesn't change, the `pending_video_controls` channel may
+    be dropping `SetSpeed` messages — restart the layer.
+
+31. **Loop-mode glyph audit** — the left-rail Video row shows a glyph
+    (∞ / → / ⇆) overlaid on the thumbnail. Confirm each video layer's
+    glyph matches the operator's intent — `→` (Once) is a common
+    surprise on show night because the playhead pauses on the last
+    frame after the clip.
+
 ## Frame-budget perf gate (P0.9.5)
 
 ### How to run
