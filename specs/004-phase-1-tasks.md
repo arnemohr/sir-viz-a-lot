@@ -118,9 +118,9 @@ workstreams ship)*
 
 | WS | Theme | Tasks | Parallel-safe? | Touches |
 |----|-------|-------|----------------|---------|
-| 1 | Setup + housekeeping | 3 | All three parallel-safe; ship before W3/W4 hit their preset UIs | `src/image_layer.rs`, `src/app.rs` (drop dispatch), `src/windows/glossary.rs` |
+| 1 | Setup + housekeeping | 4 | All four parallel-safe; ship before W3/W4 hit their preset UIs | `src/image_layer.rs`, `src/app.rs` (drop dispatch), `src/windows/glossary.rs`, `src/project/audit.rs` |
 | 2 | Treatment pipeline foundation | 4 | W2.1 first; W2.2 + W2.3 + W2.4 serial after | `src/project/schema.rs`, `src/project/command.rs`, new `src/render/treatments.rs`, `src/windows/advanced.rs`, `src/windows/scene_editor.rs` |
-| 3 | Treatment presets | 4 | All four parallel after W2.2 lands | new `src/render/shaders/treat_*.wgsl`, `src/render/treatments.rs` |
+| 3 | Treatment presets | 6 | All six parallel after W2.2 lands | new `src/render/shaders/treat_*.wgsl`, `src/render/treatments.rs` |
 | 4 | Video operator surface | 6 | W4.0 first (tiny); W4.1 + W4.2 next; W4.3 / W4.4 / W4.5 parallel after | `src/project/schema.rs`, `src/video_layer/worker.rs`, `src/windows/advanced.rs`, `src/windows/layer_strip.rs`, `src/app.rs` (layer spawn) |
 | 5 | Left rail row anatomy | 1 | Depends on W4.1 + W4.2 | `src/windows/layer_strip.rs` |
 | 6 | Diagnostics | 1 | Independent | `src/windows/diagnostics_strip.rs` (or wherever the badge lives), `src/render/texture_upload.rs` |
@@ -128,15 +128,16 @@ workstreams ship)*
 
 **Suggested order for sequencing PRs:**
 
-1. **W1.1 + W1.2 + W1.3 + W4.0** in parallel — small ergonomics +
-   glossary + the video auto-play tweak. None block anything heavier.
+1. **W1.1 + W1.2 + W1.3 + W1.4 + W4.0** in parallel — ergonomics +
+   glossary + defensive preprocessing + video auto-play tweak.
+   None block anything heavier.
 2. **W6.1** — close the P0.3.2 deferred drop-count aggregation. Tiny.
 3. **W2.1** (schema + Mutation) — unblocks W2.2 + every W3 preset +
    W2.4 focal picker.
 4. **W2.2** (render integration) + **W4.1** (in/out points) +
    **W4.2** (loop modes) in parallel — separate code paths.
 5. **W2.3** (Selected-layer UI scaffold) once W2.2 ships; then
-   **W3.1 → W3.4** in parallel (each preset is a leaf).
+   **W3.1 → W3.6** in parallel (each preset is a leaf).
    **W2.4** (focal picker) parallels W2.3.
 6. **W4.3 / W4.4 / W4.5** parallel after W4.1/W4.2.
 7. **W5.1** once W4.1 + W4.2 + W4.5 ship (the row needs the
@@ -329,6 +330,82 @@ the FX library).
 
 ---
 
+### P1.1.4 — Safe image preprocessing (EXIF + memory bounds)
+
+**Source:** `004-phase-1.md` Capability set ("Safe image
+preprocessing: crop modes, fit/fill, focal-point selection, tone
+mapping, cache-friendly texture upload").
+**Type:** engine (defensive)
+**Depends on:** P1.1.1 (handles the new formats this also defends).
+**Files:** `src/image_layer.rs` (`upload_image_rgba8`),
+`src/project/audit.rs`.
+
+**What:** the "Safe" qualifier in the spec's capability list resolves
+to two concrete defences for v0.5:
+
+1. **EXIF orientation handling.** JPEGs from phones carry an EXIF
+   `Orientation` tag (1..8). Today's `upload_image_rgba8` ignores it,
+   so portraits shot vertically come out sideways. The `image` crate
+   exposes EXIF metadata via `ImageReader::with_guessed_format()` →
+   `decode_with_orientation()` (or similar — verify exact API at
+   task time). Apply the rotation as part of the upload path so the
+   GPU texture is already correctly oriented; no per-frame
+   transform needed.
+2. **Memory bounds.** A 12K × 8K image (96 MP) uploads to ~384 MB
+   of GPU memory at RGBA8 — enough to push the renderer into
+   swap on integrated GPUs. Add a hard cap (e.g. `MAX_IMAGE_DIM =
+   4096` per side) above which the loader downscales (lanczos /
+   bilinear via the `image` crate) to fit, and emits a `tracing::warn`
+   plus a `MissingAsset`-shape audit warning so the operator sees
+   "image downscaled from 12000×8000 to 4096×2730 to fit GPU
+   budget".
+
+**Scope deliberately excludes:** ICC / colour-profile normalisation
+(deferred to Phase 7 — needs a colour-management library + careful
+display-profile detection); defensive decode for malformed files
+(today's `image` crate already returns `Result` — the existing
+warn-and-skip path covers this).
+
+**Steps:**
+1. Survey `image` crate's EXIF surface — confirm the API and the
+   pixel-orientation guarantee post-decode.
+2. Apply EXIF rotation inside `upload_image_rgba8` BEFORE the
+   `wgpu::Queue::write_texture` call. The GPU texture's `(width,
+   height)` reflects the post-rotation dimensions.
+3. Add `const MAX_IMAGE_DIM: u32 = 4096` (or whichever the operator
+   target hardware budget permits — measure on the M-series baseline
+   from P0.9.5; document the choice).
+4. If `width > MAX_IMAGE_DIM || height > MAX_IMAGE_DIM`, downscale
+   preserving aspect via `image::imageops::resize`.
+5. Audit: emit a new `AuditKind::ImageDownscaled { layer_idx,
+   original_dims, scaled_dims }` finding for any layer whose source
+   image was downscaled. Severity `Info` (operator may want to
+   re-encode the source to a smaller resolution upstream).
+6. Toast on layer-load when a downscale happens, so the operator
+   sees the warning live (in addition to the audit on next reload).
+
+**Tests:**
+- Unit test: a fixture JPEG with EXIF orientation=6 (90° rotated)
+  decodes to a correctly-oriented buffer.
+- Unit test: a synthesised 8K × 4K image downscales to fit the
+  cap; the resulting `(width, height)` is bounded.
+- Unit test: the new audit finding emits with the right shape.
+- Manual smoke: drop a phone-portrait JPEG; confirm it lands
+  upright on the canvas.
+
+**Acceptance:**
+- [ ] EXIF orientation respected by `upload_image_rgba8`.
+- [ ] Images above the dim cap downscale with a warning toast +
+      audit finding.
+- [ ] No regression on already-small / already-portrait-rotated
+      images (no double rotation).
+
+**Out of scope:** ICC profile normalisation (Phase 7); HEIC / AVIF
+decode (Phase 7); animated GIF (Phase 1 keeps first-frame only —
+see P1.1.1).
+
+---
+
 ## Workstream 2 — Treatment pipeline foundation
 
 The architectural workstream. Decides the data model + render
@@ -359,6 +436,12 @@ pub struct Treatment {
     /// `None` for presets that don't read it.
     #[serde(default)]
     pub overlay_path: Option<std::path::PathBuf>,
+    /// Image paths for presets that compose multiple sources (today:
+    /// the `collage` preset; P1.3.6). Capped at 4 entries in v0.5
+    /// (matches the 1×2 / 2×1 / 2×2 layouts the collage shader
+    /// supports). Empty for presets that don't read it.
+    #[serde(default)]
+    pub collage_paths: Vec<std::path::PathBuf>,
 }
 ```
 
@@ -377,8 +460,8 @@ to `Vec<Treatment>` is a non-breaking serde change.
 1. Read `src/project/CLAUDE.md` — rule 1 (whole-enum Reverse) +
    rule 2 (effects-vec Reverse) shape your Mutation design.
 2. Add the `Treatment` struct (`preset_id` + `params` +
-   `overlay_path`) + the `treatment: Option<Treatment>` field on
-   `LayerConfig`.
+   `overlay_path` + `collage_paths`) + the `treatment:
+   Option<Treatment>` field on `LayerConfig`.
 3. Mutation: `SetLayerTreatment { layer_idx: usize, new:
    Option<Treatment>, old: Option<Treatment> }` with snapshot Reverse
    (whole-`Option` replacement — same shape as `SetEdgeBlend`).
@@ -412,10 +495,12 @@ to `Vec<Treatment>` is a non-breaking serde change.
 
 **Acceptance:**
 - [ ] `LayerConfig.treatment: Option<Treatment>` exists with
-      `preset_id`, `params`, and `overlay_path` fields.
+      `preset_id`, `params`, `overlay_path`, and `collage_paths`
+      fields.
 - [ ] Both Mutations implement `ReverseStorage` and pass proptest.
 - [ ] Unknown preset surfaces audit warning.
-- [ ] Missing overlay file surfaces `MissingAsset` audit warning.
+- [ ] Missing overlay file (and each missing collage entry by index)
+      surfaces a `MissingAsset` audit warning.
 - [ ] No schema version bump (verified by existing v7-load tests).
 - [ ] `make ci` clean.
 
@@ -778,6 +863,133 @@ f32` (0..=1; lerp between greyscale and full-colour multiply).
 
 **Out of scope:** procedural overlays (Phase 2 FX); animated overlays
 (out of scope until Phase 4 scene grammars).
+
+---
+
+### P1.3.5 — `palette_extract` preset
+
+**Source:** `004-phase-1.md` Capability set ("palette extraction").
+**Type:** shader + render + content + CPU preprocessing
+**Depends on:** P1.2.2.
+**Files:** new `src/render/shaders/treat_palette_extract.wgsl`,
+`src/render/treatments.rs`, possibly a small CPU extraction helper
+in `src/image_layer.rs`.
+
+**What:** posterise the source image down to N derived colours. CPU
+extracts a palette of K colours from the source image (median-cut
+algorithm — well-known, deterministic, ~10 ms for a 1080p input);
+result is stored as a 1×K LUT texture. Shader samples the LUT,
+maps each source pixel to its nearest palette colour. Three params:
+`palette_size: f32` (treated as `u8 = max(2, value as u8)`, range
+2..=16), `dither: f32` (0..=1, ordered-dither blend for soft
+transitions), `vibrance: f32` (0..=2, exaggerates saturation of the
+extracted palette).
+
+**Video caveat.** Per-frame palette extraction is expensive
+(~10 ms × 60 fps = 600 ms/s wasted). v0.5 uses the **first
+decoded frame** as the palette source and reuses it for the rest
+of the clip; document this in the commit body. Phase 4 may extend
+to per-scene-boundary palette refresh once scene grammars expose
+the trigger.
+
+**Steps:**
+1. CPU helper: `extract_palette_median_cut(pixels: &[u8], width:
+   u32, height: u32, k: u8) -> Vec<[u8; 4]>`. Document the
+   median-cut algorithm in a header comment.
+2. LUT upload: build a 1×K `wgpu::Texture` (`Rgba8UnormSrgb`),
+   pack the extracted palette colours into rows.
+3. WGSL: per-fragment, compute distance from source pixel to each
+   palette entry (loop K times — K ≤ 16, cheap), pick the nearest.
+   Apply ordered-dither (Bayer matrix at fragment_pos) for soft
+   transitions when `dither > 0`.
+4. Image path: palette extracted once at layer-load (cached
+   alongside the texture in the P1.1.2 image cache).
+5. Video path: worker pushes the first decoded frame's pixel
+   buffer onto a one-shot "palette probe" channel that the render
+   thread drains, runs `extract_palette_median_cut`, and stores
+   the LUT in the layer's state. Subsequent frames reuse this LUT.
+6. The "first-frame palette" approach is the v0.5 simplification.
+   Document the limitation; a future task can wire periodic
+   refresh.
+
+**Tests:**
+- Unit test: `extract_palette_median_cut` produces K colours that
+  span the input's chromatic range (sanity test against a synthetic
+  3-colour input).
+- Unit test: defaults (`palette_size = 8, dither = 0.0, vibrance =
+  1.0`) round-trip through the `for_palette_extract(...)` builder.
+- Golden test: a fixture image with K=4 produces the documented
+  posterised output.
+
+**Acceptance:**
+- [ ] CPU palette extraction works for stills + first-frame video.
+- [ ] WGSL palette LUT sampling produces expected posterisation.
+- [ ] Dither parameter smooths transitions without colour shift.
+- [ ] Reachable from P1.2.3.
+
+**Out of scope:** per-scene palette refresh (Phase 4); animated
+palette transitions (Phase 4); palette EDIT (operator overrides
+extracted colours) — Phase 7 colour-grading work.
+
+---
+
+### P1.3.6 — `collage` preset
+
+**Source:** `004-phase-1.md` Capability set ("collage placement").
+**Type:** shader + render + content + schema
+**Depends on:** P1.2.2; consumes `Treatment.collage_paths` (added
+to the foundation in P1.2.1 — see below).
+**Files:** new `src/render/shaders/treat_collage.wgsl`,
+`src/render/treatments.rs`.
+
+**What:** composite multiple images onto a single layer in a grid
+layout. The layer's source texture acts as the "base canvas";
+collage images tile/grid on top. v0.5 caps at 4 images (a 2×2 grid).
+Phase 4 generalises to operator-authored layouts. Three HashMap
+params: `rows: f32` (treated as u8 in [1, 2]), `cols: f32` (u8 in
+[1, 2]), `spacing: f32` (0..=0.1, normalised gap between cells).
+Image paths live in a new `Treatment.collage_paths: Vec<PathBuf>`
+(empty by default).
+
+**Schema dependency.** P1.2.1 lands `Treatment.collage_paths:
+Vec<PathBuf>` alongside `overlay_path` (both are non-`f32` fields
+that the HashMap can't carry). Update P1.2.1's struct definition
+accordingly; this task only consumes the field.
+
+**Steps:**
+1. WGSL: discard the source texture (this preset writes a fresh
+   composition over it). For each fragment, compute (row, col) from
+   `(uv * vec2(rows, cols))`; sample the matching image from the
+   collage-paths array using `textureLoad` on the bound array
+   texture. Apply `spacing` as a gap-mask between cells (background
+   shows through).
+2. Bind group: a `texture_2d_array<f32>` carrying up to 4 collage
+   images (each uploaded via the P1.1.2 cache). The array's
+   layer count is the actual `collage_paths.len()`, capped at 4.
+3. UI: P1.2.3's slider grid grows a "Pick collage images…" button
+   that opens `rfd::FileDialog::pick_files()` (multi-select) when
+   the active preset is `collage`. Picked files populate
+   `collage_paths`; dispatches `SetLayerTreatment`.
+4. Missing-file audit: each entry in `collage_paths` is checked;
+   missing files surface as `MissingAsset` findings with the index.
+
+**Tests:**
+- Unit test: a `Treatment` with `collage_paths.len() == 0` is a
+  no-op (skip pipeline; render source unchanged).
+- Unit test: a `Treatment` with `collage_paths.len() == 4` and a
+  2×2 grid configures the texture array correctly.
+- Golden test: a fixture 4-image collage matches a baseline.
+
+**Acceptance:**
+- [ ] WGSL parses + validates.
+- [ ] Up to 4 images compose in a 1×2 / 2×1 / 2×2 grid.
+- [ ] Spacing parameter creates visible gaps.
+- [ ] Missing collage images surface audit warnings.
+- [ ] Reachable from P1.2.3 with multi-file picker.
+
+**Out of scope:** more than 4 images (Phase 4 — needs richer layout
+authoring); arbitrary grid shapes (Phase 4 scene grammars);
+per-image rotation / scale (Phase 4).
 
 ---
 
@@ -1369,12 +1581,13 @@ testing (operator's pre-tag work).
 ## Cross-workstream notes
 
 - **Schema bumps.** Phase 1 adds non-bumping fields only.
-  `Treatment` (W2.1, including `overlay_path`),
+  `Treatment` (W2.1, including `overlay_path` and `collage_paths`),
   `LayerKind::Video.focal` (W2.4 for parity with `Image.focal`),
   `clip_in` / `clip_out` (W4.1), `loop_mode` (W4.2 — replaces
   `loop_seamless` via a custom deserializer that accepts both
-  shapes), `bpm_lock` (W4.4) all land on the existing v7 schema
-  with `#[serde(default)]` fallbacks. **No v7 → v8 bump.**
+  shapes), `bpm_lock` (W4.4), `AuditKind::ImageDownscaled` (W1.4)
+  all land on the existing v7 schema with `#[serde(default)]`
+  fallbacks. **No v7 → v8 bump.**
 - **Cargo features.** No new features in Phase 1. `video` stays
   default-on. The treatment pipeline is unconditional (the four
   shipped presets are pure WGSL + Rust; no system deps).
@@ -1395,30 +1608,24 @@ testing (operator's pre-tag work).
   (P1.2.3, P1.2.4, P1.3.x, P1.4.x, P1.5.1) attach
   `glossary_label(...)` calls to the UI surfaces they introduce.
 - **Preset registry expansion.** W3 grows the treatments registry
-  from zero (no treatment presets in v0.4) to four. The registry's
-  `(preset_id, display_label, param_descriptors)` shape is locked
-  in P1.2.2; W3 tasks just add rows.
+  from zero (no treatment presets in v0.4) to six (`tone_map`,
+  `blur_mask`, `luminance_reveal`, `texture_overlay`,
+  `palette_extract`, `collage`). The registry's `(preset_id,
+  display_label, param_descriptors)` shape is locked in P1.2.2;
+  W3 tasks just add rows.
 - **Worker contract.** W4 extends `VideoControl` with `SetClipRange`,
   `SetLoopMode`, `SetBpmLock`, `SeekTo`. P1.4.0 may also formalise
   the default-state-is-Playing semantics. The worker state machine
   grows correspondingly; document the new states in
   `src/video_layer/worker.rs`'s header comment.
-- **Open question — palette extraction + collage placement.** The
-  Phase 1 spec's treatment-pipeline stanza names five families:
-  blur masks, luminance-driven reveals, palette extraction, collage
-  placement, texture overlays. W3 ships four (omits palette +
-  collage). **Neither is explicitly homed in a later phase.** Phase
-  4's `collage bloom` is a scene *template* (combination), and Phase
-  4's `palette → mood` wizard step is about authorial scene
-  palettes, not palette-extraction-from-image. Two resolutions:
-  - **(a)** Add `P1.3.5` + `P1.3.6` to W3 and ship them this phase.
-  - **(b)** Re-home them: palette extraction → Phase 2 alongside
-    the FX library (content-derived params are an FX concern);
-    collage placement → Phase 4 alongside scene grammars.
-    Update `specs/004-phase-1.md`'s capability list to remove
-    them; add the matching entries to phase-2 / phase-4 docs.
-
-  Resolution is a separate decision before W3 starts.
+- **All five spec treatment families ship in Phase 1.** P1.3.5
+  (`palette_extract`) and P1.3.6 (`collage`) close the gap between
+  W3's initial four-preset draft and the Phase 1 spec's promised
+  five families (blur masks ✓, luminance-driven reveals ✓, palette
+  extraction ✓, collage placement ✓, texture overlays ✓). Palette
+  extraction uses first-frame-of-video as the palette source —
+  per-scene-boundary refresh is Phase 4 work. Collage caps at 4
+  images in a 2×2 grid; richer composition is Phase 4.
 - **Acceptance gate for shipping v0.5.0.** Every workstream
   acceptance box checked + P1.7.4 perf gate green + 10-minute soak
   under `make build-show` (P1.7.1) + show-day checklist walkthrough
