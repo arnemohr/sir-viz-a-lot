@@ -43,6 +43,9 @@ pub const IDENTITY_PRESET_ID: &str = "identity";
 /// `tone_map` preset id (P1.3.1).
 pub const TONE_MAP_PRESET_ID: &str = "tone_map";
 
+/// `luminance_reveal` preset id (P1.3.3).
+pub const LUMINANCE_REVEAL_PRESET_ID: &str = "luminance_reveal";
+
 /// Inputs threaded into every preset's `render` call. The struct grows over
 /// time (W3 adds `overlay` and `collage`); existing presets ignore fields
 /// they don't read.
@@ -104,6 +107,7 @@ pub fn registry() -> &'static [(&'static str, &'static str)] {
     &[
         (IDENTITY_PRESET_ID, "Identity (no-op)"),
         (TONE_MAP_PRESET_ID, "Tone map"),
+        (LUMINANCE_REVEAL_PRESET_ID, "Luminance reveal"),
     ]
 }
 
@@ -121,6 +125,7 @@ pub fn param_descriptors(preset_id: &str) -> &'static [ParamDescriptor] {
     match preset_id {
         IDENTITY_PRESET_ID => &[],
         TONE_MAP_PRESET_ID => TONE_MAP_DESCRIPTORS,
+        LUMINANCE_REVEAL_PRESET_ID => LUMINANCE_REVEAL_DESCRIPTORS,
         _ => &[],
     }
 }
@@ -154,12 +159,40 @@ const TONE_MAP_DESCRIPTORS: &[ParamDescriptor] = &[
     },
 ];
 
+/// Static descriptors for the `luminance_reveal` preset (P1.3.3).
+/// Defaults: 50 % threshold, gentle softness band, non-inverted.
+#[allow(dead_code)] // referenced only through `param_descriptors` (v3 UI)
+const LUMINANCE_REVEAL_DESCRIPTORS: &[ParamDescriptor] = &[
+    ParamDescriptor {
+        key: "threshold",
+        label: "Threshold",
+        min: 0.0,
+        max: 1.0,
+        default: 0.5,
+    },
+    ParamDescriptor {
+        key: "softness",
+        label: "Softness",
+        min: 0.0,
+        max: 0.5,
+        default: 0.1,
+    },
+    ParamDescriptor {
+        key: "invert",
+        label: "Invert (0/1)",
+        min: 0.0,
+        max: 1.0,
+        default: 0.0,
+    },
+];
+
 /// Per-preset render pipelines. One field per preset; dispatch is a `match`
 /// on `preset_id`. Mirrors the `FxPresetPipeline` shape so adding a preset
 /// is "add a field + add a match arm" with no trait-object dispatch.
 pub struct TreatmentPipeline {
     identity: IdentityTreatmentPipeline,
     tone_map: ToneMapTreatmentPipeline,
+    luminance_reveal: LuminanceRevealTreatmentPipeline,
 }
 
 impl TreatmentPipeline {
@@ -169,6 +202,7 @@ impl TreatmentPipeline {
         Self {
             identity: IdentityTreatmentPipeline::new(device, target_format),
             tone_map: ToneMapTreatmentPipeline::new(device, target_format),
+            luminance_reveal: LuminanceRevealTreatmentPipeline::new(device, target_format),
         }
     }
 
@@ -194,6 +228,11 @@ impl TreatmentPipeline {
             }
             TONE_MAP_PRESET_ID => {
                 self.tone_map.render(device, queue, encoder, dst, inputs);
+                true
+            }
+            LUMINANCE_REVEAL_PRESET_ID => {
+                self.luminance_reveal
+                    .render(device, queue, encoder, dst, inputs);
                 true
             }
             _ => false,
@@ -553,6 +592,252 @@ impl ToneMapTreatmentPipeline {
     }
 }
 
+/// Luminance-reveal treatment pipeline (P1.3.3). Threshold + softness +
+/// invert against Rec. 601 luma; RGB passes through with premultiplied
+/// alpha modulation. Pipeline shape mirrors `ToneMapTreatmentPipeline`
+/// exactly — the only difference is the shader source — so adding W3's
+/// remaining single-pass presets follows this same template.
+struct LuminanceRevealTreatmentPipeline {
+    pipeline: wgpu::RenderPipeline,
+    bind_group_layout: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
+    params_buf: wgpu::Buffer,
+}
+
+impl LuminanceRevealTreatmentPipeline {
+    fn new(device: &wgpu::Device, target_format: wgpu::TextureFormat) -> Self {
+        let (pipeline, bind_group_layout, sampler, params_buf) = build_single_pass_treatment(
+            device,
+            target_format,
+            "treat_luminance_reveal.wgsl",
+            include_str!("shaders/treat_luminance_reveal.wgsl"),
+        );
+        Self {
+            pipeline,
+            bind_group_layout,
+            sampler,
+            params_buf,
+        }
+    }
+
+    fn render(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        dst: &wgpu::TextureView,
+        inputs: &TreatmentInputs<'_>,
+    ) {
+        let threshold = inputs.params.get("threshold").copied().unwrap_or(0.5);
+        let softness = inputs.params.get("softness").copied().unwrap_or(0.1);
+        let invert = inputs.params.get("invert").copied().unwrap_or(0.0);
+
+        let mut bytes = [0u8; 16];
+        bytes[0..4].copy_from_slice(&threshold.to_le_bytes());
+        bytes[4..8].copy_from_slice(&softness.to_le_bytes());
+        bytes[8..12].copy_from_slice(&invert.to_le_bytes());
+        queue.write_buffer(&self.params_buf, 0, &bytes);
+
+        draw_single_pass_treatment(
+            device,
+            encoder,
+            dst,
+            inputs,
+            &self.pipeline,
+            &self.bind_group_layout,
+            &self.sampler,
+            &self.params_buf,
+            "treatment luminance_reveal",
+        );
+    }
+}
+
+/// Build a single-pass treatment pipeline (one render pipeline, fit
+/// uniform at binding 2, params uniform at binding 3, ALPHA_BLENDING).
+/// Used by every W3 preset that's a simple sample → transform → emit
+/// fullscreen pass — tone_map, luminance_reveal, and the equivalent
+/// shape preset that follows. Heavier presets (blur_mask is two-pass,
+/// collage takes multiple inputs) will get their own constructors.
+#[allow(clippy::type_complexity)]
+fn build_single_pass_treatment(
+    device: &wgpu::Device,
+    target_format: wgpu::TextureFormat,
+    shader_label: &'static str,
+    shader_src: &'static str,
+) -> (
+    wgpu::RenderPipeline,
+    wgpu::BindGroupLayout,
+    wgpu::Sampler,
+    wgpu::Buffer,
+) {
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some(shader_label),
+        source: wgpu::ShaderSource::Wgsl(shader_src.into()),
+    });
+
+    let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some(shader_label),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    multisampled: false,
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: std::num::NonZeroU64::new(16),
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 3,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: std::num::NonZeroU64::new(16),
+                },
+                count: None,
+            },
+        ],
+    });
+
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some(shader_label),
+        bind_group_layouts: &[Some(&bind_group_layout)],
+        immediate_size: 0,
+    });
+
+    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some(shader_label),
+        layout: Some(&pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs_main"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            buffers: &[],
+        },
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            strip_index_format: None,
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: None,
+            unclipped_depth: false,
+            polygon_mode: wgpu::PolygonMode::Fill,
+            conservative: false,
+        },
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs_main"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: target_format,
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        multiview_mask: None,
+        cache: None,
+    });
+
+    let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some(shader_label),
+        address_mode_u: wgpu::AddressMode::ClampToEdge,
+        address_mode_v: wgpu::AddressMode::ClampToEdge,
+        address_mode_w: wgpu::AddressMode::ClampToEdge,
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+        ..Default::default()
+    });
+
+    let params_buf = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some(shader_label),
+        size: 16,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    (pipeline, bind_group_layout, sampler, params_buf)
+}
+
+/// Execute one single-pass treatment draw — fresh bind group per call,
+/// `LoadOp::Clear(TRANSPARENT)` into `dst`, full-screen triangle. Caller
+/// has already written the params buffer for this frame.
+#[allow(clippy::too_many_arguments)]
+fn draw_single_pass_treatment(
+    device: &wgpu::Device,
+    encoder: &mut wgpu::CommandEncoder,
+    dst: &wgpu::TextureView,
+    inputs: &TreatmentInputs<'_>,
+    pipeline: &wgpu::RenderPipeline,
+    bind_group_layout: &wgpu::BindGroupLayout,
+    sampler: &wgpu::Sampler,
+    params_buf: &wgpu::Buffer,
+    label: &'static str,
+) {
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some(label),
+        layout: bind_group_layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(inputs.source),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: inputs.fit_uniform.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: params_buf.as_entire_binding(),
+            },
+        ],
+    });
+
+    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some(label),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view: dst,
+            depth_slice: None,
+            resolve_target: None,
+            ops: wgpu::Operations {
+                load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                store: wgpu::StoreOp::Store,
+            },
+        })],
+        depth_stencil_attachment: None,
+        timestamp_writes: None,
+        occlusion_query_set: None,
+        multiview_mask: None,
+    });
+
+    pass.set_pipeline(pipeline);
+    pass.set_bind_group(0, &bind_group, &[]);
+    pass.draw(0..6, 0..1);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -584,6 +869,35 @@ mod tests {
         assert_eq!(by_key["shoulder"].default, 0.0, "shoulder identity = 0");
 
         // Min/max sanity: ranges are non-degenerate and bracket the default.
+        for d in descriptors {
+            assert!(d.min < d.max, "{}: min < max", d.key);
+            assert!(
+                d.default >= d.min && d.default <= d.max,
+                "{}: default in [min, max]",
+                d.key
+            );
+        }
+    }
+
+    /// Acceptance: the luminance_reveal preset is registered (P1.3.3).
+    #[test]
+    fn luminance_reveal_preset_is_registered() {
+        assert!(is_registered(LUMINANCE_REVEAL_PRESET_ID));
+    }
+
+    /// Acceptance: luminance_reveal exposes threshold + softness + invert
+    /// with sane defaults (50 % threshold, gentle softness, non-inverted).
+    #[test]
+    fn luminance_reveal_descriptor_defaults_are_sane() {
+        let descriptors = param_descriptors(LUMINANCE_REVEAL_PRESET_ID);
+        assert_eq!(descriptors.len(), 3, "luminance_reveal exposes 3 params");
+
+        let by_key: std::collections::HashMap<&str, &ParamDescriptor> =
+            descriptors.iter().map(|d| (d.key, d)).collect();
+        assert_eq!(by_key["threshold"].default, 0.5, "threshold default = 0.5");
+        assert_eq!(by_key["softness"].default, 0.1, "softness default = 0.1");
+        assert_eq!(by_key["invert"].default, 0.0, "invert default = 0.0 (off)");
+
         for d in descriptors {
             assert!(d.min < d.max, "{}: min < max", d.key);
             assert!(
