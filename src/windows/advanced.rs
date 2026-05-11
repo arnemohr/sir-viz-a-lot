@@ -105,22 +105,55 @@ pub fn show(
             ui.add_space(4.0);
 
             // ----------------------------------------------------------------
-            // 1b. Display output (T3.28) — per-projector gamma/brightness/
-            //     contrast overrides. Sliders are only enabled when the
-            //     "Override" checkbox is on; clearing the checkbox writes
-            //     `None` and the projector inherits master.
+            // 1b. Display output / Output panel — branch on projector count.
+            //
+            // P0.8.1: with ≥2 output targets, the "Display output" section
+            // (project-level overrides + primary-output RGB matrix) is
+            // replaced by the OutputPanel, which hosts per-output sub-cards
+            // (edge-blend, RGB matrix per output). The project-level override
+            // sliders are intentionally not rendered in the ≥2 case: the
+            // operator's mental model switches to "per-output controls", and
+            // the schema doesn't yet carry per-output gamma/brightness/contrast
+            // — rendering the project-level sliders here would be confusing.
+            // A written TODO in `output_panel::show_display_overrides` covers
+            // the schema gap for Phase 7.
+            //
+            // With exactly 1 output target, the pre-existing "Display output"
+            // CollapsingHeader renders unchanged (edge_blend only makes sense
+            // with ≥2 outputs, so the edge-blend section is absent here).
+            //
+            // 0 output targets should not happen (schema invariant), but we
+            // defensively render nothing rather than panic or log.
             // ----------------------------------------------------------------
-            egui::CollapsingHeader::new("Display output")
-                .id_salt(HDR_DISPLAY_OUTPUT)
-                .default_open(false)
-                .show(ui, |ui| {
-                    glossary_label(ui, GlossaryTerm::DisplayOverride);
-                    ui.label(
-                        "Override the master tone for the projector only. The \
-                         control-window preview always shows the pre-gamma image.",
-                    );
-                    show_display_overrides(ui, project, st);
-                });
+            match project.output_targets.len() {
+                0 => {
+                    // Schema invariant violated — skip both surfaces silently.
+                }
+                1 => {
+                    // Single projector: existing "Display output" unchanged.
+                    egui::CollapsingHeader::new("Display output")
+                        .id_salt(HDR_DISPLAY_OUTPUT)
+                        .default_open(false)
+                        .show(ui, |ui| {
+                            glossary_label(ui, GlossaryTerm::DisplayOverride);
+                            ui.label(
+                                "Override the master tone for the projector only. The \
+                                 control-window preview always shows the pre-gamma image.",
+                            );
+                            show_display_overrides(ui, project, st);
+                        });
+                }
+                _ => {
+                    // ≥2 projectors: output panel replaces the single-output
+                    // "Display output" CollapsingHeader entirely.
+                    egui::CollapsingHeader::new("Output panel")
+                        .id_salt("adv_output_panel")
+                        .default_open(false)
+                        .show(ui, |ui| {
+                            crate::windows::output_panel::show(ui, project, st, monitor_names);
+                        });
+                }
+            }
 
             ui.add_space(4.0);
 
@@ -533,23 +566,39 @@ fn show_display_overrides(ui: &mut Ui, project: &mut Project, st: &mut ControlPa
     }
 
     // P0.8.3 — per-projector RGB matrix calibration (3×3 grid).
+    // `output_idx: 0` targets the primary output; the multi-output path
+    // in `output_panel` passes the per-sub-card index instead.
     ui.add_space(8.0);
     ui.separator();
     ui.add_space(4.0);
-    show_rgb_matrix_editor(ui, project, st);
+    show_rgb_matrix_editor(ui, project, st, 0);
 }
 
 /// 3×3 RGB matrix editor with per-cell spinners + reset-to-identity.
+///
+/// Parameterised on `output_idx` so it can serve both the single-output
+/// surface (index 0, via `show_display_overrides`) and the per-output
+/// sub-cards in `output_panel` (index `i`).
+///
 /// Edits dispatch a `SetOutputRgbMatrix` mutation per change so undo
 /// rolls back bit-exact. The card title shows a small dot when the
 /// matrix is non-identity so the operator can see at a glance that
 /// per-projector colour calibration is active.
-fn show_rgb_matrix_editor(ui: &mut Ui, project: &mut Project, st: &mut ControlPanelState) {
-    use crate::project::command::{Mutation, SetOutputRgbMatrix};
+pub(crate) fn show_rgb_matrix_editor(
+    ui: &mut Ui,
+    project: &mut Project,
+    st: &mut ControlPanelState,
+    output_idx: usize,
+) {
     use crate::project::schema::rgb_matrix_identity;
 
     let identity = rgb_matrix_identity();
-    let is_identity = project.primary_output_target().rgb_matrix == identity;
+    let current_matrix = project
+        .output_targets
+        .get(output_idx)
+        .map(|t| t.rgb_matrix)
+        .unwrap_or(identity);
+    let is_identity = current_matrix == identity;
 
     ui.horizontal(|ui| {
         glossary_label(ui, GlossaryTerm::RgbMatrix);
@@ -558,11 +607,11 @@ fn show_rgb_matrix_editor(ui: &mut Ui, project: &mut Project, st: &mut ControlPa
         }
     });
 
-    let mut new_matrix = project.primary_output_target().rgb_matrix;
+    let mut new_matrix = current_matrix;
     let mut changed = false;
     let row_labels = ["R out", "G out", "B out"];
     let col_labels = ["·R", "·G", "·B"];
-    egui::Grid::new("rmap_rgb_matrix_grid")
+    egui::Grid::new(format!("rmap_rgb_matrix_grid_{output_idx}"))
         .num_columns(4)
         .spacing([6.0, 4.0])
         .show(ui, |ui| {
@@ -591,22 +640,16 @@ fn show_rgb_matrix_editor(ui: &mut Ui, project: &mut Project, st: &mut ControlPa
             }
         });
 
-    if changed && new_matrix != project.primary_output_target().rgb_matrix {
+    if changed && new_matrix != current_matrix {
         st.pending_mutations
-            .push(Mutation::SetOutputRgbMatrix(SetOutputRgbMatrix {
-                new: new_matrix,
-                old: project.primary_output_target().rgb_matrix,
-            }));
+            .push(project.set_output_rgb_matrix_mutation(output_idx, new_matrix));
     }
 
     ui.horizontal(|ui| {
         let reset = ui.add_enabled(!is_identity, egui::Button::new("Reset to identity"));
         if reset.clicked() {
             st.pending_mutations
-                .push(Mutation::SetOutputRgbMatrix(SetOutputRgbMatrix {
-                    new: identity,
-                    old: project.primary_output_target().rgb_matrix,
-                }));
+                .push(project.set_output_rgb_matrix_mutation(output_idx, identity));
         }
         ui.add_enabled(false, egui::Button::new("Calibrate…"))
             .on_disabled_hover_text(

@@ -1068,28 +1068,40 @@ impl ReverseStorage for SetLayerWarpCorner {
 
 /// Payload for [`Mutation::SetOutputRgbMatrix`].
 ///
-/// P0.8.2 — wholesale replace `Project.output_target.rgb_matrix`.
-/// Per-cell edits flow through this single Mutation as
-/// whole-matrix replacements: simpler and matches the project's
-/// per-OutputTarget granularity (the W7.1 `Vec<OutputTarget>`
-/// rename will extend this with `output_index: usize`).
+/// P0.8.1 — extends the original P0.8.2 stub with `output_idx: usize`,
+/// per the forward-looking comment added at P0.8.2 time: "the W7.1
+/// `Vec<OutputTarget>` rename will extend this with `output_index: usize`."
+/// Per-cell edits flow through this single Mutation as whole-matrix
+/// replacements: simpler and matches the per-OutputTarget granularity.
 #[derive(Debug, Clone)]
 pub struct SetOutputRgbMatrix {
+    /// Index into `Project.output_targets`. Panics on out-of-range in
+    /// `apply` so misconfigured call sites surface immediately.
+    pub output_idx: usize,
     /// 3×3 matrix to install. Row-major: row 0 maps RGB → R, etc.
     pub new: [[f32; 3]; 3],
-    /// Pre-mutation matrix; `apply` `debug_assert!`s this matches.
+    /// Pre-mutation matrix; `apply` `debug_assert_eq!`s this matches.
     pub old: [[f32; 3]; 3],
 }
 
 impl ReverseStorage for SetOutputRgbMatrix {
     fn apply(self, project: &mut Project) -> Self {
+        let live = project
+            .output_targets
+            .get(self.output_idx)
+            .expect("SetOutputRgbMatrix: output_idx out of range")
+            .rgb_matrix;
         debug_assert_eq!(
-            project.primary_output_target().rgb_matrix,
-            self.old,
+            live, self.old,
             "SetOutputRgbMatrix stale Reverse: live matrix != self.old",
         );
-        project.primary_output_target_mut().rgb_matrix = self.new;
+        project
+            .output_targets
+            .get_mut(self.output_idx)
+            .expect("SetOutputRgbMatrix: output_idx out of range")
+            .rgb_matrix = self.new;
         SetOutputRgbMatrix {
+            output_idx: self.output_idx,
             new: self.old,
             old: self.new,
         }
@@ -1610,6 +1622,22 @@ impl Project {
         Mutation::SetEdgeBlend(SetEdgeBlend {
             new,
             old: self.edge_blend,
+        })
+    }
+
+    /// P0.8.1 — build a `SetOutputRgbMatrix` mutation for the given output
+    /// index. Captures the current matrix as `old`. Panics if `output_idx`
+    /// is out of range — callers must guard first.
+    pub fn set_output_rgb_matrix_mutation(
+        &self,
+        output_idx: usize,
+        new: [[f32; 3]; 3],
+    ) -> Mutation {
+        let old = self.output_targets[output_idx].rgb_matrix;
+        Mutation::SetOutputRgbMatrix(SetOutputRgbMatrix {
+            output_idx,
+            new,
+            old,
         })
     }
 
@@ -2164,9 +2192,9 @@ mod tests {
         );
     }
 
-    /// P0.8.2 — `SetOutputRgbMatrix` round-trips a non-identity
-    /// matrix bit-exact through apply + reverse. Confirms the
-    /// whole-matrix Reverse rule + the exact-match
+    /// P0.8.1 — `SetOutputRgbMatrix` round-trips a non-identity
+    /// matrix bit-exact through apply + reverse for output_idx 0.
+    /// Confirms the whole-matrix Reverse rule + the exact-match
     /// `debug_assert_eq!` in `apply`.
     #[test]
     fn set_output_rgb_matrix_round_trips() {
@@ -2178,11 +2206,12 @@ mod tests {
         let before = serde_json::to_value(&p).unwrap();
 
         let mutation = Mutation::SetOutputRgbMatrix(SetOutputRgbMatrix {
+            output_idx: 0,
             new: new_matrix,
             old: identity,
         });
         let reverse = mutation.apply(&mut p);
-        assert_eq!(p.primary_output_target().rgb_matrix, new_matrix);
+        assert_eq!(p.output_targets[0].rgb_matrix, new_matrix);
 
         let _ = reverse.apply(&mut p);
         let after = serde_json::to_value(&p).unwrap();
@@ -2190,6 +2219,48 @@ mod tests {
             before, after,
             "Reverse should restore the project byte-equal (whole-matrix Reverse)",
         );
+    }
+
+    /// P0.8.1 — `set_output_rgb_matrix_mutation(1, new)` on a project with
+    /// 2 targets applies to `output_targets[1]` only; `output_targets[0]`
+    /// is unchanged.
+    #[test]
+    fn set_output_rgb_matrix_per_output_round_trip() {
+        use crate::project::schema::OutputTarget;
+        let mut p = fresh_project();
+        // Ensure a second output target exists.
+        p.output_targets.push(OutputTarget::default());
+        assert_eq!(p.output_targets.len(), 2);
+
+        let identity = crate::project::schema::rgb_matrix_identity();
+        let new_matrix = [[0.8, 0.1, 0.1], [0.1, 0.8, 0.1], [0.1, 0.1, 0.8]];
+
+        let m = p.set_output_rgb_matrix_mutation(1, new_matrix);
+        let _reverse = m.apply(&mut p);
+
+        assert_eq!(
+            p.output_targets[1].rgb_matrix, new_matrix,
+            "output_targets[1].rgb_matrix should be updated",
+        );
+        assert_eq!(
+            p.output_targets[0].rgb_matrix, identity,
+            "output_targets[0].rgb_matrix must be unchanged",
+        );
+    }
+
+    /// P0.8.1 — applying `SetOutputRgbMatrix` with an out-of-range
+    /// `output_idx` must panic with a message containing "out of range".
+    #[test]
+    #[should_panic(expected = "out of range")]
+    fn set_output_rgb_matrix_out_of_range_panics() {
+        let mut p = fresh_project();
+        let identity = crate::project::schema::rgb_matrix_identity();
+        let m = Mutation::SetOutputRgbMatrix(SetOutputRgbMatrix {
+            output_idx: 99,
+            new: identity,
+            old: identity,
+        });
+        let _ = m.apply(&mut p);
     }
 
     /// V31.1.4 follow-up — `Mutation::ApplyProjectSnapshot` round-trips
@@ -2827,6 +2898,13 @@ mod tests {
             QuantizeBars(Option<u8>),
             /// P0.7.3 — set the edge-blend config (`None` = off, `Some(cfg)` = enabled).
             EdgeBlend(Option<(u32, bool)>),
+            /// P0.8.1 — set the RGB matrix for an output target. `output_idx_pick`
+            /// is taken mod `output_targets.len()` so the harness doesn't need to
+            /// know the project's target count; `matrix` is the new 3×3 value.
+            SetOutputRgbMatrix {
+                output_idx_pick: u8,
+                matrix: [[f32; 3]; 3],
+            },
         }
 
         fn to_mutation(kind: &MutationKind, project: &Project) -> Mutation {
@@ -3156,6 +3234,21 @@ mod tests {
                         );
                     project.set_edge_blend_mutation(new)
                 }
+                // P0.8.1 — per-output RGB matrix; `output_idx_pick` is modded by
+                // `output_targets.len()` so the harness generates a valid index
+                // without needing to know the project fixture's target count.
+                MutationKind::SetOutputRgbMatrix {
+                    output_idx_pick,
+                    matrix,
+                } => {
+                    let n = project.output_targets.len();
+                    let idx = if n == 0 {
+                        return project.set_gamma_mutation(project.gamma); // degenerate
+                    } else {
+                        (*output_idx_pick as usize) % n
+                    };
+                    project.set_output_rgb_matrix_mutation(idx, *matrix)
+                }
             }
         }
 
@@ -3348,6 +3441,25 @@ mod tests {
                 // P0.7.3 — edge-blend: None / Some(overlap_px, cosine).
                 proptest::option::weighted(0.5, (0u32..=512, any::<bool>()),)
                     .prop_map(MutationKind::EdgeBlend),
+                // P0.8.1 — per-output RGB matrix: random index (modded in
+                // `to_mutation`) + arbitrary 3×3 matrix values in [-2, 2].
+                // Each row is generated as a tuple-of-3-ranges (proptest maps
+                // `(a, b, c)` to `(f32, f32, f32)`), then assembled into a
+                // `[[f32;3];3]`.
+                (
+                    any::<u8>(),
+                    (-2.0_f32..=2.0_f32, -2.0_f32..=2.0_f32, -2.0_f32..=2.0_f32),
+                    (-2.0_f32..=2.0_f32, -2.0_f32..=2.0_f32, -2.0_f32..=2.0_f32),
+                    (-2.0_f32..=2.0_f32, -2.0_f32..=2.0_f32, -2.0_f32..=2.0_f32),
+                )
+                    .prop_map(
+                        |(output_idx_pick, (r00, r01, r02), (r10, r11, r12), (r20, r21, r22))| {
+                            MutationKind::SetOutputRgbMatrix {
+                                output_idx_pick,
+                                matrix: [[r00, r01, r02], [r10, r11, r12], [r20, r21, r22]],
+                            }
+                        }
+                    ),
             ]
         }
 

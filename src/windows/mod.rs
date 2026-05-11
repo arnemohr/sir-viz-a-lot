@@ -26,6 +26,8 @@ pub mod launcher;
 pub mod layer_strip;
 pub mod output;
 #[cfg(feature = "v3")]
+pub mod output_panel;
+#[cfg(feature = "v3")]
 pub mod primitives;
 pub mod scene_editor;
 #[cfg(feature = "v3")]
