@@ -116,6 +116,7 @@ pub fn is_registered(preset_id: &str) -> bool {
 
 /// Param descriptors for the named preset. Returns an empty slice for
 /// unknown presets and for presets with no tunable parameters (identity).
+#[allow(dead_code)] // consumed by `windows::advanced` (v3-gated picker)
 pub fn param_descriptors(preset_id: &str) -> &'static [ParamDescriptor] {
     match preset_id {
         IDENTITY_PRESET_ID => &[],
@@ -128,6 +129,7 @@ pub fn param_descriptors(preset_id: &str) -> &'static [ParamDescriptor] {
 /// At all defaults (`exposure=0, contrast=1, shoulder=0`) the shader is
 /// a passthrough — the preset is visually transparent until the operator
 /// tunes a slider.
+#[allow(dead_code)] // referenced only through `param_descriptors` (v3 UI)
 const TONE_MAP_DESCRIPTORS: &[ParamDescriptor] = &[
     ParamDescriptor {
         key: "exposure",
