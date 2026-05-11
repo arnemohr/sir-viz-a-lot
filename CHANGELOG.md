@@ -4,6 +4,139 @@ All notable changes to rmap are documented here.
 
 ---
 
+## v0.5.0 — 2026-05-12
+
+v0.5 makes rmap a real photo / video performance tool. Drop an
+image or mp4, pick from six **treatment presets** (tone-map,
+blur-mask, luminance-reveal, texture-overlay, palette-extract,
+2×2 collage), and tune them live. Video gains in/out trim, three
+loop modes, BPM-lock, and click-to-seek wiring. Every change is
+undoable.
+
+### What changed
+
+**Treatment pipeline (W2)**
+
+- New `TreatmentPipeline` runs *before* the effect chain on every
+  layer that carries a `Treatment`. Source → treatment → effects →
+  warp → compositor. Unknown preset_id falls back to the default
+  blit so a half-configured layer still shows its content.
+- `LayerConfig.treatment: Option<Treatment>` (non-bumping serde
+  addition on v7); `Treatment { preset_id, params, overlay_path,
+  collage_paths }`. Two new mutations: `SetLayerTreatment` (whole-
+  Option Reverse) and `SetLayerTreatmentParams` (whole-HashMap
+  Reverse). Audit emits warnings for missing assets.
+- Selected-layer **Treatment picker UI** in Advanced: combobox
+  lists every registered preset, per-param sliders dispatch on
+  drag-release (one undo entry per gesture). Preset switch
+  preserves shared param keys, falling back to descriptor
+  defaults.
+
+**Six treatment presets (W3)**
+
+- `tone_map` — S-curve (exposure / contrast / shoulder rolloff).
+  Identity at defaults.
+- `luminance_reveal` — Rec. 601 luma → smoothstep threshold
+  modulates alpha. Useful for cutouts on bright subjects.
+- `blur_mask` — three-pass SDF-gated separable gaussian. Pixels
+  near the mask edge get heavy blur, centre stays sharp. Per-
+  fragment radius derived from `abs(sdf) → smoothstep`.
+- `texture_overlay` — composites an external image asset over
+  the source with one of four blend modes (Normal/Multiply/
+  Screen/Add), offset, and opacity. Loaded via the shared
+  ImageTextureCache.
+- `palette_extract` — bit-depth posterise with optional ordered
+  Bayer dither. Reduced colour depth. (True k-means palette
+  extraction is Phase 7.)
+- `collage` — fixed 2×2 grid of up to four slot textures, with
+  configurable seam gap. Empty slots fall back to source.
+
+**Video operator surface (W4)**
+
+- Auto-play on drag-drop. Drop an mp4, it plays.
+- Speed slider (0.25× — 4× log scale).
+- **In/out points** (`clip_in` / `clip_out` seconds). Worker
+  sets AVAssetReader `timeRange` before reading; seamless loop
+  seeks back to `clip_in`.
+- **Loop modes** — Once (stop on EOF) / Loop (seamless, default)
+  / Ping-pong (forward-only stub until Phase 7 ships the I-frame
+  cache).
+- **BPM-lock** — checkbox; when on, effective speed scales with
+  the show's clock BPM (120 BPM = identity).
+- **Seek** — `VideoControl::SeekTo(seconds)`; worker rebuilds the
+  reader at the seek point. Wired end-to-end; the thumbnail-strip
+  UI that triggers it on click is deferred to Phase 7 (needs
+  AVAssetImageGenerator FFI + egui texture registration).
+- **Reverse playback** — falls back gracefully: negative speed is
+  logged + clamped to `|speed|`. True reverse needs the same
+  Phase 7 keyframe cache as PingPong's second half.
+
+**Image / Video parity (W2.4)**
+
+- `LayerKind::Video` gains `fit` + `focal` fields, parity with
+  `Image`. The per-frame render code now honours both variants
+  through one shared arm.
+- `SetLayerFocal` mutation handles either variant.
+- Selected-layer **Source fit** section: fit-mode read-out
+  (set on import) + focal-point X/Y sliders when fit == Cover.
+  Click-to-set focal on a thumbnail preview is deferred to
+  Phase 7 (same texture-registration infra as the thumbnail
+  strip).
+
+**Left-rail video row anatomy (W5)**
+
+- Loop-mode glyph (∞ / → / ⇆) overlaid on the thumbnail.
+- In/out trim markers along the thumbnail's bottom edge when
+  the layer is trimmed (60-second reference window).
+
+**Drag-drop + image cache (W1)**
+
+- `.webp` and `.gif` drops route through the image-layer path
+  (GIF: first-frame only).
+- `ImageTextureCache` dedupes uploads keyed on `(path, mtime)`;
+  wgpu's Texture is Arc-counted, so cache hits clone cheaply.
+  Cache lives at session scope.
+- EXIF orientation handling: phone-portrait JPEGs land upright.
+- Memory bounds (MAX_DIM = 4096) emit a `tracing::warn!` on
+  downscale.
+
+**UX fixes**
+
+- Auto-select dropped layer — the just-added layer is the
+  Selected-layer panel's target immediately.
+- Treatment placeholder names the actual layer kind ("this is a
+  SVG layer") with warn colour instead of plain weak text.
+- Left rail width 88 → 120 + zero panel inner-margin; label
+  truncation via Galley + `max_width` so long filenames don't
+  overflow into adjacent rows.
+
+**Diagnostics (W6)**
+
+- Texture-upload drop count aggregated into the diagnostics
+  widget (audio + texture-upload summed, tooltip splits the
+  breakdown).
+
+**Glossary (W1.3)**
+
+- 13 new glossary entries cover the Phase 1 vocabulary
+  (Treatment, ToneMap, BlurMask, LuminanceReveal,
+  TextureOverlay, PaletteExtract, Collage, FocalPoint,
+  InOutPoints, LoopMode, BpmLockedPlayback, ReversePlayback,
+  ThumbnailScrub).
+
+### Deferred to Phase 7
+
+- True reverse playback + PingPong's reverse half — needs the
+  I-frame cache.
+- Thumbnail strip + click-to-scrub UI — needs
+  `AVAssetImageGenerator` FFI and egui texture registration for
+  live video / image frames.
+- Click-to-set focal on a thumbnail preview — same blocker.
+- True k-means palette extraction (operator-named palettes).
+- Variable-N collage (currently fixed at 2×2).
+
+---
+
 ## v0.4.0 — 2026-05-11
 
 v0.4 is the first multi-projector release. It adds two-output support with

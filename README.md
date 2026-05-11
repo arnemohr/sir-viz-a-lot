@@ -92,6 +92,53 @@ a parameter map. The shipped preset, `mask_edge_ripple_wash`, applies an
 animated ripple wash along the edges of the layer's mask polygon. The demo
 project `fx-ripple-wash` in the launcher shows the preset in action.
 
+## Treatment presets (v0.5)
+
+Drop an image or video, open Advanced → Selected layer → **Treatment**, and
+pick one of six presets. Each one is bit-exact identity at default
+parameters, so the operator sees no change until they reach for a slider —
+makes the preset list safe to scrub through on stage.
+
+- **Tone map** — exposure / contrast / shoulder rolloff. Lifts shadows and
+  rolls off highlights for video frames shot in mixed lighting.
+- **Luminance reveal** — Rec. 601 luminance threshold modulates alpha;
+  useful for keying bright subjects out of a dark background.
+- **Blur mask** — SDF-gated separable gaussian. Feathers the mask edge into
+  the background without losing centre detail.
+- **Texture overlay** — composites an external image (loaded through the
+  shared image cache) over the source with one of four blend modes
+  (Normal / Multiply / Screen / Add).
+- **Palette / posterize** — bit-depth quantization with optional ordered
+  dither.
+- **Collage (2×2)** — fixed four-slot grid composited over the source.
+  Pick up to four images; empty slots fall back to source.
+
+The combobox plus per-param sliders dispatch undoable mutations on
+drag-release, so accidental scrubbing is one Cmd-Z away.
+
+## Video grammar (v0.5)
+
+Drag-drop an mp4 / mov / m4v; the layer auto-plays. Selected-layer →
+**Video** exposes:
+
+- **Playback speed** (0.25× — 4×, log slider).
+- **Loop mode** — *Loop* (seamless, default), *Once* (stop on EOF), or
+  *Ping-pong* (forward-only stub in v0.5; true reverse lands with the
+  Phase 7 keyframe cache).
+- **In / Out points** — number inputs in seconds. Default `Out` is the
+  sentinel "end" (no trim). The worker sets the AVAssetReader's
+  `timeRange` before reading, so trimming is decoder-bounded rather than
+  per-frame filtered.
+- **BPM-lock** — when on, effective speed scales with the show clock's
+  BPM (120 = identity). Pair with the BPM tap-tempo in the top chrome.
+
+Video layers also expose the **Source fit** section (Cover / Contain /
+Stretch + focal X/Y when fit == Cover), parity with image layers.
+
+A small loop-mode glyph (∞ / → / ⇆) and in/out markers appear on the
+video layer's thumbnail in the left rail so the operator can read
+playback state at a glance without opening Advanced.
+
 ## Docs
 
 - [Show-day operator checklist](docs/show-day-checklist.md) — macOS-focused
