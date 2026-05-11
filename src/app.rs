@@ -4143,6 +4143,11 @@ fn handle_editing_window_event(
                     // is pending.
                     #[cfg(feature = "v3")]
                     pending_cue: state.pending_cue,
+                    // P1.6.1: snapshot the texture-upload queue's drop count
+                    // for the diagnostics aggregate. Closes P0.3.2's deferred
+                    // wiring (video producer landed in P0.4.2b).
+                    #[cfg(feature = "v3")]
+                    texture_upload_dropped: state.texture_upload_queue.dropped_count(),
                 };
                 // 003-T1.42 follow-up: drain expired toasts once per frame
                 // before render. Sticky Error toasts survive; auto-expiring

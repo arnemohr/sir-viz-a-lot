@@ -431,6 +431,13 @@ pub struct ControlPanelInputs {
     /// the operator can see the pending-fire at a glance.
     #[cfg(feature = "v3")]
     pub pending_cue: Option<usize>,
+    /// P1.6.1 — texture-upload queue's running drop count. Snapshotted
+    /// at the call site from `state.texture_upload_queue.dropped_count()`
+    /// so the diagnostics widget can aggregate it with the audio
+    /// counter without holding a reference into `EditingState`. Closes
+    /// P0.3.2's deferred wiring (the video worker is now a real producer).
+    #[cfg(feature = "v3")]
+    pub texture_upload_dropped: u64,
 }
 
 /// Render the control panel. Mutates `project` in place.
@@ -527,6 +534,7 @@ pub fn show(
                         st,
                         scene,
                         &inputs.monitor_names,
+                        inputs.texture_upload_dropped,
                     );
                     match act {
                         ControlPanelAction::None => {}

@@ -58,6 +58,7 @@ pub fn show(
     st: &mut ControlPanelState,
     scene: &SceneEditorState,
     monitor_names: &[String],
+    texture_upload_dropped: u64,
 ) -> ControlPanelAction {
     // Sync st.selected_layer from scene.selected so the migrated
     // effects-tab code that reads st.selected_layer stays correct.
@@ -361,23 +362,35 @@ pub fn show(
                 .default_open(false)
                 .show(ui, |ui| {
                     ui.label("Audit findings and re-runnable checks will appear here.");
-                    // P0.3.2 — aggregate dropped-frame counter. Currently
-                    // the audio path (P0.3.2) feeds it; the texture-upload
-                    // queue's per-instance counter (P0.3.1) joins once
-                    // P0.4.2 wires it into `EditingState`.
+                    // P0.3.2 + P1.6.1 — aggregate dropped-frame counter
+                    // combining audio (cpal callback overflow) and texture-
+                    // upload (video / NDI producer overflow). P0.3.2 wired
+                    // audio; P1.6.1 closes the deferred texture-upload half
+                    // now that the video worker produces frames.
+                    //
+                    // The two counters are summed because the operator's
+                    // concern is "is the renderer dropping work?", not which
+                    // producer. A breakdown is logged via `tracing` already;
+                    // showing the split inline would compete for visual
+                    // weight in the diagnostics row.
                     let audio_dropped = crate::modulators::audio::dropped_count();
+                    let total_dropped = audio_dropped.saturating_add(texture_upload_dropped);
                     ui.horizontal(|ui| {
                         crate::windows::glossary::glossary_label(
                             ui,
                             crate::windows::glossary::GlossaryTerm::DroppedFrames,
                         );
-                        if audio_dropped == 0 {
+                        if total_dropped == 0 {
                             ui.weak("0");
                         } else {
                             ui.colored_label(
                                 egui::Color32::from_rgb(0xc0, 0x80, 0x40),
-                                format!("{audio_dropped}"),
-                            );
+                                format!("{total_dropped}"),
+                            )
+                            .on_hover_text(format!(
+                                "audio: {audio_dropped} · texture-upload: \
+                                 {texture_upload_dropped}",
+                            ));
                         }
                     });
                 });
