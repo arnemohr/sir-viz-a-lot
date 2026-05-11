@@ -3,7 +3,7 @@
 Companion task spec for [`004-phase-0.md`](004-phase-0.md). Each task
 below is sized for a single PR.
 
-## Implementation status (2026-05-11)
+## Implementation status (2026-05-11, late session)
 
 **Shipped (commit SHAs):**
 
@@ -55,6 +55,17 @@ below is sized for a single PR.
   with per-row Identify flash. Launcher captures the secondary
   monitor in `LauncherState`; the actual second-window spawning
   ships in P0.7.2.
+- ✅ **P0.2.5** `ac0365b` + follow-up `e98a7e6` — MIDI-learn
+  workflow. New `src/controls/midi_learn.rs` module with a
+  Mutex-behind-OnceLock state shared between UI and the midir
+  callback thread. Right-click on a modulator row's label →
+  "Learn next MIDI CC"; pulsing accent while armed; ESC cancels;
+  30 s timeout with a toast. Captured CC dispatches
+  `Command::MidiLearnCapture { target, channel, cc, scale,
+  offset }` → `apply_command` builds `Modulator::MidiBound` via
+  `SetModulator` (undoable). The follow-up threads range-derived
+  `scale` + `offset` through arm-time so captured bindings sweep
+  the parameter's full range (matches the picker's behaviour).
 - ✅ **P0.7.2** `28d63e5` (part 1: container) + `4afac03` (part 2:
   second OutputWindow lifecycle). `EditingState.outputs:
   SmallVec<[OutputWindow; 2]>`, `OutputState` extracted to
@@ -66,33 +77,58 @@ below is sized for a single PR.
   prefixes, `OutputWindow.monitor` field added for GoLive
   fullscreen, one `SleepAssertion` per active display, window-close
   shrinks the vec and exits when empty.
+- ✅ **P0.7.3** `94abced` — Edge-blend overlap region rendering.
+  `Project.edge_blend: Option<EdgeBlendConfig { overlap_px,
+  falloff_curve }>` (non-bumping schema addition); `FalloffCurve`
+  enum (Linear, Cosine); `SetEdgeBlend` mutation (snapshot Reverse);
+  new `src/render/shaders/edge_blend.wgsl` + `src/render/edge_blend.rs`
+  pipeline with multiply blend state. Per-output pass runs between
+  gamma and overlay when `outputs.len() >= 2 && edge_blend.is_some()`.
+  outputs[0] = right-edge falloff, outputs[1] = left-edge falloff
+  (hardcoded v0.4 topology; Phase 7 generalises). GPU golden test
+  deferred (CPU uniform-byte test included).
 - ✅ **P0.7.4** `fddc6c6` — `TestPattern::EdgeBlendGradient` and
   `TestPattern::AlignmentCross` added to the `T` cycle with
   shaders under `src/render/shaders/`. P0.7.1 wires
   AlignmentCross into the launcher Identify button.
+- ✅ **P0.7.5** `bc08cf3` — Output mode pill (minimum-viable
+  toolbar toggle). New `st.output_panel_open` + "Output" toolbar
+  toggle that opens the OutputPanel as a peer right-side SidePanel
+  (animated width mirrors Advanced; Esc closes). Mutual exclusion
+  with Advanced's per-output sections (avoids egui Grid-ID
+  collisions and matches the spec's mode-pill semantic).
+  **Deferred from spec:** the full Warp/Mask/Content/Output
+  *cluster* (M3 follow-on; the v3 toolbar today only has a single
+  Warp toggle), canvas mode-tint border (I11 — tint infra not
+  established), pill keyboard binding.
+- ✅ **P0.8.1** `7d697fe` — OutputPanel scaffold. New
+  `src/windows/output_panel.rs`. `SetOutputRgbMatrix` extended
+  in-place with `output_idx: usize` per the P0.8.2 forward-looking
+  comment; single existing call site updated; proptest harness
+  threaded with random output_idx. Edge-blend section at panel
+  level (rationale: v0.4 data model has one shared edge). Sub-card
+  per output target with monitor-name header, placeholder preview
+  thumbnail (160×90 "Preview pending"), per-output RGB matrix
+  editor. Advanced panel branches: ≥2 projectors → OutputPanel
+  CollapsingHeader replaces "Display output" + "RGB Matrix";
+  1 projector → existing surfaces unchanged. **Deferred:**
+  per-output gamma/brightness/contrast overrides (schema doesn't
+  carry them — would need `OutputTarget.{gamma,brightness,contrast}
+  _override: Option<f32>` + cascading render lookup).
 - ✅ **P0.8.2** `b1ea596` — Per-projector RGB matrix render path.
   `gamma.render` consumes `OutputTarget.rgb_matrix`; P0.7.2 routes
   the per-output target so each projector applies its own matrix.
 - ✅ **P0.8.3** `c0e3181` — RGB matrix editor UI in the per-display
-  Advanced panel (3×3 spinner grid + identity reset).
+  Advanced panel (3×3 spinner grid + identity reset). P0.8.1's
+  `show_rgb_matrix_editor` is now parameterised on `output_idx`
+  so the editor serves both the 1-projector Advanced surface and
+  the multi-projector OutputPanel sub-cards.
 
 **Not yet started:**
 
-- **P0.2.5** — MIDI-learn workflow (right-click parameter →
-  "Learn next CC", listen state, ESC cancel, 30 s timeout, decoder
-  CC capture). Substantial; not started.
 - **P0.5.2 / P0.5.3** — SDF inputs to effect shaders + the
   `Mask-edge ripple wash` proof preset. WGSL + render-pipeline
   work; not started.
-- **P0.7.3** — Edge-blend overlap region rendering. Now unblocked
-  by P0.7.2; needs `EdgeBlendConfig` schema field + per-output
-  falloff WGSL. P0.7.4's gradient pattern is the verification fixture.
-- **P0.7.5** — `Output` mode pill. Depends on P0.7.2 ✅ and
-  P0.8.1 (still pending).
-- **P0.8.1** — OutputPanel scaffold (badge stays for 1 projector).
-  Now unblocked by P0.7.2. The P0.8.2/P0.8.3 RGB matrix UI
-  currently lives on the existing per-display panel and will move
-  into the new OutputPanel sub-card when this lands.
 - **P0.9.1 – P0.9.5** — Release housekeeping (version bump, soak,
   changelog, README, system-deps for ffmpeg, frame-budget perf
   gate). Tail-end; depends on all other workstreams.
@@ -110,14 +146,16 @@ below is sized for a single PR.
 
 **Test status:**
 
-- 475 tests pass under `--features v3,midi`.
-- 254 tests pass under default features.
+- 491 tests pass under `--features v3,midi`.
+- 259 tests pass under default features.
 - New tests by workstream:
-  - W2 (modulator path + components): ~12 tests.
+  - W2 (modulator path + components + MIDI-learn state): ~13 tests.
   - W3 (texture-upload queue): 5 tests.
   - W5 (FxLayer round-trip): 1 test.
-  - W7 (output-targets reconcile + per-target audit): 7 tests.
-  - W8 (RGB matrix render + mutation): tests landed with P0.8.2.
+  - W7 (reconcile + per-target audit + edge-blend schema /
+    mutation / uniform byte-layout): ~12 tests.
+  - W8 (RGB matrix render + per-output mutation, out-of-range
+    panic test): tests landed across P0.8.2 / P0.8.1.
 
 **Pre-existing issues (not introduced by this work):**
 
