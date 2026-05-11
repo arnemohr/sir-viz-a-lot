@@ -231,6 +231,48 @@ pub fn default_output_targets() -> Vec<OutputTarget> {
     vec![OutputTarget::default()]
 }
 
+/// P0.7.3 — falloff curve shape for the edge-blend overlap region.
+///
+/// `Linear` is the simplest sum-to-1.0 curve in linear light (when both
+/// outputs use the same `overlap_px`). `Cosine` adds a soft S-curve that
+/// is still complementary and visually smoother at the seam. Gamma22 and
+/// hardware-measured curves are deferred to Phase 7 (hardware calibration).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+pub enum FalloffCurve {
+    #[default]
+    Linear,
+    Cosine,
+}
+
+/// P0.7.3 — edge-blend overlap region between two adjacent projectors.
+///
+/// For v0.4 the spec caps multi-output at 2 projectors, and the implicit
+/// topology is "outputs[0] is left (right-edge falloff), outputs[1] is
+/// right (left-edge falloff)". The linear sum-to-1.0 invariant holds only
+/// when both output passes read the same `overlap_px` value — this single
+/// project-level config enforces that.
+///
+/// Persisted as `Project.edge_blend: Option<EdgeBlendConfig>`. `None` means
+/// no blending (default); explicit `Some(...)` arms the per-output edge-blend
+/// pass. Phase 7 will generalise to per-edge configs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct EdgeBlendConfig {
+    /// Width of the soft-edge region in pixels on each projector surface.
+    pub overlap_px: u32,
+    /// Shape of the brightness ramp across the overlap region.
+    #[serde(default)]
+    pub falloff_curve: FalloffCurve,
+}
+
+impl Default for EdgeBlendConfig {
+    fn default() -> Self {
+        Self {
+            overlap_px: 0,
+            falloff_curve: FalloffCurve::Linear,
+        }
+    }
+}
+
 /// 003-T4.1 — 192×108 RGBA8 thumbnail captured when a scene is saved.
 /// Stored as a flat `width * height * 4` byte array in row-major order.
 /// `#[serde(default)]` ensures existing v5 saves (without this field) load
@@ -322,6 +364,14 @@ pub struct Project {
     /// load unchanged.
     #[serde(default)]
     pub quantize_bars: Option<u8>,
+    /// P0.7.3 — edge-blend config for the overlap region between two adjacent
+    /// projectors. `None` = no blending (default); `Some(cfg)` arms the
+    /// per-output edge-blend pass when `outputs.len() >= 2`. Non-bumping: a
+    /// `None`-defaulting `Option` on v7 is backwards-compatible (old saves
+    /// load with `edge_blend == None` = no blending, identical to prior
+    /// behaviour).
+    #[serde(default)]
+    pub edge_blend: Option<EdgeBlendConfig>,
     /// Side-channel state surfaced by [`migrate::migrate_v3_to_v4`] to the
     /// audit pass (T3.0d). `previous_warp_count > 1` triggers a one-shot
     /// `MultipleWarpsConsolidated` finding so the operator knows the
@@ -363,6 +413,7 @@ impl Default for Project {
             crossfade_duration_s: 0.0,
             solo: None,
             quantize_bars: None,
+            edge_blend: None,
             transient_audit_signals: Cell::new(TransientAuditSignals::default()),
         }
     }
@@ -607,6 +658,36 @@ mod tests {
         let scene: Scene = serde_json::from_str(json).expect("deserialize old scene");
         assert_eq!(scene.thumbnail, None);
         assert_eq!(scene.name, "old-scene");
+    }
+
+    /// P0.7.3 — `Project.edge_blend` round-trips through serde with full fidelity.
+    #[test]
+    fn edge_blend_config_round_trip() {
+        let cfg = EdgeBlendConfig {
+            overlap_px: 64,
+            falloff_curve: FalloffCurve::Cosine,
+        };
+        let p = Project {
+            edge_blend: Some(cfg),
+            ..Project::default()
+        };
+        let json = serde_json::to_string(&p).expect("serialize project with edge_blend");
+        let decoded: Project =
+            serde_json::from_str(&json).expect("deserialize project with edge_blend");
+        assert_eq!(decoded.edge_blend, p.edge_blend);
+    }
+
+    /// P0.7.3 — a v7 project saved before this field exists loads with
+    /// `edge_blend == None` thanks to `#[serde(default)]`.
+    #[test]
+    fn edge_blend_missing_from_old_save_deserializes_as_none() {
+        // Minimal v7 JSON without the `edge_blend` key.
+        let json = r#"{"schema_version":7,"layers":[],"output_targets":[{"fallback_index":0,"rgb_matrix":[[1.0,0.0,0.0],[0.0,1.0,0.0],[0.0,0.0,1.0]]}]}"#;
+        let p: Project = serde_json::from_str(json).expect("deserialize old v7 project");
+        assert_eq!(
+            p.edge_blend, None,
+            "old saves must load with edge_blend = None"
+        );
     }
 
     /// V31.1.4 — a JSON file that omits the `effects` field entirely must fail

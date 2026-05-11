@@ -35,6 +35,7 @@
 //! spec forbids tokio.
 
 pub mod compositor;
+pub mod edge_blend;
 pub mod gamma;
 pub mod overlay;
 pub mod pipeline;

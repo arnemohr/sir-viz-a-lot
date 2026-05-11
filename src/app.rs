@@ -60,6 +60,7 @@ use crate::project::restore_scene;
 use crate::project::schema::{self, Project};
 use crate::project::{ProjectError, interpolate, snapshot, snapshots_share_layer_topology};
 use crate::render::compositor::Compositor;
+use crate::render::edge_blend::EdgeBlendPipeline;
 use crate::render::gamma::GammaPipeline;
 use crate::render::overlay::OverlayPipeline;
 use crate::render::pipeline::EffectPipeline;
@@ -407,6 +408,9 @@ struct EditingState {
     svg_pipeline: SvgLayerPipeline,
     compositor: Compositor,
     gamma: GammaPipeline,
+    /// P0.7.3 — edge-blend multiply pass applied after gamma, before overlay.
+    /// Only emitted when `outputs.len() >= 2 && project.edge_blend.is_some()`.
+    edge_blend: EdgeBlendPipeline,
     /// Editor-overlay pass painted on top of the projector after gamma
     /// (toggled by `output_state.show_editor_overlay`). Lets the
     /// operator see on the actual surface where each layer is mapped
@@ -1479,6 +1483,8 @@ struct RenderGraph {
     svg_pipeline: SvgLayerPipeline,
     compositor: Compositor,
     gamma: GammaPipeline,
+    /// P0.7.3 — edge-blend multiply pipeline (always built; conditionally emitted).
+    edge_blend: EdgeBlendPipeline,
     overlay: OverlayPipeline,
     warp_rt: wgpu::Texture,
     warp_rt_view: wgpu::TextureView,
@@ -1504,6 +1510,7 @@ fn init_render_graph(
     let compositor = Compositor::new(device, w, h, surface_format);
 
     let gamma = GammaPipeline::new(device, surface_format);
+    let edge_blend = EdgeBlendPipeline::new(device, surface_format);
     let overlay = OverlayPipeline::new(device, surface_format);
     let (warp_rt, warp_rt_view) = make_warp_render_target(device, w, h, surface_format);
     let layers = rebuild_layers(device, queue, project, project_path, w, h, surface_format)?;
@@ -1512,6 +1519,7 @@ fn init_render_graph(
         svg_pipeline,
         compositor,
         gamma,
+        edge_blend,
         overlay,
         warp_rt,
         warp_rt_view,
@@ -1837,6 +1845,7 @@ fn assemble_editing_state(
         svg_pipeline: graph.svg_pipeline,
         compositor: graph.compositor,
         gamma: graph.gamma,
+        edge_blend: graph.edge_blend,
         overlay: graph.overlay,
         warp_rt: graph.warp_rt,
         warp_rt_view: graph.warp_rt_view,
@@ -3283,8 +3292,15 @@ impl Drop for SurfacePresentGuard {
     }
 }
 
-/// P0.7.2: run passes 5-6 (gamma + overlay + present) for a single output.
-/// Called in a loop over `outputs[..]` after passes 1-4 have been submitted.
+/// P0.7.2 / P0.7.3: run passes 5-6 (gamma + edge-blend + overlay + present)
+/// for a single output. Called in a loop over `outputs[..]` after passes 1-4
+/// have been submitted.
+///
+/// P0.7.3 adds an optional edge-blend multiply pass between gamma and overlay:
+/// - Emitted when `outputs_total >= 2 && edge_blend_cfg.is_some() && output_idx < 2`.
+/// - `output_idx == 0` → right-edge falloff (left projector).
+/// - `output_idx == 1` → left-edge falloff (right projector).
+/// - `output_idx >= 2` → skipped (v0.4 caps at 2; defensive, not a panic).
 ///
 /// Surface-loss outcomes (`SurfaceLost`, `SurfaceOutdated`, `SurfaceSuboptimal`)
 /// are handled inline: the surface is reconfigured and `Ok(())` is returned so
@@ -3297,6 +3313,10 @@ fn render_m5_passes_5_6(
     output_target: &crate::project::schema::OutputTarget,
     project: &Project,
     gamma: &GammaPipeline,
+    edge_blend: &EdgeBlendPipeline,
+    edge_blend_cfg: Option<&crate::project::schema::EdgeBlendConfig>,
+    output_idx: usize,
+    outputs_total: usize,
     overlay: &mut OverlayPipeline,
     overlay_selected: Option<usize>,
     overlay_enabled: bool,
@@ -3351,6 +3371,29 @@ fn render_m5_passes_5_6(
             output_target.rgb_matrix,
             wgpu::LoadOp::Clear(wgpu::Color::BLACK),
         );
+        // P0.7.3 — edge-blend multiply pass: runs after gamma (pass 5),
+        // before overlay (pass 6), so the editor chrome stays full-brightness.
+        // Only emitted when two outputs are active, edge_blend is configured,
+        // and output_idx is 0 or 1 (v0.4 hardcodes two-projector topology).
+        //   output_idx == 0  → right-edge falloff (left projector):  edge_side = 0.0
+        //   output_idx == 1  → left-edge falloff  (right projector): edge_side = 1.0
+        if outputs_total >= 2 {
+            if let Some(cfg) = edge_blend_cfg {
+                if output_idx < 2 {
+                    let edge_side = if output_idx == 0 { 0.0_f32 } else { 1.0_f32 };
+                    edge_blend.render(
+                        &renderer.gpu.device,
+                        &renderer.gpu.queue,
+                        &mut enc_gamma,
+                        &surface_view,
+                        output.config.width,
+                        cfg.overlap_px,
+                        edge_side,
+                        cfg.falloff_curve,
+                    );
+                }
+            }
+        }
         // Editor overlay: paint per-layer outlines + mask polygons on
         // top of the gamma-corrected frame so the operator can see
         // on the actual surface where each layer is mapped. Cheap to
@@ -3388,6 +3431,7 @@ fn render_m5_pipeline(
     svg_pipeline: &SvgLayerPipeline,
     compositor: &Compositor,
     gamma: &GammaPipeline,
+    edge_blend: &EdgeBlendPipeline,
     overlay: &mut OverlayPipeline,
     overlay_selected: Option<usize>,
     overlay_enabled: bool,
@@ -3556,9 +3600,11 @@ fn render_m5_pipeline(
         // Submit passes 1-4. The warp_rt is now ready for gamma sampling.
         renderer.gpu.queue.submit(std::iter::once(encoder.finish()));
 
-        // --- Passes 5-6: gamma + overlay + present — once per output ---
+        // --- Passes 5-6: gamma + edge-blend + overlay + present — once per output ---
         // P0.7.2: each output gets its own encoder (its own surface texture).
+        // P0.7.3: edge-blend pass inserted between gamma and overlay.
         // Surface-loss is handled inline per output; only RenderPanic escapes.
+        let outputs_total = outputs.len();
         for (out_idx, output) in outputs.iter().enumerate() {
             // Look up the per-output target. If the project has fewer targets
             // than outputs (shouldn't happen after reconcile, but be safe),
@@ -3573,6 +3619,10 @@ fn render_m5_pipeline(
                 output_target,
                 project,
                 gamma,
+                edge_blend,
+                project.edge_blend.as_ref(),
+                out_idx,
+                outputs_total,
                 overlay,
                 overlay_selected,
                 overlay_enabled,
@@ -4473,6 +4523,7 @@ fn handle_editing_window_event(
                     &state.svg_pipeline,
                     &state.compositor,
                     &state.gamma,
+                    &state.edge_blend,
                     &mut state.overlay,
                     overlay_selected,
                     overlay_enabled,

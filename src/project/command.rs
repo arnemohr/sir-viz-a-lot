@@ -360,6 +360,36 @@ impl ReverseStorage for SetProjectContrastOverride {
     }
 }
 
+/// P0.7.3 — Payload for [`Mutation::SetEdgeBlend`].
+/// Whole-`Option` Reverse so a `None → Some → None` toggle round-trips
+/// byte-equally. Both fields carry the entire `Option<EdgeBlendConfig>` —
+/// there is no per-sub-field Reverse because replacing a sub-field while
+/// keeping the outer `Option::Some` alive would produce a stale Reverse
+/// for the variant-change (`None ↔ Some`) direction.
+#[derive(Debug, Clone)]
+pub struct SetEdgeBlend {
+    /// Value to write (`None` disables edge-blend).
+    pub new: Option<crate::project::schema::EdgeBlendConfig>,
+    /// Pre-mutation value.
+    pub old: Option<crate::project::schema::EdgeBlendConfig>,
+}
+
+impl ReverseStorage for SetEdgeBlend {
+    fn apply(self, project: &mut Project) -> Self {
+        debug_assert!(
+            project.edge_blend == self.old,
+            "SetEdgeBlend stale Reverse: project.edge_blend={:?}, expected old={:?}",
+            project.edge_blend,
+            self.old
+        );
+        project.edge_blend = self.new;
+        SetEdgeBlend {
+            new: self.old,
+            old: self.new,
+        }
+    }
+}
+
 /// Payload for [`Mutation::SetOutputWindowed`].
 #[derive(Debug, Clone)]
 pub struct SetOutputWindowed {
@@ -1201,6 +1231,8 @@ pub enum Mutation {
     /// 003-T3.28 — replace `Project.contrast_override`. See
     /// `SetProjectGammaOverride`.
     SetProjectContrastOverride(SetProjectContrastOverride),
+    /// P0.7.3 — replace `Project.edge_blend`. Delegates to [`SetEdgeBlend`].
+    SetEdgeBlend(SetEdgeBlend),
     /// Replace `Project.output_windowed`. Delegates to [`SetOutputWindowed`].
     SetOutputWindowed(SetOutputWindowed),
     /// Replace `WarpMesh.mask_feather`. Delegates to [`SetLayerMaskFeather`].
@@ -1327,6 +1359,7 @@ impl Mutation {
             Mutation::SetProjectContrastOverride(s) => {
                 Mutation::SetProjectContrastOverride(s.apply(project))
             }
+            Mutation::SetEdgeBlend(s) => Mutation::SetEdgeBlend(s.apply(project)),
             Mutation::SetOutputWindowed(s) => Mutation::SetOutputWindowed(s.apply(project)),
             Mutation::SetLayerMaskFeather(s) => Mutation::SetLayerMaskFeather(s.apply(project)),
             Mutation::SetLayerWarpDimensions(s) => {
@@ -1466,6 +1499,7 @@ impl Mutation {
             | Mutation::SetProjectGammaOverride(_)
             | Mutation::SetProjectBrightnessOverride(_)
             | Mutation::SetProjectContrastOverride(_)
+            | Mutation::SetEdgeBlend(_)
             | Mutation::RelinkAssetPath(_)
             | Mutation::SetLayerKind(_)
             | Mutation::SetOutputRgbMatrix(_) => false,
@@ -1563,6 +1597,19 @@ impl Project {
         Mutation::SetProjectContrastOverride(SetProjectContrastOverride {
             new,
             old: self.contrast_override,
+        })
+    }
+
+    /// P0.7.3 — build a `SetEdgeBlend` mutation. Captures the project's
+    /// current `edge_blend` value as `old`. Pass `None` to disable blending;
+    /// `Some(cfg)` to enable / update it.
+    pub fn set_edge_blend_mutation(
+        &self,
+        new: Option<crate::project::schema::EdgeBlendConfig>,
+    ) -> Mutation {
+        Mutation::SetEdgeBlend(SetEdgeBlend {
+            new,
+            old: self.edge_blend,
         })
     }
 
@@ -1952,6 +1999,69 @@ mod tests {
         assert_eq!(p.gamma_override, Some(3.4));
         let _ = reverse.apply(&mut p);
         assert_eq!(p.gamma_override, Some(1.2));
+    }
+
+    /// P0.7.3 — `SetEdgeBlend` round-trips through apply + Reverse for every
+    /// transition the operator exercises:
+    ///   None → Some(cfg) → None  (enable then disable)
+    ///   Some(a) → Some(b)        (update config while enabled)
+    #[test]
+    fn set_edge_blend_round_trips() {
+        use crate::project::schema::{EdgeBlendConfig, FalloffCurve};
+
+        let mut p = fresh_project();
+        assert_eq!(p.edge_blend, None);
+
+        // None → Some(64, Cosine)
+        let cfg_a = EdgeBlendConfig {
+            overlap_px: 64,
+            falloff_curve: FalloffCurve::Cosine,
+        };
+        let m = p.set_edge_blend_mutation(Some(cfg_a));
+        let reverse = m.apply(&mut p);
+        assert_eq!(p.edge_blend, Some(cfg_a));
+
+        // Reverse: Some → None
+        let _ = reverse.apply(&mut p);
+        assert_eq!(p.edge_blend, None);
+
+        // Some(a) → Some(b) chain
+        p.edge_blend = Some(cfg_a);
+        let cfg_b = EdgeBlendConfig {
+            overlap_px: 128,
+            falloff_curve: FalloffCurve::Linear,
+        };
+        let m = p.set_edge_blend_mutation(Some(cfg_b));
+        let reverse = m.apply(&mut p);
+        assert_eq!(p.edge_blend, Some(cfg_b));
+        let _ = reverse.apply(&mut p);
+        assert_eq!(p.edge_blend, Some(cfg_a));
+    }
+
+    /// P0.7.3 — `SetEdgeBlend` is undoable (user-driven config change).
+    #[test]
+    fn set_edge_blend_is_undoable() {
+        use crate::project::schema::{EdgeBlendConfig, FalloffCurve};
+        let p = fresh_project();
+        let cfg = EdgeBlendConfig {
+            overlap_px: 32,
+            falloff_curve: FalloffCurve::Linear,
+        };
+        assert!(!p.set_edge_blend_mutation(Some(cfg)).is_non_undoable());
+        assert!(!p.set_edge_blend_mutation(None).is_non_undoable());
+    }
+
+    /// P0.7.3 — `SetEdgeBlend` does not invalidate the layer GPU state.
+    #[test]
+    fn set_edge_blend_does_not_need_layer_rebuild() {
+        use crate::project::schema::{EdgeBlendConfig, FalloffCurve};
+        let p = fresh_project();
+        let cfg = EdgeBlendConfig {
+            overlap_px: 32,
+            falloff_curve: FalloffCurve::Linear,
+        };
+        assert!(!p.set_edge_blend_mutation(Some(cfg)).needs_layer_rebuild());
+        assert!(!p.set_edge_blend_mutation(None).needs_layer_rebuild());
     }
 
     /// 003-T3.28 — overrides are user-driven and Cmd-Z reversible.
@@ -2715,6 +2825,8 @@ mod tests {
             LayerSolo(Option<usize>),
             /// V31.7.2 — set the quantize-bars field (`None` = off; `Some(1/2/4/8)` = quantized).
             QuantizeBars(Option<u8>),
+            /// P0.7.3 — set the edge-blend config (`None` = off, `Some(cfg)` = enabled).
+            EdgeBlend(Option<(u32, bool)>),
         }
 
         fn to_mutation(kind: &MutationKind, project: &Project) -> Mutation {
@@ -3029,6 +3141,21 @@ mod tests {
                 }
                 // V31.7.2 — quantize bars coverage.
                 MutationKind::QuantizeBars(v) => project.set_quantize_bars_mutation(*v),
+                // P0.7.3 — edge-blend; `bool` picks Linear (false) vs Cosine (true).
+                MutationKind::EdgeBlend(v) => {
+                    let new =
+                        v.map(
+                            |(overlap_px, cosine)| crate::project::schema::EdgeBlendConfig {
+                                overlap_px,
+                                falloff_curve: if cosine {
+                                    crate::project::schema::FalloffCurve::Cosine
+                                } else {
+                                    crate::project::schema::FalloffCurve::Linear
+                                },
+                            },
+                        );
+                    project.set_edge_blend_mutation(new)
+                }
             }
         }
 
@@ -3218,6 +3345,9 @@ mod tests {
                     prop_oneof![Just(1u8), Just(2u8), Just(4u8), Just(8u8)],
                 )
                 .prop_map(MutationKind::QuantizeBars),
+                // P0.7.3 — edge-blend: None / Some(overlap_px, cosine).
+                proptest::option::weighted(0.5, (0u32..=512, any::<bool>()),)
+                    .prop_map(MutationKind::EdgeBlend),
             ]
         }
 
