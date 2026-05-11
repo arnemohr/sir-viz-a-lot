@@ -584,14 +584,17 @@ pub fn show(
     #[cfg(feature = "v3")]
     egui::SidePanel::left("rmap_layer_strip")
         .resizable(false)
-        // 88 px was tight: 4 px pad + 64 px thumb + 4 px gap leaves
-        // only ~14 px for the S / M / ▲ / ▼ controls column, which
-        // visibly clipped the row's right edge under standard egui
-        // panel margins (reported during W2/W3.1 smoke). 108 px gives
-        // the controls a real ~32 px and leaves slack for the panel's
-        // inner margin without growing the canvas-claimed area enough
-        // to crowd the show-day strip.
-        .exact_width(108.0)
+        // 88 px was tight; even 108 still clipped under egui's default
+        // SidePanel inner_margin (~8 px each side). 120 px + a zeroed
+        // Frame margin lets layer_strip use the full rail width for its
+        // row allocations without the panel chrome stealing ~16 px.
+        .exact_width(120.0)
+        .frame(
+            egui::Frame::new()
+                .fill(ui.style().visuals.panel_fill)
+                .inner_margin(0.0)
+                .outer_margin(0.0),
+        )
         .show_inside(ui, |ui| {
             crate::windows::layer_strip::show(ui, project, st, scene);
         });

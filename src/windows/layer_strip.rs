@@ -222,18 +222,30 @@ pub fn show(
                 painter.rect_filled(thumb_rect, egui::CornerRadius::same(2), thumb_colour);
 
                 // ── layer id label ──────────────────────────────────────
+                // `painter.text` does not auto-truncate; long filenames
+                // (e.g. "skokugel_complete_20250511.png") would overflow
+                // both horizontally past the thumbnail column AND
+                // vertically into the next row. Lay out via a Galley with
+                // an explicit `max_width = thumb_rect.width()` so egui
+                // truncates with an ellipsis at the right boundary.
                 let label_rect = egui::Rect::from_min_max(
                     egui::pos2(thumb_rect.left(), thumb_rect.bottom() + 2.0),
                     egui::pos2(thumb_rect.right(), row_rect.bottom() - 1.0),
                 );
                 let label_colour = theme::TEXT_PRIMARY.linear_multiply(dim);
-                painter.text(
-                    label_rect.center_top(),
-                    egui::Align2::CENTER_TOP,
-                    &layer.id,
+                let galley = painter.layout(
+                    layer.id.clone(),
                     egui::FontId::proportional(9.5),
                     label_colour,
+                    thumb_rect.width(),
                 );
+                // Center horizontally inside `label_rect`; top-anchor
+                // vertically (matches the previous CENTER_TOP align).
+                let label_pos = egui::pos2(
+                    label_rect.center().x - galley.size().x * 0.5,
+                    label_rect.top(),
+                );
+                painter.galley(label_pos, galley, label_colour);
 
                 // ── right-side controls column ──────────────────────────
                 // Controls column to the right of the thumbnail: eye toggle + arrows.
