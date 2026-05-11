@@ -720,10 +720,15 @@ fn schedule_scene_recall(state: &mut EditingState, slot: usize) -> RecallOutcome
 
 /// Construct a `LayerConfig` from a path the operator dropped onto the
 /// control window. Extension match is permissive (case-insensitive); a
-/// path that doesn't end in `.svg`, `.png`, `.jpg`, or `.jpeg` returns
-/// `None`. Layer id is uniqued via `next_unique_layer_id` so a duplicate
-/// drop produces a distinct slot rather than colliding with an existing
-/// id (T-M8-05).
+/// path with an unsupported extension returns `None`. Layer id is
+/// uniqued via `next_unique_layer_id` so a duplicate drop produces a
+/// distinct slot rather than colliding with an existing id (T-M8-05).
+///
+/// Supported extensions:
+/// - **SVG**: `.svg`
+/// - **Image**: `.png`, `.jpg`, `.jpeg`, `.webp`, `.gif` (first frame
+///   only; animated GIFs play as a single still — P1.1.1)
+/// - **Video**: `.mp4`, `.mov`, `.m4v`
 fn layer_from_dropped_path(
     path: &std::path::Path,
     project: &Project,
@@ -736,7 +741,11 @@ fn layer_from_dropped_path(
     let path_buf = path.to_path_buf();
     match ext.as_deref() {
         Some("svg") => Some(schema::layer_from_svg_path(id, path_buf)),
-        Some("png") | Some("jpg") | Some("jpeg") => {
+        // P1.1.1 — webp + gif join the still-image family. The `image`
+        // crate 0.25 ships gif + webp decoders by default features. GIF
+        // decodes to first frame only via `ImageReader::decode()`; the
+        // animated path is out of scope until Phase 7.
+        Some("png") | Some("jpg") | Some("jpeg") | Some("webp") | Some("gif") => {
             Some(schema::layer_from_image_path(id, path_buf))
         }
         // P0.4.2 — video extensions.
@@ -4055,7 +4064,8 @@ fn handle_editing_window_event(
                     #[cfg(feature = "v3")]
                     state.toast_queue.push(crate::windows::toast::Toast::new(
                         crate::windows::toast::ToastKind::Warn,
-                        "That file type isn't supported yet. Try a JPG, PNG, or SVG.",
+                        "That file type isn't supported yet. Try a JPG, PNG, WEBP, GIF, \
+                         SVG, MP4, MOV, or M4V.",
                     ));
                 }
             }
@@ -6572,6 +6582,107 @@ mod tests {
             let extended = reconcile_output_targets(&mut p, &[0]);
             assert!(!extended, "no extension needed when targets >= requested");
             assert_eq!(p.output_targets.len(), 2, "vec must not shrink");
+        }
+    }
+
+    /// P1.1.1 — drag-and-drop extension dispatch. Verifies the four
+    /// classes (SVG / image / video / unsupported) route correctly,
+    /// and that the P1.1.1 additions (webp, gif) take the image path.
+    mod drop_path {
+        use super::*;
+
+        fn empty_project() -> Project {
+            Project::default()
+        }
+
+        /// SVG routes through `layer_from_svg_path`.
+        #[test]
+        fn svg_routes_to_svg_kind() {
+            let p = empty_project();
+            let layer = layer_from_dropped_path(std::path::Path::new("/tmp/x.svg"), &p)
+                .expect("svg accepted");
+            assert!(matches!(layer.kind, schema::LayerKind::Svg { .. }));
+        }
+
+        /// Pre-P1.1.1 image extensions still route to the image path.
+        #[test]
+        fn png_jpg_jpeg_route_to_image_kind() {
+            let p = empty_project();
+            for ext in ["png", "jpg", "jpeg"] {
+                let path = format!("/tmp/x.{ext}");
+                let layer = layer_from_dropped_path(std::path::Path::new(&path), &p)
+                    .unwrap_or_else(|| panic!("{ext} should be accepted"));
+                assert!(
+                    matches!(layer.kind, schema::LayerKind::Image { .. }),
+                    "{ext} should route to Image, got {:?}",
+                    layer.kind,
+                );
+            }
+        }
+
+        /// P1.1.1 — webp + gif route to the image path (first-frame
+        /// GIF; animated playback is out of scope until Phase 7).
+        #[test]
+        fn webp_and_gif_route_to_image_kind() {
+            let p = empty_project();
+            for ext in ["webp", "gif"] {
+                let path = format!("/tmp/x.{ext}");
+                let layer = layer_from_dropped_path(std::path::Path::new(&path), &p)
+                    .unwrap_or_else(|| panic!("{ext} should be accepted (P1.1.1)"));
+                assert!(
+                    matches!(layer.kind, schema::LayerKind::Image { .. }),
+                    "{ext} should route to Image, got {:?}",
+                    layer.kind,
+                );
+            }
+        }
+
+        /// Extension match is case-insensitive — operators dropping
+        /// `Picture.JPG` from Finder get an Image layer, not a no-op.
+        #[test]
+        fn extension_match_is_case_insensitive() {
+            let p = empty_project();
+            for path in ["/tmp/x.PNG", "/tmp/y.WebP", "/tmp/z.GIF", "/tmp/w.MP4"] {
+                assert!(
+                    layer_from_dropped_path(std::path::Path::new(path), &p).is_some(),
+                    "uppercase / mixed-case extension should still be accepted: {path}",
+                );
+            }
+        }
+
+        /// Video extensions stay routed to the video path (regression
+        /// guard — P1.1.1 must not steal `.mp4` etc.).
+        #[test]
+        fn video_extensions_still_route_to_video_kind() {
+            let p = empty_project();
+            for ext in ["mp4", "mov", "m4v"] {
+                let path = format!("/tmp/x.{ext}");
+                let layer = layer_from_dropped_path(std::path::Path::new(&path), &p)
+                    .unwrap_or_else(|| panic!("{ext} should be accepted"));
+                assert!(
+                    matches!(layer.kind, schema::LayerKind::Video { .. }),
+                    "{ext} should route to Video, got {:?}",
+                    layer.kind,
+                );
+            }
+        }
+
+        /// Unsupported extensions return None (the UI then surfaces
+        /// the "supported extensions" toast).
+        #[test]
+        fn unsupported_extensions_return_none() {
+            let p = empty_project();
+            for path in [
+                "/tmp/x.bmp",
+                "/tmp/y.tiff",
+                "/tmp/z.heic",
+                "/tmp/no_extension",
+            ] {
+                assert!(
+                    layer_from_dropped_path(std::path::Path::new(path), &p).is_none(),
+                    "{path} should not be accepted",
+                );
+            }
         }
     }
 }
