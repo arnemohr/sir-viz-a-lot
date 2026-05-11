@@ -3,7 +3,7 @@
 Companion task spec for [`004-phase-0.md`](004-phase-0.md). Each task
 below is sized for a single PR.
 
-## Implementation status (2026-05-11, after W4 video integration)
+## Implementation status (2026-05-11, Phase 0 feature-complete)
 
 **Shipped (commit SHAs):**
 
@@ -181,14 +181,24 @@ below is sized for a single PR.
   checklist refreshed with v0.4 capabilities; system-deps audit
   confirms v0.4 has zero Homebrew dependencies (AVFoundation when
   video lands ships with macOS; NDI deferred to v0.5).
+- ✅ **P0.9.5** `679114f` — Show-day frame-budget perf gate. New
+  `tests/perf_frame_budget.rs` under `--features gpu-tests` drives
+  a fixture (4 FxLayer ripple-wash layers + edge-blend across 2
+  simulated outputs) through 600 frames against a headless wgpu
+  adapter, records min/p50/p99/max + drop count, asserts
+  `texture_upload.dropped_count() == 0`, no `RenderError::RenderPanic`,
+  and p99 < 100 ms (loose CI-portable threshold; the show-day
+  16.6 ms target is operator-recorded in `docs/show-day-checklist.md`).
+  Local Apple M-series baseline: p99 ≈ 5.87 ms.
+  **Substitutions documented in commit**: video layers → FxLayer
+  (no fixture mp4 in v0.4); NDI input omitted (deferred to v0.5).
+  Render-loop reimplemented locally via Path B because production
+  pipelines aren't re-exported from `src/lib.rs`; `TODO(P0.9.5-path-a)`
+  marks the refactor for a follow-up.
 
 **Not yet started:**
 
-- **P0.9.5** — Show-day frame-budget perf gate. Now unblocked
-  (P0.4.2 ✅ ships the full v0.4 surface that the fixture targets:
-  4 video layers + bindings + edge-blend). Harness scaffolding +
-  baseline measurement against the headless wgpu adapter is the
-  remaining lift.
+- *(none — Phase 0 feature-complete.)*
 
 **Deferred to v0.5:**
 
@@ -208,6 +218,8 @@ below is sized for a single PR.
   default; macOS-only).
 - 254 tests pass under `--no-default-features` (video feature off;
   worker stub body active; AVFoundation deps absent).
+- 1 test passes under `--features gpu-tests` for P0.9.5's
+  `perf_frame_budget` gate (requires a wgpu adapter at test time).
 - New tests by workstream:
   - W2 (modulator path + components + MIDI-learn state): ~13 tests.
   - W3 (texture-upload queue): 5 tests.
