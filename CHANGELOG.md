@@ -4,6 +4,17 @@ All notable changes to rmap are documented here.
 
 ---
 
+## [0.9.0] — unreleased
+
+<!-- P5.1.3 placeholder — filled in P5.11.2 once W2–W11 ship. -->
+
+### Lighting output
+
+_Phase 5: Art-Net DMX light output, fixture groups, and colour-from-pixel
+canvas sampling. Details to follow._
+
+---
+
 ## [0.8.0] — 2026-05-13
 
 v0.8 moves rmap from a renderer with a UI to a **scene engine**. Operators

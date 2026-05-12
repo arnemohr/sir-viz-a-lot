@@ -296,6 +296,13 @@ The `rmap > About rmap` menu item shows the running version. The canonical
 list of all key bindings is in
 [`specs/keyboard-accelerators.md`](specs/keyboard-accelerators.md).
 
+## Lighting output
+
+<!-- P5.1.3 placeholder — filled in P5.11.3 once W2–W9 ship. -->
+
+_Phase 5 — Art-Net DMX light output, fixture groups, and colour-from-pixel
+canvas sampling. Planned for v0.9.0 (unreleased)._
+
 ### Cargo features
 
 - `v3` — Spec 003 UI/UX overhaul (state machine, command/mutation pattern,
@@ -306,6 +313,9 @@ list of all key bindings is in
   v0.4; binding pickers and MIDI-learn are available out of the box.
 - `audio` — 8-band FFT audio input source. Off by default; when enabled, a
   meter strip appears above the cue strip. Do not promote to default.
+- `lighting` — Phase 5 Art-Net DMX light output. Off by default; when
+  enabled, the Output panel grows a fixture-group editor and the lighting
+  thread starts on Go-live.
 
 ### Build profiles
 
