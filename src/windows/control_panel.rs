@@ -812,11 +812,16 @@ fn show_scene_tab(
     ui.label(
         "Live preview. Click a layer to select; drag to move; Shift-drag to scale; Alt-drag to rotate. Drag a mask vertex to move; double-click an edge to insert; Shift-click a vertex to delete. Drop SVG / PNG / JPG to add a layer.",
     );
-    if let Some(scene_editor::Selection::Layer(idx)) = scene.selected {
-        if let Some(layer) = project.layers.get(idx) {
-            ui.label(format!("selected: layer {} ({})", idx, layer.id));
-        }
-    }
+    // P1.UX: the "selected: layer N (id)" label was a second
+    // conditional row above the canvas; appearing on selection
+    // pushed the canvas down a line → operator reported a visible
+    // canvas jump on every layer click. The layer is already
+    // surfaced redundantly through:
+    //   • the left rail (selected row gets the accent ring)
+    //   • the colored layer outline on the canvas
+    //   • the bold layer-id at the top of the Controls window's
+    //     "Selected layer" section
+    // — so removing this above-canvas row is a clean loss-of-noise.
     ui.add_space(4.0);
     let Some(tex_id) = inputs.scene_texture else {
         // 003-T2.17 — friendly transition copy with animated dots while
