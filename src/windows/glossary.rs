@@ -172,6 +172,54 @@ pub enum GlossaryTerm {
     /// Highlight, LightSource). Different from `ZoneTemplate` (a geometry
     /// shortcut for common polygon shapes).
     ZoneTag,
+    // -----------------------------------------------------------------------
+    // P4.1.1 — Phase 4 scene-grammar domain terms + template display labels.
+    // -----------------------------------------------------------------------
+    /// P4.1.1 — a named, parameterised recipe that assembles media, zones, and
+    /// FX presets into a ready-to-run scene.
+    SceneTemplate,
+    /// P4.1.1 — the structural vocabulary of a scene: which zone roles it
+    /// binds, which media it accepts, which FX presets it activates.
+    SceneGrammar,
+    /// P4.1.1 — a guided multi-step UI (template → media → zones → palette →
+    /// tempo) for creating a scene from a scene template.
+    Wizard,
+    /// P4.1.1 — a curated set of warm, cool, or neutral accent colours used
+    /// to tint a scene template's output.
+    PaletteMood,
+    /// P4.1.1 — the emotional character of a scene (Calm, Energetic, or
+    /// Ethereal) that templates use to pre-select parameter ranges.
+    Mood,
+    /// P4.1.1 — locking a template's animation speed to the project BPM so
+    /// the scene moves in time with the music.
+    TempoSync,
+    /// P4.1.1 — Bezier handles for mask polygon editing, letting operators
+    /// draw smooth curves instead of angular vertices.
+    BezierHandles,
+    /// P4.1.1 — built-in scene template: soft light flows through tagged
+    /// window zones revealing the scene beneath.
+    WindowReveal,
+    /// P4.1.1 — built-in scene template: fine particles drift slowly across
+    /// the source media surface.
+    PixelDrift,
+    /// P4.1.1 — built-in scene template: four-image collage with particle
+    /// blooms at each image edge.
+    CollagBloom,
+    /// P4.1.1 — built-in scene template: fluid light pools behind portal
+    /// zones, evoking glow from architectural openings.
+    GlowBehindOpenings,
+    /// P4.1.1 — built-in scene template: portrait image broken into
+    /// fragments by colliding particles at the mask boundary.
+    FragmentedPortrait,
+    /// P4.1.1 — built-in scene template: a gentle wave wash that traces the
+    /// edge zones of architectural surfaces.
+    ArchitecturalWash,
+    /// P4.1.1 — built-in scene template: the classic mask-edge ripple wash
+    /// as a standalone scene (no source media required).
+    MaskEdgeRippleWashScene,
+    /// P4.1.1 — built-in scene template: light appears to spill outward from
+    /// tagged window zones as if leaking from an interior source.
+    LightSpillFromWindows,
 }
 
 /// A single glossary entry: a short headline and a 1–2 sentence body.
@@ -681,6 +729,115 @@ pub fn entry(t: GlossaryTerm) -> GlossaryEntry {
                    shortcut for common polygon shapes), a Zone Tag is purely \
                    semantic — it does not change the polygon's shape.",
         },
+        // -------------------------------------------------------------------
+        // P4.1.1 — Phase 4 scene-grammar domain terms.
+        // -------------------------------------------------------------------
+        GlossaryTerm::SceneTemplate => GlossaryEntry {
+            headline: "Scene Template",
+            body: "A named, parameterised recipe that assembles media, zones, \
+                   and FX presets into a ready-to-run scene.  Pick a template \
+                   in the wizard, assign a few assets, and confirm — the scene \
+                   is live in under a minute.",
+        },
+        GlossaryTerm::SceneGrammar => GlossaryEntry {
+            headline: "Scene Grammar",
+            body: "The structural vocabulary of a scene: which zone roles it \
+                   binds, which media slots it accepts, and which FX presets it \
+                   activates.  Every built-in template documents its grammar so \
+                   the zone-mapping step is unambiguous.",
+        },
+        GlossaryTerm::Wizard => GlossaryEntry {
+            headline: "Scene Wizard",
+            body: "A guided multi-step flow for creating a scene from a \
+                   template: template select → media → zone binding → palette \
+                   → tempo → confirm.  Cancel at any step to return to the \
+                   previous state; one Cmd-Z undoes the entire commit.",
+        },
+        GlossaryTerm::PaletteMood => GlossaryEntry {
+            headline: "Palette",
+            body: "A curated colour accent set (Warm, Cool, or Neutral) that \
+                   templates apply to tint their output.  Warm leans amber and \
+                   gold; Cool leans blue and cyan; Neutral leaves the source \
+                   colours largely unchanged.",
+        },
+        GlossaryTerm::Mood => GlossaryEntry {
+            headline: "Mood",
+            body: "The emotional character of a scene template: Calm (gentle, \
+                   slow motion), Energetic (fast, punchy), or Ethereal (soft, \
+                   dreamy).  Templates use this to pre-select animation speed \
+                   and particle density defaults.",
+        },
+        GlossaryTerm::TempoSync => GlossaryEntry {
+            headline: "Tempo Sync",
+            body: "Locks a template's animation speed to the project BPM so \
+                   particle bursts, wave cycles, and wipe timings all fall on \
+                   the beat.  Requires the BPM clock to be running; toggle \
+                   off for freeform, non-musical scenes.",
+        },
+        GlossaryTerm::BezierHandles => GlossaryEntry {
+            headline: "Bezier Handles",
+            body: "Smooth-curve control handles for mask polygon edges that \
+                   let operators draw arched window reveals and organic shapes \
+                   without lots of vertices.  Bezier handles are planned for \
+                   Phase 7; current masks use straight-edge polygons only.",
+        },
+        // -------------------------------------------------------------------
+        // P4.1.1 — Built-in scene template display labels.
+        // -------------------------------------------------------------------
+        GlossaryTerm::WindowReveal => GlossaryEntry {
+            headline: "Window Reveal",
+            body: "A soft wash of light that flows through masks tagged as \
+                   Window zones, evoking daylight filtering through a glass \
+                   facade.  Assign a background image and tag your window \
+                   masks to see the reveal animate across the surface.",
+        },
+        GlossaryTerm::PixelDrift => GlossaryEntry {
+            headline: "Pixel Drift",
+            body: "Fine particles drift slowly and quietly across the source \
+                   media, giving a still photograph the feeling of faint \
+                   movement without any visible direction or narrative.",
+        },
+        GlossaryTerm::CollagBloom => GlossaryEntry {
+            headline: "Collage Bloom",
+            body: "Composites four images in a 2×2 grid with particles \
+                   blooming outward from each image edge.  Assign a different \
+                   photo to each slot for maximum contrast between the cells.",
+        },
+        GlossaryTerm::GlowBehindOpenings => GlossaryEntry {
+            headline: "Glow Behind Openings",
+            body: "Fluid light pools inside masks tagged as Portal zones, \
+                   suggesting that warm interior light is spilling through \
+                   archways or doorways.  Intensity follows the fluid \
+                   simulation viscosity slider.",
+        },
+        GlossaryTerm::FragmentedPortrait => GlossaryEntry {
+            headline: "Fragmented Portrait",
+            body: "A portrait image that shatters into fragment-like particles \
+                   bouncing off the mask boundary.  Works best with a \
+                   high-contrast portrait on a dark background.",
+        },
+        GlossaryTerm::ArchitecturalWash => GlossaryEntry {
+            headline: "Architectural Wash",
+            body: "A gentle ripple-wave wash that traces the edges of surfaces \
+                   tagged as Edge zones — sills, reveals, and trims.  \
+                   Upgrade of the v3 Architectural Wash FX preset; the \
+                   underlying effect is unchanged, but this scene template \
+                   adds media input and zone composition.",
+        },
+        GlossaryTerm::MaskEdgeRippleWashScene => GlossaryEntry {
+            headline: "Mask-Edge Ripple Wash (Scene)",
+            body: "The classic ripple-wash FX preset promoted to a full scene \
+                   template for one-click setup.  No source media required — \
+                   the effect generates its own visual content from the mask \
+                   boundary alone.",
+        },
+        GlossaryTerm::LightSpillFromWindows => GlossaryEntry {
+            headline: "Light Spill from Windows",
+            body: "Light appears to leak outward from masks tagged as Window \
+                   zones, as if an interior lamp is casting through the \
+                   aperture onto the surrounding wall.  Assign an interior-\
+                   light image to the media slot for the strongest effect.",
+        },
     }
 }
 
@@ -773,6 +930,23 @@ pub fn all_terms() -> &'static [GlossaryTerm] {
         GlossaryTerm::ZoneRoleLightSource,
         GlossaryTerm::ZoneAwareShader,
         GlossaryTerm::ZoneTag,
+        // P4.1.1 — Phase 4 scene-grammar domain terms.
+        GlossaryTerm::SceneTemplate,
+        GlossaryTerm::SceneGrammar,
+        GlossaryTerm::Wizard,
+        GlossaryTerm::PaletteMood,
+        GlossaryTerm::Mood,
+        GlossaryTerm::TempoSync,
+        GlossaryTerm::BezierHandles,
+        // P4.1.1 — Built-in scene template display labels.
+        GlossaryTerm::WindowReveal,
+        GlossaryTerm::PixelDrift,
+        GlossaryTerm::CollagBloom,
+        GlossaryTerm::GlowBehindOpenings,
+        GlossaryTerm::FragmentedPortrait,
+        GlossaryTerm::ArchitecturalWash,
+        GlossaryTerm::MaskEdgeRippleWashScene,
+        GlossaryTerm::LightSpillFromWindows,
     ]
 }
 
@@ -849,7 +1023,7 @@ mod tests {
     #[test]
     fn all_terms_covers_every_variant() {
         // Bump this when you add a new GlossaryTerm variant.
-        const EXPECTED_VARIANT_COUNT: usize = 72;
+        const EXPECTED_VARIANT_COUNT: usize = 87;
         assert_eq!(
             super::all_terms().len(),
             EXPECTED_VARIANT_COUNT,
