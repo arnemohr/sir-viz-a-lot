@@ -82,6 +82,52 @@ pub fn bake_polygon_sdf(poly: &[[f32; 2]], size: usize) -> Vec<f32> {
 mod tests {
     use super::*;
 
+    // P2.3.1 — CPU mirror of `sample_sdf_bilinear` (WGSL). Matches the shader
+    // implementation exactly: texel-centre layout, bilinear mix, clamped indices.
+    fn sample_sdf_bilinear_cpu(buf: &[f32], w: usize, h: usize, uv: [f32; 2]) -> f32 {
+        let (wf, hf) = (w as f32, h as f32);
+        let px = uv[0] * wf - 0.5;
+        let py = uv[1] * hf - 0.5;
+        let i0x = px.floor() as i32;
+        let i0y = py.floor() as i32;
+        let fx = px - i0x as f32;
+        let fy = py - i0y as f32;
+        let ix0 = i0x.clamp(0, w as i32 - 1) as usize;
+        let iy0 = i0y.clamp(0, h as i32 - 1) as usize;
+        let ix1 = (i0x + 1).clamp(0, w as i32 - 1) as usize;
+        let iy1 = (i0y + 1).clamp(0, h as i32 - 1) as usize;
+        let v00 = buf[iy0 * w + ix0];
+        let v10 = buf[iy0 * w + ix1];
+        let v01 = buf[iy1 * w + ix0];
+        let v11 = buf[iy1 * w + ix1];
+        let row0 = v00 + (v10 - v00) * fx;
+        let row1 = v01 + (v11 - v01) * fx;
+        row0 + (row1 - row0) * fy
+    }
+
+    // P2.3.1 — CPU mirror of `sample_sdf_gradient` (WGSL). Central-difference
+    // at one-texel epsilon.
+    fn sample_sdf_gradient_cpu(buf: &[f32], w: usize, h: usize, uv: [f32; 2]) -> [f32; 2] {
+        let eps_x = 1.0 / w as f32;
+        let eps_y = 1.0 / h as f32;
+        let dx_p = sample_sdf_bilinear_cpu(buf, w, h, [uv[0] + eps_x, uv[1]]);
+        let dx_n = sample_sdf_bilinear_cpu(buf, w, h, [uv[0] - eps_x, uv[1]]);
+        let dy_p = sample_sdf_bilinear_cpu(buf, w, h, [uv[0], uv[1] + eps_y]);
+        let dy_n = sample_sdf_bilinear_cpu(buf, w, h, [uv[0], uv[1] - eps_y]);
+        [(dx_p - dx_n) / (2.0 * eps_x), (dy_p - dy_n) / (2.0 * eps_y)]
+    }
+
+    // P2.3.1 — CPU mirror of `sample_sdf_normal` (WGSL). Normalises the
+    // gradient; returns [0.0, 0.0] when magnitude is below the 1e-6 floor.
+    fn sample_sdf_normal_cpu(buf: &[f32], w: usize, h: usize, uv: [f32; 2]) -> [f32; 2] {
+        let g = sample_sdf_gradient_cpu(buf, w, h, uv);
+        let len = (g[0] * g[0] + g[1] * g[1]).sqrt();
+        if len < 1e-6 {
+            return [0.0, 0.0];
+        }
+        [g[0] / len, g[1] / len]
+    }
+
     /// P0.5.2 smoke test: confirms the helper constant contains all three
     /// exported function signatures. Not a functional test — just guards
     /// against accidental truncation or wrong file path.
@@ -98,6 +144,10 @@ mod tests {
         assert!(
             SDF_HELPER_WGSL.contains("fn sample_sdf("),
             "SDF_HELPER_WGSL missing sample_sdf"
+        );
+        assert!(
+            SDF_HELPER_WGSL.contains("fn sample_sdf_normal("),
+            "SDF_HELPER_WGSL missing sample_sdf_normal"
         );
     }
 
@@ -136,6 +186,94 @@ mod tests {
         assert!(
             d < texel * 2.0,
             "edge distance should be ~0, got {d} (texel ~{texel})"
+        );
+    }
+
+    /// P2.3.1 — Construct a synthetic 64×64 circle SDF (centre 0.5, radius 0.25)
+    /// and verify `sample_sdf_normal` returns a vector within 0.05 per component
+    /// of the analytic radial unit-vector at four cardinal UV positions outside
+    /// the circle.
+    #[test]
+    fn sdf_normal_matches_radial_for_circle() {
+        let size: usize = 64;
+        let center = (0.5_f32, 0.5_f32);
+        let radius = 0.25_f32;
+
+        // Build circle SDF: value = dist_from_centre - radius.
+        let buf: Vec<f32> = (0..size * size)
+            .map(|idx| {
+                let ix = idx % size;
+                let iy = idx / size;
+                let x = (ix as f32 + 0.5) / size as f32;
+                let y = (iy as f32 + 0.5) / size as f32;
+                let dist = ((x - center.0).powi(2) + (y - center.1).powi(2)).sqrt();
+                dist - radius
+            })
+            .collect();
+
+        // Four cardinal UV positions outside the circle (centre + radius + margin).
+        let test_uvs: &[[f32; 2]] = &[
+            [0.5, 0.1], // above centre (small y)
+            [0.5, 0.9], // below centre (large y)
+            [0.1, 0.5], // left of centre
+            [0.9, 0.5], // right of centre
+        ];
+
+        let tol = 0.05_f32;
+
+        for &uv in test_uvs {
+            let normal = sample_sdf_normal_cpu(&buf, size, size, uv);
+
+            // Analytic: unit vector from centre to uv.
+            let dx = uv[0] - center.0;
+            let dy = uv[1] - center.1;
+            let len = (dx * dx + dy * dy).sqrt();
+            let expected = [dx / len, dy / len];
+
+            assert!(
+                (normal[0] - expected[0]).abs() < tol,
+                "uv={uv:?}: normal.x={} expected {} (tol {tol})",
+                normal[0],
+                expected[0],
+            );
+            assert!(
+                (normal[1] - expected[1]).abs() < tol,
+                "uv={uv:?}: normal.y={} expected {} (tol {tol})",
+                normal[1],
+                expected[1],
+            );
+        }
+    }
+
+    /// P2.3.1 — At the exact circle centre the SDF gradient is degenerate
+    /// (equidistant in all directions); `sample_sdf_normal` must return a
+    /// near-zero vector rather than a NaN or an arbitrary direction.
+    #[test]
+    fn sdf_normal_zero_when_degenerate() {
+        let size: usize = 64;
+        let center = (0.5_f32, 0.5_f32);
+        let radius = 0.25_f32;
+
+        let buf: Vec<f32> = (0..size * size)
+            .map(|idx| {
+                let ix = idx % size;
+                let iy = idx / size;
+                let x = (ix as f32 + 0.5) / size as f32;
+                let y = (iy as f32 + 0.5) / size as f32;
+                let dist = ((x - center.0).powi(2) + (y - center.1).powi(2)).sqrt();
+                dist - radius
+            })
+            .collect();
+
+        // At the exact centre the gradient should be near-zero (by symmetry,
+        // the central-difference stencil cancels). If it doesn't fully cancel
+        // due to floating-point, the magnitude must still be below 1e-6 so the
+        // function returns [0, 0].
+        let normal = sample_sdf_normal_cpu(&buf, size, size, [center.0, center.1]);
+        let mag = (normal[0] * normal[0] + normal[1] * normal[1]).sqrt();
+        assert!(
+            mag < 1e-4,
+            "expected near-zero normal at circle centre, got {normal:?} (mag={mag})"
         );
     }
 }

@@ -51,3 +51,19 @@ fn sample_sdf(t_sdf: texture_2d<f32>, uv: vec2<f32>) -> vec3<f32> {
     let g = sample_sdf_gradient(t_sdf, uv);
     return vec3<f32>(d, g.x, g.y);
 }
+
+// P2.3.1 — Normalised gradient direction at `uv`. Points away from the
+// nearest mask edge. Built on top of `sample_sdf_gradient` (which already
+// computes a central-difference stencil at one-texel epsilon); the 1/(2ε)
+// scaling cancels in the normalisation so the result is identical to a
+// direct finite-difference implementation. Returns vec2<f32>(0.0, 0.0)
+// when the local gradient magnitude is below a small floor (degenerate /
+// interior far from any edge).
+fn sample_sdf_normal(t_sdf: texture_2d<f32>, uv: vec2<f32>) -> vec2<f32> {
+    let g = sample_sdf_gradient(t_sdf, uv);
+    let len = length(g);
+    if (len < 1e-6) {
+        return vec2<f32>(0.0, 0.0);
+    }
+    return g / len;
+}
