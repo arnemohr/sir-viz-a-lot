@@ -2083,6 +2083,302 @@ fn perf_zone_tagged_fx_layer_within_budget() {
 }
 
 // ---------------------------------------------------------------------------
+// P4.1.2 — Scene-template post-wizard fixture: 2 image + 2 FxLayer layers.
+// ---------------------------------------------------------------------------
+
+/// P4.1.2 — perf gate for a four-layer post-wizard scene: two image-proxy
+/// layers and two `mask_edge_ripple_wash` FxLayers.
+///
+/// The fixture simulates a scene produced by the scene wizard after the
+/// operator commits a template such as `window_reveal` (1 image + 1 FxLayer)
+/// or `collage_bloom` (4 images + 1 FxLayer).  Two image layers are
+/// represented as warp-only passes (no FX pipeline, mirroring a plain Image
+/// layer where the source texture is already GPU-resident); two FxLayer
+/// layers run the full ripple-wash FX pass.
+///
+/// The `FIXME` below will be resolved when W5 templates land: replace the
+/// stub fixture with a real `instantiate_template` call against a compiled
+/// `window_reveal` template.
+///
+/// Target: p99 ≤ 16.6 ms (one frame at 60 Hz) on M-series hardware.
+/// FIXME(P4.5.1): update fixture to use real template-generated layers once W5
+/// built-in templates land in `src/project/scene_templates.rs`.
+#[cfg(feature = "gpu-tests")]
+#[test]
+fn perf_scene_template_scene_within_budget() {
+    let h = Headless::new().expect("Headless::new — no GPU adapter available");
+    let device = &h.device;
+    let queue = &h.queue;
+
+    // ---- Build shared pipelines ----
+    let fx_pipeline = FxPipeline::new_ripple_wash(device, FORMAT);
+    let compositor = Compositor::new(device, OUT_W, OUT_H, FORMAT);
+    let gamma = GammaPipeline::new(device, FORMAT);
+    let edge_blend = EdgeBlendPipeline::new(device, FORMAT);
+
+    // Fixture: 4 layers (indices 0–1 = image proxy; 2–3 = FxLayer ripple_wash).
+    const SCENE_LAYER_COUNT: usize = 4;
+    const IMAGE_LAYER_COUNT: usize = 2;
+
+    // ---- Build per-layer GPU state ----
+    let mut layers: Vec<LayerGpu> = (0..SCENE_LAYER_COUNT)
+        .map(|i| {
+            let poly = layer_polygon(i);
+            let (_fx_tex, fx_view) = make_render_texture(
+                device,
+                OUT_W,
+                OUT_H,
+                FORMAT,
+                &format!("scene_template fx tex layer {i}"),
+            );
+            let (_warp_tex, warp_view) = make_render_texture(
+                device,
+                OUT_W,
+                OUT_H,
+                FORMAT,
+                &format!("scene_template warp tex layer {i}"),
+            );
+            let (_sdf_tex, sdf_view) = make_sdf_texture(
+                device,
+                queue,
+                &poly,
+                &format!("scene_template sdf layer {i}"),
+            );
+            let compositor_uniform = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(&format!("scene_template comp uniform layer {i}")),
+                size: 16,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            let warp_pipeline = WarpPipeline::new(device, FORMAT);
+            warp_pipeline.init_buffers(queue, poly.len() >= 3);
+            LayerGpu {
+                _fx_tex,
+                fx_view,
+                _warp_tex,
+                warp_view,
+                _sdf_tex,
+                sdf_view,
+                compositor_uniform,
+                warp_pipeline,
+            }
+        })
+        .collect();
+
+    // ---- Per-output render targets ----
+    let output_targets: Vec<(wgpu::Texture, wgpu::TextureView)> = (0..OUTPUT_COUNT)
+        .map(|i| {
+            make_render_texture(
+                device,
+                OUT_W,
+                OUT_H,
+                FORMAT,
+                &format!("scene_template output rt {i}"),
+            )
+        })
+        .collect();
+
+    let (_warp_rt_tex, warp_rt_view) =
+        make_render_texture(device, OUT_W, OUT_H, FORMAT, "scene_template warp rt");
+
+    // ---- Frame timing accumulator ----
+    let mut frame_times_ms: Vec<f64> = Vec::with_capacity(FRAME_COUNT);
+    let texture_upload_drop_count: u64 = 0;
+    let mut panic_count: usize = 0;
+
+    let start_time = Instant::now();
+
+    for frame_idx in 0..FRAME_COUNT {
+        let frame_start = Instant::now();
+        let clock_secs = start_time.elapsed().as_secs_f32();
+
+        let frame_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            render_frame_scene_template(
+                device,
+                queue,
+                &fx_pipeline,
+                &compositor,
+                &gamma,
+                &edge_blend,
+                &mut layers,
+                IMAGE_LAYER_COUNT,
+                &output_targets,
+                &warp_rt_view,
+                clock_secs,
+            );
+        }));
+
+        if frame_result.is_err() {
+            panic_count += 1;
+        }
+
+        device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("device.poll failed");
+
+        let elapsed_ms = frame_start.elapsed().as_secs_f64() * 1000.0;
+        frame_times_ms.push(elapsed_ms);
+
+        if (frame_idx + 1) % 100 == 0 {
+            println!(
+                "[perf_scene_template_scene_within_budget] frame {}/{FRAME_COUNT}: last={:.2}ms",
+                frame_idx + 1,
+                elapsed_ms
+            );
+        }
+    }
+
+    // ---- Compute statistics ----
+    frame_times_ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let min_ms = frame_times_ms[0];
+    let max_ms = *frame_times_ms.last().unwrap();
+    let p50_ms = percentile(&frame_times_ms, 50.0);
+    let p99_ms = percentile(&frame_times_ms, 99.0);
+    let total_frames = frame_times_ms.len();
+
+    // ---- Print results ----
+    println!();
+    println!("=== P4.1.2 Frame-Budget Gate: scene-template stub fixture ===");
+    println!(
+        "  Fixture:          {IMAGE_LAYER_COUNT} image-proxy + {} FxLayer ripple_wash layers",
+        SCENE_LAYER_COUNT - IMAGE_LAYER_COUNT
+    );
+    println!("  Frames rendered:  {total_frames}");
+    println!("  Min frame time:   {min_ms:.2} ms");
+    println!("  p50 frame time:   {p50_ms:.2} ms");
+    println!("  p99 frame time:   {p99_ms:.2} ms");
+    println!("  Max frame time:   {max_ms:.2} ms");
+    println!("  Texture drops:    {texture_upload_drop_count}");
+    println!("  Panic count:      {panic_count}");
+    println!();
+    println!("  CI assertion:     p99 < 100 ms (regression guard)");
+    println!("  Show-day target:  p99 ≤ 16.6 ms on actual projector hardware");
+    println!("  NOTE: stub fixture; update to real template layers in P4.5.1.");
+    println!("=============================================================");
+
+    // ---- Assertions ----
+    assert_eq!(
+        texture_upload_drop_count, 0,
+        "texture upload drop count must be zero (no producers configured in fixture)"
+    );
+    assert_eq!(
+        panic_count, 0,
+        "panic_count must be zero: {panic_count} frame(s) panicked — check render graph"
+    );
+    // CI-portable loose gate (10× regression guard).
+    assert!(
+        p99_ms < 100.0,
+        "p99 frame time {p99_ms:.2} ms exceeds 100 ms CI regression gate \
+         (scene-template fixture: {IMAGE_LAYER_COUNT} image-proxy + {} FxLayer layers, \
+         {OUTPUT_COUNT} outputs, edge-blend {EDGE_BLEND_OVERLAP_PX}px)",
+        SCENE_LAYER_COUNT - IMAGE_LAYER_COUNT
+    );
+    // Show-day acceptance: p99 ≤ 16.6 ms (one frame at 60 Hz).
+    assert!(
+        p99_ms <= 16.6,
+        "p99 frame time {p99_ms:.2} ms exceeds show-day budget of 16.6 ms \
+         (scene-template stub fixture: 2 image-proxy + 2 FxLayer)"
+    );
+}
+
+/// Per-frame render sequence for the scene-template fixture.
+///
+/// Layers with index < `image_layer_count` are treated as image-proxy layers:
+/// they skip the FX pipeline pass and render only the warp pass (the
+/// `fx_view` texture contains whatever GPU-allocated memory it was
+/// initialised to, standing in for a GPU-resident image texture).
+///
+/// Layers with index ≥ `image_layer_count` are FxLayers: they run the full
+/// ripple-wash FX pass before the warp pass.
+#[allow(clippy::too_many_arguments)]
+fn render_frame_scene_template(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    fx_pipeline: &FxPipeline,
+    compositor: &Compositor,
+    gamma: &GammaPipeline,
+    edge_blend: &EdgeBlendPipeline,
+    layers: &mut [LayerGpu],
+    image_layer_count: usize,
+    output_targets: &[(wgpu::Texture, wgpu::TextureView)],
+    warp_rt_view: &wgpu::TextureView,
+    clock_secs: f32,
+) {
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("perf scene_template offscreen encoder"),
+    });
+
+    let comp_inputs: Vec<(&wgpu::TextureView, f32, f32, &wgpu::Buffer)> = layers
+        .iter_mut()
+        .enumerate()
+        .map(|(i, ls)| {
+            if i >= image_layer_count {
+                // FxLayer: run the FX preset first, then the warp pass.
+                fx_pipeline.render_with_params(
+                    device,
+                    queue,
+                    &mut encoder,
+                    &ls.fx_view,
+                    &ls.sdf_view,
+                    clock_secs,
+                    &MAX_AMP_PARAMS,
+                );
+            }
+            // Both image-proxy and FxLayer run the warp pass.
+            ls.warp_pipeline.render(
+                device,
+                queue,
+                &mut encoder,
+                &ls.warp_view,
+                &ls.fx_view,
+                &ls.sdf_view,
+            );
+
+            (
+                &ls.warp_view as &wgpu::TextureView,
+                1.0f32,
+                0.0f32,
+                &ls.compositor_uniform as &wgpu::Buffer,
+            )
+        })
+        .collect();
+
+    compositor.composite(
+        device,
+        queue,
+        &mut encoder,
+        wgpu::Color {
+            r: 0.0,
+            g: 0.0,
+            b: 0.0,
+            a: 1.0,
+        },
+        warp_rt_view,
+        &comp_inputs,
+    );
+
+    queue.submit(std::iter::once(encoder.finish()));
+
+    for (out_idx, (_out_tex, out_view)) in output_targets.iter().enumerate() {
+        let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("perf scene_template gamma encoder"),
+        });
+        gamma.render(device, queue, &mut enc, out_view, warp_rt_view);
+        let edge_side = if out_idx == 0 { 0.0f32 } else { 1.0 };
+        edge_blend.render(
+            device,
+            queue,
+            &mut enc,
+            out_view,
+            OUT_W,
+            EDGE_BLEND_OVERLAP_PX,
+            edge_side,
+        );
+        queue.submit(std::iter::once(enc.finish()));
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Percentile helper
 // ---------------------------------------------------------------------------
 
