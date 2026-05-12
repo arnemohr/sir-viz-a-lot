@@ -36,9 +36,10 @@ pub mod preset_browser;
 pub mod preset_io;
 #[cfg(feature = "v3")]
 pub mod preset_stars;
-#[cfg(feature = "v3")]
 pub mod primitives;
 pub mod scene_editor;
+#[cfg(feature = "v3")]
+pub mod scene_io;
 #[cfg(feature = "v3")]
 pub mod show_day_strip;
 pub mod theme;
