@@ -47,3 +47,5 @@ pub mod theme;
 pub mod toast;
 #[cfg(feature = "v3")]
 pub mod toolbar;
+#[cfg(feature = "v3")]
+pub mod wizard;

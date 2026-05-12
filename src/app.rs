@@ -141,6 +141,14 @@ enum AppState {
     /// transition from / back to `Editing`.
     #[allow(dead_code)] // Constructed by T-003-T4.16.
     GoLive(EditingState),
+    /// P4.3.1 — Scene wizard overlay. The operator picks a template and
+    /// assigns media / zones / palette / tempo before the wizard commits.
+    /// The `EditingState` is MOVED OUT of `Editing` on entry and MOVED BACK
+    /// on commit or cancel (mirrors the `GoLive` transition pattern).
+    /// `ControlFlow` is `Poll` so the canvas keeps animating behind the overlay.
+    #[allow(dead_code)] // Constructed by P4.3.1 enter_scene_wizard().
+    #[cfg(feature = "v3")]
+    SceneWizard(SceneWizardState),
     /// Project load, audit-critical, or render-init failure. T-003-T1.44
     /// wires the routing.
     #[allow(dead_code)] // Constructed by T-003-T1.44.
@@ -151,12 +159,23 @@ impl AppState {
     /// True when the app already holds a live session of any kind.
     /// Used to guard the macOS `resumed` re-fire path.
     fn is_running(&self) -> bool {
-        matches!(self, Self::Launcher(_) | Self::Editing(_) | Self::GoLive(_))
+        matches!(self, Self::Launcher(_) | Self::Editing(_) | Self::GoLive(_)) || {
+            #[cfg(feature = "v3")]
+            {
+                matches!(self, Self::SceneWizard(_))
+            }
+            #[cfg(not(feature = "v3"))]
+            {
+                false
+            }
+        }
     }
 
     /// `&mut EditingState` for the variants that carry one
     /// (`Editing`, `GoLive`). `None` for `Booting`, `Launcher`,
-    /// `Failed`. T-003-T1.2 / T1.3 replace the call-site uses of
+    /// `Failed`, and `SceneWizard` (the wizard does not expose
+    /// `EditingState` directly — access is via `SceneWizardState.editing`).
+    /// T-003-T1.2 / T1.3 replace the call-site uses of
     /// this helper with explicit `match` expressions.
     fn editing_mut(&mut self) -> Option<&mut EditingState> {
         match self {
@@ -167,16 +186,21 @@ impl AppState {
 
     /// 003-T1.4: per-state event-loop control-flow.
     ///
-    /// `Editing` and `GoLive` need `Poll` (vsync redraws drive
-    /// rendering). `Launcher` and `Failed` are idle screens with
-    /// no animation — `Wait` keeps the laptop CPU + battery quiet
-    /// until the user does something. `Booting` is transient
-    /// (one frame before transition); `Wait` is the safest
-    /// default.
+    /// `Editing`, `GoLive`, and `SceneWizard` need `Poll` (vsync redraws drive
+    /// rendering; the canvas animates behind the wizard overlay). `Launcher`
+    /// and `Failed` are idle screens with no animation — `Wait` keeps the
+    /// laptop CPU + battery quiet until the user does something. `Booting` is
+    /// transient (one frame before transition); `Wait` is the safest default.
     fn control_flow(&self) -> ControlFlow {
+        #[cfg(feature = "v3")]
+        if matches!(self, Self::SceneWizard(_)) {
+            return ControlFlow::Poll;
+        }
         match self {
             Self::Editing(_) | Self::GoLive(_) => ControlFlow::Poll,
             Self::Booting | Self::Launcher(_) | Self::Failed(_) => ControlFlow::Wait,
+            #[cfg(feature = "v3")]
+            Self::SceneWizard(_) => ControlFlow::Poll, // handled above; unreachable
         }
     }
 
@@ -190,6 +214,8 @@ impl AppState {
             Self::Editing(_) => "Editing",
             Self::GoLive(_) => "GoLive",
             Self::Failed(_) => "Failed",
+            #[cfg(feature = "v3")]
+            Self::SceneWizard(_) => "SceneWizard",
         }
     }
 }
@@ -341,6 +367,25 @@ const LAUNCHER_ERROR_TTL: std::time::Duration = std::time::Duration::from_secs(5
 #[cfg(not(feature = "v3"))]
 #[allow(dead_code)]
 struct LauncherState;
+
+/// P4.3.1 — payload for `AppState::SceneWizard`.
+///
+/// The `EditingState` is MOVED OUT of `AppState::Editing` on wizard entry
+/// and MOVED BACK on commit or cancel. The pre-wizard project JSON is captured
+/// as a snapshot for cancel rollback (see P4.3.2).
+#[cfg(feature = "v3")]
+struct SceneWizardState {
+    /// The full editing session (GPU, windows, etc.) kept live so the canvas
+    /// continues to animate behind the wizard overlay.
+    editing: EditingState,
+    /// Snapshot of the project state at the moment the wizard was opened.
+    /// Used by cancel (P4.3.2) to dispatch `ApplyProjectSnapshot { non_undoable: true }`.
+    pre_wizard_snapshot: serde_json::Value,
+    /// Wizard choices accumulated across the five steps.
+    choices: crate::project::scene_instantiation::WizardChoices,
+    /// Which step is currently displayed.
+    step: crate::windows::wizard::WizardStep,
+}
 
 /// Reasons for transitioning into `AppState::Failed`. Each variant
 /// surfaces a recoverable or terminal failure. T-003-T1.44 wires
@@ -4164,6 +4209,179 @@ fn render_m5_pipeline(
     })
 }
 
+// ---------------------------------------------------------------------------
+// P4.3.1 — Scene wizard routing
+// ---------------------------------------------------------------------------
+
+/// Construct `AppState::SceneWizard` from an `EditingState`.
+///
+/// Moves the editing state into the wizard and captures the current project
+/// JSON as a rollback snapshot. Called from the "New scene from template"
+/// action (wired in P4.3.2 / P4.4.1).
+#[cfg(feature = "v3")]
+#[allow(dead_code)] // wired by P4.3.2 "New scene from template" action
+fn enter_scene_wizard(editing: EditingState) -> AppState {
+    use crate::project::scene_instantiation::WizardChoices;
+    use crate::project::snapshot;
+    use crate::windows::wizard::WizardStep;
+
+    let pre_wizard_snapshot = snapshot(&editing.project);
+    AppState::SceneWizard(SceneWizardState {
+        pre_wizard_snapshot,
+        choices: WizardChoices::default(),
+        step: WizardStep::default(),
+        editing,
+    })
+}
+
+/// What `handle_wizard_window_event` requests the caller to do.
+///
+/// `None` = stay in `SceneWizard` (no `AppState` transition).
+/// `Some` = take ownership of the `SceneWizardState` and produce a new `AppState`
+/// (cancel or commit).
+#[cfg(feature = "v3")]
+enum WizardTransition {
+    Cancel,
+    Commit,
+}
+
+/// Handle a winit `WindowEvent` while the app is in `AppState::SceneWizard`.
+///
+/// Returns `Some(WizardTransition)` when the operator cancels or confirms;
+/// the caller does `mem::replace` to take ownership of the `SceneWizardState`
+/// before calling `wizard_cancel` / `wizard_commit` with the owned value.
+#[cfg(feature = "v3")]
+fn handle_wizard_window_event(
+    state: &mut SceneWizardState,
+    _event_loop: &ActiveEventLoop,
+    window_id: WindowId,
+    event: WindowEvent,
+) -> Option<WizardTransition> {
+    use crate::windows::wizard::{WizardAction, draw_wizard_panel};
+
+    // Handle escape → cancel.
+    if matches!(
+        event,
+        WindowEvent::KeyboardInput {
+            event: winit::event::KeyEvent {
+                logical_key: winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape),
+                state: winit::event::ElementState::Pressed,
+                ..
+            },
+            ..
+        }
+    ) {
+        return Some(WizardTransition::Cancel);
+    }
+
+    // Dispatch to the control window's egui context if the event belongs to it.
+    let ctrl = state.editing.control.as_mut()?;
+    if ctrl.id() != window_id {
+        return None;
+    }
+    let _ = ctrl.on_window_event(&event);
+
+    if let WindowEvent::RedrawRequested = event {
+        let device = &state.editing.renderer.gpu.device;
+        let queue = &state.editing.renderer.gpu.queue;
+        let step = state.step;
+        let choices = &mut state.choices;
+        let mut wizard_action: Option<WizardAction> = None;
+
+        let _ = ctrl.render(device, queue, |ui| {
+            wizard_action = draw_wizard_panel(ui, step, choices);
+        });
+
+        // Process WizardAction returned from the panel.
+        match wizard_action {
+            Some(WizardAction::Cancel) => return Some(WizardTransition::Cancel),
+            Some(WizardAction::Back) => {
+                if let Some(prev) = state.step.prev() {
+                    state.step = prev;
+                }
+            }
+            Some(WizardAction::Next) => {
+                if let Some(next) = state.step.next() {
+                    state.step = next;
+                }
+            }
+            Some(WizardAction::Confirm) => return Some(WizardTransition::Commit),
+            None => {}
+        }
+
+        ctrl.window.request_redraw();
+    }
+
+    None
+}
+
+/// Cancel the wizard: dispatch non-undoable `ApplyProjectSnapshot` and return
+/// to `AppState::Editing` with the pre-wizard state restored.
+///
+/// Takes ownership of `SceneWizardState` — called by `App::window_event` after
+/// `mem::replace` extracts the state from `self.state`.
+#[cfg(feature = "v3")]
+fn wizard_cancel(state: SceneWizardState) -> AppState {
+    use crate::project::command::{ApplyProjectSnapshot, Mutation};
+    use crate::project::snapshot;
+
+    let SceneWizardState {
+        mut editing,
+        pre_wizard_snapshot,
+        ..
+    } = state;
+
+    let current_snapshot = snapshot(&editing.project);
+    let mutation = Mutation::ApplyProjectSnapshot(ApplyProjectSnapshot {
+        new: pre_wizard_snapshot,
+        old: current_snapshot,
+        non_undoable: true,
+    });
+    editing.undo_stack.push(mutation, &mut editing.project);
+    AppState::Editing(editing)
+}
+
+/// Commit the wizard: instantiate the template, dispatch undoable
+/// `ApplyProjectSnapshot`, and return to `AppState::Editing`.
+///
+/// Takes ownership of `SceneWizardState` — called by `App::window_event` after
+/// `mem::replace` extracts the state from `self.state`.
+#[cfg(feature = "v3")]
+fn wizard_commit(state: SceneWizardState) -> AppState {
+    use crate::project::command::{ApplyProjectSnapshot, Mutation};
+    use crate::project::scene_instantiation::instantiate_template;
+    use crate::project::scene_templates::scene_registry;
+    use crate::project::snapshot;
+
+    let SceneWizardState {
+        mut editing,
+        pre_wizard_snapshot,
+        choices,
+        ..
+    } = state;
+
+    let current_snapshot = snapshot(&editing.project);
+
+    // Find the selected template and instantiate it.
+    let generated = if let Some(template) = scene_registry()
+        .iter()
+        .find(|t| t.id == choices.template_id)
+    {
+        instantiate_template(template, &choices, current_snapshot)
+    } else {
+        // No template selected or registry empty — keep current project.
+        snapshot(&editing.project)
+    };
+
+    let mutation = Mutation::ApplyProjectSnapshot(ApplyProjectSnapshot {
+        new: generated,
+        old: pre_wizard_snapshot,
+        non_undoable: false,
+    });
+    editing.undo_stack.push(mutation, &mut editing.project);
+    AppState::Editing(editing)
+}
+
 /// Handle a winit `WindowEvent` while the app is in `Editing` or
 /// `GoLive`. Pulled out of `App::window_event` (003-T1.3) so the
 /// top-level handler is a thin `match` on `AppState`. The body is
@@ -5578,6 +5796,26 @@ impl ApplicationHandler for App {
             return;
         }
 
+        // P4.3.1: wizard arm — mirrors the launcher short-circuit above.
+        // The wizard panel renders in the control window while the canvas
+        // animates behind it; on cancel/commit we mem::replace to take
+        // ownership and call wizard_cancel / wizard_commit.
+        #[cfg(feature = "v3")]
+        if let AppState::SceneWizard(wizard_state) = &mut self.state {
+            let transition = handle_wizard_window_event(wizard_state, event_loop, window_id, event);
+            if let Some(t) = transition {
+                let prev = std::mem::replace(&mut self.state, AppState::Booting);
+                let AppState::SceneWizard(owned) = prev else {
+                    unreachable!("SceneWizard variant matched on the line above");
+                };
+                self.state = match t {
+                    WizardTransition::Cancel => wizard_cancel(owned),
+                    WizardTransition::Commit => wizard_commit(owned),
+                };
+            }
+            return;
+        }
+
         // 003-T1.3: dispatch on AppState. The `Editing` / `GoLive`
         // payload runs the full pre-existing handler unchanged; other
         // states ignore most events but honor `CloseRequested` so the
@@ -5599,6 +5837,10 @@ impl ApplicationHandler for App {
                 }
             }
             AppState::Editing(_) | AppState::GoLive(_) => {}
+            #[cfg(feature = "v3")]
+            AppState::SceneWizard(_) => {
+                // Short-circuited above; unreachable.
+            }
         }
         // 003-T4.17: handle GoLive/ExitGoLive transitions outside the match so
         // the borrow of self.state is released before we mem::replace it.
