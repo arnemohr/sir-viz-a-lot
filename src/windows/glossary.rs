@@ -88,6 +88,57 @@ pub enum GlossaryTerm {
     ReversePlayback,
     /// P1.1.3 (W4 / P1.4.5) — pre-decoded thumbnail strip with seek.
     ThumbnailScrub,
+    // -----------------------------------------------------------------------
+    // P2.1.1 — Phase 2 domain terms and built-in preset display labels.
+    // -----------------------------------------------------------------------
+    /// P2.1.1 — GPU point / sprite simulation layer.
+    Particle,
+    /// P2.1.1 — directional influence volume that steers particles.
+    ForceField,
+    /// P2.1.1 — Navier–Stokes-style velocity-field simulation.
+    FluidSim,
+    /// P2.1.1 — browsable collection of built-in and user FX presets.
+    PresetLibrary,
+    /// P2.1.1 — effect or emitter whose output is clipped to the mask boundary.
+    MaskConstrained,
+    /// P2.1.1 — mask shape used as the spawn surface for an emitter.
+    EmitterMasking,
+    /// P2.1.1 — outward-pointing normal derived from the mask's distance field.
+    SdfNormal,
+    /// P2.1.1 — preset family that pushes geometry outward in a wave.
+    DisplacementPreset,
+    /// P2.1.1 — preset family that bends light at the mask boundary.
+    RefractionPreset,
+    /// P2.1.1 — preset family that propagates oscillating wave patterns.
+    WavePreset,
+    /// P2.1.1 — ceiling on active particles for perf control.
+    ParticleBudget,
+    /// P2.1.1 — deterministic noise seed so a preset looks the same every take.
+    SeedDeterminism,
+    /// P2.1.1 — drag-to-reorder gesture for the per-layer effect chain.
+    EffectChainReorder,
+    /// P2.1.1 — preset saved by the operator for their own library.
+    UserPreset,
+    /// P2.1.1 — factory preset shipped with the application.
+    BuiltInPreset,
+    /// P2.1.1 — built-in preset: particle ripple spawned along the mask edge.
+    MaskEdgeRippleWash,
+    /// P2.1.1 — built-in preset: wave wash emitted from the mask edge.
+    MaskEdgeWaveWash,
+    /// P2.1.1 — built-in preset: particles drift inside the mask boundary.
+    MaskConstrainedDrift,
+    /// P2.1.1 — built-in preset: sparks emitted outward from the mask edge.
+    MaskEdgeEmission,
+    /// P2.1.1 — built-in preset: force-field flow driven by the mask shape.
+    MaskFieldFlow,
+    /// P2.1.1 — built-in preset: particles bounce off the mask boundary.
+    MaskCollisionReflection,
+    /// P2.1.1 — built-in preset: fluid simulation bounded by the mask.
+    MaskBoundedFluid,
+    /// P2.1.1 — built-in preset: ripple displacement emanating from the mask.
+    DisplacementRipple,
+    /// P2.1.1 — built-in preset: lens-refraction distortion at the mask edge.
+    Refraction,
 }
 
 /// A single glossary entry: a short headline and a 1–2 sentence body.
@@ -356,6 +407,172 @@ pub fn entry(t: GlossaryTerm) -> GlossaryEntry {
                    clip.  Hover to preview a position; click to seek the \
                    playhead there.  Drag the edges to set in/out points.",
         },
+        // -------------------------------------------------------------------
+        // P2.1.1 — Phase 2 domain terms.
+        // -------------------------------------------------------------------
+        GlossaryTerm::Particle => GlossaryEntry {
+            headline: "Particle",
+            body: "A single GPU-simulated sprite that moves, fades, and \
+                   disappears over its lifetime.  Hundreds of thousands run \
+                   in parallel on the GPU; the Particle Budget slider caps \
+                   the count to match your hardware.",
+        },
+        GlossaryTerm::ForceField => GlossaryEntry {
+            headline: "Force Field",
+            body: "A directional volume that pushes or pulls particles passing \
+                   through it.  Combine several overlapping fields to build \
+                   wind, vortex, or gravity effects without touching individual \
+                   particle settings.",
+        },
+        GlossaryTerm::FluidSim => GlossaryEntry {
+            headline: "Fluid Sim",
+            body: "A velocity-field simulation that makes particles swirl and \
+                   flow like smoke or ink.  Viscosity and diffusion sliders \
+                   control whether the motion looks like water, fog, or thick \
+                   paint.",
+        },
+        GlossaryTerm::PresetLibrary => GlossaryEntry {
+            headline: "Preset Library",
+            body: "The browsable panel showing all built-in and saved FX \
+                   presets.  Click a preset to apply it to the selected FX \
+                   Layer; use the star to pin favourites to the top.",
+        },
+        GlossaryTerm::MaskConstrained => GlossaryEntry {
+            headline: "Mask-Constrained",
+            body: "An effect or emitter whose output is clipped to the layer's \
+                   mask polygon.  Particles or distortions that cross the \
+                   boundary are removed, keeping the look tidy on irregular \
+                   surfaces.",
+        },
+        GlossaryTerm::EmitterMasking => GlossaryEntry {
+            headline: "Emitter Masking",
+            body: "Uses the layer's mask polygon as the spawn surface for \
+                   particles.  New particles appear along the mask edge or \
+                   inside its filled area depending on the preset's emitter \
+                   mode.",
+        },
+        GlossaryTerm::SdfNormal => GlossaryEntry {
+            headline: "SDF Normal",
+            body: "The outward-pointing direction at any point on the mask \
+                   boundary, computed from its signed-distance field.  Presets \
+                   use this to shoot particles or waves perpendicular to the \
+                   mask edge without manual direction tuning.",
+        },
+        GlossaryTerm::DisplacementPreset => GlossaryEntry {
+            headline: "Displacement Preset",
+            body: "A preset family that pushes pixels outward from the mask \
+                   boundary using a wave or ripple offset.  Strength and \
+                   frequency sliders control how far pixels shift and how \
+                   quickly the wave cycles.",
+        },
+        GlossaryTerm::RefractionPreset => GlossaryEntry {
+            headline: "Refraction Preset",
+            body: "A preset family that bends the layer image at the mask \
+                   boundary as if viewed through glass or water.  Index and \
+                   blur sliders control the strength of the lens effect.",
+        },
+        GlossaryTerm::WavePreset => GlossaryEntry {
+            headline: "Wave Preset",
+            body: "A preset family that propagates oscillating patterns outward \
+                   from the mask edge.  Speed, amplitude, and wavelength \
+                   sliders let you tune it from a gentle shimmer to a heavy \
+                   ripple.",
+        },
+        GlossaryTerm::ParticleBudget => GlossaryEntry {
+            headline: "Particle Budget",
+            body: "The maximum number of live particles allowed on this layer \
+                   at once.  Lower the budget if you see dropped frames; raise \
+                   it for denser effects when headroom is available.  Changes \
+                   take effect on the next spawn cycle.",
+        },
+        GlossaryTerm::SeedDeterminism => GlossaryEntry {
+            headline: "Seed (Determinism)",
+            body: "A numeric value that locks a preset's random noise to a \
+                   fixed sequence.  Two shows with the same seed look \
+                   identical.  Change the seed to get a different-but-\
+                   repeatable variation of the same preset.",
+        },
+        GlossaryTerm::EffectChainReorder => GlossaryEntry {
+            headline: "Effect-Chain Reorder",
+            body: "Drag an effect card up or down in the effect chain to change \
+                   the order effects are applied.  Order matters: a blur before \
+                   a colour shift produces a different result than the reverse.",
+        },
+        GlossaryTerm::UserPreset => GlossaryEntry {
+            headline: "User Preset",
+            body: "An FX preset you saved from your own parameter tweaks.  \
+                   User presets appear in the Preset Library alongside built-in \
+                   ones; export them to share with other operators.",
+        },
+        GlossaryTerm::BuiltInPreset => GlossaryEntry {
+            headline: "Built-In Preset",
+            body: "A factory preset shipped with the application that cannot be \
+                   deleted.  Built-in presets are a starting point; duplicate \
+                   one to create an editable user preset.",
+        },
+        // -------------------------------------------------------------------
+        // P2.1.1 — Built-in preset display labels.
+        // -------------------------------------------------------------------
+        GlossaryTerm::MaskEdgeRippleWash => GlossaryEntry {
+            headline: "Mask-Edge Ripple Wash",
+            body: "Spawns a continuous wash of particles along the mask \
+                   boundary, flowing outward as a ripple.  Speed and density \
+                   sliders tune how fast and thick the wash appears.",
+        },
+        GlossaryTerm::MaskEdgeWaveWash => GlossaryEntry {
+            headline: "Mask-Edge Wave Wash",
+            body: "Emits an oscillating wave wash from the mask edge that \
+                   crests and fades across the layer surface.  Amplitude and \
+                   frequency control the height and spacing of each wave crest.",
+        },
+        GlossaryTerm::MaskConstrainedDrift => GlossaryEntry {
+            headline: "Mask-Constrained Drift",
+            body: "Fills the mask interior with slowly drifting particles that \
+                   stay within the boundary.  A gentle effect for giving a \
+                   still image a sense of quiet movement without visible \
+                   directional flow.",
+        },
+        GlossaryTerm::MaskEdgeEmission => GlossaryEntry {
+            headline: "Mask-Edge Emission",
+            body: "Shoots sparks outward from the mask perimeter, following \
+                   the SDF normal direction.  Burst rate and spread angle let \
+                   you scale from occasional glints to a constant halo.",
+        },
+        GlossaryTerm::MaskFieldFlow => GlossaryEntry {
+            headline: "Mask Field Flow",
+            body: "A force-field preset whose flow lines follow the mask \
+                   boundary shape, carrying particles along the contour.  \
+                   Works well on text or logo masks to trace their outline \
+                   with motion.",
+        },
+        GlossaryTerm::MaskCollisionReflection => GlossaryEntry {
+            headline: "Mask Collision Reflection",
+            body: "Particles fill the layer and bounce elastically off the \
+                   mask boundary as if the edge were a solid wall.  \
+                   Restitution and particle size sliders control how \
+                   energetic the collisions look.",
+        },
+        GlossaryTerm::MaskBoundedFluid => GlossaryEntry {
+            headline: "Mask-Bounded Fluid",
+            body: "A fluid simulation that treats the mask polygon as a \
+                   container: the velocity field swirls inside but cannot \
+                   escape the boundary.  Viscosity sets the feel from \
+                   thin water to heavy oil.",
+        },
+        GlossaryTerm::DisplacementRipple => GlossaryEntry {
+            headline: "Displacement Ripple",
+            body: "Pushes pixels in a radial ripple pattern emanating from the \
+                   mask edge, distorting the layer image as if a stone were \
+                   dropped into the surface.  Speed sets the ring expansion \
+                   rate; strength sets maximum pixel offset.",
+        },
+        GlossaryTerm::Refraction => GlossaryEntry {
+            headline: "Refraction",
+            body: "Bends the layer image at the mask boundary using a \
+                   lens-distortion pass, creating a glass-edge or water-\
+                   surface appearance.  Index controls how strongly light \
+                   bends; blur softens the distorted region.",
+        },
     }
 }
 
@@ -412,6 +629,32 @@ pub fn all_terms() -> &'static [GlossaryTerm] {
         GlossaryTerm::BpmLockedPlayback,
         GlossaryTerm::ReversePlayback,
         GlossaryTerm::ThumbnailScrub,
+        // P2.1.1 — Phase 2 domain terms.
+        GlossaryTerm::Particle,
+        GlossaryTerm::ForceField,
+        GlossaryTerm::FluidSim,
+        GlossaryTerm::PresetLibrary,
+        GlossaryTerm::MaskConstrained,
+        GlossaryTerm::EmitterMasking,
+        GlossaryTerm::SdfNormal,
+        GlossaryTerm::DisplacementPreset,
+        GlossaryTerm::RefractionPreset,
+        GlossaryTerm::WavePreset,
+        GlossaryTerm::ParticleBudget,
+        GlossaryTerm::SeedDeterminism,
+        GlossaryTerm::EffectChainReorder,
+        GlossaryTerm::UserPreset,
+        GlossaryTerm::BuiltInPreset,
+        // P2.1.1 — Built-in preset display labels.
+        GlossaryTerm::MaskEdgeRippleWash,
+        GlossaryTerm::MaskEdgeWaveWash,
+        GlossaryTerm::MaskConstrainedDrift,
+        GlossaryTerm::MaskEdgeEmission,
+        GlossaryTerm::MaskFieldFlow,
+        GlossaryTerm::MaskCollisionReflection,
+        GlossaryTerm::MaskBoundedFluid,
+        GlossaryTerm::DisplacementRipple,
+        GlossaryTerm::Refraction,
     ]
 }
 
@@ -488,7 +731,7 @@ mod tests {
     #[test]
     fn all_terms_covers_every_variant() {
         // Bump this when you add a new GlossaryTerm variant.
-        const EXPECTED_VARIANT_COUNT: usize = 39;
+        const EXPECTED_VARIANT_COUNT: usize = 63;
         assert_eq!(
             super::all_terms().len(),
             EXPECTED_VARIANT_COUNT,
