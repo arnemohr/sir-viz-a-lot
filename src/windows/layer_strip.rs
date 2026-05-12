@@ -489,11 +489,53 @@ pub fn show(
                     pending.push(project.set_add_layer_mutation(layer, position));
                 }
             }
+
+            // ── "+ Add FX layer" button ───────────────────────────────────────
+            ui.add_space(2.0);
+            let add_fx_btn = ui.add(
+                egui::Button::new(egui::RichText::new("+ Add FX layer").size(11.0))
+                    .min_size(egui::vec2(ui.available_width(), 28.0))
+                    .fill(theme::BG_PANEL.linear_multiply(1.4)),
+            );
+            if add_fx_btn.clicked() {
+                let id = unique_fx_layer_id(project);
+                let params = crate::windows::preset_browser::default_params(
+                    crate::render::fx_presets::RIPPLE_WASH_PRESET_ID,
+                );
+                let seed = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos() as u64)
+                    .unwrap_or(0);
+                let layer = schema::layer_from_fx_preset(
+                    id,
+                    crate::render::fx_presets::RIPPLE_WASH_PRESET_ID,
+                    params,
+                    seed,
+                );
+                let position = project.layers.len();
+                pending.push(project.set_add_layer_mutation(layer, position));
+            }
         });
 
     // Drain into ControlPanelState so the app's per-frame loop routes
     // everything through the undo stack in one pass.
     st.pending_mutations.extend(pending);
+}
+
+// ── helpers ───────────────────────────────────────────────────────────────
+
+/// P2 follow-up — generate a non-colliding id for a new FX layer.
+/// Walks `project.layers` looking for `fx_1`, `fx_2`, …, picking the first
+/// that is not already taken.
+fn unique_fx_layer_id(project: &crate::project::schema::Project) -> String {
+    let mut n = 1u32;
+    loop {
+        let candidate = format!("fx_{n}");
+        if !project.layers.iter().any(|l| l.id == candidate) {
+            return candidate;
+        }
+        n += 1;
+    }
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────

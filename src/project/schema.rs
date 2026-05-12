@@ -733,6 +733,40 @@ pub fn layer_from_video_path(id: impl Into<String>, path: PathBuf) -> LayerConfi
     }
 }
 
+/// P2 follow-up — Build a new `FxLayer` with the given preset and a centered
+/// rectangular mask polygon.
+///
+/// The mask polygon is non-empty: the FX presets read the layer's SDF,
+/// so an empty mask makes the layer invisible. The default rectangle
+/// at (0.2 … 0.8) × (0.15 … 0.85) gives the operator something to see
+/// immediately; they can edit it via the mask manipulation tools.
+pub fn layer_from_fx_preset(
+    id: impl Into<String>,
+    preset_id: impl Into<String>,
+    params: HashMap<String, f32>,
+    seed: u64,
+) -> LayerConfig {
+    let mut warp = WarpMesh::default_placement();
+    warp.mask_polygon = vec![[0.2, 0.15], [0.8, 0.15], [0.8, 0.85], [0.2, 0.85]];
+    LayerConfig {
+        id: id.into(),
+        kind: LayerKind::FxLayer {
+            preset_id: preset_id.into(),
+            params,
+            seed,
+            t_layer_added_secs: 0.0,
+        },
+        enabled: true,
+        transform: Transform2D::default(),
+        effects: crate::effects::default_effect_chain(),
+        blend_mode: BlendMode::Normal,
+        opacity: 1.0,
+        warp,
+        muted: false,
+        treatment: None,
+    }
+}
+
 /// Build a layer row for an image (JPG/PNG) path using the v1 default chain.
 /// Defaults to `Cover` fit + center focal — matches the "drop a photo,
 /// it fills the wall" operator expectation (T-M8-05).
@@ -979,6 +1013,35 @@ mod tests {
                 assert!(
                     (t_layer_added_secs - 1.5).abs() < 1e-6,
                     "t_layer_added_secs must round-trip, got {t_layer_added_secs}"
+                );
+            }
+            other => panic!("expected FxLayer, got {:?}", other),
+        }
+    }
+
+    /// P2 follow-up — `layer_from_fx_preset` produces a non-empty mask polygon
+    /// (4 vertices) so the FX preset's SDF is well-defined immediately.
+    #[test]
+    fn fxlayer_constructor_has_non_empty_mask() {
+        let layer = layer_from_fx_preset("test", "mask_edge_ripple_wash", HashMap::new(), 0);
+        assert_eq!(
+            layer.warp.mask_polygon.len(),
+            4,
+            "FxLayer constructor must produce a 4-vertex mask polygon, got {}",
+            layer.warp.mask_polygon.len()
+        );
+    }
+
+    /// P2 follow-up — `layer_from_fx_preset` sets `LayerKind::FxLayer` with
+    /// the expected `preset_id`.
+    #[test]
+    fn fxlayer_constructor_uses_correct_kind() {
+        let layer = layer_from_fx_preset("test", "mask_edge_ripple_wash", HashMap::new(), 0);
+        match &layer.kind {
+            LayerKind::FxLayer { preset_id, .. } => {
+                assert_eq!(
+                    preset_id, "mask_edge_ripple_wash",
+                    "FxLayer constructor must use the given preset_id"
                 );
             }
             other => panic!("expected FxLayer, got {:?}", other),
