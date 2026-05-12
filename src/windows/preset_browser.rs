@@ -157,6 +157,8 @@ pub fn slugify(name: &str) -> String {
 #[derive(Default)]
 struct SaveDialog {
     open: bool,
+    /// True only on the first frame after open — used to request focus once.
+    just_opened: bool,
     /// Name being typed in the TextEdit.
     name_buf: String,
     /// Layer index to save.
@@ -353,7 +355,10 @@ impl PresetBrowserWindow {
             .show(ctx, |ui| {
                 self.show_body(ui, project, st, layer_idx);
             });
-        self.open = open;
+        // Use AND so that either a preset click inside show_body (sets
+        // self.open = false) OR the egui window-close X (sets open = false)
+        // closes the modal.
+        self.open = open && self.open;
     }
 
     fn show_body(
@@ -567,8 +572,13 @@ impl PresetBrowserWindow {
                 let resp = egui::TextEdit::singleline(&mut self.save_dialog.name_buf)
                     .hint_text("My cool preset")
                     .show(ui);
-                // P2.8.4 — request focus so the operator can type immediately.
-                resp.response.request_focus();
+                // P2.8.4 — request focus only on the first frame after open so
+                // the operator can type immediately without the cursor jumping
+                // back on every subsequent frame.
+                if self.save_dialog.just_opened {
+                    resp.response.request_focus();
+                    self.save_dialog.just_opened = false;
+                }
                 ui.horizontal(|ui| {
                     let can_save = !self.save_dialog.name_buf.trim().is_empty();
                     if ui
@@ -740,6 +750,7 @@ impl PresetBrowserWindow {
     /// Open the "Save as preset…" dialog for the given layer.
     pub fn open_save_dialog(&mut self, layer_idx: usize) {
         self.save_dialog.open = true;
+        self.save_dialog.just_opened = true;
         self.save_dialog.layer_idx = layer_idx;
         self.save_dialog.name_buf.clear();
     }
