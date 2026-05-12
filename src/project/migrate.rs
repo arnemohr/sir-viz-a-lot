@@ -1175,4 +1175,98 @@ mod tests {
             "zone_role must not be modified by the v8 no-op migration"
         );
     }
+
+    // --- P3.6.3 old-project regression test ---
+
+    /// P3.6.3 — A v7 project without any `zone_role` keys migrates to v8
+    /// identically: `zone_role = None` on all layers, schema_version == 8,
+    /// and no zone-related audit findings. CPU-only test (no GPU).
+    #[cfg(feature = "v3")]
+    #[test]
+    fn old_v7_project_loads_identically_after_migration() {
+        use crate::project::audit::{AuditEnv, AuditKind, ProjectAudit};
+        use crate::project::schema::{CURRENT_SCHEMA_VERSION, Project};
+
+        // Construct a minimal v7 project JSON: one Image layer, one FxLayer,
+        // no `zone_role` keys anywhere — simulates a pre-P3 saved project.
+        let v7_json = serde_json::json!({
+            "schema_version": 7u32,
+            "layers": [
+                {
+                    "id": "img0",
+                    "kind": {"Image": {"path": "/tmp/photo.jpg", "fit": "Cover", "focal": [0.5, 0.5]}},
+                    "enabled": true,
+                    "transform": {"translate": [0.0, 0.0], "rotate_deg": 0.0, "scale": [1.0, 1.0], "anchor": [0.0, 0.0]},
+                    "effects": [],
+                    "blend_mode": "Normal",
+                    "opacity": 1.0,
+                    "warp": {
+                        "rows": 1, "cols": 1,
+                        "grid": [[[0.0, 0.0], [1.0, 0.0]], [[0.0, 1.0], [1.0, 1.0]]],
+                        "mask_polygon": [], "mask_feather": 0.02
+                    }
+                },
+                {
+                    "id": "fx0",
+                    "kind": {"FxLayer": {"preset_id": "mask_edge_ripple_wash", "params": {}}},
+                    "enabled": true,
+                    "transform": {"translate": [0.0, 0.0], "rotate_deg": 0.0, "scale": [1.0, 1.0], "anchor": [0.0, 0.0]},
+                    "effects": [],
+                    "blend_mode": "Normal",
+                    "opacity": 1.0,
+                    "warp": {
+                        "rows": 1, "cols": 1,
+                        "grid": [[[0.0, 0.0], [1.0, 0.0]], [[0.0, 1.0], [1.0, 1.0]]],
+                        "mask_polygon": [[0.2, 0.2], [0.8, 0.2], [0.8, 0.8], [0.2, 0.8]],
+                        "mask_feather": 0.02
+                    }
+                }
+            ],
+            "output_targets": [{"fallback_index": 0, "rgb_matrix": [[1.0,0.0,0.0],[0.0,1.0,0.0],[0.0,0.0,1.0]]}]
+        });
+
+        // Migrate the v7 project to v8.
+        let (migrated, _) = migrate(v7_json).expect("migrate v7 → v8");
+
+        // Assertion 1: schema_version == 8.
+        assert_eq!(
+            migrated["schema_version"], CURRENT_SCHEMA_VERSION,
+            "migrated project must have schema_version == {CURRENT_SCHEMA_VERSION}"
+        );
+
+        // Assertion 2: every warp.zone_role is null.
+        for (i, layer) in migrated["layers"].as_array().unwrap().iter().enumerate() {
+            let zone_role = &layer["warp"]["zone_role"];
+            assert!(
+                zone_role.is_null(),
+                "layer {i}: zone_role must be null after v7→v8 migration, got {zone_role}"
+            );
+        }
+
+        // Assertion 3: deserialized project has zone_role = None on all layers.
+        let project: Project =
+            serde_json::from_value(migrated).expect("deserialize migrated project");
+        for (i, layer) in project.layers.iter().enumerate() {
+            assert_eq!(
+                layer.warp.zone_role, None,
+                "layer {i}: zone_role must be None in typed struct after migration"
+            );
+        }
+
+        // Assertion 4: audit produces no zone-related findings.
+        let findings = ProjectAudit::run(&project, &AuditEnv::default());
+        let zone_findings: Vec<_> = findings
+            .iter()
+            .filter(|f| {
+                matches!(
+                    f.kind,
+                    AuditKind::UnknownZoneRole { .. } | AuditKind::MissingZoneTag { .. }
+                )
+            })
+            .collect();
+        assert!(
+            zone_findings.is_empty(),
+            "v7 project with non-zone-consuming preset must produce no zone findings; got: {zone_findings:?}"
+        );
+    }
 }
