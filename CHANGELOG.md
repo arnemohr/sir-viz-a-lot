@@ -4,6 +4,22 @@ All notable changes to rmap are documented here.
 
 ---
 
+## [Unreleased] — v0.6
+
+### FX Preset Library
+
+_TODO: fill body in P2.10.2._
+
+### Effect-Chain Reordering
+
+_TODO: fill body in P2.10.2._
+
+### Particle / Wave / Fluid Families
+
+_TODO: fill body in P2.10.2._
+
+---
+
 ## v0.5.0 — 2026-05-12
 
 v0.5 makes rmap a real photo / video performance tool. Drop an

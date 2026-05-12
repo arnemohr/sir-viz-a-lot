@@ -92,6 +92,10 @@ a parameter map. The shipped preset, `mask_edge_ripple_wash`, applies an
 animated ripple wash along the edges of the layer's mask polygon. The demo
 project `fx-ripple-wash` in the launcher shows the preset in action.
 
+## FX Preset Library (v0.6)
+
+_FX preset library — Wave / Particle / Fluid families with a built-in browser. Coming in v0.6._
+
 ## Treatment presets (v0.5)
 
 Drop an image or video, open Advanced → Selected layer → **Treatment**, and
