@@ -4143,6 +4143,10 @@ mod tests {
             SetFxLayerParams {
                 wavelength: f32,
             },
+            /// P3.6.1 — set the zone role of layer 0's warp. `None` clears the
+            /// role; `Some(role_idx)` picks one of the seven roles by index
+            /// modulo 7. Always targets layer 0 (always present in the fixture).
+            SetMaskZoneRole(Option<u8>),
         }
 
         fn to_mutation(kind: &MutationKind, project: &Project) -> Mutation {
@@ -4593,6 +4597,27 @@ mod tests {
                         project.set_gamma_mutation(project.gamma) // no-op fallback
                     }
                 }
+                MutationKind::SetMaskZoneRole(role_opt) => {
+                    // P3.6.1 — target layer 0 (always present in fresh_project).
+                    // `None` clears the role; `Some(idx)` picks one of the
+                    // seven ZoneRole variants by index mod 7. Falls back to a
+                    // no-op gamma if the project has no layers (shouldn't happen
+                    // in fresh_project, but guards against RemoveLayer steps).
+                    use crate::project::schema::ZoneRole;
+                    if project.layers.is_empty() {
+                        return project.set_gamma_mutation(project.gamma);
+                    }
+                    let new_role = role_opt.map(|idx| match idx % 7 {
+                        0 => ZoneRole::Window,
+                        1 => ZoneRole::Portal,
+                        2 => ZoneRole::Void,
+                        3 => ZoneRole::Spill,
+                        4 => ZoneRole::Edge,
+                        5 => ZoneRole::Highlight,
+                        _ => ZoneRole::LightSource,
+                    });
+                    project.set_mask_zone_role_mutation(0, new_role)
+                }
             }
         }
 
@@ -4849,6 +4874,9 @@ mod tests {
                 // is a valid sequence for the round-trip harness.
                 (10.0_f32..=400.0_f32)
                     .prop_map(|wavelength| { MutationKind::SetFxLayerParams { wavelength } }),
+                // P3.6.1 — SetMaskZoneRole: None (clear) or Some(0..=6) (one
+                // of the seven ZoneRole variants; to_mutation mods by 7).
+                proptest::option::weighted(0.5, 0u8..=6u8).prop_map(MutationKind::SetMaskZoneRole),
             ]
         }
 
