@@ -3801,34 +3801,37 @@ fn render_m5_pipeline(
             // fx_texture, then use fx_view as the source for the effect chain.
             // Unknown preset_id → no fx_texture written → layer invisible
             // (matches the P0.5.1 audit-warns-but-renders contract).
+            // P2.2.3: dispatch is now registry-driven via fx_presets::dispatch.
             let fx_tex_view: Option<&wgpu::TextureView> =
                 if let schema::LayerKind::FxLayer { preset_id, params } = &cfg.kind {
-                    if preset_id == crate::render::fx_presets::RIPPLE_WASH_PRESET_ID {
+                    if crate::render::fx_presets::fx_is_registered(preset_id) {
                         if let Some((_tex, fx_view)) = ls.fx_texture.as_ref() {
                             // sync_mesh_and_mask updates the SDF from cfg.warp;
                             // call it here so sdf_view() is up to date before
-                            // fx_pipeline.render reads it.
+                            // dispatch reads it.
                             ls.warp_renderer.sync_mesh_and_mask(
                                 &renderer.gpu.device,
                                 &renderer.gpu.queue,
                                 &cfg.warp,
                             );
-                            let params_uniform =
-                                crate::render::fx_presets::FxParamsUniform::for_ripple_wash(params);
                             let clock_secs = clock.elapsed().as_secs_f32();
-                            // Collect the views before calling render so the
+                            // Collect the views before calling dispatch so the
                             // borrow checker sees separate field borrows.
                             let sdf_v = ls.warp_renderer.sdf_view();
-                            fx_pipeline.render(
-                                &renderer.gpu.device,
-                                &renderer.gpu.queue,
-                                &mut encoder,
-                                fx_view,
-                                sdf_v,
-                                clock_secs,
-                                &params_uniform,
+                            let rendered = crate::render::fx_presets::dispatch(
+                                preset_id,
+                                fx_pipeline,
+                                crate::render::fx_presets::FxShaderInputs {
+                                    device: &renderer.gpu.device,
+                                    queue: &renderer.gpu.queue,
+                                    encoder: &mut encoder,
+                                    dst: fx_view,
+                                    sdf_view: sdf_v,
+                                    clock_secs,
+                                    params,
+                                },
                             );
-                            Some(fx_view)
+                            if rendered { Some(fx_view) } else { None }
                         } else {
                             None
                         }

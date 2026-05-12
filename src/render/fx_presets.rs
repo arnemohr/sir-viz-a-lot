@@ -181,6 +181,62 @@ pub fn fx_param_descriptors(preset_id: &str) -> &'static [FxParamDescriptor] {
 /// Preset id for the mask-edge ripple wash effect.
 pub const RIPPLE_WASH_PRESET_ID: &str = "mask_edge_ripple_wash";
 
+/// Per-frame inputs that every FX preset receives at dispatch time.
+///
+/// P2.2.3 minimal contract; P2.3.2 will lock canonical slot assignment
+/// and add source/SSBO bindings.
+pub struct FxShaderInputs<'a> {
+    /// wgpu device (bind-group creation, buffer writes).
+    pub device: &'a wgpu::Device,
+    /// wgpu queue (uniform uploads via `write_buffer`).
+    pub queue: &'a wgpu::Queue,
+    /// Active command encoder for the frame.
+    pub encoder: &'a mut wgpu::CommandEncoder,
+    /// Output texture view — preset renders into this.
+    pub dst: &'a wgpu::TextureView,
+    /// Layer's per-frame SDF (R32Float). Must be up-to-date; caller is
+    /// responsible for calling `sync_mesh_and_mask` before dispatch.
+    pub sdf_view: &'a wgpu::TextureView,
+    /// Elapsed clock time in seconds (`Clock::elapsed().as_secs_f32()`).
+    pub clock_secs: f32,
+    /// Free-form per-preset params from `LayerKind::FxLayer.params`. Each
+    /// preset documents which keys it reads; missing keys fall back to the
+    /// documented default.
+    pub params: &'a std::collections::HashMap<String, f32>,
+}
+
+/// Route `preset_id` to its registered render implementation.
+///
+/// Returns `true` if a known preset rendered into `inputs.dst`; returns
+/// `false` for any unrecognised `preset_id` so the caller can fall through
+/// to the "unknown preset / no-op" path (the P0.5.1 audit has already
+/// emitted a warning for the unknown id).
+///
+/// # Unit-testing note
+///
+/// Unit-testing `dispatch` requires a GPU adapter; coverage comes from
+/// `make test-gpu` smoke + the `app.rs` integration path exercised by
+/// `demo_loads_fx_ripple_wash`.
+pub fn dispatch(preset_id: &str, pipeline: &FxPresetPipeline, inputs: FxShaderInputs<'_>) -> bool {
+    match preset_id {
+        RIPPLE_WASH_PRESET_ID => {
+            let params_uniform = FxParamsUniform::for_ripple_wash(inputs.params);
+            pipeline.render(
+                inputs.device,
+                inputs.queue,
+                inputs.encoder,
+                inputs.dst,
+                inputs.sdf_view,
+                inputs.clock_secs,
+                &params_uniform,
+            );
+            true
+        }
+        // Registered families not yet wired — caller skips rendering.
+        _ => false,
+    }
+}
+
 /// Rendered by `FxPresetPipeline::render` into an output-sized texture.
 /// The texture then flows through the layer's normal effect chain + warp
 /// pipeline, so Color / Blur / Transform effects and masking work
@@ -522,6 +578,34 @@ mod tests {
     #[test]
     fn registry_contains_ripple_wash() {
         assert!(fx_is_registered(RIPPLE_WASH_PRESET_ID));
+    }
+
+    // --- P2.2.3 dispatch tests ---
+
+    /// P2.2.3: RIPPLE_WASH_PRESET_ID is registered (prerequisite for
+    /// dispatch returning true for it). Unit-testing `dispatch` itself
+    /// requires a GPU adapter; coverage comes from `make test-gpu` smoke
+    /// + the `app.rs` `demo_loads_fx_ripple_wash` integration path.
+    #[test]
+    fn dispatch_ripple_wash_preset_is_registered() {
+        assert!(
+            fx_registry()
+                .iter()
+                .any(|e| e.preset_id == RIPPLE_WASH_PRESET_ID),
+            "RIPPLE_WASH_PRESET_ID must be in fx_registry() for dispatch to route it"
+        );
+    }
+
+    /// P2.2.3: fx_is_registered returns false for a bogus preset_id,
+    /// meaning dispatch would return false without panicking.
+    #[test]
+    fn dispatch_returns_false_for_bogus() {
+        // Cannot create real wgpu resources in a unit test; instead verify
+        // the precondition dispatch relies on: an unknown id is not registered.
+        assert!(
+            !fx_is_registered("bogus_preset_id"),
+            "bogus preset must not be registered — dispatch must return false for it"
+        );
     }
 
     /// P2.2.1 acceptance: fx_is_registered rejects an unknown id.
