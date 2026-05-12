@@ -350,10 +350,10 @@ impl PresetBrowserWindow {
         let mut open = self.open;
         egui::Window::new("FX preset library")
             .open(&mut open)
-            .default_size([720.0, 520.0])
-            .min_width(560.0)
-            .max_width(960.0)
-            .resizable(true)
+            .fixed_size([700.0, 540.0])
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
                 self.show_body(ui, project, st, layer_idx);
             });
@@ -424,28 +424,47 @@ impl PresetBrowserWindow {
         let (builtin_list, user_list): (Vec<_>, Vec<_>) =
             presets.iter().partition(|p| p.is_builtin());
 
+        const COLS: usize = 4;
         egui::ScrollArea::vertical().show(ui, |ui| {
             // Built-in section.
             if !builtin_list.is_empty() {
                 ui.strong("Built-in presets");
                 ui.add_space(4.0);
-                ui.horizontal_wrapped(|ui| {
-                    for preset in &builtin_list {
-                        self.show_cell(ui, preset, layer_idx, project, st, false);
-                    }
-                });
+                egui::Grid::new("preset_browser_builtin_grid")
+                    .num_columns(COLS)
+                    .spacing([8.0, 8.0])
+                    .show(ui, |ui| {
+                        for (i, preset) in builtin_list.iter().enumerate() {
+                            self.show_cell(ui, preset, layer_idx, project, st, false);
+                            if (i + 1) % COLS == 0 {
+                                ui.end_row();
+                            }
+                        }
+                        if builtin_list.len() % COLS != 0 {
+                            ui.end_row();
+                        }
+                    });
             }
 
             // User preset section.
             if !user_list.is_empty() {
-                ui.add_space(8.0);
+                ui.add_space(12.0);
                 ui.strong("User presets");
                 ui.add_space(4.0);
-                ui.horizontal_wrapped(|ui| {
-                    for preset in &user_list {
-                        self.show_cell(ui, preset, layer_idx, project, st, true);
-                    }
-                });
+                egui::Grid::new("preset_browser_user_grid")
+                    .num_columns(COLS)
+                    .spacing([8.0, 8.0])
+                    .show(ui, |ui| {
+                        for (i, preset) in user_list.iter().enumerate() {
+                            self.show_cell(ui, preset, layer_idx, project, st, true);
+                            if (i + 1) % COLS == 0 {
+                                ui.end_row();
+                            }
+                        }
+                        if user_list.len() % COLS != 0 {
+                            ui.end_row();
+                        }
+                    });
             }
         });
     }
