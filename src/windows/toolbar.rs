@@ -89,11 +89,56 @@ pub fn show(
             action = Some(ControlPanelAction::RequestSaveAs);
         }
 
-        // --- BPM HUD badge (V31.7.2) --- live BPM + tap source + quantize selector
+        // --- BPM HUD badge (V31.7.2 + P1.UX) --- live BPM + tap source +
+        // quantize selector. P1.UX additions:
+        //   • Hover tooltips on BPM and Quantize labels so the operator
+        //     can self-discover what these do without reading the spec.
+        //   • Tap button as a discoverable fallback to the Space-bar
+        //     shortcut (operators won't always guess the shortcut).
+        //   • Tap-flash: the BPM number pulses accent for ~250 ms after
+        //     a tap registers, so a single Space-press is visibly
+        //     received even before the second tap (which is what
+        //     actually changes the inferred BPM).
         #[cfg(feature = "v3")]
         {
+            use std::time::Duration;
             ui.add_space(12.0);
-            ui.label(format!("BPM: {:.1}", inputs.bpm_telemetry.current_bpm));
+
+            let bpm_tooltip = "Beats-per-minute clock used by:\n\
+                 • Modulator::Bpm (sine-wave parameter automation\n   \
+                   tied to the beat)\n\
+                 • Video layers with BPM-lock on (playback rate\n   \
+                   scales with this value; 120 = identity)\n\
+                 • Scene-recall quantization (see Quantize)\n\n\
+                 Tap tempo: press Space twice in time with the beat,\n\
+                 or click the Tap button. The first tap records the\n\
+                 time; the second tap derives the BPM from the\n\
+                 interval. Subsequent taps smooth the running estimate.";
+
+            // Per-tap visual pulse on the BPM number — fades over
+            // ~250 ms after each tap so a single Space-press gives
+            // immediate confirmation that the tap was received.
+            let fresh_tap = inputs
+                .bpm_telemetry
+                .last_tap_at
+                .map(|t| t.elapsed() < Duration::from_millis(250))
+                .unwrap_or(false);
+            let bpm_text = format!("BPM: {:.1}", inputs.bpm_telemetry.current_bpm);
+            let bpm_label: egui::WidgetText = if fresh_tap {
+                egui::RichText::new(bpm_text)
+                    .color(crate::windows::theme::ACCENT)
+                    .strong()
+                    .into()
+            } else {
+                bpm_text.into()
+            };
+            ui.label(bpm_label).on_hover_text(bpm_tooltip);
+            if fresh_tap {
+                // Keep repainting through the flash window so the
+                // colour decays smoothly back to normal.
+                ui.ctx().request_repaint_after(Duration::from_millis(50));
+            }
+
             if let (Some(src), Some(at)) = (
                 inputs.bpm_telemetry.last_tap_source,
                 inputs.bpm_telemetry.last_tap_at,
@@ -101,8 +146,30 @@ pub fn show(
                 let age_s = at.elapsed().as_secs_f32();
                 ui.weak(format!("({}, {:.1}s)", src.label(), age_s));
             }
+
+            // Explicit Tap button so the Space-bar shortcut isn't a
+            // hidden affordance. Clicking goes through the same
+            // `apply_command` path the keyboard tap uses, so the
+            // smoothed-BPM logic is identical.
+            if ui
+                .button("Tap")
+                .on_hover_text("Tap twice in time with the beat (or press Space).")
+                .clicked()
+            {
+                action = Some(ControlPanelAction::EmitCommand(
+                    crate::controls::Command::TapTempo(crate::clock::TapSource::Keyboard),
+                ));
+            }
+
             ui.add_space(8.0);
-            ui.label("Quantize:");
+
+            let quantize_tooltip = "Scene-recall quantization. With Quantize Off (default),\n\
+                 pressing a scene key (1-9) recalls the scene immediately.\n\
+                 With Quantize set to N bars, the recall is **armed** and\n\
+                 fires at the next N-bar boundary in the BPM clock — so\n\
+                 scene changes land on the downbeat instead of mid-bar.\n\n\
+                 Off: instant. 1: next bar. 2/4/8: next 2/4/8 bars.";
+            ui.label("Quantize:").on_hover_text(quantize_tooltip);
             for opt in [None, Some(1u8), Some(2u8), Some(4u8), Some(8u8)] {
                 let label = match opt {
                     None => "Off",
@@ -112,13 +179,18 @@ pub fn show(
                     Some(8) => "8",
                     _ => unreachable!(),
                 };
+                let opt_tooltip = match opt {
+                    None => "Off — scene cues fire instantly on keypress.",
+                    Some(n) => &format!("Arm scene cues to fire at the next {n}-bar boundary."),
+                };
                 let is_active = project.quantize_bars == opt;
                 let button = egui::Button::new(label).fill(if is_active {
                     crate::windows::theme::ACCENT.linear_multiply(0.25)
                 } else {
                     egui::Color32::TRANSPARENT
                 });
-                if ui.add(button).clicked() && !is_active {
+                let resp = ui.add(button).on_hover_text(opt_tooltip);
+                if resp.clicked() && !is_active {
                     st.pending_mutations
                         .push(project.set_quantize_bars_mutation(opt));
                 }
