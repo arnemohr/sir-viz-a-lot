@@ -50,8 +50,8 @@ impl PresetStars {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let json = serde_json::to_string_pretty(self)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+        let json =
+            serde_json::to_string_pretty(self).map_err(|e| std::io::Error::other(e.to_string()))?;
         // Atomic write: write to a temp file then rename.
         let tmp = path.with_extension("json.tmp");
         std::fs::write(&tmp, json)?;
@@ -100,11 +100,12 @@ mod tests {
     /// P2.8.3 — serialize / deserialize identical.
     #[test]
     fn preset_stars_round_trip_json() {
-        let mut stars = PresetStars::default();
-        stars.starred = vec![
-            "mask_edge_ripple_wash".to_string(),
-            "fluid_identity".to_string(),
-        ];
+        let stars = PresetStars {
+            starred: vec![
+                "mask_edge_ripple_wash".to_string(),
+                "fluid_identity".to_string(),
+            ],
+        };
         let json = serde_json::to_string(&stars).expect("serialize");
         let back: PresetStars = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(back.starred, stars.starred);

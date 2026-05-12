@@ -26,8 +26,8 @@ pub struct RmapPresetJson {
 ///
 /// Uses an atomic temp-file + rename pattern to avoid partial writes.
 pub fn write_preset(path: &Path, preset: &RmapPresetJson) -> std::io::Result<()> {
-    let json = serde_json::to_string_pretty(preset)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+    let json =
+        serde_json::to_string_pretty(preset).map_err(|e| std::io::Error::other(e.to_string()))?;
     // Atomic: write to a sibling temp file then rename.
     let tmp = path.with_extension("rmap-preset.json.tmp");
     std::fs::write(&tmp, &json)?;
