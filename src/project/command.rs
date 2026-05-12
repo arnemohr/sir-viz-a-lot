@@ -5185,4 +5185,126 @@ mod tests {
             "SetMaskZoneRole must be undoable (is_non_undoable must return false)"
         );
     }
+
+    // -----------------------------------------------------------------------
+    // P4.8.2 — Wizard commit / cancel `ApplyProjectSnapshot` round-trip tests
+    // -----------------------------------------------------------------------
+
+    /// P4.8.2 — Wizard cancel: non-undoable `ApplyProjectSnapshot` round-trip.
+    ///
+    /// Simulates the `wizard_cancel` path: apply (install the pre-wizard
+    /// snapshot) then apply the Reverse (go back to the mid-wizard state).
+    /// The final state must equal the pre-wizard state (byte-for-byte).
+    #[test]
+    fn wizard_cancel_apply_project_snapshot_round_trip() {
+        let pre_wizard = fresh_project();
+        let pre_snap = crate::project::snapshot(&pre_wizard);
+
+        let mut mid_wizard = pre_wizard.clone();
+        mid_wizard.gamma = 3.0 + 0.14_f32; // avoids approx_constant lint
+        let mid_snap = crate::project::snapshot(&mid_wizard);
+
+        // Cancel mutation: restore pre-wizard snapshot (non-undoable).
+        let cancel_mutation = Mutation::ApplyProjectSnapshot(ApplyProjectSnapshot {
+            new: pre_snap.clone(),
+            old: mid_snap,
+            non_undoable: true,
+        });
+        assert!(
+            cancel_mutation.is_non_undoable(),
+            "wizard cancel mutation must be non-undoable"
+        );
+
+        let mut p = mid_wizard;
+        let reverse = cancel_mutation.apply(&mut p);
+
+        // After applying: project must equal pre-wizard state.
+        let after_snap = crate::project::snapshot(&p);
+        assert_eq!(
+            pre_snap, after_snap,
+            "after wizard cancel, project must equal pre-wizard snapshot"
+        );
+
+        // Applying the Reverse restores the mid-wizard state.
+        let _ = reverse.apply(&mut p);
+        let restored_gamma = p.gamma;
+        // 3.14 is not the standard f32::consts::PI; use a non-round value to
+        // distinguish from the default (1.0) while avoiding the approx_constant lint.
+        let expected_gamma = 3.0 + 0.14_f32;
+        assert!(
+            (restored_gamma - expected_gamma).abs() < 1e-2,
+            "after Reverse of cancel, gamma must equal mid-wizard value"
+        );
+    }
+
+    /// P4.8.2 — Wizard commit: undoable `ApplyProjectSnapshot` round-trip.
+    ///
+    /// Simulates the `wizard_commit` path: apply (install the generated
+    /// template JSON) then apply the Reverse (restore the pre-wizard state).
+    /// `is_non_undoable()` must return `false` for the commit mutation.
+    #[test]
+    fn wizard_commit_apply_project_snapshot_round_trip() {
+        let pre_wizard = fresh_project();
+        let pre_snap = crate::project::snapshot(&pre_wizard);
+
+        // Simulate a generated template project (two layers).
+        let mut generated = pre_wizard.clone();
+        generated.gamma = 2.0 + 0.71_f32; // avoids approx_constant lint
+        generated
+            .layers
+            .push(crate::project::schema::layer_from_fx_preset(
+                "scene_window_reveal_fx_0",
+                "mask_edge_ripple_wash",
+                std::collections::HashMap::new(),
+                0,
+            ));
+        let generated_snap = crate::project::snapshot(&generated);
+
+        // Commit mutation: apply generated JSON (undoable).
+        let commit_mutation = Mutation::ApplyProjectSnapshot(ApplyProjectSnapshot {
+            new: generated_snap.clone(),
+            old: pre_snap.clone(),
+            non_undoable: false,
+        });
+        assert!(
+            !commit_mutation.is_non_undoable(),
+            "wizard commit mutation must be undoable (is_non_undoable must return false)"
+        );
+
+        let mut p = pre_wizard;
+        let reverse = commit_mutation.apply(&mut p);
+
+        // After applying: project must equal generated state.
+        let after_snap = crate::project::snapshot(&p);
+        assert_eq!(
+            generated_snap, after_snap,
+            "after wizard commit, project must equal generated template snapshot"
+        );
+
+        // Undo (Reverse): restore_scene preserves the pre-wizard snapshot layers
+        // and keeps any layers whose IDs weren't in pre_snap (the template-generated
+        // layer is kept as a "post-save addition" per restore_scene semantics).
+        // The important invariant: pre-wizard project settings (gamma) are restored.
+        let _ = reverse.apply(&mut p);
+        assert!(
+            (p.gamma - 1.0_f32).abs() < 1e-4,
+            "after Cmd-Z, gamma must be restored to pre-wizard value (1.0), got {}",
+            p.gamma
+        );
+        // The pre-wizard layers are present in the restored project.
+        assert!(
+            p.layers.iter().any(|l| l.id == "test_layer"),
+            "pre-wizard layer 'test_layer' must be present after undo"
+        );
+        // is_non_undoable check for commit.
+        let commit2 = Mutation::ApplyProjectSnapshot(ApplyProjectSnapshot {
+            new: pre_snap.clone(),
+            old: pre_snap.clone(),
+            non_undoable: false,
+        });
+        assert!(
+            !commit2.is_non_undoable(),
+            "wizard commit ApplyProjectSnapshot must have non_undoable = false"
+        );
+    }
 }
