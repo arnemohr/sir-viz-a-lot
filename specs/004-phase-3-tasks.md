@@ -5,7 +5,16 @@ below is sized for a single PR.
 
 ## Implementation status
 
-_Implementation status will be populated as PRs land._
+- [x] P3.1.1 fdb078e — glossary entries for Phase 3 zone domain terms (9 variants, count → 72)
+- [x] P3.1.2 fdb078e — perf gate stub: perf_zone_tagged_fx_layer_within_budget
+- [x] P3.1.3 fdb078e — CHANGELOG [Unreleased] — v0.7 + README Spatial Zones placeholder
+- [x] P3.2.1 ae6753a — ZoneRole enum + WarpMesh.zone_role field + From<ZoneRole> for u32
+- [x] P3.2.2 f07de03 — schema migration v7 → v8 (zone_role: null on all warps)
+- [x] P3.2.3 07bde3d — SetMaskZoneRole mutation + Project constructor
+- [x] P3.2.4 18059f3 — audit finding UnknownZoneRole + WarpMesh custom Deserialize
+- [x] P3.2.5 04ed707 — audit finding MissingZoneTag + fx_requires_zone()
+- [x] P3.3.1 d8caa81 — ZONE_TAG_WGSL constant + zone_tag_helper.wgsl (naga validated)
+- [x] P3.3.2 bb2e96b — bind-group slot 6 contract doc + zone_tag_buffer + per-frame write
 
 ---
 

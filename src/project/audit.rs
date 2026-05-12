@@ -624,20 +624,27 @@ impl ProjectAudit {
             // Deserialize impl (schema.rs) populates `unknown_zone_role_raw` when
             // it encounters an unrecognised role string, so the typed field is None
             // but the raw string survives for audit purposes.
-            if let Some(ref raw) = warp.unknown_zone_role_raw {
-                findings.push(AuditFinding {
-                    kind: AuditKind::UnknownZoneRole {
-                        layer_idx,
-                        role: raw.clone(),
-                    },
-                    severity: Severity::Warn,
-                    message: format!(
-                        "Layer {layer_idx} has an unrecognised zone role '{raw}'. \
+            //
+            // Guard: skip the finding if `zone_role` is `Some(...)` — that means the
+            // user has set a valid role via SetMaskZoneRole and the sidecar is
+            // implicitly stale (the sidecar is not cleared on mutation, only on
+            // deserialization; once a known role is active the sidecar is harmless).
+            if warp.zone_role.is_none() {
+                if let Some(ref raw) = warp.unknown_zone_role_raw {
+                    findings.push(AuditFinding {
+                        kind: AuditKind::UnknownZoneRole {
+                            layer_idx,
+                            role: raw.clone(),
+                        },
+                        severity: Severity::Warn,
+                        message: format!(
+                            "Layer {layer_idx} has an unrecognised zone role '{raw}'. \
                          The layer will render as if zone_role is None until the role is cleared.",
-                    ),
-                    autofix: None,
-                });
-            }
+                        ),
+                        autofix: None,
+                    });
+                }
+            } // end warp.zone_role.is_none() guard
 
             // T1.37: mask polygon with 1 or 2 vertices (0 is fine — no mask intended;
             // ≥3 is fine — valid polygon for SDF baker).
