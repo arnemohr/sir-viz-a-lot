@@ -306,6 +306,9 @@ pub struct ControlPanelState {
     /// (P0.8.1) co-exists with this — the two paths reach identical UI.
     #[cfg(feature = "v3")]
     pub output_panel_open: bool,
+    /// P2.8.1 — floating preset library browser modal.
+    #[cfg(feature = "v3")]
+    pub preset_browser: crate::windows::preset_browser::PresetBrowserWindow,
 }
 
 pub enum ControlPanelAction {
@@ -574,6 +577,21 @@ pub fn show(
         if !still_open {
             st.controls_open = false;
         }
+    }
+
+    // P2.8.1 — Preset library browser modal. Rendered every frame (the
+    // modal itself gates on `st.preset_browser.open`). The browser
+    // pushes mutations / toasts into `st` via the shared state.
+    #[cfg(feature = "v3")]
+    {
+        let ctx = ui.ctx().clone();
+        // Split the borrow: extract what we need from st.preset_browser
+        // before calling show, which mutably borrows st.
+        // We use a temporary pattern: move preset_browser out, call show,
+        // then put it back. This avoids a double-borrow.
+        let mut browser = std::mem::take(&mut st.preset_browser);
+        browser.show(&ctx, project, st);
+        st.preset_browser = browser;
     }
 
     // P0.7.5 — Output panel as a peer right-side SidePanel. Opens when

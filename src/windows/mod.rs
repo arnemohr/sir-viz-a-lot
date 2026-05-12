@@ -31,6 +31,12 @@ pub mod output;
 #[cfg(feature = "v3")]
 pub mod output_panel;
 #[cfg(feature = "v3")]
+pub mod preset_browser;
+#[cfg(feature = "v3")]
+pub mod preset_io;
+#[cfg(feature = "v3")]
+pub mod preset_stars;
+#[cfg(feature = "v3")]
 pub mod primitives;
 pub mod scene_editor;
 #[cfg(feature = "v3")]

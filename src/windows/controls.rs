@@ -536,9 +536,21 @@ pub fn show(
                     // --------------------------------------------------------
                     // P2.5.6 — FX preset parameter sliders. Only rendered
                     // when the selected layer is a LayerKind::FxLayer.
+                    // P2.8.1 — "Browse presets…" and "Save as preset…" buttons.
                     // --------------------------------------------------------
                     #[cfg(feature = "v3")]
                     if matches!(project.layers[layer_idx].kind, LayerKind::FxLayer { .. }) {
+                        // P2.8.1 / P2.8.4 — preset browser trigger buttons.
+                        ui.horizontal(|ui| {
+                            if ui.button("Browse presets…").clicked() {
+                                st.preset_browser.open_for_layer(layer_idx);
+                            }
+                            if ui.button("Save as preset…").clicked() {
+                                st.preset_browser.open_save_dialog(layer_idx);
+                            }
+                        });
+                        ui.add_space(2.0);
+
                         egui::CollapsingHeader::new("FX params")
                             .id_salt("adv_fx_params")
                             .default_open(true)
