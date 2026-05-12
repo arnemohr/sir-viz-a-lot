@@ -82,6 +82,11 @@ rustfft = { version = "6",    optional = true }
 midir   = { version = "0.10", optional = true }
 rosc    = { version = "0.11", optional = true }
 
+# P5.1.4 — Phase 5 lighting output (Art-Net DMX). Gated behind `lighting`
+# (off by default) so the show-day binary stays lean. MIT, pure Rust, zero
+# system deps. Version matches the decision-doc ratification (P5.0.1).
+artnet_protocol = { version = "0.4.4", optional = true }
+
 # 003-T2.13 — native OS file picker. macOS uses NSOpenPanel / NSSavePanel
 # directly; Linux falls back to xdg-portal (wayland-aware), Windows to the
 # Win32 common dialogs. Default features include the Linux portal + wayland
@@ -198,3 +203,8 @@ video = [
 # v3 work ships behind the flag. Promoted to default-on at M3 per
 # the 003 task plan.
 v3 = []
+
+# P5.1.4 — Phase 5 lighting output: Art-Net DMX transport, fixture groups,
+# colour-from-pixel sampling. Off by default; mirrors `audio` / `midi` / `osc`.
+# `cargo build --no-default-features` must succeed with this feature absent.
+lighting = ["dep:artnet_protocol"]

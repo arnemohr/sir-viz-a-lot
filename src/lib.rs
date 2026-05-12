@@ -7,6 +7,8 @@
 
 pub mod clock;
 pub mod effects;
+#[cfg(feature = "lighting")]
+pub mod lighting;
 #[cfg(target_os = "macos")]
 pub mod macos;
 pub mod modulators;
