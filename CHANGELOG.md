@@ -4,19 +4,64 @@ All notable changes to rmap are documented here.
 
 ---
 
-## [Unreleased] — v0.7
+## [0.7.0] — 2026-05-13
+
+v0.7 adds spatial zones as first-class authored objects: operators draw a
+polygon mask, tag it with a semantic role, and pick an FX preset that
+responds to that role without any further configuration. Old projects
+without zone tags load and render identically.
 
 ### Spatial Zones
 
-_Placeholder — to be filled in P3.7.2._
+Zones are semantic tags applied to mask polygons, drawn from a closed
+seven-role palette:
+
+- **Window** — transparent opening (window pane, glass facade).
+- **Portal** — visual passageway or threshold.
+- **Void** — non-emitting blank region intended to stay dark.
+- **Spill** — surface that catches stray light from a nearby bright zone.
+- **Edge** — perimeter or boundary of a surface feature.
+- **Highlight** — surface intended to catch a key light or colour accent.
+- **Light Source** — practical luminaire or architectural light emitter.
+
+Each role is documented in the Glossary window (search "zone"). Tags live
+on the mask polygon, not the layer, so future phases can support multiple
+masks per layer without a schema churn.
+
+**Schema:** `WarpMesh.zone_role` field added at schema v8. Old v7 projects
+migrate automatically — every warp gains `zone_role: null` (no behaviour
+change).
 
 ### Zone-Consuming FX Presets
 
-_Placeholder — to be filled in P3.7.2._
+Three new built-in FX presets that read the zone tag at runtime and output
+transparent black for non-matching zones (safe fallback, no crash):
+
+- **Light spill from window zones** (`fx_zone_light_spill`) — warm-glow
+  gradient emanating inward from the mask edge for `window`-tagged layers.
+- **Ripple at edge zones** (`fx_zone_edge_ripple`) — tighter, higher-
+  frequency ripple along the mask boundary for `edge`-tagged layers.
+- **Particle drift through portal zones** (`fx_zone_portal_drift`) —
+  luminous drifting particle field inside the mask for `portal`-tagged
+  layers.
+
+Each preset is registered in the preset browser with a "— requires zone
+tag" label so the operator knows to tag the mask before applying. The
+`MissingZoneTag` audit finding (severity: Info) surfaces this hint
+automatically.
 
 ### Zone Authoring UI
 
-_Placeholder — to be filled in P3.7.2._
+- **Zone palette in Mask mode** — a ComboBox below the mask-feather slider
+  lets the operator pick one of the seven roles or clear the tag. Every
+  role label wraps a Glossary `?` hover tooltip. Zone changes are undoable
+  (Cmd-Z / Cmd-Shift-Z).
+- **Zone badge in layer list** — tagged layers show a short `[window]` /
+  `[edge]` / etc. badge in muted text below the layer ID, visible without
+  entering Mask mode.
+- **Preset browser zone hint** — zone-consuming presets display "— requires
+  zone tag" in a muted colour so the operator knows the workflow before
+  applying.
 
 ---
 
