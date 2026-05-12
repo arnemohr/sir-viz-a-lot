@@ -3843,6 +3843,8 @@ fn render_m5_pipeline(
                                 seed: *seed,
                                 t_layer_added_secs: *t_layer_added_secs,
                                 output_size: out_size,
+                                // P3.3.2 — zone role for zone-aware preset dispatch.
+                                zone_role: cfg.warp.zone_role,
                             },
                         );
                         if rendered { Some(fx_view) } else { None }

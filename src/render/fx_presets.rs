@@ -16,6 +16,12 @@
 //! | 3       | Clock uniform (`vec4<f32>`, `.x` = secs)       | Written each frame via `queue.write_buffer`     |
 //! | 4       | Source texture (`Rgba8UnormSrgb`)              | Fragment presets only (Wave/Fluid color-pass); leave unbound for others |
 //! | 5       | Particle SSBO                                  | Compute presets only (`P2.5.1 FxComputePipeline`); fragment presets leave unbound |
+//! | 6       | `ZoneTagUniform` (u32 zone tag + 3 × u32 pad, 16 bytes) | Zone-aware presets only (P3.3.2); non-zone presets omit slot 6 from their bind-group layout entirely — the layout is family-conditional, matching the slot 4 / slot 5 precedent |
+//!
+//! Zone-aware presets declare slot 6 explicitly in their bind-group-layout
+//! descriptor. Non-zone-aware presets do not include a slot 6 entry; an
+//! accidental omission on a zone-aware preset fails at pipeline build time
+//! (structural opt-in, not silent fallback).
 //!
 //! All Phase 2 presets MUST use these slots. Diverging is a build-time
 //! hazard — adding a new bind-group layout means the existing dispatch
@@ -580,6 +586,11 @@ pub struct FxShaderInputs<'a> {
     /// P2.5.1 — output resolution `[width, height]`. Particle vertex shader
     /// uses this to convert positions to NDC. Fragment presets ignore this.
     pub output_size: [u32; 2],
+
+    /// P3.3.2 — zone role of the layer's mask polygon. Passed to
+    /// `FxPresetPipeline::render` so it can write `ZoneTagUniform` (slot 6)
+    /// for zone-aware presets. Non-zone-aware presets ignore this field.
+    pub zone_role: Option<crate::project::schema::ZoneRole>,
 }
 
 /// Route `preset_id` to its registered render implementation.
@@ -606,6 +617,7 @@ pub fn dispatch(preset_id: &str, pipelines: &FxPipelines, inputs: FxShaderInputs
                 inputs.sdf_view,
                 inputs.clock_secs,
                 &params_uniform,
+                inputs.zone_role, // P3.3.2 — non-zone preset: zone_tag_buffer is None
             );
             true
         }
@@ -619,6 +631,7 @@ pub fn dispatch(preset_id: &str, pipelines: &FxPipelines, inputs: FxShaderInputs
                 inputs.sdf_view,
                 inputs.clock_secs,
                 &params_uniform,
+                inputs.zone_role, // P3.3.2 — non-zone preset: zone_tag_buffer is None
             );
             true
         }
@@ -986,6 +999,9 @@ impl FxEdgeWaveWashPipeline {
         sdf_view: &wgpu::TextureView,
         clock_secs: f32,
         params: &FxParamsUniform,
+        // P3.3.2 — zone role (ignored for non-zone presets; kept for
+        // signature parity with `FxPresetPipeline::render`).
+        _zone_role: Option<crate::project::schema::ZoneRole>,
     ) {
         let mut params_bytes = [0u8; 32];
         let floats = [
@@ -1111,6 +1127,12 @@ pub struct FxPresetPipeline {
     sampler: wgpu::Sampler,
     params_buf: wgpu::Buffer,
     clock_buf: wgpu::Buffer,
+    /// P3.3.2 — zone-tag uniform buffer (16 bytes: u32 zone_tag + 3 × u32 pad).
+    /// `Some` for zone-aware presets (P3.5.x); `None` for all others.
+    /// When `Some`, the buffer is written each frame with the layer's
+    /// `zone_role` as a u32 (via `zone_role_to_u32`), and slot 6 is included
+    /// in the bind group. When `None`, slot 6 is omitted.
+    zone_tag_buffer: Option<wgpu::Buffer>,
 }
 
 impl FxPresetPipeline {
@@ -1257,6 +1279,8 @@ impl FxPresetPipeline {
             sampler,
             params_buf,
             clock_buf,
+            // P3.3.2 — ripple_wash is not zone-aware; no zone_tag_buffer.
+            zone_tag_buffer: None,
         }
     }
 
@@ -1277,6 +1301,10 @@ impl FxPresetPipeline {
         sdf_view: &wgpu::TextureView,
         clock_secs: f32,
         params: &FxParamsUniform,
+        // P3.3.2 — zone role for this layer. Used only when `zone_tag_buffer`
+        // is `Some`; ignored for non-zone-aware presets (where the buffer
+        // field is `None` and slot 6 is not in the bind-group layout).
+        zone_role: Option<crate::project::schema::ZoneRole>,
     ) {
         // Upload params uniform: 8 × f32 = 32 bytes, little-endian.
         let mut params_bytes = [0u8; 32];
@@ -1300,28 +1328,69 @@ impl FxPresetPipeline {
         clock_bytes[0..4].copy_from_slice(&clock_secs.to_le_bytes());
         queue.write_buffer(&self.clock_buf, 0, &clock_bytes);
 
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("fx ripple wash bind group"),
-            layout: &self.bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(sdf_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&self.sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: self.params_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: self.clock_buf.as_entire_binding(),
-                },
-            ],
-        });
+        // P3.3.2 — write zone-tag uniform for zone-aware presets.
+        // `zone_tag_buffer` is `Some` only for presets whose bind-group layout
+        // includes slot 6 (set at pipeline-build time in P3.5.x). For all
+        // non-zone presets (including ripple_wash), it is `None` and this
+        // branch is skipped — slot 6 is never written or bound.
+        if let Some(ref zone_buf) = self.zone_tag_buffer {
+            let zone_tag = crate::project::schema::zone_role_to_u32(zone_role);
+            // ZoneTagUniform: u32 zone_tag + 3 × u32 padding = 16 bytes.
+            let zone_bytes = [
+                zone_tag.to_le_bytes(),
+                [0u8; 4], // _pad0
+                [0u8; 4], // _pad1
+                [0u8; 4], // _pad2
+            ]
+            .concat();
+            queue.write_buffer(zone_buf, 0, &zone_bytes);
+        }
+
+        // Build the bind group. For zone-aware presets, slot 6 was already
+        // included in `bind_group_layout` at pipeline build time (P3.5.x);
+        // we add it to the bind group entries here. For non-zone presets,
+        // `zone_tag_buffer` is `None` and slot 6 is omitted (the layout
+        // doesn't include it, so omitting the entry is correct).
+        let base_entries = [
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(sdf_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(&self.sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: self.params_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: self.clock_buf.as_entire_binding(),
+            },
+        ];
+
+        let bind_group = if let Some(ref zone_buf) = self.zone_tag_buffer {
+            // Zone-aware: include slot 6 in the bind group.
+            let zone_entry = wgpu::BindGroupEntry {
+                binding: 6,
+                resource: zone_buf.as_entire_binding(),
+            };
+            let mut entries = base_entries.to_vec();
+            entries.push(zone_entry);
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("fx zone-aware bind group"),
+                layout: &self.bind_group_layout,
+                entries: &entries,
+            })
+        } else {
+            // Non-zone: 4 bindings only.
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("fx ripple wash bind group"),
+                layout: &self.bind_group_layout,
+                entries: &base_entries,
+            })
+        };
 
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -2196,5 +2265,29 @@ mod tests {
             descs.iter().any(|d| d.key == "dissipation"),
             "dissipation descriptor must be present"
         );
+    }
+
+    // --- P3.3.2 bind-group contract tests ---
+
+    /// P3.3.2 — non-zone presets have `zone_aware = false` (fx_requires_zone returns
+    /// false) so their pipeline has no zone_tag_buffer.
+    #[test]
+    fn non_zone_presets_return_false_for_fx_requires_zone() {
+        assert!(!fx_requires_zone(RIPPLE_WASH_PRESET_ID));
+        assert!(!fx_requires_zone(EDGE_WAVE_WASH_PRESET_ID));
+    }
+
+    /// P3.3.2 — zone-consuming preset IDs return true for fx_requires_zone.
+    #[test]
+    fn zone_preset_ids_return_true_for_fx_requires_zone() {
+        assert!(fx_requires_zone("fx_zone_light_spill"));
+        assert!(fx_requires_zone("fx_zone_edge_ripple"));
+        assert!(fx_requires_zone("fx_zone_portal_drift"));
+    }
+
+    /// P3.3.2 — an unknown preset_id returns false for fx_requires_zone.
+    #[test]
+    fn unknown_preset_returns_false_for_fx_requires_zone() {
+        assert!(!fx_requires_zone("bogus_unknown_preset"));
     }
 }
