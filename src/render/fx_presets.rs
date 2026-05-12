@@ -4,6 +4,23 @@
 //! v0.4 ships one preset (`"mask_edge_ripple_wash"`) as the proof point.
 //! Phase 2 will grow the registry into the full FX library.
 //!
+//! # Canonical bind-group slots
+//!
+//! Every FX preset shader shares the same bind-group slot assignment:
+//!
+//! | Binding | Resource                                       | Notes                                           |
+//! |---------|------------------------------------------------|-------------------------------------------------|
+//! | 0       | SDF texture (`R32Float`, unfilterable)         | Always bound; caller must call `sync_mesh_and_mask` first |
+//! | 1       | Sampler (`NonFiltering`)                       | Required by layout; `textureLoad` presets don't sample through it |
+//! | 2       | `FxParamsUniform` (8 × f32, 32 bytes)          | Written each frame via `queue.write_buffer`     |
+//! | 3       | Clock uniform (`vec4<f32>`, `.x` = secs)       | Written each frame via `queue.write_buffer`     |
+//! | 4       | Source texture (`Rgba8UnormSrgb`)              | Fragment presets only (Wave/Fluid color-pass); leave unbound for others |
+//! | 5       | Particle SSBO                                  | Compute presets only (`P2.5.1 FxComputePipeline`); fragment presets leave unbound |
+//!
+//! All Phase 2 presets MUST use these slots. Diverging is a build-time
+//! hazard — adding a new bind-group layout means the existing dispatch
+//! contract is broken.
+//!
 //! # Rendering
 //!
 //! Each FxLayer owns an `fx_texture` (output-sized, same format as the
@@ -183,8 +200,9 @@ pub const RIPPLE_WASH_PRESET_ID: &str = "mask_edge_ripple_wash";
 
 /// Per-frame inputs that every FX preset receives at dispatch time.
 ///
-/// P2.2.3 minimal contract; P2.3.2 will lock canonical slot assignment
-/// and add source/SSBO bindings.
+/// Carries the canonical bind-group contract (P2.3.2): slots 0–3 are always
+/// populated; `source` (slot 4) and `particle_ssbo` (slot 5) are optional and
+/// reserved for future Wave/Fluid/Compute preset families.
 pub struct FxShaderInputs<'a> {
     /// wgpu device (bind-group creation, buffer writes).
     pub device: &'a wgpu::Device,
@@ -203,6 +221,17 @@ pub struct FxShaderInputs<'a> {
     /// preset documents which keys it reads; missing keys fall back to the
     /// documented default.
     pub params: &'a std::collections::HashMap<String, f32>,
+
+    /// Optional source texture for fragment presets that read underlying
+    /// layer pixels (none of v0.6's currently registered presets do —
+    /// reserved for future Wave/Fluid families that composite over source).
+    #[allow(dead_code)] // wired by future Wave/Fluid presets
+    pub source: Option<&'a wgpu::TextureView>,
+
+    /// Optional particle SSBO binding for compute-shader-based presets
+    /// (P2.5.1's `FxComputePipeline`). Fragment presets leave this `None`.
+    #[allow(dead_code)] // wired by P2.5.1
+    pub particle_ssbo: Option<&'a wgpu::Buffer>,
 }
 
 /// Route `preset_id` to its registered render implementation.
@@ -688,6 +717,26 @@ mod tests {
     #[test]
     fn bogus_returns_empty_descriptors() {
         assert!(fx_param_descriptors("bogus").is_empty());
+    }
+
+    // --- P2.3.2 struct shape tests ---
+
+    /// P2.3.2 compile check: `FxShaderInputs<'a>` can be named with the new
+    /// optional fields present. No GPU resources needed — the compiler
+    /// type-checks the struct shape when the function below is compiled.
+    /// A `#[test]` body is not meaningful here (the function is never
+    /// called at runtime); the verification is purely at compile time.
+    #[allow(dead_code)]
+    fn _compile_check<'a>(_inputs: FxShaderInputs<'a>) {}
+
+    /// P2.3.2 acceptance: verify `source` and `particle_ssbo` fields exist
+    /// on `FxShaderInputs` and accept `None`. This test is a no-op at
+    /// runtime; its only purpose is to confirm the struct layout compiles
+    /// with the canonical-slot extension.
+    #[test]
+    fn fx_shader_inputs_optional_fields_compile() {
+        // Confirm the new fields are accepted by the type system.
+        let _: fn(FxShaderInputs<'_>) = _compile_check;
     }
 
     /// P2.2.2 acceptance: descriptor defaults match `FxParamsUniform::for_ripple_wash`

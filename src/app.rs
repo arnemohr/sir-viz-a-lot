@@ -3829,6 +3829,8 @@ fn render_m5_pipeline(
                                     sdf_view: sdf_v,
                                     clock_secs,
                                     params,
+                                    source: None,
+                                    particle_ssbo: None,
                                 },
                             );
                             if rendered { Some(fx_view) } else { None }
