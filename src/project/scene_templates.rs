@@ -493,4 +493,139 @@ mod tests {
             );
         }
     }
+
+    // -----------------------------------------------------------------------
+    // P4.8.1 — Proptest round-trip: SceneTemplate serde + registry invariants
+    // -----------------------------------------------------------------------
+
+    use proptest::prelude::*;
+
+    /// Arbitrary `PaletteHint` strategy.
+    fn arb_palette() -> impl Strategy<Value = PaletteHint> {
+        prop_oneof![
+            Just(PaletteHint::Warm),
+            Just(PaletteHint::Cool),
+            Just(PaletteHint::Neutral),
+        ]
+    }
+
+    /// Arbitrary `MoodHint` strategy.
+    fn arb_mood() -> impl Strategy<Value = MoodHint> {
+        prop_oneof![
+            Just(MoodHint::Calm),
+            Just(MoodHint::Energetic),
+            Just(MoodHint::Ethereal),
+        ]
+    }
+
+    /// Arbitrary `ZoneRole` strategy.
+    fn arb_zone_role() -> impl Strategy<Value = crate::project::schema::ZoneRole> {
+        use crate::project::schema::ZoneRole;
+        prop_oneof![
+            Just(ZoneRole::Window),
+            Just(ZoneRole::Portal),
+            Just(ZoneRole::Void),
+            Just(ZoneRole::Spill),
+            Just(ZoneRole::Edge),
+            Just(ZoneRole::Highlight),
+            Just(ZoneRole::LightSource),
+        ]
+    }
+
+    /// Arbitrary `MediaSlotKind` strategy.
+    fn arb_media_slot_kind() -> impl Strategy<Value = MediaSlotKind> {
+        prop_oneof![
+            Just(MediaSlotKind::Image),
+            Just(MediaSlotKind::Video),
+            Just(MediaSlotKind::Any),
+        ]
+    }
+
+    /// Arbitrary `MediaSlotDescriptor` strategy.
+    fn arb_media_slot_descriptor() -> impl Strategy<Value = MediaSlotDescriptor> {
+        (
+            "[a-z]{1,10}",
+            "[A-Za-z ]{1,20}",
+            prop::collection::vec(arb_media_slot_kind(), 0..3),
+        )
+            .prop_map(|(name, label, accepts)| MediaSlotDescriptor {
+                name,
+                label,
+                accepts,
+            })
+    }
+
+    /// Arbitrary `SceneTemplate` strategy.
+    fn arb_scene_template() -> impl Strategy<Value = SceneTemplate> {
+        (
+            "[a-z_]{1,20}",
+            "[A-Za-z ]{1,20}",
+            "[A-Za-z .]{1,50}",
+            prop::collection::vec(arb_zone_role(), 0..4),
+            prop::collection::vec(arb_media_slot_descriptor(), 0..4),
+            prop::collection::vec("[a-z_]{1,20}", 0..3),
+            arb_palette(),
+            arb_mood(),
+            proptest::bool::ANY,
+            proptest::bool::ANY,
+        )
+            .prop_map(
+                |(
+                    id,
+                    display_name,
+                    description,
+                    zones_consumed,
+                    media_slots,
+                    fx_presets_used,
+                    palette,
+                    mood,
+                    tempo_sync,
+                    builtin,
+                )| {
+                    SceneTemplate {
+                        id,
+                        display_name,
+                        description,
+                        zones_consumed,
+                        media_slots,
+                        fx_presets_used,
+                        palette,
+                        mood,
+                        tempo_sync,
+                        builtin,
+                    }
+                },
+            )
+    }
+
+    proptest! {
+        /// P4.8.1 — arbitrary SceneTemplate values serialise and deserialise
+        /// without loss.
+        #[test]
+        fn proptest_scene_template_serde_round_trip(template in arb_scene_template()) {
+            let json = serde_json::to_string(&template)
+                .expect("SceneTemplate must be serialisable");
+            let back: SceneTemplate = serde_json::from_str(&json)
+                .expect("SceneTemplate JSON must be deserialisable");
+
+            prop_assert_eq!(&back.id, &template.id);
+            prop_assert_eq!(&back.display_name, &template.display_name);
+            prop_assert_eq!(&back.description, &template.description);
+            prop_assert_eq!(&back.zones_consumed, &template.zones_consumed);
+            prop_assert_eq!(back.media_slots.len(), template.media_slots.len());
+            prop_assert_eq!(&back.fx_presets_used, &template.fx_presets_used);
+            prop_assert_eq!(back.palette, template.palette);
+            prop_assert_eq!(back.mood, template.mood);
+            prop_assert_eq!(back.tempo_sync, template.tempo_sync);
+            prop_assert_eq!(back.builtin, template.builtin);
+        }
+    }
+
+    /// P4.8.1 — registry uniqueness: no duplicate IDs.
+    #[test]
+    fn scene_registry_no_duplicate_ids_proptest_guard() {
+        let ids: Vec<&str> = scene_registry().iter().map(|t| t.id.as_str()).collect();
+        let unique_count = ids.iter().collect::<std::collections::HashSet<_>>().len();
+        assert_eq!(ids.len(), unique_count, "duplicate IDs in scene_registry()");
+    }
 }
