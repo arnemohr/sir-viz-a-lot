@@ -100,6 +100,11 @@ pub fn fx_registry() -> &'static [FxPresetEntry] {
             label: "Particles (identity)",
             family: FxFamily::ComputeParticle,
         },
+        FxPresetEntry {
+            preset_id: CONSTRAINED_DRIFT_PRESET_ID,
+            label: "Mask-constrained drift",
+            family: FxFamily::ComputeParticle,
+        },
     ]
 }
 
@@ -246,6 +251,40 @@ const PARTICLES_IDENTITY_DESCRIPTORS: &[FxParamDescriptor] = &[FxParamDescriptor
     max_particle_count: Some(16),
 }];
 
+/// P2.5.2 — Param descriptors for `mask_constrained_drift`.
+///
+/// FxParamsUniform field aliasing:
+///   `particle_count` → `wavelength` (1..=2048, default 256)
+///   `drift_speed`    → `speed`      (0.0..=0.05, default 0.02)
+///   `particle_size`  → `falloff`    (0.5..=4.0, default 2.0)
+#[allow(dead_code)] // referenced only through `fx_param_descriptors` (P2.8.1 UI)
+const CONSTRAINED_DRIFT_DESCRIPTORS: &[FxParamDescriptor] = &[
+    FxParamDescriptor {
+        key: "particle_count",
+        label: "Particle count (1–2048)",
+        min: 1.0,
+        max: 2048.0,
+        default: 256.0,
+        max_particle_count: Some(2048),
+    },
+    FxParamDescriptor {
+        key: "drift_speed",
+        label: "Drift speed (UV/s)",
+        min: 0.0,
+        max: 0.05,
+        default: 0.02,
+        max_particle_count: None,
+    },
+    FxParamDescriptor {
+        key: "particle_size",
+        label: "Particle size (px)",
+        min: 0.5,
+        max: 4.0,
+        default: 2.0,
+        max_particle_count: None,
+    },
+];
+
 /// Param descriptors for the named FX preset. Returns an empty slice for
 /// unknown presets and for presets with no tunable parameters.
 #[allow(dead_code)] // consumed by P2.5.6 mutation + P2.8.1 browser UI
@@ -254,6 +293,7 @@ pub fn fx_param_descriptors(preset_id: &str) -> &'static [FxParamDescriptor] {
         RIPPLE_WASH_PRESET_ID => RIPPLE_WASH_DESCRIPTORS,
         EDGE_WAVE_WASH_PRESET_ID => EDGE_WAVE_WASH_DESCRIPTORS,
         PARTICLES_IDENTITY_PRESET_ID => PARTICLES_IDENTITY_DESCRIPTORS,
+        CONSTRAINED_DRIFT_PRESET_ID => CONSTRAINED_DRIFT_DESCRIPTORS,
         _ => &[],
     }
 }
@@ -266,6 +306,9 @@ pub const EDGE_WAVE_WASH_PRESET_ID: &str = "mask_edge_wave_wash";
 
 /// P2.5.1 — Preset id for the particles identity effect.
 pub const PARTICLES_IDENTITY_PRESET_ID: &str = "particles_identity";
+
+/// P2.5.2 — Preset id for the mask-constrained drift effect.
+pub const CONSTRAINED_DRIFT_PRESET_ID: &str = "mask_constrained_drift";
 
 /// Per-frame inputs that every FX preset receives at dispatch time.
 ///
@@ -379,6 +422,34 @@ pub fn dispatch(preset_id: &str, pipelines: &FxPipelines, inputs: FxShaderInputs
 
             // Render pass: draw quads for each particle into dst.
             pipelines.particles_identity.draw_particles(
+                inputs.device,
+                inputs.queue,
+                inputs.encoder,
+                inputs.dst,
+                n_particles,
+                inputs.output_size,
+            );
+            true
+        }
+        CONSTRAINED_DRIFT_PRESET_ID => {
+            let n_particles = inputs
+                .params
+                .get("particle_count")
+                .copied()
+                .unwrap_or(256.0)
+                .clamp(1.0, 2048.0) as u32;
+            pipelines.constrained_drift.dispatch_compute_with_sdf(
+                inputs.queue,
+                inputs.device,
+                inputs.encoder,
+                n_particles,
+                inputs.seed,
+                inputs.clock_secs,
+                inputs.t_layer_added_secs,
+                inputs.params,
+                inputs.sdf_view,
+            );
+            pipelines.constrained_drift.draw_particles(
                 inputs.device,
                 inputs.queue,
                 inputs.encoder,
@@ -617,6 +688,8 @@ pub struct FxPipelines {
     pub edge_wave_wash: FxEdgeWaveWashPipeline,
     /// P2.5.1 — particles identity (stationary grid of white dots).
     pub particles_identity: FxComputePipeline,
+    /// P2.5.2 — mask-constrained drift (particles drift inside mask).
+    pub constrained_drift: FxComputePipeline,
 }
 
 impl FxPipelines {
@@ -629,6 +702,7 @@ impl FxPipelines {
             ripple_wash: FxPresetPipeline::new_ripple_wash(device, target_format),
             edge_wave_wash: FxEdgeWaveWashPipeline::new(device, target_format),
             particles_identity: FxComputePipeline::new_particles_identity(device, target_format),
+            constrained_drift: FxComputePipeline::new_constrained_drift(device, target_format),
         }
     }
 }
@@ -988,6 +1062,56 @@ impl FxParamsUniform {
             _pad1: 0.0,
         }
     }
+
+    /// P2.5.2–P2.5.5 — Generic param uniform for SDF-reading particle presets.
+    ///
+    /// All four SDF particle presets share the same field aliasing pattern:
+    ///
+    /// | HashMap key      | maps to uniform field | notes                          |
+    /// |------------------|-----------------------|--------------------------------|
+    /// | `particle_count` | `wavelength`          | count, varies per preset       |
+    /// | `drift_speed` / `emission_speed` / `flow_speed` / `speed` | `speed` | UV/s |
+    /// | `particle_size` / `lifetime_secs` / `flow_direction` / `restitution` | `falloff` | shape param |
+    ///
+    /// The caller maps the preset-specific key names before calling this, OR
+    /// the shaders read the positional uniform field directly. This generic
+    /// constructor reads the first present key for each field.
+    ///
+    /// `dispatch_compute_with_sdf` uses this so each preset's shader always
+    /// reads `u_params.wavelength`, `u_params.speed`, `u_params.falloff`.
+    pub fn for_sdf_particle_preset(params: &HashMap<String, f32>) -> Self {
+        // particle_count → wavelength
+        let wavelength = params.get("particle_count").copied().unwrap_or(0.0);
+
+        // speed-like param: drift_speed, emission_speed, flow_speed, or speed
+        let speed = params
+            .get("drift_speed")
+            .or_else(|| params.get("emission_speed"))
+            .or_else(|| params.get("flow_speed"))
+            .or_else(|| params.get("speed"))
+            .copied()
+            .unwrap_or(0.0);
+
+        // shape param: particle_size, lifetime_secs, flow_direction, or restitution
+        let falloff = params
+            .get("particle_size")
+            .or_else(|| params.get("lifetime_secs"))
+            .or_else(|| params.get("flow_direction"))
+            .or_else(|| params.get("restitution"))
+            .copied()
+            .unwrap_or(0.0);
+
+        Self {
+            wavelength,
+            speed,
+            falloff,
+            base_r: 0.0,
+            base_g: 0.0,
+            base_b: 0.0,
+            _pad0: 0.0,
+            _pad1: 0.0,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1304,4 +1428,64 @@ mod tests {
         let u = FxParamsUniform::for_particles_identity(&map);
         assert_eq!(u.wavelength, 9.0, "particle_count=9 → wavelength=9");
     }
+
+    // -------------------------------------------------------------------------
+    // P2.5.2 — mask_constrained_drift
+    // -------------------------------------------------------------------------
+
+    /// P2.5.2 acceptance: `mask_constrained_drift` is in the registry.
+    #[test]
+    fn constrained_drift_is_registered() {
+        assert!(
+            fx_is_registered(CONSTRAINED_DRIFT_PRESET_ID),
+            "mask_constrained_drift must be in fx_registry()"
+        );
+    }
+
+    /// P2.5.2 acceptance: descriptors count matches spec (3); each min < max;
+    /// default ∈ range.
+    #[test]
+    fn constrained_drift_descriptors_present() {
+        let descs = fx_param_descriptors(CONSTRAINED_DRIFT_PRESET_ID);
+        assert_eq!(
+            descs.len(),
+            3,
+            "mask_constrained_drift must have 3 descriptors"
+        );
+        for d in descs {
+            assert!(d.min < d.max, "key={}: min < max", d.key);
+            assert!(
+                d.default >= d.min && d.default <= d.max,
+                "key={}: default ∈ range",
+                d.key
+            );
+        }
+    }
+
+    /// P2.5.2 acceptance: `particle_count` descriptor has `max_particle_count: Some(2048)`.
+    #[test]
+    fn constrained_drift_max_particle_count_matches_spec() {
+        let descs = fx_param_descriptors(CONSTRAINED_DRIFT_PRESET_ID);
+        let pc = descs
+            .iter()
+            .find(|d| d.key == "particle_count")
+            .expect("particle_count descriptor must be present");
+        assert_eq!(
+            pc.max_particle_count,
+            Some(2048),
+            "constrained_drift particle_count max_particle_count must be Some(2048)"
+        );
+    }
+
+    /// P2.5.2 acceptance: registry entry has `FxFamily::ComputeParticle`.
+    #[test]
+    fn constrained_drift_family_is_compute_particle() {
+        let entry = fx_registry()
+            .iter()
+            .find(|e| e.preset_id == CONSTRAINED_DRIFT_PRESET_ID)
+            .expect("mask_constrained_drift must be in fx_registry");
+        assert_eq!(entry.family, FxFamily::ComputeParticle);
+    }
+
+    // P2.5.3-P2.5.5 tests added in subsequent commits.
 }
