@@ -115,6 +115,11 @@ pub fn fx_registry() -> &'static [FxPresetEntry] {
             label: "Mask field flow",
             family: FxFamily::ComputeParticle,
         },
+        FxPresetEntry {
+            preset_id: COLLISION_REFLECTION_PRESET_ID,
+            label: "Mask collision reflection",
+            family: FxFamily::ComputeParticle,
+        },
     ]
 }
 
@@ -363,6 +368,40 @@ const FIELD_FLOW_DESCRIPTORS: &[FxParamDescriptor] = &[
     },
 ];
 
+/// P2.5.5 — Param descriptors for `mask_collision_reflection`.
+///
+/// FxParamsUniform field aliasing:
+///   `particle_count` → `wavelength` (1..=512, default 64)
+///   `speed`          → `speed`      (0.01..=0.2, default 0.08)
+///   `restitution`    → `falloff`    (0.5..=1.0, default 0.95)
+#[allow(dead_code)] // referenced only through `fx_param_descriptors` (P2.8.1 UI)
+const COLLISION_REFLECTION_DESCRIPTORS: &[FxParamDescriptor] = &[
+    FxParamDescriptor {
+        key: "particle_count",
+        label: "Particle count (1–512)",
+        min: 1.0,
+        max: 512.0,
+        default: 64.0,
+        max_particle_count: Some(512),
+    },
+    FxParamDescriptor {
+        key: "speed",
+        label: "Speed (UV/s)",
+        min: 0.01,
+        max: 0.2,
+        default: 0.08,
+        max_particle_count: None,
+    },
+    FxParamDescriptor {
+        key: "restitution",
+        label: "Restitution (0.5–1.0)",
+        min: 0.5,
+        max: 1.0,
+        default: 0.95,
+        max_particle_count: None,
+    },
+];
+
 /// Param descriptors for the named FX preset. Returns an empty slice for
 /// unknown presets and for presets with no tunable parameters.
 #[allow(dead_code)] // consumed by P2.5.6 mutation + P2.8.1 browser UI
@@ -374,6 +413,7 @@ pub fn fx_param_descriptors(preset_id: &str) -> &'static [FxParamDescriptor] {
         CONSTRAINED_DRIFT_PRESET_ID => CONSTRAINED_DRIFT_DESCRIPTORS,
         EDGE_EMISSION_PRESET_ID => EDGE_EMISSION_DESCRIPTORS,
         FIELD_FLOW_PRESET_ID => FIELD_FLOW_DESCRIPTORS,
+        COLLISION_REFLECTION_PRESET_ID => COLLISION_REFLECTION_DESCRIPTORS,
         _ => &[],
     }
 }
@@ -395,6 +435,9 @@ pub const EDGE_EMISSION_PRESET_ID: &str = "mask_edge_emission";
 
 /// P2.5.4 — Preset id for the mask field flow effect.
 pub const FIELD_FLOW_PRESET_ID: &str = "mask_field_flow";
+
+/// P2.5.5 — Preset id for the mask collision reflection effect.
+pub const COLLISION_REFLECTION_PRESET_ID: &str = "mask_collision_reflection";
 
 /// Per-frame inputs that every FX preset receives at dispatch time.
 ///
@@ -592,6 +635,34 @@ pub fn dispatch(preset_id: &str, pipelines: &FxPipelines, inputs: FxShaderInputs
                 inputs.sdf_view,
             );
             pipelines.field_flow.draw_particles(
+                inputs.device,
+                inputs.queue,
+                inputs.encoder,
+                inputs.dst,
+                n_particles,
+                inputs.output_size,
+            );
+            true
+        }
+        COLLISION_REFLECTION_PRESET_ID => {
+            let n_particles = inputs
+                .params
+                .get("particle_count")
+                .copied()
+                .unwrap_or(64.0)
+                .clamp(1.0, 512.0) as u32;
+            pipelines.collision_reflection.dispatch_compute_with_sdf(
+                inputs.queue,
+                inputs.device,
+                inputs.encoder,
+                n_particles,
+                inputs.seed,
+                inputs.clock_secs,
+                inputs.t_layer_added_secs,
+                inputs.params,
+                inputs.sdf_view,
+            );
+            pipelines.collision_reflection.draw_particles(
                 inputs.device,
                 inputs.queue,
                 inputs.encoder,
@@ -836,6 +907,8 @@ pub struct FxPipelines {
     pub edge_emission: FxComputePipeline,
     /// P2.5.4 — mask field flow (particles follow SDF gradient).
     pub field_flow: FxComputePipeline,
+    /// P2.5.5 — mask collision reflection (particles bounce inside mask).
+    pub collision_reflection: FxComputePipeline,
 }
 
 impl FxPipelines {
@@ -851,6 +924,10 @@ impl FxPipelines {
             constrained_drift: FxComputePipeline::new_constrained_drift(device, target_format),
             edge_emission: FxComputePipeline::new_edge_emission(device, target_format),
             field_flow: FxComputePipeline::new_field_flow(device, target_format),
+            collision_reflection: FxComputePipeline::new_collision_reflection(
+                device,
+                target_format,
+            ),
         }
     }
 }
@@ -1763,5 +1840,61 @@ mod tests {
         assert_eq!(entry.family, FxFamily::ComputeParticle);
     }
 
-    // P2.5.5 tests added in subsequent commit.
+    // -------------------------------------------------------------------------
+    // P2.5.5 — mask_collision_reflection
+    // -------------------------------------------------------------------------
+
+    /// P2.5.5 acceptance: `mask_collision_reflection` is in the registry.
+    #[test]
+    fn collision_reflection_is_registered() {
+        assert!(
+            fx_is_registered(COLLISION_REFLECTION_PRESET_ID),
+            "mask_collision_reflection must be in fx_registry()"
+        );
+    }
+
+    /// P2.5.5 acceptance: descriptors count matches spec (3); each min < max;
+    /// default ∈ range.
+    #[test]
+    fn collision_reflection_descriptors_present() {
+        let descs = fx_param_descriptors(COLLISION_REFLECTION_PRESET_ID);
+        assert_eq!(
+            descs.len(),
+            3,
+            "mask_collision_reflection must have 3 descriptors"
+        );
+        for d in descs {
+            assert!(d.min < d.max, "key={}: min < max", d.key);
+            assert!(
+                d.default >= d.min && d.default <= d.max,
+                "key={}: default ∈ range",
+                d.key
+            );
+        }
+    }
+
+    /// P2.5.5 acceptance: `particle_count` descriptor has `max_particle_count: Some(512)`.
+    #[test]
+    fn collision_reflection_max_particle_count_matches_spec() {
+        let descs = fx_param_descriptors(COLLISION_REFLECTION_PRESET_ID);
+        let pc = descs
+            .iter()
+            .find(|d| d.key == "particle_count")
+            .expect("particle_count descriptor must be present");
+        assert_eq!(
+            pc.max_particle_count,
+            Some(512),
+            "collision_reflection particle_count max_particle_count must be Some(512)"
+        );
+    }
+
+    /// P2.5.5 acceptance: registry entry has `FxFamily::ComputeParticle`.
+    #[test]
+    fn collision_reflection_family_is_compute_particle() {
+        let entry = fx_registry()
+            .iter()
+            .find(|e| e.preset_id == COLLISION_REFLECTION_PRESET_ID)
+            .expect("mask_collision_reflection must be in fx_registry");
+        assert_eq!(entry.family, FxFamily::ComputeParticle);
+    }
 }
