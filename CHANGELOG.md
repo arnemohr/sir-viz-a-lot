@@ -4,19 +4,81 @@ All notable changes to rmap are documented here.
 
 ---
 
-## [Unreleased] — v0.6
+## [Unreleased]
+
+---
+
+## v0.6.0 — 2026-05-12
+
+v0.6 makes rmap a live FX performance tool. Operators can now pick from
+14 built-in procedural presets across three families — Wave, Particle, and
+Fluid — directly from an in-app browser. Every change is undoable; the
+show-day frame budget is protected by hard particle-count enforcement.
 
 ### FX Preset Library
 
-_TODO: fill body in P2.10.2._
+The new preset browser modal (accessible from Advanced → Selected layer →
+FX Preset) lists all built-in and user-saved presets. Operators can search
+by name, filter by family (Wave / Particle / Fluid / Treatment), and star
+presets they use often. The three-click flow — drop a mask, open the
+browser, pick a preset — is intentional: no scrubbing through a menu tree.
 
 ### Effect-Chain Reordering
 
-_TODO: fill body in P2.10.2._
+The effect chain on every layer type (Image, Video, SVG, FxLayer) is now
+drag-reorderable. Effects can also be added and removed with + / − buttons.
+`Effect::External` is promoted to a first-class menu entry so operators can
+reach custom post-processing effects without editing the project file by hand.
 
 ### Particle / Wave / Fluid Families
 
-_TODO: fill body in P2.10.2._
+Fourteen built-in FX presets shipped in v0.6:
+
+**Wave (FxLayer + Treatment)**
+- `mask_edge_wave_wash` — animated wave wash along the mask polygon edge.
+- `displacement_ripple` (Treatment) — time-varying per-pixel UV displacement
+  for a heat-haze / ripple effect over any source layer.
+- `refraction` (Treatment) — SDF-normal-based refraction that bends light
+  across the mask boundary.
+
+**Particle (FxLayer, GPU compute)**
+- `mask_constrained_drift` — particles spawned inside the mask polygon,
+  drifting with gentle random walk.
+- `mask_edge_emission` — continuous particle emission from the mask edge,
+  falling inward.
+- `mask_field_flow` — flow-field driven particles; direction sampled from
+  a pre-baked noise texture.
+- `mask_collision_reflection` — particles bounce off the mask polygon
+  boundary with configurable restitution.
+
+**Fluid (FxLayer, GPU compute)**
+- `fluid_identity` — Navier-Stokes advection with no forcing; a minimal
+  identity baseline for the fluid pipeline.
+- `mask_bounded_fluid` — advected velocity field constrained inside the
+  mask polygon; renders as a coloured RGBA16Float velocity buffer.
+
+### Export / Import
+
+User-tuned presets can be exported as `.rmap-preset.json` files and
+re-imported into any project. The format carries only `preset_id` and
+parameter values — no media paths, no warp data — so sharing a preset
+between machines requires only the single JSON file.
+
+### Engine
+
+- `SetFxLayerParams` mutation validates `particle_count` against each
+  preset's declared `max_particle_count` and refuses to commit when
+  over-budget; the UI shows an inline warning and snaps the slider back.
+- `FxLayer` schema gains `seed: u64` and `t_layer_added_secs: f32` for
+  deterministic particle initialisation; same seed = bit-exact pixel output
+  across independent renders.
+- `FxParamDescriptor` API lets presets declare parameter names, ranges, and
+  defaults; the UI reads descriptors to build sliders generically.
+- Project audit now emits `UnknownFxPreset` and `UnknownTreatment` findings
+  for any layer whose `preset_id` is not in the registry; findings appear
+  in the Diagnostics strip.
+- `sample_sdf_normal` WGSL helper available to all FX shaders; returns the
+  mask polygon's surface normal at any fragment coordinate.
 
 ---
 
