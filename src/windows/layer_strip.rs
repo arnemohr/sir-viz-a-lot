@@ -215,8 +215,12 @@ pub fn show(
                 // can see at a glance which layers are suppressed.
                 let dim = if is_muted { 0.4 } else { 1.0 };
                 let thumb_colour = color_for_id(&layer.id).linear_multiply(dim);
+                // P1.UX: left inset bumped 4 → 6 so the selected/solo
+                // ring's 3 px Inside stroke doesn't kiss the thumb's
+                // left edge. Mirrors the right-inset bump on
+                // controls_rect.
                 let thumb_rect = egui::Rect::from_min_size(
-                    row_rect.min + egui::vec2(4.0, (ROW_HEIGHT - THUMB_H) * 0.5),
+                    row_rect.min + egui::vec2(6.0, (ROW_HEIGHT - THUMB_H) * 0.5),
                     egui::vec2(THUMB_W, THUMB_H),
                 );
                 painter.rect_filled(thumb_rect, egui::CornerRadius::same(2), thumb_colour);
@@ -325,8 +329,11 @@ pub fn show(
 
                 // ── right-side controls column ──────────────────────────
                 // Controls column to the right of the thumbnail: eye toggle + arrows.
+                // P1.UX: right inset bumped 2 → 6 so the selection ring's
+                // 3 px Inside stroke clears the controls column. M / ▼
+                // were rendering past the ring's right stroke before.
                 let ctrl_x = thumb_rect.right() + 4.0;
-                let ctrl_w = row_rect.right() - ctrl_x - 2.0;
+                let ctrl_w = row_rect.right() - ctrl_x - 6.0;
 
                 // We use child UI rects placed via `put`. In order to keep
                 // allocations simple, we call `ui.put(rect, widget)` on the
@@ -339,7 +346,7 @@ pub fn show(
 
                 let controls_rect = egui::Rect::from_min_max(
                     egui::pos2(ctrl_x, row_rect.top() + 2.0),
-                    egui::pos2(row_rect.right() - 2.0, row_rect.bottom() - 2.0),
+                    egui::pos2(row_rect.right() - 6.0, row_rect.bottom() - 6.0),
                 );
 
                 // Safety: `ui.allocate_rect` below might overlap with the already-allocated

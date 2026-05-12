@@ -610,11 +610,15 @@ pub fn show(
     #[cfg(feature = "v3")]
     egui::SidePanel::left("rmap_layer_strip")
         .resizable(false)
-        // 88 px was tight; even 108 still clipped under egui's default
-        // SidePanel inner_margin (~8 px each side). 120 px + a zeroed
-        // Frame margin lets layer_strip use the full rail width for its
-        // row allocations without the panel chrome stealing ~16 px.
-        .exact_width(120.0)
+        // Width sized so the row's interior fits cleanly:
+        //   136 px panel - ~10 px scrollbar - 6 px thumb-left inset
+        //   - 64 px thumb - 4 px gap - 6 px controls-right inset
+        //   ≈ 46 px for the controls column. The 6 px right inset
+        //   gives the selection ring's 3 px Inside stroke clear space
+        //   so the M / ▼ buttons stop overlapping it. Earlier bumps
+        //   (88 → 108 → 120) under-corrected because they kept the
+        //   original 2 px right inset which the stroke ate.
+        .exact_width(136.0)
         .frame(
             egui::Frame::new()
                 .fill(ui.style().visuals.panel_fill)
