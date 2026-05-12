@@ -1134,6 +1134,48 @@ pub fn mode_banner_copy(mode: EditMode, has_layer_selected: bool) -> &'static st
     }
 }
 
+// ---------------------------------------------------------------------------
+// P4.7.1 — Capability-availability hints
+// ---------------------------------------------------------------------------
+
+/// Contextual state passed to [`capability_hint`] to decide which hint (if any)
+/// to show in the mode banner.
+///
+/// P4.7.1: hints are static copy, not runtime feature detection.
+#[cfg(feature = "v3")]
+pub struct HintContext {
+    /// Current edit mode.
+    pub mode: EditMode,
+    /// `true` when a layer or mask vertex is selected.
+    pub has_selection: bool,
+    /// `true` when `AppState` is `SceneWizard` (the wizard is open).
+    pub in_wizard: bool,
+}
+
+/// Return an optional static capability-availability hint for the current
+/// context.
+///
+/// Hints educate the operator about capabilities that are either coming in a
+/// future phase or already available but non-obvious. They appear below the
+/// existing `mode_banner_copy` label as italic grey text.
+///
+/// Conditions (P4.7.1 spec):
+/// - Mask mode + mask selected → "Bezier handles — Phase 7"
+/// - Mask mode + no mask → "Fluid sim — Phase 2 preset in the FX layer menu"
+/// - Scene Wizard (TemplateSelect step) → "AI scene generation — not planned
+///   (pick a template instead)"
+#[cfg(feature = "v3")]
+pub fn capability_hint(ctx: &HintContext) -> Option<&'static str> {
+    if ctx.in_wizard {
+        return Some("AI scene generation — not planned (pick a template instead)");
+    }
+    match ctx.mode {
+        EditMode::Mask if ctx.has_selection => Some("Bezier handles — Phase 7"),
+        EditMode::Mask => Some("Fluid sim — Phase 2 preset in the FX layer menu"),
+        _ => None,
+    }
+}
+
 /// 003-T3.8 — thin instruction strip at the top of the canvas.
 ///
 /// Renders a single low-contrast label with guidance text that varies by
@@ -1141,8 +1183,24 @@ pub fn mode_banner_copy(mode: EditMode, has_layer_selected: bool) -> &'static st
 /// changes. No border; small font; grey text so it doesn't compete with the
 /// canvas content. v3-only — v2 has its own static instruction label in
 /// `show_scene_tab`.
+///
+/// P4.7.1: also renders a capability-availability hint below the primary copy
+/// when the current context matches one of the hint conditions.
 #[cfg(feature = "v3")]
 pub fn mode_banner(ui: &mut egui::Ui, scene: &mut SceneEditorState) {
+    mode_banner_with_hint(ui, scene, false);
+}
+
+/// Extended variant called from the `SceneWizard` context where `in_wizard`
+/// is `true`. Wired from `handle_wizard_window_event` in P4.3.1.
+#[cfg(feature = "v3")]
+#[allow(dead_code)] // wired by wizard rendering in app.rs
+pub fn mode_banner_wizard(ui: &mut egui::Ui, scene: &mut SceneEditorState) {
+    mode_banner_with_hint(ui, scene, true);
+}
+
+#[cfg(feature = "v3")]
+fn mode_banner_with_hint(ui: &mut egui::Ui, scene: &mut SceneEditorState, in_wizard: bool) {
     use crate::windows::anim::{TRANSITION_MS, animate_bool_to};
 
     let has_selection = scene.selected.is_some();
@@ -1155,6 +1213,21 @@ pub fn mode_banner(ui: &mut egui::Ui, scene: &mut SceneEditorState) {
 
     let color = TEXT_SECONDARY.linear_multiply(alpha);
     ui.label(egui::RichText::new(copy).small().color(color));
+
+    // P4.7.1: capability-availability hint below the primary copy.
+    let ctx = HintContext {
+        mode: scene.mode,
+        has_selection,
+        in_wizard,
+    };
+    if let Some(hint) = capability_hint(&ctx) {
+        ui.label(
+            egui::RichText::new(hint)
+                .small()
+                .italics()
+                .color(TEXT_SECONDARY.linear_multiply(alpha * 0.7)),
+        );
+    }
 }
 
 /// 003-T3.9 — map the current `EditMode` to the cursor icon that reflects
@@ -1554,6 +1627,78 @@ mod tests {
         assert_eq!(
             super::mode_banner_copy(EditMode::Mask, false),
             "Select a layer first."
+        );
+    }
+
+    // --- P4.7.1: capability_hint tests ---
+
+    /// In wizard: hint mentions "AI scene generation".
+    #[cfg(feature = "v3")]
+    #[test]
+    fn capability_hint_in_wizard_returns_ai_hint() {
+        let ctx = super::HintContext {
+            mode: EditMode::Layer,
+            has_selection: false,
+            in_wizard: true,
+        };
+        let hint = super::capability_hint(&ctx);
+        assert!(hint.is_some(), "expected Some hint in wizard mode");
+        assert!(
+            hint.unwrap().contains("AI scene generation"),
+            "wizard hint must mention AI scene generation"
+        );
+    }
+
+    /// Mask mode + mask selected → "Bezier handles" hint.
+    #[cfg(feature = "v3")]
+    #[test]
+    fn capability_hint_mask_with_selection_returns_bezier() {
+        let ctx = super::HintContext {
+            mode: EditMode::Mask,
+            has_selection: true,
+            in_wizard: false,
+        };
+        let hint = super::capability_hint(&ctx);
+        assert!(hint.is_some(), "expected hint in Mask mode with selection");
+        assert!(
+            hint.unwrap().contains("Bezier"),
+            "mask-with-selection hint must mention Bezier"
+        );
+    }
+
+    /// Mask mode + no mask → "Fluid sim" hint.
+    #[cfg(feature = "v3")]
+    #[test]
+    fn capability_hint_mask_no_selection_returns_fluid_sim() {
+        let ctx = super::HintContext {
+            mode: EditMode::Mask,
+            has_selection: false,
+            in_wizard: false,
+        };
+        let hint = super::capability_hint(&ctx);
+        assert!(
+            hint.is_some(),
+            "expected hint in Mask mode without selection"
+        );
+        assert!(
+            hint.unwrap().contains("Fluid sim"),
+            "mask-no-selection hint must mention Fluid sim"
+        );
+    }
+
+    /// Default Editing mode with no selection → no hint.
+    #[cfg(feature = "v3")]
+    #[test]
+    fn capability_hint_layer_mode_no_hint() {
+        let ctx = super::HintContext {
+            mode: EditMode::Layer,
+            has_selection: false,
+            in_wizard: false,
+        };
+        assert_eq!(
+            super::capability_hint(&ctx),
+            None,
+            "Layer mode with no selection must return no hint"
         );
     }
 
