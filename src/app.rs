@@ -413,7 +413,7 @@ struct EditingState {
     /// registry indexed by `preset_id`. Built once in `init_render_graph`
     /// and shared across all FxLayer layers in the scene (the pipeline
     /// itself is stateless; per-layer state lives in `LayerState.fx_texture`).
-    fx_pipeline: crate::render::fx_presets::FxPresetPipeline,
+    fx_pipelines: crate::render::fx_presets::FxPipelines,
     /// P1.2.2 — Treatment preset pipelines. Runs before the effect chain
     /// for Image / Video layers that carry a `LayerConfig.treatment`. v0.4
     /// ships only the identity preset; W3 grows the registry into the
@@ -1576,9 +1576,9 @@ struct RenderGraph {
     /// P0.7.3 — edge-blend multiply pipeline (always built; conditionally emitted).
     edge_blend: EdgeBlendPipeline,
     overlay: OverlayPipeline,
-    /// P0.5.3 — ripple-wash FX preset pipeline. One pipeline shared across all
-    /// FxLayer layers; per-layer output lives in `LayerState.fx_texture`.
-    fx_pipeline: crate::render::fx_presets::FxPresetPipeline,
+    /// P0.5.3/P2.4.3 — FX preset pipelines. All registered preset pipelines
+    /// live here; per-layer output lives in `LayerState.fx_texture`.
+    fx_pipelines: crate::render::fx_presets::FxPipelines,
     /// P1.2.2 — treatment pipelines (shared across all layers that carry a
     /// `LayerConfig.treatment`).
     treatment_pipeline: crate::render::treatments::TreatmentPipeline,
@@ -1616,10 +1616,9 @@ fn init_render_graph(
     let gamma = GammaPipeline::new(device, surface_format);
     let edge_blend = EdgeBlendPipeline::new(device, surface_format);
     let overlay = OverlayPipeline::new(device, surface_format);
-    // P0.5.3 — build the ripple-wash FX preset pipeline against the same
-    // surface format as every other intermediate texture in the graph.
-    let fx_pipeline =
-        crate::render::fx_presets::FxPresetPipeline::new_ripple_wash(device, surface_format);
+    // P0.5.3/P2.4.3 — build all FX preset pipelines against the same surface
+    // format as every other intermediate texture in the graph.
+    let fx_pipelines = crate::render::fx_presets::FxPipelines::new(device, surface_format);
     // P1.2.2 — treatment pipelines (identity for v0.4; W3 will grow the registry).
     let treatment_pipeline =
         crate::render::treatments::TreatmentPipeline::new(device, surface_format);
@@ -1648,7 +1647,7 @@ fn init_render_graph(
         gamma,
         edge_blend,
         overlay,
-        fx_pipeline,
+        fx_pipelines,
         treatment_pipeline,
         warp_rt,
         warp_rt_view,
@@ -1976,7 +1975,7 @@ fn assemble_editing_state(
         svg_pipeline: graph.svg_pipeline,
         compositor: graph.compositor,
         gamma: graph.gamma,
-        fx_pipeline: graph.fx_pipeline,
+        fx_pipelines: graph.fx_pipelines,
         treatment_pipeline: graph.treatment_pipeline,
         edge_blend: graph.edge_blend,
         overlay: graph.overlay,
@@ -3752,7 +3751,7 @@ fn render_m5_pipeline(
     external_registry: &ExternalRegistry,
     _surface_format: wgpu::TextureFormat,
     clock: &Clock,
-    fx_pipeline: &crate::render::fx_presets::FxPresetPipeline,
+    fx_pipelines: &crate::render::fx_presets::FxPipelines,
     treatment_pipeline: &crate::render::treatments::TreatmentPipeline,
     image_texture_cache: &crate::image_layer::ImageTextureCache,
 ) -> std::result::Result<(), RenderError> {
@@ -3820,7 +3819,7 @@ fn render_m5_pipeline(
                             let sdf_v = ls.warp_renderer.sdf_view();
                             let rendered = crate::render::fx_presets::dispatch(
                                 preset_id,
-                                fx_pipeline,
+                                fx_pipelines,
                                 crate::render::fx_presets::FxShaderInputs {
                                     device: &renderer.gpu.device,
                                     queue: &renderer.gpu.queue,
@@ -5194,7 +5193,7 @@ fn handle_editing_window_event(
                     &state.external_registry,
                     surface_format,
                     &state.clock,
-                    &state.fx_pipeline,
+                    &state.fx_pipelines,
                     &state.treatment_pipeline,
                     &state.image_texture_cache,
                 )

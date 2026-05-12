@@ -83,11 +83,18 @@ pub struct FxPresetEntry {
 /// `treatments::registry()` shape.
 #[allow(dead_code)] // wired by P2.2.4 audit + P2.8.1 browser
 pub fn fx_registry() -> &'static [FxPresetEntry] {
-    &[FxPresetEntry {
-        preset_id: RIPPLE_WASH_PRESET_ID,
-        label: "Mask-edge ripple wash",
-        family: FxFamily::Fragment,
-    }]
+    &[
+        FxPresetEntry {
+            preset_id: RIPPLE_WASH_PRESET_ID,
+            label: "Mask-edge ripple wash",
+            family: FxFamily::Fragment,
+        },
+        FxPresetEntry {
+            preset_id: EDGE_WAVE_WASH_PRESET_ID,
+            label: "Mask-edge wave wash",
+            family: FxFamily::Fragment,
+        },
+    ]
 }
 
 /// `true` if `preset_id` corresponds to a registered FX preset.
@@ -185,18 +192,56 @@ const RIPPLE_WASH_DESCRIPTORS: &[FxParamDescriptor] = &[
     },
 ];
 
+/// Param descriptors for the `mask_edge_wave_wash` preset.
+///
+/// FxParamsUniform field aliasing:
+/// - `wave_speed` → `speed` (0.0..=5.0, default 1.0)
+/// - `wave_width` → `falloff` (0.0..=0.3, default 0.15)
+/// - `colour`     → `base_r` (0.0..=1.0, default 0.5)
+#[allow(dead_code)] // referenced only through `fx_param_descriptors` (P2.8.1 UI)
+const EDGE_WAVE_WASH_DESCRIPTORS: &[FxParamDescriptor] = &[
+    FxParamDescriptor {
+        key: "wave_speed",
+        label: "Wave speed (cycles/sec)",
+        min: 0.0,
+        max: 5.0,
+        default: 1.0,
+        max_particle_count: None,
+    },
+    FxParamDescriptor {
+        key: "wave_width",
+        label: "Wave band width (normalised)",
+        min: 0.0,
+        max: 0.3,
+        default: 0.15,
+        max_particle_count: None,
+    },
+    FxParamDescriptor {
+        key: "colour",
+        label: "Colour (0=cold blue, 1=warm amber)",
+        min: 0.0,
+        max: 1.0,
+        default: 0.5,
+        max_particle_count: None,
+    },
+];
+
 /// Param descriptors for the named FX preset. Returns an empty slice for
 /// unknown presets and for presets with no tunable parameters.
 #[allow(dead_code)] // consumed by P2.5.6 mutation + P2.8.1 browser UI
 pub fn fx_param_descriptors(preset_id: &str) -> &'static [FxParamDescriptor] {
     match preset_id {
         RIPPLE_WASH_PRESET_ID => RIPPLE_WASH_DESCRIPTORS,
+        EDGE_WAVE_WASH_PRESET_ID => EDGE_WAVE_WASH_DESCRIPTORS,
         _ => &[],
     }
 }
 
 /// Preset id for the mask-edge ripple wash effect.
 pub const RIPPLE_WASH_PRESET_ID: &str = "mask_edge_ripple_wash";
+
+/// Preset id for the mask-edge wave wash effect (P2.4.3).
+pub const EDGE_WAVE_WASH_PRESET_ID: &str = "mask_edge_wave_wash";
 
 /// Per-frame inputs that every FX preset receives at dispatch time.
 ///
@@ -246,11 +291,24 @@ pub struct FxShaderInputs<'a> {
 /// Unit-testing `dispatch` requires a GPU adapter; coverage comes from
 /// `make test-gpu` smoke + the `app.rs` integration path exercised by
 /// `demo_loads_fx_ripple_wash`.
-pub fn dispatch(preset_id: &str, pipeline: &FxPresetPipeline, inputs: FxShaderInputs<'_>) -> bool {
+pub fn dispatch(preset_id: &str, pipelines: &FxPipelines, inputs: FxShaderInputs<'_>) -> bool {
     match preset_id {
         RIPPLE_WASH_PRESET_ID => {
             let params_uniform = FxParamsUniform::for_ripple_wash(inputs.params);
-            pipeline.render(
+            pipelines.ripple_wash.render(
+                inputs.device,
+                inputs.queue,
+                inputs.encoder,
+                inputs.dst,
+                inputs.sdf_view,
+                inputs.clock_secs,
+                &params_uniform,
+            );
+            true
+        }
+        EDGE_WAVE_WASH_PRESET_ID => {
+            let params_uniform = FxParamsUniform::for_edge_wave_wash(inputs.params);
+            pipelines.edge_wave_wash.render(
                 inputs.device,
                 inputs.queue,
                 inputs.encoder,
@@ -263,6 +321,243 @@ pub fn dispatch(preset_id: &str, pipeline: &FxPresetPipeline, inputs: FxShaderIn
         }
         // Registered families not yet wired — caller skips rendering.
         _ => false,
+    }
+}
+
+/// P2.4.3 — Edge-wave-wash FX preset pipeline. Self-illuminated traveling wave
+/// along the mask boundary. Same 4-binding contract as `FxPresetPipeline`.
+///
+/// Owns its own `params_buf` and `clock_buf` so a scene with both ripple-wash
+/// and wave-wash FxLayers can upload different uniforms in the same frame
+/// without collisions.
+pub struct FxEdgeWaveWashPipeline {
+    pipeline: wgpu::RenderPipeline,
+    bind_group_layout: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
+    params_buf: wgpu::Buffer,
+    clock_buf: wgpu::Buffer,
+}
+
+impl FxEdgeWaveWashPipeline {
+    /// Build the edge-wave-wash pipeline against `target_format`.
+    pub fn new(device: &wgpu::Device, target_format: wgpu::TextureFormat) -> Self {
+        let shader_src = format!(
+            "{}\n{}",
+            SDF_HELPER_WGSL,
+            include_str!("shaders/fx_edge_wave_wash.wgsl")
+        );
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("fx_edge_wave_wash.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(shader_src.into()),
+        });
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("fx edge wave wash bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("fx edge wave wash pipeline layout"),
+            bind_group_layouts: &[Some(&bind_group_layout)],
+            immediate_size: 0,
+        });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("fx edge wave wash pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: target_format,
+                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("fx edge wave wash sampler"),
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+        let params_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("fx edge wave wash params"),
+            size: std::mem::size_of::<FxParamsUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let clock_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("fx edge wave wash clock"),
+            size: 16,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        Self {
+            pipeline,
+            bind_group_layout,
+            sampler,
+            params_buf,
+            clock_buf,
+        }
+    }
+
+    /// Render into `dst` using `sdf_view` and the preset's params.
+    ///
+    /// The caller must call `sync_mesh_and_mask` before this so the SDF is
+    /// current.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        dst: &wgpu::TextureView,
+        sdf_view: &wgpu::TextureView,
+        clock_secs: f32,
+        params: &FxParamsUniform,
+    ) {
+        let mut params_bytes = [0u8; 32];
+        let floats = [
+            params.wavelength,
+            params.speed,
+            params.falloff,
+            params.base_r,
+            params.base_g,
+            params.base_b,
+            params._pad0,
+            params._pad1,
+        ];
+        for (i, f) in floats.iter().enumerate() {
+            params_bytes[i * 4..(i + 1) * 4].copy_from_slice(&f.to_le_bytes());
+        }
+        queue.write_buffer(&self.params_buf, 0, &params_bytes);
+        let mut clock_bytes = [0u8; 16];
+        clock_bytes[0..4].copy_from_slice(&clock_secs.to_le_bytes());
+        queue.write_buffer(&self.clock_buf, 0, &clock_bytes);
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("fx edge wave wash bind group"),
+            layout: &self.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(sdf_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: self.params_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: self.clock_buf.as_entire_binding(),
+                },
+            ],
+        });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("fx edge wave wash pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: dst,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.draw(0..3, 0..1);
+        }
+    }
+}
+
+/// Holder for all FX preset pipelines. One field per preset; each preset
+/// owns its own GPU buffers so concurrent renders in a multi-FxLayer scene
+/// never share uniform buffers across presets.
+///
+/// Phase 2: add a new field for each new preset. The dispatch function and
+/// `app.rs` `init_render_graph` both gain one line.
+pub struct FxPipelines {
+    /// P0.5.3 — mask-edge ripple wash (concentric rings from edge).
+    pub ripple_wash: FxPresetPipeline,
+    /// P2.4.3 — mask-edge wave wash (traveling wave along edge).
+    pub edge_wave_wash: FxEdgeWaveWashPipeline,
+}
+
+impl FxPipelines {
+    /// Build both FX preset pipelines for the given surface format.
+    ///
+    /// Called once in `init_render_graph`; the result is stored on
+    /// `EditingState` as `fx_pipelines` and passed to `dispatch` each frame.
+    pub fn new(device: &wgpu::Device, target_format: wgpu::TextureFormat) -> Self {
+        Self {
+            ripple_wash: FxPresetPipeline::new_ripple_wash(device, target_format),
+            edge_wave_wash: FxEdgeWaveWashPipeline::new(device, target_format),
+        }
     }
 }
 
@@ -529,6 +824,17 @@ impl FxPresetPipeline {
 /// | base_b     | base colour blue channel              | 1.0     |
 /// | _pad0      | reserved                              | 0.0     |
 /// | _pad1      | reserved                              | 0.0     |
+///
+/// # `mask_edge_wave_wash` field mapping (aliased — P2.4.3)
+///
+/// | field      | semantic for wave_wash                | default |
+/// |------------|---------------------------------------|---------|
+/// | speed      | wave_speed (animation speed, 0..=5)   | 1.0     |
+/// | falloff    | wave_width (edge band half-width)     | 0.15    |
+/// | base_r     | colour (cold↔warm tint, 0..=1)        | 0.5     |
+/// | wavelength | unused (0.0)                          | 0.0     |
+/// | base_g     | unused (0.0)                          | 0.0     |
+/// | base_b     | unused (0.0)                          | 0.0     |
 #[derive(Debug, Clone, Copy, Default)]
 pub struct FxParamsUniform {
     pub wavelength: f32,
@@ -554,6 +860,35 @@ impl FxParamsUniform {
             base_r: params.get("base_r").copied().unwrap_or(0.4),
             base_g: params.get("base_g").copied().unwrap_or(0.6),
             base_b: params.get("base_b").copied().unwrap_or(1.0),
+            _pad0: 0.0,
+            _pad1: 0.0,
+        }
+    }
+
+    /// Build from the `LayerKind::FxLayer.params` HashMap for the
+    /// `mask_edge_wave_wash` preset.
+    ///
+    /// # Field mapping
+    ///
+    /// The wave-wash preset reuses the generic uniform layout with aliased
+    /// semantics (documented in the struct-level table above):
+    ///
+    /// | HashMap key | maps to uniform field | default |
+    /// |-------------|----------------------|---------|
+    /// | `wave_speed` | `speed`             | 1.0     |
+    /// | `wave_width` | `falloff`           | 0.15    |
+    /// | `colour`     | `base_r`            | 0.5     |
+    ///
+    /// All other fields (`wavelength`, `base_g`, `base_b`, `_pad0`, `_pad1`)
+    /// are set to `0.0` — the shader does not read them.
+    pub fn for_edge_wave_wash(params: &HashMap<String, f32>) -> Self {
+        Self {
+            wavelength: 0.0,
+            speed: params.get("wave_speed").copied().unwrap_or(1.0),
+            falloff: params.get("wave_width").copied().unwrap_or(0.15),
+            base_r: params.get("colour").copied().unwrap_or(0.5),
+            base_g: 0.0,
+            base_b: 0.0,
             _pad0: 0.0,
             _pad1: 0.0,
         }
@@ -760,5 +1095,49 @@ mod tests {
                 d.key
             );
         }
+    }
+
+    // --- P2.4.3 edge_wave_wash tests ---
+
+    /// P2.4.3 acceptance: EDGE_WAVE_WASH_PRESET_ID is in the registry.
+    #[test]
+    fn edge_wave_wash_is_registered() {
+        assert!(fx_is_registered(EDGE_WAVE_WASH_PRESET_ID));
+    }
+
+    /// P2.4.3 acceptance: descriptors for edge_wave_wash return exactly 3 entries.
+    #[test]
+    fn edge_wave_wash_descriptors_present() {
+        assert_eq!(
+            fx_param_descriptors(EDGE_WAVE_WASH_PRESET_ID).len(),
+            3,
+            "mask_edge_wave_wash must have exactly 3 param descriptors"
+        );
+    }
+
+    /// P2.4.3 acceptance: the registry entry for edge_wave_wash has FxFamily::Fragment.
+    #[test]
+    fn edge_wave_wash_family_is_fragment() {
+        let entry = fx_registry()
+            .iter()
+            .find(|e| e.preset_id == EDGE_WAVE_WASH_PRESET_ID)
+            .expect("edge_wave_wash must be in fx_registry");
+        assert_eq!(entry.family, FxFamily::Fragment);
+    }
+
+    /// P2.4.3 acceptance: `FxParamsUniform::for_edge_wave_wash` returns documented
+    /// defaults when the params map is empty. The aliased uniform fields are
+    /// checked: `speed` = wave_speed, `falloff` = wave_width, `base_r` = colour.
+    #[test]
+    fn edge_wave_wash_defaults_round_trip() {
+        let u = FxParamsUniform::for_edge_wave_wash(&HashMap::new());
+        assert_eq!(u.speed, 1.0, "wave_speed → speed default must be 1.0");
+        assert_eq!(u.falloff, 0.15, "wave_width → falloff default must be 0.15");
+        assert_eq!(u.base_r, 0.5, "colour → base_r default must be 0.5");
+        assert_eq!(u.wavelength, 0.0, "wavelength must be 0.0 (unused)");
+        assert_eq!(u.base_g, 0.0, "base_g must be 0.0 (unused)");
+        assert_eq!(u.base_b, 0.0, "base_b must be 0.0 (unused)");
+        assert_eq!(u._pad0, 0.0, "_pad0 must be 0.0");
+        assert_eq!(u._pad1, 0.0, "_pad1 must be 0.0");
     }
 }
