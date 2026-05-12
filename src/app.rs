@@ -497,6 +497,16 @@ struct EditingState {
     /// the receive thread.
     #[cfg(feature = "osc")]
     osc: Option<crate::controls::osc::OscSource>,
+    /// P5.2.4 — background DMX lighting thread. `None` until Go-live;
+    /// started on `EnterGoLive`, stopped (via Drop) on `ExitGoLive`.
+    /// Drop sets the stop flag and joins the thread — no thread leaks.
+    #[cfg(feature = "lighting")]
+    lighting_thread: Option<crate::lighting::thread::LightingThread>,
+    /// P5.2.4 — channel sender to the lighting thread. `None` when
+    /// `lighting_thread` is `None`. The render thread calls `try_send`
+    /// (non-blocking); dropped frames are silently ignored.
+    #[cfg(feature = "lighting")]
+    lighting_tx: Option<crossbeam_channel::Sender<crate::lighting::universe::UniverseFrame>>,
     /// One RAII `SleepAssertion` (IOPMAssertion) per active output window,
     /// index-aligned with `outputs`. Prevents display sleep on every
     /// connected projector during a session. The entry at index `k` is
@@ -2043,6 +2053,10 @@ fn assemble_editing_state(
         midi: inputs.midi,
         #[cfg(feature = "osc")]
         osc: inputs.osc,
+        #[cfg(feature = "lighting")]
+        lighting_thread: None,
+        #[cfg(feature = "lighting")]
+        lighting_tx: None,
         _sleep_assertions: output.sleep_assertions,
         project_file_path,
         crossfade: None,
@@ -5972,6 +5986,38 @@ impl ApplicationHandler for App {
                             }
                         }
                         if go_live_ok {
+                            // P5.2.4 — start the lighting thread on Go-live.
+                            #[cfg(feature = "lighting")]
+                            {
+                                use crate::lighting::transport::ArtNetTransport;
+                                // Default destination: Art-Net subnet broadcast on port 6454.
+                                // Phase 5 UI (P5.8.1) will allow operator configuration;
+                                // for now we use the broadcast address as the safe default
+                                // (reaches all Art-Net nodes on the local subnet).
+                                let dest: std::net::SocketAddr =
+                                    "255.255.255.255:6454".parse().unwrap();
+                                match ArtNetTransport::new(dest) {
+                                    Ok(transport) => {
+                                        let (thread, tx) =
+                                            crate::lighting::thread::LightingThread::start(
+                                                transport,
+                                            );
+                                        editing.lighting_thread = Some(thread);
+                                        editing.lighting_tx = Some(tx);
+                                        tracing::info!(
+                                            dest = %dest,
+                                            "lighting thread started (Art-Net broadcast)"
+                                        );
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            ?e,
+                                            "lighting: ArtNetTransport::new failed; \
+                                             DMX output will be inactive"
+                                        );
+                                    }
+                                }
+                            }
                             self.state = AppState::GoLive(editing);
                         } else {
                             // Roll back any outputs that succeeded before the failure.
@@ -5995,12 +6041,22 @@ impl ApplicationHandler for App {
                         self.state = enter_scene_wizard(editing);
                     }
                     EditingTransition::ExitGoLive => {
-                        let AppState::GoLive(editing) = prev else {
+                        let AppState::GoLive(mut editing) = prev else {
                             // Already in Editing (double-click race); restore.
                             tracing::warn!("ExitGoLive received in non-GoLive state; ignoring");
                             self.state = prev;
                             return;
                         };
+                        // P5.2.4 — stop the lighting thread before exiting Go-live.
+                        // Drop sets the stop flag and joins the thread. Dropping
+                        // lighting_tx first ensures the thread's channel read loop
+                        // sees Disconnected and exits without waiting for the sleep.
+                        #[cfg(feature = "lighting")]
+                        {
+                            editing.lighting_tx = None;
+                            editing.lighting_thread = None;
+                            tracing::info!("lighting thread stopped (ExitGoLive)");
+                        }
                         tracing::info!(
                             output_count = editing.outputs.len(),
                             "exiting GoLive; set_fullscreen(false) for all outputs"
