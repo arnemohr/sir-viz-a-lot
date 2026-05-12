@@ -272,11 +272,38 @@ fn worker_loop(
                         };
                     }
                     Ok(VideoControl::SetLoopMode(m)) => {
-                        state = WorkerState::Paused {
-                            speed,
-                            loop_mode: m,
-                            clip,
-                            seek_override,
+                        // P1.UX — if the operator switches AWAY from
+                        // Once while paused (typical case: clip hit
+                        // Once-EOF and parked on the last frame),
+                        // their intent is "I want this playing
+                        // again", so resume into Playing. Once → Once
+                        // stays paused — a no-op selection shouldn't
+                        // unpause an operator who paused on purpose.
+                        let resume = matches!(
+                            m,
+                            crate::project::schema::LoopMode::Loop
+                                | crate::project::schema::LoopMode::PingPong
+                        );
+                        state = if resume {
+                            // Drop any stale seek_override so the
+                            // rebuild reads `clip.clip_in` — a Loop
+                            // resumed from a Once-EOF pause should
+                            // restart from the trim point, not from
+                            // wherever a long-forgotten scrub left
+                            // the override.
+                            WorkerState::Playing {
+                                speed,
+                                loop_mode: m,
+                                clip,
+                                seek_override: None,
+                            }
+                        } else {
+                            WorkerState::Paused {
+                                speed,
+                                loop_mode: m,
+                                clip,
+                                seek_override,
+                            }
                         };
                     }
                     Ok(VideoControl::SetClipRange { clip_in, clip_out }) => {
