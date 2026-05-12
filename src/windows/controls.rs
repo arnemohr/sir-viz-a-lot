@@ -232,10 +232,41 @@ pub fn show(
                     ui.add_space(2.0);
 
                     // --------------------------------------------------------
+                    // P4.6.1 — Scene-aware header: FX preset params above the
+                    // fold for FxLayer layers.
+                    //
+                    // For FxLayer, the operator's first question is "which
+                    // preset parameters tune this effect?" — not "where is it
+                    // placed?". We render the FX params section first for
+                    // FxLayer and fall through to the standard order for all
+                    // other layer kinds.
+                    // --------------------------------------------------------
+                    #[cfg(feature = "v3")]
+                    if matches!(project.layers[layer_idx].kind, LayerKind::FxLayer { .. }) {
+                        // P2.8.1 / P2.8.4 — preset browser trigger buttons.
+                        ui.horizontal(|ui| {
+                            if ui.button("Browse presets…").clicked() {
+                                st.preset_browser.open_for_layer(layer_idx);
+                            }
+                            if ui.button("Save as preset…").clicked() {
+                                st.preset_browser.open_save_dialog(layer_idx);
+                            }
+                        });
+                        ui.add_space(2.0);
+
+                        egui::CollapsingHeader::new("FX params")
+                            .id_salt("p461_fx_params_above_fold")
+                            .default_open(true)
+                            .show(ui, |ui| {
+                                show_fx_params_section(ui, project, st, layer_idx);
+                            });
+                        ui.add_space(4.0);
+                    }
+
+                    // --------------------------------------------------------
                     // P1.UX — Transform (position / scale / rotate / opacity)
                     // moved from the right-edge Inspector. Lives at the top
-                    // because "where the layer is" is the operator's first
-                    // question; blend mode + treatment come after.
+                    // for non-FxLayer layers; below FX params for FxLayer.
                     // --------------------------------------------------------
                     egui::CollapsingHeader::new("Transform")
                         .id_salt(HDR_TRANSFORM)
@@ -534,34 +565,8 @@ pub fn show(
                     }
 
                     // --------------------------------------------------------
-                    // P2.5.6 — FX preset parameter sliders. Only rendered
-                    // when the selected layer is a LayerKind::FxLayer.
-                    // P2.8.1 — "Browse presets…" and "Save as preset…" buttons.
-                    // --------------------------------------------------------
-                    #[cfg(feature = "v3")]
-                    if matches!(project.layers[layer_idx].kind, LayerKind::FxLayer { .. }) {
-                        // P2.8.1 / P2.8.4 — preset browser trigger buttons.
-                        ui.horizontal(|ui| {
-                            if ui.button("Browse presets…").clicked() {
-                                st.preset_browser.open_for_layer(layer_idx);
-                            }
-                            if ui.button("Save as preset…").clicked() {
-                                st.preset_browser.open_save_dialog(layer_idx);
-                            }
-                        });
-                        ui.add_space(2.0);
-
-                        egui::CollapsingHeader::new("FX params")
-                            .id_salt("adv_fx_params")
-                            .default_open(true)
-                            .show(ui, |ui| {
-                                show_fx_params_section(ui, project, st, layer_idx);
-                            });
-                        ui.add_space(4.0);
-                    }
-
-                    // --------------------------------------------------------
                     // T3.13 + T3.14 — Effect chain editor (includes modulator picker)
+                    // (P4.6.1: FX params moved above Transform for FxLayer layers)
                     // --------------------------------------------------------
                     egui::CollapsingHeader::new("Effect chain")
                         .id_salt(HDR_EFFECT_CHAIN)
@@ -576,31 +581,42 @@ pub fn show(
                     ui.add_space(4.0);
 
                     // --------------------------------------------------------
-                    // P1.UX — Placement / Warp summary (lifted from the
-                    // right-edge Inspector). Read-out of the current warp
-                    // grid + Edit warp / Edit mask buttons.
+                    // P4.6.2 — "Advanced" disclosure for raw layer params
+                    // (warp mesh, mask polygon controls, placement).
+                    //
+                    // Collapsed by default for FxLayer (the operator arrived
+                    // via the wizard and the FX params card is the primary
+                    // surface). Expanded by default for all other layer kinds
+                    // (Image, Video, SVG) to preserve pre-P4.6 UX.
                     // --------------------------------------------------------
-                    egui::CollapsingHeader::new("Placement")
-                        .id_salt(HDR_PLACEMENT)
-                        .default_open(false)
-                        .show(ui, |ui| {
-                            show_placement_section(ui, project, layer_idx);
-                        });
+                    {
+                        let is_fx_layer =
+                            matches!(project.layers[layer_idx].kind, LayerKind::FxLayer { .. });
+                        egui::CollapsingHeader::new("Advanced")
+                            .id_salt("p462_advanced")
+                            .default_open(!is_fx_layer)
+                            .show(ui, |ui| {
+                                // Placement / Warp summary (P1.UX).
+                                egui::CollapsingHeader::new("Placement")
+                                    .id_salt(HDR_PLACEMENT)
+                                    .default_open(false)
+                                    .show(ui, |ui| {
+                                        show_placement_section(ui, project, layer_idx);
+                                    });
 
-                    ui.add_space(4.0);
+                                ui.add_space(4.0);
 
-                    // --------------------------------------------------------
-                    // T3.15 — Mapping: mesh rows/cols + mask feather
-                    // --------------------------------------------------------
-                    egui::CollapsingHeader::new("Mapping")
-                        .id_salt(HDR_MAPPING)
-                        .default_open(false)
-                        .show(ui, |ui| {
-                            // T3.21 — warp is the core domain term for this section.
-                            glossary_label(ui, GlossaryTerm::Warp);
-                            ui.add_space(4.0);
-                            show_layer_mapping(ui, project, st, layer_idx);
-                        });
+                                // Mapping: mesh rows/cols + mask feather (T3.15).
+                                egui::CollapsingHeader::new("Mapping")
+                                    .id_salt(HDR_MAPPING)
+                                    .default_open(false)
+                                    .show(ui, |ui| {
+                                        glossary_label(ui, GlossaryTerm::Warp);
+                                        ui.add_space(4.0);
+                                        show_layer_mapping(ui, project, st, layer_idx);
+                                    });
+                            });
+                    }
                 });
 
             ui.add_space(4.0);
