@@ -34,6 +34,14 @@ below is sized for a single PR.
 - [x] P2.8.3 71a6492 — star/favourite presets
 - [x] P2.8.4 cfb4361 — save/delete user presets
 - [x] P2.8.5 aa4db23 (+ 2194d16 fmt + d9cc01e ux fix) — .rmap-preset.json export/import
+- [x] P2.10.1 04cb28d — version bump 0.5 → 0.6.0
+- [x] P2.10.2 0e464b2 — CHANGELOG body for v0.6
+- [x] P2.10.3 52f88e2 — README — FX preset library section
+- [x] P2.10.4 25efa9d — show-day checklist: particle budget, preset library audit, effect-chain order
+- [x] P2.10.5 23adc24 — Phase 2 acceptance smoke test (manual)
+- [x] P2.9.2 5cffb3c — GPU determinism test (same seed = bit-exact, different seed = visibly different); PNG golden + 3 tests pass on Metal.
+
+**Phase 2 complete (2026-05-12).** All 33 leaf tasks shipped across W1–W10. Final `make ci`: 357 tests pass under default features. Open follow-up: extract no-GPU registry into a shared module (see Task #36 in the orchestrator's TaskList) — needed to remove the `#[cfg(feature = "v3")] pub mod render { ... }` workaround in src/lib.rs introduced in P2.2.4.
 
 ---
 
