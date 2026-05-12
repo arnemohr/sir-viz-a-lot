@@ -35,7 +35,7 @@
 
 use egui::Ui;
 
-use crate::project::schema::{BlendMode, LayerKind, Project};
+use crate::project::schema::{BlendMode, LayerKind, Project, ZoneRole};
 use crate::windows::control_panel::{
     ControlPanelAction, ControlPanelState, EffectChange, command_checkbox, command_dragvalue_f32,
     command_dragvalue_u32, command_slider, effect_label, show_effect,
@@ -1369,6 +1369,69 @@ fn show_layer_mapping(
         st.pending_mutations
             .push(project.set_layer_mask_feather_mutation(layer_idx, new));
     }
+
+    // P3.4.1 — Zone role palette. Appears below the feather slider, before
+    // the vertex list. A ComboBox (closed palette: seven roles + None) lets
+    // the operator tag the mask polygon with a semantic zone role.
+    // UX constraint: no new top-level pill; this is a sub-mode inside Mask.
+    ui.add_space(4.0);
+    glossary_label(ui, GlossaryTerm::ZoneTag);
+    let cur_zone = project.layers[layer_idx].warp.zone_role;
+    let selected_label = match cur_zone {
+        None => "None",
+        Some(ZoneRole::Window) => "Window",
+        Some(ZoneRole::Portal) => "Portal",
+        Some(ZoneRole::Void) => "Void",
+        Some(ZoneRole::Spill) => "Spill",
+        Some(ZoneRole::Edge) => "Edge",
+        Some(ZoneRole::Highlight) => "Highlight",
+        Some(ZoneRole::LightSource) => "Light Source",
+    };
+    egui::ComboBox::from_id_salt(("zone_role_picker", layer_idx))
+        .selected_text(selected_label)
+        .show_ui(ui, |ui| {
+            // "None" option — clears the zone tag.
+            if ui.selectable_label(cur_zone.is_none(), "None").clicked() && cur_zone.is_some() {
+                st.pending_mutations
+                    .push(project.set_mask_zone_role_mutation(layer_idx, None));
+            }
+
+            // Seven role options with glossary tooltips.
+            let roles = [
+                (
+                    Some(ZoneRole::Window),
+                    GlossaryTerm::ZoneRoleWindow,
+                    "Window",
+                ),
+                (
+                    Some(ZoneRole::Portal),
+                    GlossaryTerm::ZoneRolePortal,
+                    "Portal",
+                ),
+                (Some(ZoneRole::Void), GlossaryTerm::ZoneRoleVoid, "Void"),
+                (Some(ZoneRole::Spill), GlossaryTerm::ZoneRoleSpill, "Spill"),
+                (Some(ZoneRole::Edge), GlossaryTerm::ZoneRoleEdge, "Edge"),
+                (
+                    Some(ZoneRole::Highlight),
+                    GlossaryTerm::ZoneRoleHighlight,
+                    "Highlight",
+                ),
+                (
+                    Some(ZoneRole::LightSource),
+                    GlossaryTerm::ZoneRoleLightSource,
+                    "Light Source",
+                ),
+            ];
+            for (role, term, label) in roles {
+                ui.horizontal(|ui| {
+                    if ui.selectable_label(cur_zone == role, label).clicked() && cur_zone != role {
+                        st.pending_mutations
+                            .push(project.set_mask_zone_role_mutation(layer_idx, role));
+                    }
+                    glossary_label(ui, term);
+                });
+            }
+        });
 
     let w = &project.layers[layer_idx].warp;
     ui.label(format!(
