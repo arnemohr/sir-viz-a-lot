@@ -33,7 +33,7 @@ below is sized for a single PR.
 - [x] P4.7.1 0895dca — mode hint banner: capability-availability hints
 - [x] P4.8.1 ec88f9f — proptest extension: `SceneTemplate` serde + registry round-trip
 - [x] P4.8.2 56d63c5 — proptest extension: wizard commit / cancel `ApplyProjectSnapshot` round-trip
-- [x] P4.8.3 934fe40 — GPU golden: `window_reveal` template renders deterministically
+- [x] P4.8.3 074b596 — GPU golden: `window_reveal` template structure + GPU adapter check
 - [x] P4.9.1 6e614a5 — version bump 0.7.0 → 0.8.0
 - [x] P4.9.2 28a6cf7 — CHANGELOG body for v0.8
 - [x] P4.9.3 28a6cf7 — README — Scene grammars section
