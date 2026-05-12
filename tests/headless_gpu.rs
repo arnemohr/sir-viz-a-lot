@@ -1054,3 +1054,490 @@ fn warp_pass_golden() {
 
     assert_image_matches(&bytes, W, H, "tests/golden/warp.png", TOLERANCE);
 }
+
+// ---------------------------------------------------------------------------
+// P2.9.2 — Particle determinism tests: `mask_constrained_drift`.
+//
+// Two properties are tested:
+//   1. Same seed + same clock → bit-exact identical pixel output (two
+//      independent renders in the same process, same device).
+//   2. Different seed → at least one pixel differs (sanity-check that the
+//      seed parameter actually influences output).
+//
+// A third assertion writes the seed=42 render as a PNG golden:
+//   `tests/golden/particle_determinism_seed42.png`.
+//   Set UPDATE_GOLDEN=1 to (re-)write it; the next run asserts against it.
+//
+// Note on cross-session determinism: the compute shader uses a fixed
+// dt = 1/60 s so in-session renders are bit-exact. Cross-session runs may
+// differ when OS timer resolution causes sub-frame jitter in wall-clock
+// arguments supplied by the caller; that known limitation is documented
+// here and accepted by the spec (P2.9.2 "Out of scope").
+//
+// All tests are gated on `feature = "gpu-tests"` (whole file is
+// `#![cfg(feature = "gpu-tests")]`) and skip cleanly if no wgpu adapter
+// is available (the existing harness contract: Headless::new panics on
+// missing adapter, which nextest reports as a test failure only if no
+// adapter is present — unchanged from the other tests in this file).
+// ---------------------------------------------------------------------------
+
+/// Maximum particle count (mirrors `fx_compute.rs`).
+const MAX_PARTICLES_DRIFT: u32 = 2048;
+/// SSBO byte size: MAX_PARTICLES × 32 bytes per Particle (std430).
+const SSBO_SIZE_DRIFT: u64 = MAX_PARTICLES_DRIFT as u64 * 32;
+
+/// Build a circular SDF fixture: R32Float texture of `size × size` texels.
+/// Values follow the convention used throughout the codebase: negative inside
+/// the circle, positive outside, zero on the boundary.
+/// Circle: centre (0.5, 0.5), radius 0.25, in normalised [0,1]² space.
+fn make_circular_sdf(device: &wgpu::Device, queue: &wgpu::Queue, size: u32) -> wgpu::TextureView {
+    let n = (size * size) as usize;
+    let mut texels: Vec<f32> = Vec::with_capacity(n);
+    for ty in 0..size {
+        for tx in 0..size {
+            // Texel centre in normalised [0,1]² space.
+            let px = (tx as f32 + 0.5) / size as f32;
+            let py = (ty as f32 + 0.5) / size as f32;
+            let dx = px - 0.5;
+            let dy = py - 0.5;
+            // distance from centre minus radius → negative inside, positive outside
+            texels.push((dx * dx + dy * dy).sqrt() - 0.25);
+        }
+    }
+    // Convert f32 slice to bytes for upload.
+    let bytes: Vec<u8> = texels.iter().flat_map(|f| f.to_le_bytes()).collect();
+
+    let tex = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("circular sdf fixture"),
+        size: wgpu::Extent3d {
+            width: size,
+            height: size,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::R32Float,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &tex,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &bytes,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(size * 4), // 4 bytes per R32Float texel
+            rows_per_image: Some(size),
+        },
+        wgpu::Extent3d {
+            width: size,
+            height: size,
+            depth_or_array_layers: 1,
+        },
+    );
+    tex.create_view(&wgpu::TextureViewDescriptor::default())
+}
+
+/// Render `mask_constrained_drift` (N=64, given `seed`, `clock_secs=5.0`) into
+/// a `W×H` offscreen target and return the packed RGBA8 pixel buffer.
+///
+/// Rebuilds the full compute + render pipeline in-test (no `lib.rs` access
+/// without the `v3` feature) following the same pattern as `warp_pass_golden`.
+/// The shader sources are loaded via `include_str!`; `sdf_helper.wgsl` is
+/// prepended to both the compute and vertex shaders exactly as the production
+/// `FxComputePipeline` does.
+fn render_constrained_drift(h: &Headless, seed: u64, clock_secs: f32) -> Vec<u8> {
+    const W: u32 = 128;
+    const H: u32 = 128;
+    const N_PARTICLES: u32 = 64;
+    const T_LAYER_ADDED_SECS: f32 = 0.0;
+    const SDF_SIZE: u32 = 64;
+
+    h.render_to_rgba8(W, H, |device, queue, view| {
+        // --- Shader sources (prepend sdf_helper.wgsl as production does) ------
+        let sdf_helper = include_str!("../src/render/shaders/sdf_helper.wgsl");
+        let compute_src = format!(
+            "{}\n{}",
+            sdf_helper,
+            include_str!("../src/render/shaders/fx_particles_drift.wgsl")
+        );
+        let vertex_src = format!(
+            "{}\n{}",
+            sdf_helper,
+            include_str!("../src/render/shaders/fx_particles_vertex.wgsl")
+        );
+        // Fragment shader has no SDF calls but production prepends it too.
+        let fragment_src = format!(
+            "{}\n{}",
+            sdf_helper,
+            include_str!("../src/render/shaders/fx_particles_fragment.wgsl")
+        );
+
+        // --- Compute bind-group layout (bindings 2, 3, 5, 6) -----------------
+        let compute_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("drift determinism compute bgl"),
+            entries: &[
+                // binding 2: FxParamsUniform (8 × f32, 32 bytes)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // binding 3: ClockUniform (vec4<f32>)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // binding 5: output SSBO (read_write)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // binding 6: SDF texture (R32Float, unfilterable)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 6,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+            ],
+        });
+
+        let compute_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("drift determinism compute shader"),
+            source: wgpu::ShaderSource::Wgsl(compute_src.into()),
+        });
+        let compute_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("drift determinism compute layout"),
+            bind_group_layouts: &[Some(&compute_bgl)],
+            immediate_size: 0,
+        });
+        let compute_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("drift determinism compute pipeline"),
+            layout: Some(&compute_layout),
+            module: &compute_shader,
+            entry_point: Some("cs_main"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            cache: None,
+        });
+
+        // --- Render bind-group layout (bindings 3, 4, 5) ---------------------
+        let render_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("drift determinism render bgl"),
+            entries: &[
+                // binding 3: ClockUniform
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // binding 4: ResUniform
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // binding 5: particle SSBO (read-only)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+
+        let vertex_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("drift determinism vertex shader"),
+            source: wgpu::ShaderSource::Wgsl(vertex_src.into()),
+        });
+        let fragment_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("drift determinism fragment shader"),
+            source: wgpu::ShaderSource::Wgsl(fragment_src.into()),
+        });
+        let render_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("drift determinism render layout"),
+            bind_group_layouts: &[Some(&render_bgl)],
+            immediate_size: 0,
+        });
+        let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("drift determinism render pipeline"),
+            layout: Some(&render_layout),
+            vertex: wgpu::VertexState {
+                module: &vertex_shader,
+                entry_point: Some("vs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &fragment_shader,
+                entry_point: Some("fs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: TARGET_FORMAT,
+                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        // --- Uniform buffers --------------------------------------------------
+        // FxParamsUniform: 8 × f32 = 32 bytes.
+        // For constrained_drift: wavelength = N_PARTICLES (particle_count),
+        // speed = 0.02 (drift_speed default), falloff = 2.0 (particle_size default).
+        let params_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("drift determinism params"),
+            size: 32,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        {
+            let mut pb = [0u8; 32];
+            pb[0..4].copy_from_slice(&(N_PARTICLES as f32).to_le_bytes()); // wavelength = particle_count
+            pb[4..8].copy_from_slice(&0.02f32.to_le_bytes()); // speed = drift_speed
+            pb[8..12].copy_from_slice(&2.0f32.to_le_bytes()); // falloff = particle_size
+            // base_r/g/b/_pad0/_pad1 = 0.0 (unused)
+            queue.write_buffer(&params_buf, 0, &pb);
+        }
+
+        // ClockUniform: vec4<f32> = 16 bytes.
+        // .x = clock_secs, .y = t_layer_local_secs, .z = seed_f32, .w = n_particles
+        let clock_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("drift determinism clock"),
+            size: 16,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        {
+            let t_local = clock_secs - T_LAYER_ADDED_SECS;
+            // Pack u64 seed into the lower 23 bits of a f32 mantissa (matches
+            // the production FxComputePipeline packing in fx_compute.rs).
+            let seed_f = (seed as u32 & 0x7f_ffff) as f32;
+            let mut cb = [0u8; 16];
+            cb[0..4].copy_from_slice(&clock_secs.to_le_bytes());
+            cb[4..8].copy_from_slice(&t_local.to_le_bytes());
+            cb[8..12].copy_from_slice(&seed_f.to_le_bytes());
+            cb[12..16].copy_from_slice(&(N_PARTICLES as f32).to_le_bytes());
+            queue.write_buffer(&clock_buf, 0, &cb);
+        }
+
+        // ResUniform: vec4<f32> = 16 bytes. .x = width, .y = height.
+        let res_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("drift determinism res"),
+            size: 16,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        {
+            let mut rb = [0u8; 16];
+            rb[0..4].copy_from_slice(&(W as f32).to_le_bytes());
+            rb[4..8].copy_from_slice(&(H as f32).to_le_bytes());
+            queue.write_buffer(&res_buf, 0, &rb);
+        }
+
+        // SSBO (single buffer — particle data is computed from scratch each
+        // call; no persistent state between calls in these tests).
+        let ssbo = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("drift determinism ssbo"),
+            size: SSBO_SIZE_DRIFT,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        // --- Circular SDF fixture (R=0.25, centre 0.5,0.5) -------------------
+        let sdf_view = make_circular_sdf(device, queue, SDF_SIZE);
+
+        // --- Encode compute + render in one submission -----------------------
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("drift determinism encoder"),
+        });
+
+        // Compute pass: write particle positions.
+        {
+            let compute_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("drift determinism compute bg"),
+                layout: &compute_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: params_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: clock_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: ssbo.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 6,
+                        resource: wgpu::BindingResource::TextureView(&sdf_view),
+                    },
+                ],
+            });
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("drift determinism compute pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&compute_pipeline);
+            pass.set_bind_group(0, &compute_bg, &[]);
+            let groups = N_PARTICLES.div_ceil(64);
+            pass.dispatch_workgroups(groups, 1, 1);
+        }
+
+        // Render pass: draw particle quads.
+        {
+            let render_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("drift determinism render bg"),
+                layout: &render_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: clock_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: res_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: ssbo.as_entire_binding(),
+                    },
+                ],
+            });
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("drift determinism render pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&render_pipeline);
+            pass.set_bind_group(0, &render_bg, &[]);
+            // 6 vertices per quad (two triangles), N_PARTICLES instances.
+            pass.draw(0..6, 0..N_PARTICLES);
+        }
+
+        queue.submit(std::iter::once(encoder.finish()));
+    })
+}
+
+/// P2.9.2 — Same seed → bit-exact pixel output.
+///
+/// Renders `mask_constrained_drift` twice with the same seed and clock value.
+/// Both renders run in the same process on the same wgpu device so no
+/// cross-session timer variance can intervene; bit-exactness is guaranteed by
+/// the deterministic hash in the shader.
+#[test]
+fn test_particle_determinism_same_seed() {
+    let h = Headless::new().expect("Headless::new");
+    let buf1 = render_constrained_drift(&h, 42, 5.0);
+    let buf2 = render_constrained_drift(&h, 42, 5.0);
+    assert_eq!(
+        buf1, buf2,
+        "same seed=42, clock=5.0: expected bit-exact identical pixel output"
+    );
+}
+
+/// P2.9.2 — Different seed → at least one pixel differs.
+///
+/// Renders `mask_constrained_drift` with seed=42 and seed=43 at the same
+/// clock. The two particle positions are seed-derived (distinct hash inputs)
+/// so the images must differ by at least one pixel.
+#[test]
+fn test_particle_determinism_different_seed() {
+    let h = Headless::new().expect("Headless::new");
+    let buf42 = render_constrained_drift(&h, 42, 5.0);
+    let buf43 = render_constrained_drift(&h, 43, 5.0);
+    assert_ne!(
+        buf42, buf43,
+        "seed=42 and seed=43 produced identical pixel output; \
+         the seed parameter must influence particle positions"
+    );
+}
+
+/// P2.9.2 — Golden image baseline for seed=42.
+///
+/// Run with `UPDATE_GOLDEN=1` to write the baseline; subsequent runs assert
+/// the render matches within `TOLERANCE` (PNG round-trip introduces at most
+/// 1-LSB per channel; tolerance=2 matches the convention for other goldens).
+///
+/// Cross-session bit-exactness is NOT guaranteed (OS timer resolution may
+/// shift `clock_secs` sub-frame timing); the tolerance band absorbs minor
+/// driver / sRGB quantisation differences. For strict in-session determinism
+/// see `test_particle_determinism_same_seed`.
+#[test]
+fn test_particle_determinism_golden_seed42() {
+    let h = Headless::new().expect("Headless::new");
+    let pixels = render_constrained_drift(&h, 42, 5.0);
+    assert_image_matches(
+        &pixels,
+        128,
+        128,
+        "tests/golden/particle_determinism_seed42.png",
+        TOLERANCE,
+    );
+}
