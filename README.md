@@ -94,12 +94,22 @@ project `fx-ripple-wash` in the launcher shows the preset in action.
 
 ## Spatial Zones (v0.7)
 
-Operators can tag any mask polygon with a semantic zone role — Window, Portal,
-Void, Spill, Edge, Highlight, or Light Source — from a small palette inside Mask
-mode. Zone-aware FX presets read these tags at runtime and adapt their
-behaviour to the tagged surface type, without additional configuration.
+Operators can tag any mask polygon with a semantic zone role — **Window**,
+**Portal**, **Void**, **Spill**, **Edge**, **Highlight**, or **Light Source** —
+from a small palette inside Mask mode. Zone-aware FX presets read the tag at
+runtime and activate their effect only for the matching role, outputting
+transparent black for everything else (no crash, no configuration needed).
 
-_Full prose to be added in P3.7.3._
+The three zone-consuming presets shipped in v0.7 cover the most common
+projection-mapping scenarios: a warm-glow light spill for window surfaces, a
+tight boundary ripple for architectural edges, and a luminous particle drift for
+portal-like regions. Each preset shows a "requires zone tag" hint in the preset
+browser so the operator knows the workflow before applying it. Zone roles are
+documented in the Glossary window — search "zone" or hover any role label in
+Mask mode for a concise definition.
+
+Old projects without zone tags load and render identically; the schema migration
+adds `zone_role: null` automatically.
 
 ## FX Preset Library (v0.6)
 
