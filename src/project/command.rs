@@ -541,6 +541,43 @@ impl ReverseStorage for SetLayerMaskFeather {
     }
 }
 
+/// P3.2.3 — payload for [`Mutation::SetMaskZoneRole`].
+///
+/// Follows the Whole-enum Reverse rule from `src/project/CLAUDE.md`:
+/// store the full `Option<ZoneRole>` even though the value is small,
+/// so future additions to `ZoneRole` cannot silently truncate the undo.
+#[derive(Debug, Clone)]
+pub struct SetMaskZoneRole {
+    /// Index into `Project.layers`; the layer's `warp` is the target.
+    pub layer_idx: usize,
+    /// Role to write (or `None` to clear).
+    pub new: Option<crate::project::schema::ZoneRole>,
+    /// Pre-mutation role value.
+    pub old: Option<crate::project::schema::ZoneRole>,
+}
+
+impl ReverseStorage for SetMaskZoneRole {
+    fn apply(self, project: &mut Project) -> Self {
+        let warp = &mut project
+            .layers
+            .get_mut(self.layer_idx)
+            .expect("SetMaskZoneRole: layer_idx out of range")
+            .warp;
+        debug_assert!(
+            warp.zone_role == self.old,
+            "SetMaskZoneRole stale Reverse: warp.zone_role={:?}, expected old={:?}",
+            warp.zone_role,
+            self.old
+        );
+        warp.zone_role = self.new;
+        SetMaskZoneRole {
+            layer_idx: self.layer_idx,
+            new: self.old,
+            old: self.new,
+        }
+    }
+}
+
 /// Payload for [`Mutation::SetLayerWarpDimensions`].
 ///
 /// Editing rows or cols bilinear-resamples the grid (the existing T-M7-01
@@ -1668,6 +1705,8 @@ pub enum Mutation {
     SetOutputWindowed(SetOutputWindowed),
     /// Replace `WarpMesh.mask_feather`. Delegates to [`SetLayerMaskFeather`].
     SetLayerMaskFeather(SetLayerMaskFeather),
+    /// P3.2.3 — replace `WarpMesh.zone_role`. Delegates to [`SetMaskZoneRole`].
+    SetMaskZoneRole(SetMaskZoneRole),
     /// Replace `WarpMesh` dimensions. Delegates to [`SetLayerWarpDimensions`].
     SetLayerWarpDimensions(SetLayerWarpDimensions),
     /// Replace `LayerConfig.opacity`. Delegates to [`SetLayerOpacity`].
@@ -1827,6 +1866,7 @@ impl Mutation {
             Mutation::SetEdgeBlend(s) => Mutation::SetEdgeBlend(s.apply(project)),
             Mutation::SetOutputWindowed(s) => Mutation::SetOutputWindowed(s.apply(project)),
             Mutation::SetLayerMaskFeather(s) => Mutation::SetLayerMaskFeather(s.apply(project)),
+            Mutation::SetMaskZoneRole(s) => Mutation::SetMaskZoneRole(s.apply(project)),
             Mutation::SetLayerWarpDimensions(s) => {
                 Mutation::SetLayerWarpDimensions(s.apply(project))
             }
@@ -1951,6 +1991,7 @@ impl Mutation {
             | Mutation::SetCrossfadeDurationS(_)
             | Mutation::SetOutputWindowed(_)
             | Mutation::SetLayerMaskFeather(_)
+            | Mutation::SetMaskZoneRole(_)
             | Mutation::SetLayerWarpDimensions(_)
             | Mutation::SetLayerOpacity(_)
             | Mutation::SetLayerEnabled(_)
@@ -2219,6 +2260,22 @@ impl Project {
         Mutation::SetOutputMonitorIndex(SetOutputMonitorIndex {
             new,
             old: self.primary_output_target().fallback_index,
+        })
+    }
+
+    /// P3.2.3 — build a `SetMaskZoneRole` mutation for the given layer.
+    /// Captures the layer's current `warp.zone_role` as `old`. Panics if
+    /// `layer_idx` is out of range.
+    pub fn set_mask_zone_role_mutation(
+        &self,
+        layer_idx: usize,
+        new: Option<crate::project::schema::ZoneRole>,
+    ) -> Mutation {
+        let old = self.layers[layer_idx].warp.zone_role;
+        Mutation::SetMaskZoneRole(SetMaskZoneRole {
+            layer_idx,
+            new,
+            old,
         })
     }
 
@@ -5026,6 +5083,78 @@ mod tests {
         assert_eq!(
             after_undo, original_val,
             "after undo: effect chain should be restored to empty"
+        );
+    }
+
+    // --- P3.2.3 SetMaskZoneRole tests ---
+
+    fn project_with_fx_layer_and_mask() -> Project {
+        let layer = crate::project::schema::layer_from_fx_preset(
+            "l0",
+            "mask_edge_ripple_wash",
+            Default::default(),
+            0,
+        );
+        let mut p = Project::default();
+        p.layers.push(layer);
+        p
+    }
+
+    /// P3.2.3 — `SetMaskZoneRole::apply` sets `warp.zone_role` and returns the
+    /// correct reverse (old/new swapped).
+    #[test]
+    fn set_mask_zone_role_apply_and_reverse() {
+        use crate::project::schema::ZoneRole;
+
+        let mut p = project_with_fx_layer_and_mask();
+        assert_eq!(p.layers[0].warp.zone_role, None);
+
+        // Apply: None → Some(Window).
+        let m = p.set_mask_zone_role_mutation(0, Some(ZoneRole::Window));
+        let reverse = m.apply(&mut p);
+        assert_eq!(
+            p.layers[0].warp.zone_role,
+            Some(ZoneRole::Window),
+            "zone_role must be Window after apply"
+        );
+
+        // Reverse: Some(Window) → None.
+        let _ = reverse.apply(&mut p);
+        assert_eq!(
+            p.layers[0].warp.zone_role, None,
+            "zone_role must be None after reverse"
+        );
+    }
+
+    /// P3.2.3 — `set_mask_zone_role_mutation` captures the correct `old` value
+    /// so the debug_assert fires when a stale Reverse is applied.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "SetMaskZoneRole stale Reverse")]
+    fn set_mask_zone_role_stale_reverse_panics() {
+        use crate::project::schema::ZoneRole;
+
+        let mut p = project_with_fx_layer_and_mask();
+        // Build a mutation with stale old = Some(Portal) but the current state is None.
+        let stale = Mutation::SetMaskZoneRole(SetMaskZoneRole {
+            layer_idx: 0,
+            new: Some(ZoneRole::Window),
+            old: Some(ZoneRole::Portal), // stale — actual is None
+        });
+        // This must panic in debug builds.
+        let _ = stale.apply(&mut p);
+    }
+
+    /// P3.2.3 — `SetMaskZoneRole` is undoable (not a non-undoable mutation).
+    #[test]
+    fn set_mask_zone_role_is_undoable() {
+        use crate::project::schema::ZoneRole;
+
+        let p = project_with_fx_layer_and_mask();
+        let m = p.set_mask_zone_role_mutation(0, Some(ZoneRole::Edge));
+        assert!(
+            !m.is_non_undoable(),
+            "SetMaskZoneRole must be undoable (is_non_undoable must return false)"
         );
     }
 }
