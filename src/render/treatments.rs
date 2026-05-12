@@ -58,6 +58,9 @@ pub const PALETTE_EXTRACT_PRESET_ID: &str = "palette_extract";
 /// `collage` preset id (P1.3.6).
 pub const COLLAGE_PRESET_ID: &str = "collage";
 
+/// `displacement_ripple` preset id (P2.4.1).
+pub const DISPLACEMENT_RIPPLE_PRESET_ID: &str = "displacement_ripple";
+
 /// Number of collage slots supported by the v0.5 `collage` preset.
 /// Fixed at 4 (a 2×2 grid) — true variable-N collage requires either
 /// dynamically-built bind groups or a texture array binding, deferred
@@ -142,6 +145,7 @@ pub fn registry() -> &'static [(&'static str, &'static str)] {
         (TEXTURE_OVERLAY_PRESET_ID, "Texture overlay"),
         (PALETTE_EXTRACT_PRESET_ID, "Palette / posterize"),
         (COLLAGE_PRESET_ID, "Collage (2×2)"),
+        (DISPLACEMENT_RIPPLE_PRESET_ID, "Displacement ripple"),
     ]
 }
 
@@ -164,6 +168,7 @@ pub fn param_descriptors(preset_id: &str) -> &'static [ParamDescriptor] {
         TEXTURE_OVERLAY_PRESET_ID => TEXTURE_OVERLAY_DESCRIPTORS,
         PALETTE_EXTRACT_PRESET_ID => PALETTE_EXTRACT_DESCRIPTORS,
         COLLAGE_PRESET_ID => COLLAGE_DESCRIPTORS,
+        DISPLACEMENT_RIPPLE_PRESET_ID => DISPLACEMENT_RIPPLE_DESCRIPTORS,
         _ => &[],
     }
 }
@@ -333,6 +338,36 @@ const BLUR_MASK_DESCRIPTORS: &[ParamDescriptor] = &[
     },
 ];
 
+/// Static descriptors for the `displacement_ripple` preset (P2.4.1).
+/// Identity at default amplitude = 0.0 — the operator sees no change
+/// until they increase the amplitude slider. Decay controls how quickly
+/// the ripple band falls off from the mask edge; frequency sets the
+/// spatial frequency of the sinusoidal modulation.
+#[allow(dead_code)] // referenced only through `param_descriptors` (v3 UI)
+const DISPLACEMENT_RIPPLE_DESCRIPTORS: &[ParamDescriptor] = &[
+    ParamDescriptor {
+        key: "amplitude",
+        label: "Amplitude (UV units)",
+        min: 0.0,
+        max: 0.05,
+        default: 0.0,
+    },
+    ParamDescriptor {
+        key: "frequency",
+        label: "Frequency (ripples/unit)",
+        min: 1.0,
+        max: 20.0,
+        default: 8.0,
+    },
+    ParamDescriptor {
+        key: "decay",
+        label: "Decay (0=narrow band, 1=wide)",
+        min: 0.0,
+        max: 1.0,
+        default: 0.5,
+    },
+];
+
 /// Per-preset render pipelines. One field per preset; dispatch is a `match`
 /// on `preset_id`. Mirrors the `FxPresetPipeline` shape so adding a preset
 /// is "add a field + add a match arm" with no trait-object dispatch.
@@ -344,6 +379,7 @@ pub struct TreatmentPipeline {
     texture_overlay: TextureOverlayTreatmentPipeline,
     palette_extract: PaletteExtractTreatmentPipeline,
     collage: CollageTreatmentPipeline,
+    displacement_ripple: DisplacementRippleTreatmentPipeline,
 }
 
 impl TreatmentPipeline {
@@ -358,6 +394,7 @@ impl TreatmentPipeline {
             texture_overlay: TextureOverlayTreatmentPipeline::new(device, target_format),
             palette_extract: PaletteExtractTreatmentPipeline::new(device, target_format),
             collage: CollageTreatmentPipeline::new(device, target_format),
+            displacement_ripple: DisplacementRippleTreatmentPipeline::new(device, target_format),
         }
     }
 
@@ -426,6 +463,17 @@ impl TreatmentPipeline {
                 // mix=0 the operator sees pure source even with 4
                 // slots populated, so we never refuse the dispatch.
                 self.collage.render(device, queue, encoder, dst, inputs);
+                true
+            }
+            DISPLACEMENT_RIPPLE_PRESET_ID => {
+                // displacement_ripple requires the layer SDF. If missing
+                // (e.g. SVG / FxLayer route), skip the dispatch and let
+                // the caller's fallback render the source unaltered.
+                let Some(sdf) = inputs.sdf else {
+                    return false;
+                };
+                self.displacement_ripple
+                    .render(device, queue, encoder, dst, inputs, sdf);
                 true
             }
             _ => false,
@@ -2025,6 +2073,237 @@ impl TextureOverlayTreatmentPipeline {
     }
 }
 
+/// Displacement-ripple treatment pipeline (P2.4.1). Single pass, SDF-aware.
+/// Displaces the source UV along the SDF normal near the mask boundary,
+/// producing a "glass lens at the window edge" refraction effect.
+///
+/// Bind-group layout (5 entries):
+///   0 source texture (filterable)
+///   1 filtering sampler (source)
+///   2 params uniform    (vec4: amplitude, frequency, decay, _pad)
+///   3 fit uniform       (vec4: mode, aspect, focal_x, focal_y)
+///   4 SDF texture       (R32Float, NonFiltering)
+///
+/// The SDF helper (`sdf_helper.wgsl`) is prepended at pipeline build time
+/// because the shader's basename starts with `treat_displacement` (see
+/// `SDF_CONSUMERS` in build.rs).
+struct DisplacementRippleTreatmentPipeline {
+    pipeline: wgpu::RenderPipeline,
+    bind_group_layout: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
+    params_buf: wgpu::Buffer,
+}
+
+impl DisplacementRippleTreatmentPipeline {
+    fn new(device: &wgpu::Device, target_format: wgpu::TextureFormat) -> Self {
+        // Prepend the SDF helper at runtime to match build.rs's compile-time
+        // validation (which concatenated it via the SDF_CONSUMERS rule).
+        let src = format!(
+            "{}\n{}",
+            crate::render::sdf::SDF_HELPER_WGSL,
+            include_str!("shaders/treat_displacement_ripple.wgsl")
+        );
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("treat_displacement_ripple.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(src.into()),
+        });
+
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("treat_displacement_ripple bgl"),
+            entries: &[
+                // binding 0: source texture (filterable RGBA)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    },
+                    count: None,
+                },
+                // binding 1: filtering sampler (source)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                // binding 2: params uniform (16 bytes)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: std::num::NonZeroU64::new(16),
+                    },
+                    count: None,
+                },
+                // binding 3: fit uniform (16 bytes)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: std::num::NonZeroU64::new(16),
+                    },
+                    count: None,
+                },
+                // binding 4: SDF texture — R32Float, NonFiltering.
+                // sdf_helper uses textureLoad so no sampler slot is needed.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                    },
+                    count: None,
+                },
+            ],
+        });
+
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("treat_displacement_ripple pipeline layout"),
+            bind_group_layouts: &[Some(&bind_group_layout)],
+            immediate_size: 0,
+        });
+
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("treat_displacement_ripple pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: target_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("treat_displacement_ripple source sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
+        });
+
+        let params_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("treat_displacement_ripple params"),
+            size: 16,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        Self {
+            pipeline,
+            bind_group_layout,
+            sampler,
+            params_buf,
+        }
+    }
+
+    fn render(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        dst: &wgpu::TextureView,
+        inputs: &TreatmentInputs<'_>,
+        sdf: &wgpu::TextureView,
+    ) {
+        // Resolve params: fall back to descriptor defaults when keys are absent.
+        let amplitude = inputs.params.get("amplitude").copied().unwrap_or(0.0);
+        let frequency = inputs.params.get("frequency").copied().unwrap_or(8.0);
+        let decay = inputs.params.get("decay").copied().unwrap_or(0.5);
+
+        // Pack into 16-byte uniform: [amplitude, frequency, decay, _pad].
+        let mut bytes = [0u8; 16];
+        bytes[0..4].copy_from_slice(&amplitude.to_le_bytes());
+        bytes[4..8].copy_from_slice(&frequency.to_le_bytes());
+        bytes[8..12].copy_from_slice(&decay.to_le_bytes());
+        // bytes[12..16] reserved (zero).
+        queue.write_buffer(&self.params_buf, 0, &bytes);
+
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("treat_displacement_ripple bg"),
+            layout: &self.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(inputs.source),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: self.params_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: inputs.fit_uniform.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(sdf),
+                },
+            ],
+        });
+
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("treat_displacement_ripple pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: dst,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.draw(0..6, 0..1);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2173,5 +2452,47 @@ mod tests {
         for (id, _) in registry() {
             assert!(seen.insert(*id), "duplicate preset_id in registry: {id}");
         }
+    }
+
+    /// Acceptance: the displacement_ripple preset is registered (P2.4.1).
+    #[test]
+    fn displacement_ripple_preset_is_registered() {
+        assert!(is_registered(DISPLACEMENT_RIPPLE_PRESET_ID));
+    }
+
+    /// Acceptance: displacement_ripple exposes amplitude + frequency + decay
+    /// with valid min/max/default ranges and 3 total descriptors.
+    #[test]
+    fn displacement_ripple_descriptors_present() {
+        let descriptors = param_descriptors(DISPLACEMENT_RIPPLE_PRESET_ID);
+        assert_eq!(
+            descriptors.len(),
+            3,
+            "displacement_ripple exposes exactly 3 params"
+        );
+
+        for d in descriptors {
+            assert!(d.min < d.max, "{}: min < max", d.key);
+            assert!(
+                d.default >= d.min && d.default <= d.max,
+                "{}: default in [min, max]",
+                d.key
+            );
+        }
+    }
+
+    /// Acceptance: the amplitude descriptor defaults to 0.0, satisfying the
+    /// identity-default rule (amplitude=0 → disp=vec2(0) → passthrough).
+    #[test]
+    fn displacement_ripple_amplitude_default_is_zero() {
+        let descriptors = param_descriptors(DISPLACEMENT_RIPPLE_PRESET_ID);
+        let amplitude_desc = descriptors
+            .iter()
+            .find(|d| d.key == "amplitude")
+            .expect("amplitude descriptor must be present");
+        assert_eq!(
+            amplitude_desc.default, 0.0,
+            "amplitude identity default = 0.0"
+        );
     }
 }
