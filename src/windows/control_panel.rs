@@ -2045,28 +2045,24 @@ pub(super) fn show_effect(
             }
         }
         Effect::External { id, params } => {
-            // P2.7.3: when no external passes are registered the control-panel
-            // call sites have no access to ExternalRegistry (it lives in
-            // EditingState and is not threaded into show_effects_tab / controls).
-            // In v1 no built-in passes ship, so the placeholder is always shown.
-            // A future refactor that threads ExternalRegistry here can gate on
-            // registry.is_empty() instead of the id check below.
-            //
-            // Show placeholder when the id is empty (freshly-added via the menu)
-            // or when the id is non-empty but no registry is available. Because
-            // the registry is never available at this call site in v1, we always
-            // show the placeholder note followed by the existing id/JSON for
-            // projects that already have a configured External effect.
-            ui.label(
-                "No external passes registered \u{2014} connect a plugin to populate this entry.",
-            );
-            // T3.17: raw JSON only inside Advanced. v2 callers always pass
-            // `inside_advanced = true` (v2 has no Advanced concept, so the
-            // Effects tab keeps showing JSON).  Under v3, `show_effect` is
-            // only called from `advanced::show_effect_chain`, so `inside_advanced`
-            // is always true there too.  The flag guards a future surface that
-            // might call `show_effect` outside Advanced.
-            if !id.is_empty() {
+            // P2.7.3: when no external passes are registered (id is empty —
+            // freshly added via the menu) show the operator-facing placeholder.
+            // For projects already carrying a configured External effect (non-
+            // empty id) fall through to the id/JSON display so the operator can
+            // see what is wired. A future refactor that threads ExternalRegistry
+            // into this call site can gate on `registry.is_empty()` instead of
+            // `id.is_empty()` for a finer-grained "no matching pass" note.
+            if id.is_empty() {
+                ui.label(
+                    "No external passes registered \u{2014} connect a plugin to populate this entry.",
+                );
+            } else {
+                // T3.17: raw JSON only inside Advanced. v2 callers always pass
+                // `inside_advanced = true` (v2 has no Advanced concept, so the
+                // Effects tab keeps showing JSON).  Under v3, `show_effect` is
+                // only called from `advanced::show_effect_chain`, so `inside_advanced`
+                // is always true there too.  The flag guards a future surface that
+                // might call `show_effect` outside Advanced.
                 ui.label(format!("id: {id}"));
                 if inside_advanced {
                     ui.label("params (JSON, edited via project file):");
