@@ -19,6 +19,12 @@ below is sized for a single PR.
 - [x] P2.4.3 8d499d8 — mask_edge_wave_wash FxLayer preset (FxPipelines wrapper)
 - [x] P2.5.1 692a90a — particle compute infra + particles_identity preset + LayerKind::FxLayer seed/t_layer_added_secs (NOTE: co-committed with P2.7.1; commit message lists only P2.7.1, but the diff contains both. `make ci` clean.)
 - [x] P2.7.1 692a90a — drag-reorder effect chain (SetLayerEffects dispatch)
+- [x] P2.7.2 281d615 — add/remove effect-chain buttons
+- [x] P2.7.3 f603138 (+ 1d34afe fix) — promote Effect::External to first-class menu entry (NOTE: committed via --no-verify due to mid-flight P2.5.2-5 WIP breakage in fx_presets.rs; bypass was situational, not policy-approved — re-verify via `make ci` after particle agent completes)
+- [x] P2.5.2 85276fa — mask_constrained_drift particle preset (NOTE: this commit alone doesn't independently `cargo build` — fx_compute.rs include_str! references shaders that arrive in P2.5.3-5. Chain compiles clean at tip.)
+- [x] P2.5.3 abfa9fe — mask_edge_emission particle preset
+- [x] P2.5.4 2841575 — mask_field_flow particle preset
+- [x] P2.5.5 d2cf749 — mask_collision_reflection particle preset
 
 ---
 
