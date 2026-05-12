@@ -4247,38 +4247,68 @@ enum WizardTransition {
 
 /// Handle a winit `WindowEvent` while the app is in `AppState::SceneWizard`.
 ///
+/// P4.3.1: draws the wizard overlay in the control window.
+/// P4.3.2: implements cancel (Escape key + Cancel button, non-undoable
+/// `ApplyProjectSnapshot`) and back navigation (← key + Back button,
+/// no mutation). Also forwards output-window events to the editing render
+/// path so the canvas keeps animating behind the wizard overlay.
+///
 /// Returns `Some(WizardTransition)` when the operator cancels or confirms;
 /// the caller does `mem::replace` to take ownership of the `SceneWizardState`
 /// before calling `wizard_cancel` / `wizard_commit` with the owned value.
 #[cfg(feature = "v3")]
 fn handle_wizard_window_event(
     state: &mut SceneWizardState,
-    _event_loop: &ActiveEventLoop,
+    event_loop: &ActiveEventLoop,
     window_id: WindowId,
     event: WindowEvent,
 ) -> Option<WizardTransition> {
     use crate::windows::wizard::{WizardAction, draw_wizard_panel};
+    use winit::keyboard::{Key, NamedKey};
 
-    // Handle escape → cancel.
-    if matches!(
-        event,
-        WindowEvent::KeyboardInput {
-            event: winit::event::KeyEvent {
-                logical_key: winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape),
+    // Keyboard shortcuts: Escape → cancel; ← → back.
+    if let WindowEvent::KeyboardInput {
+        event:
+            winit::event::KeyEvent {
+                logical_key: ref key,
                 state: winit::event::ElementState::Pressed,
                 ..
             },
-            ..
+        ..
+    } = event
+    {
+        match key {
+            Key::Named(NamedKey::Escape) => return Some(WizardTransition::Cancel),
+            Key::Named(NamedKey::ArrowLeft) => {
+                // Back: decrement step (no mutation).
+                if let Some(prev) = state.step.prev() {
+                    state.step = prev;
+                }
+                return None;
+            }
+            _ => {}
         }
-    ) {
-        return Some(WizardTransition::Cancel);
     }
 
-    // Dispatch to the control window's egui context if the event belongs to it.
-    let ctrl = state.editing.control.as_mut()?;
-    if ctrl.id() != window_id {
+    // P4.3.2: Forward output-window events to the editing render path so the
+    // canvas keeps animating behind the wizard overlay. The editing handler is
+    // called only when the event belongs to an output window, not the control
+    // window. We ignore `EditingTransition` for now (GoLive from wizard mode
+    // is undefined).
+    let event_is_for_control = state
+        .editing
+        .control
+        .as_ref()
+        .is_some_and(|c| c.id() == window_id);
+    if !event_is_for_control {
+        // Forward to editing handler (canvas animation, output window resize, etc.).
+        let _ =
+            handle_editing_window_event(&mut state.editing, event_loop, window_id, event, false);
         return None;
     }
+
+    // The event belongs to the control window — run the wizard panel.
+    let ctrl = state.editing.control.as_mut()?;
     let _ = ctrl.on_window_event(&event);
 
     if let WindowEvent::RedrawRequested = event {
