@@ -11,6 +11,23 @@ pub const SDF_SIZE: usize = 256;
 /// so consumers control their own bind slots.
 pub const SDF_HELPER_WGSL: &str = include_str!("shaders/sdf_helper.wgsl");
 
+/// P3.3.1 — WGSL snippet providing zone-role constants and the `ZoneTagUniform`
+/// struct for zone-aware FX preset shaders.
+///
+/// Prepend this to zone-aware preset shaders at pipeline build time, after
+/// `SDF_HELPER_WGSL`, using Rust string concatenation — exactly as
+/// `SDF_HELPER_WGSL` is used for SDF-consuming shaders.
+///
+/// Zone-aware shaders also declare the binding in their own source:
+/// ```wgsl
+/// @group(0) @binding(6) var<uniform> u_zone: ZoneTagUniform;
+/// ```
+/// This binding is NOT included here so `zone_tag_helper.wgsl` validates
+/// standalone (no entry point, no orphaned binding). See P3.3.2 for the
+/// canonical bind-group slot table.
+#[allow(dead_code)] // P3.3.2 wires the zone-aware pipeline call sites.
+pub const ZONE_TAG_WGSL: &str = include_str!("shaders/zone_tag_helper.wgsl");
+
 /// Point-in-polygon (ray cast along +X).
 pub fn point_in_polygon(x: f32, y: f32, poly: &[[f32; 2]]) -> bool {
     if poly.len() < 3 {
@@ -275,5 +292,77 @@ mod tests {
             mag < 1e-4,
             "expected near-zero normal at circle centre, got {normal:?} (mag={mag})"
         );
+    }
+
+    // --- P3.3.1 ZONE_TAG_WGSL tests ---
+
+    /// P3.3.1 — ZONE_TAG_WGSL contains all zone constant definitions and the
+    /// ZoneTagUniform struct.
+    #[test]
+    fn zone_tag_wgsl_contains_required_declarations() {
+        assert!(
+            ZONE_TAG_WGSL.contains("ZONE_NONE"),
+            "ZONE_TAG_WGSL missing ZONE_NONE constant"
+        );
+        assert!(
+            ZONE_TAG_WGSL.contains("ZONE_WINDOW"),
+            "ZONE_TAG_WGSL missing ZONE_WINDOW constant"
+        );
+        assert!(
+            ZONE_TAG_WGSL.contains("ZONE_PORTAL"),
+            "ZONE_TAG_WGSL missing ZONE_PORTAL constant"
+        );
+        assert!(
+            ZONE_TAG_WGSL.contains("ZONE_VOID"),
+            "ZONE_TAG_WGSL missing ZONE_VOID constant"
+        );
+        assert!(
+            ZONE_TAG_WGSL.contains("ZONE_SPILL"),
+            "ZONE_TAG_WGSL missing ZONE_SPILL constant"
+        );
+        assert!(
+            ZONE_TAG_WGSL.contains("ZONE_EDGE"),
+            "ZONE_TAG_WGSL missing ZONE_EDGE constant"
+        );
+        assert!(
+            ZONE_TAG_WGSL.contains("ZONE_HIGHLIGHT"),
+            "ZONE_TAG_WGSL missing ZONE_HIGHLIGHT constant"
+        );
+        assert!(
+            ZONE_TAG_WGSL.contains("ZONE_LIGHT_SOURCE"),
+            "ZONE_TAG_WGSL missing ZONE_LIGHT_SOURCE constant"
+        );
+        assert!(
+            ZONE_TAG_WGSL.contains("struct ZoneTagUniform"),
+            "ZONE_TAG_WGSL missing ZoneTagUniform struct"
+        );
+        assert!(
+            ZONE_TAG_WGSL.contains("zone_tag: u32"),
+            "ZONE_TAG_WGSL missing zone_tag field in ZoneTagUniform"
+        );
+    }
+
+    /// P3.3.1 — `From<ZoneRole> for u32` mapping matches WGSL constant values.
+    #[test]
+    fn zone_role_u32_values_match_wgsl_constants() {
+        use crate::project::schema::ZoneRole;
+        // Parse the ZONE_TAG_WGSL to verify the constants in the file.
+        // We check that the Rust From impl and the WGSL constants agree
+        // by verifying both use the same numeric values.
+        assert_eq!(u32::from(ZoneRole::Window), 1);
+        assert_eq!(u32::from(ZoneRole::Portal), 2);
+        assert_eq!(u32::from(ZoneRole::Void), 3);
+        assert_eq!(u32::from(ZoneRole::Spill), 4);
+        assert_eq!(u32::from(ZoneRole::Edge), 5);
+        assert_eq!(u32::from(ZoneRole::Highlight), 6);
+        assert_eq!(u32::from(ZoneRole::LightSource), 7);
+        // Verify the WGSL file contains the matching values.
+        assert!(ZONE_TAG_WGSL.contains("ZONE_WINDOW: u32 = 1u"));
+        assert!(ZONE_TAG_WGSL.contains("ZONE_PORTAL: u32 = 2u"));
+        assert!(ZONE_TAG_WGSL.contains("ZONE_VOID: u32 = 3u"));
+        assert!(ZONE_TAG_WGSL.contains("ZONE_SPILL: u32 = 4u"));
+        assert!(ZONE_TAG_WGSL.contains("ZONE_EDGE: u32 = 5u"));
+        assert!(ZONE_TAG_WGSL.contains("ZONE_HIGHLIGHT: u32 = 6u"));
+        assert!(ZONE_TAG_WGSL.contains("ZONE_LIGHT_SOURCE: u32 = 7u"));
     }
 }
