@@ -138,6 +138,25 @@ Use this top-to-bottom before doors; aim for under five minutes once you know yo
     surprise on show night because the playhead pauses on the last
     frame after the clip.
 
+## FX preset library + particles (v0.6)
+
+32. **Particle budget** — If using particle presets (`mask_constrained_drift`,
+    `mask_edge_emission`, `mask_field_flow`, `mask_collision_reflection`),
+    verify each FxLayer's particle count is within budget. No inline warning
+    should be visible in the control panel; a warning means the mutation was
+    refused and the slider snapped back — reset the value before going live.
+
+33. **Preset library audit** — Confirm all FX presets load without
+    `UnknownFxPreset` audit warnings in the diagnostics strip (Advanced →
+    Diagnostics). An unknown-preset finding means the project file references
+    a `preset_id` not in the registry; re-link or remove the affected layer
+    before doors.
+
+34. **Effect-chain order** — Confirm the effect-chain order on each layer
+    matches your saved scene (Advanced → Selected layer → Effect chain). Check
+    that the undo stack is clear before going live — a non-empty stack means
+    unsaved edits are in flight.
+
 ## Frame-budget perf gate (P0.9.5)
 
 ### How to run
