@@ -246,6 +246,12 @@ pub struct ControlPanelState {
     /// v2 builds carry no undo machinery; the field is gated.
     #[cfg(feature = "v3")]
     pub pending_mutations: Vec<Mutation>,
+    /// P2.5.6 — `Toast`s to push into `EditingState.toast_queue` after
+    /// the control panel frame. Drained by `app.rs` alongside
+    /// `pending_mutations`. Gated on `v3` (toast infrastructure requires
+    /// the undo/command wiring that v3 introduces).
+    #[cfg(feature = "v3")]
+    pub pending_toasts: Vec<crate::windows::toast::Toast>,
     /// P0.4.3 — `VideoControl` messages to dispatch to worker threads
     /// during this frame. Each entry is `(layer_idx, message)`. The app
     /// drains this alongside `pending_mutations` and routes each message

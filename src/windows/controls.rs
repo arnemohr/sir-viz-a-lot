@@ -534,6 +534,21 @@ pub fn show(
                     }
 
                     // --------------------------------------------------------
+                    // P2.5.6 — FX preset parameter sliders. Only rendered
+                    // when the selected layer is a LayerKind::FxLayer.
+                    // --------------------------------------------------------
+                    #[cfg(feature = "v3")]
+                    if matches!(project.layers[layer_idx].kind, LayerKind::FxLayer { .. }) {
+                        egui::CollapsingHeader::new("FX params")
+                            .id_salt("adv_fx_params")
+                            .default_open(true)
+                            .show(ui, |ui| {
+                                show_fx_params_section(ui, project, st, layer_idx);
+                            });
+                        ui.add_space(4.0);
+                    }
+
+                    // --------------------------------------------------------
                     // T3.13 + T3.14 — Effect chain editor (includes modulator picker)
                     // --------------------------------------------------------
                     egui::CollapsingHeader::new("Effect chain")
@@ -1007,6 +1022,75 @@ fn show_treatment_section(
                         .push(project.set_layer_treatment_mutation(layer_idx, Some(new_treatment)));
                 }
             });
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FX preset parameter sliders (P2.5.6)
+// ---------------------------------------------------------------------------
+/// Render per-param sliders for the selected `FxLayer`.
+///
+/// For each `FxParamDescriptor` from `fx_param_descriptors(preset_id)`:
+/// - Renders a slider over `[d.min, d.max]` with the current value from
+///   `layer.params.get(d.key).copied().unwrap_or(d.default)`.
+/// - On drag-release or focus-loss, runs a pre-flight budget check via
+///   `Project::fx_layer_params_over_budget`. If over budget: pushes a
+///   warning toast and does NOT dispatch the mutation (slider snaps back
+///   on the next frame because the project state is unchanged).
+/// - If within budget, dispatches `SetFxLayerParams` via the mutation queue.
+///
+/// This function is only called when the layer is an FxLayer; callers must
+/// ensure that invariant.
+#[cfg(feature = "v3")]
+fn show_fx_params_section(
+    ui: &mut Ui,
+    project: &mut Project,
+    st: &mut ControlPanelState,
+    layer_idx: usize,
+) {
+    let (preset_id, current_params) = match &project.layers[layer_idx].kind {
+        LayerKind::FxLayer {
+            preset_id, params, ..
+        } => (preset_id.clone(), params.clone()),
+        _ => return, // guard — caller guarantees FxLayer
+    };
+
+    let descriptors = crate::render::fx_presets::fx_param_descriptors(preset_id.as_str());
+    if descriptors.is_empty() {
+        ui.weak("This FX preset has no tunable parameters.");
+        return;
+    }
+
+    for d in descriptors {
+        let cur = current_params.get(d.key).copied().unwrap_or(d.default);
+        let mut edit = cur;
+        let resp = ui.add(egui::Slider::new(&mut edit, d.min..=d.max).text(d.label));
+        // Dispatch only on drag-release / focus-loss to avoid flooding
+        // the undo stack with mid-drag ticks — mirrors the Video-speed
+        // and Treatment-params patterns.
+        if (resp.drag_stopped() || resp.lost_focus()) && (edit - cur).abs() > 1e-6 {
+            let mut next_params = current_params.clone();
+            next_params.insert(d.key.to_string(), edit);
+
+            // Pre-flight budget check — surface a warning toast and refuse
+            // to dispatch rather than calling the mutation which would be a
+            // no-op but would still generate an undo-stack entry.
+            if let Some((_key, _val, max)) =
+                project.fx_layer_params_over_budget(layer_idx, &next_params)
+            {
+                st.pending_toasts
+                    .push(crate::windows::toast::Toast::warn(format!(
+                        "Particle count exceeds budget (max: {max})"
+                    )));
+            } else {
+                st.pending_mutations
+                    .push(project.set_fx_layer_params_mutation(layer_idx, next_params));
+            }
+            // Stop iterating after the first drag-release — the next frame
+            // will read fresh params. Continuing here would compare later
+            // sliders against the now-stale `current_params` clone.
+            break;
         }
     }
 }

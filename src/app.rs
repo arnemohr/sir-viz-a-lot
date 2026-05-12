@@ -4505,6 +4505,18 @@ fn handle_editing_window_event(
                         state.undo_stack.push(m, &mut state.project);
                     }
                 }
+                // P2.5.6 — drain warning toasts emitted by the FX-params
+                // slider section (budget-refusal feedback). Pushed by
+                // `controls.rs` into `control_panel.pending_toasts`; drained
+                // here alongside `pending_mutations` so the toast queue is
+                // owned exclusively by `EditingState`.
+                #[cfg(feature = "v3")]
+                {
+                    let pending_toasts = std::mem::take(&mut state.control_panel.pending_toasts);
+                    for t in pending_toasts {
+                        state.toast_queue.push(t);
+                    }
+                }
                 // P0.4.3 — drain VideoControl messages emitted by the
                 // Video section in advanced.rs. Each message accompanies a
                 // SetVideoSpeed / SetVideoLoopSeamless mutation that went

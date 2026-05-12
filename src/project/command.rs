@@ -943,6 +943,97 @@ impl ReverseStorage for SetLayerTreatmentParams {
     }
 }
 
+/// P2.5.6 — Payload for [`Mutation::SetFxLayerParams`].
+///
+/// Whole-`HashMap` snapshot Reverse (rule 1) for `FxLayer.params`.
+/// Mirrors `SetLayerTreatmentParams`. Preset switches still go through
+/// `SetLayerKind`; this variant handles lightweight per-param slider
+/// edits without churning the whole `LayerKind`.
+///
+/// **Apply contract:** the layer must be `LayerKind::FxLayer` at apply
+/// time. Panics otherwise — the UI dispatch site is responsible for
+/// guarding (param sliders only render for FxLayer).
+///
+/// **Budget refusal:** if `new` contains a key whose value exceeds the
+/// descriptor's `max_particle_count`, `apply` returns a no-op Reverse
+/// (new == old) and leaves the project unchanged. The UI pre-flight
+/// helper `Project::fx_layer_params_over_budget` detects this before
+/// constructing the mutation and shows a warning toast instead.
+#[derive(Debug, Clone)]
+pub struct SetFxLayerParams {
+    /// Index into `Project.layers`. Layer must be `LayerKind::FxLayer`.
+    pub layer_idx: usize,
+    /// Replacement params HashMap (replaces the whole map, not per-key).
+    pub new: std::collections::HashMap<String, f32>,
+    /// Pre-mutation params (snapshot; `apply` `debug_assert!`s match).
+    pub old: std::collections::HashMap<String, f32>,
+}
+
+impl ReverseStorage for SetFxLayerParams {
+    fn apply(self, project: &mut Project) -> Self {
+        let layer = project
+            .layers
+            .get_mut(self.layer_idx)
+            .expect("SetFxLayerParams: layer_idx out of range");
+        let (preset_id, current_params) = match &mut layer.kind {
+            crate::project::schema::LayerKind::FxLayer {
+                preset_id, params, ..
+            } => (preset_id.clone(), params),
+            _ => panic!("SetFxLayerParams: layer is not FxLayer — dispatch site must guard"),
+        };
+        debug_assert_eq!(
+            *current_params, self.old,
+            "SetFxLayerParams stale Reverse for layer_idx={}",
+            self.layer_idx,
+        );
+
+        // Budget check: refuse if any param exceeds its max_particle_count.
+        if let Some(over) = particle_budget_exceeded(&preset_id, &self.new) {
+            tracing::warn!(
+                layer_idx = self.layer_idx,
+                key = %over.0,
+                value = over.1,
+                max = over.2,
+                "SetFxLayerParams: refused (over particle budget)",
+            );
+            // Return a no-op Reverse: new == old == current state.
+            // The UI detects refusal via the pre-flight helper; the project
+            // is unchanged so the slider snaps back on the next frame.
+            return SetFxLayerParams {
+                layer_idx: self.layer_idx,
+                new: self.old.clone(),
+                old: self.old,
+            };
+        }
+
+        *current_params = self.new.clone();
+        SetFxLayerParams {
+            layer_idx: self.layer_idx,
+            new: self.old,
+            old: self.new,
+        }
+    }
+}
+
+/// P2.5.6 — Returns `Some((key, value, max))` when `params` would
+/// exceed any descriptor's `max_particle_count` budget for the given
+/// preset. Returns `None` when all params are within budget.
+fn particle_budget_exceeded(
+    preset_id: &str,
+    params: &std::collections::HashMap<String, f32>,
+) -> Option<(String, f32, u32)> {
+    for d in crate::render::fx_presets::fx_param_descriptors(preset_id) {
+        if let Some(max) = d.max_particle_count {
+            if let Some(&val) = params.get(d.key) {
+                if val > max as f32 {
+                    return Some((d.key.to_string(), val, max));
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Payload for [`Mutation::SetModulator`].
 ///
 /// Whole-enum Reverse (rule 1): stores the full old `Modulator` value so a
@@ -1654,6 +1745,12 @@ pub enum Mutation {
     /// [`SetLayerTreatmentParams`].
     SetLayerTreatmentParams(SetLayerTreatmentParams),
 
+    /// P2.5.6 — replace a `FxLayer`'s `params` map (whole-`HashMap`
+    /// snapshot Reverse). Delegates to [`SetFxLayerParams`].
+    /// Budget violations refuse without mutating the project (see
+    /// `SetFxLayerParams::apply`).
+    SetFxLayerParams(SetFxLayerParams),
+
     /// P0.8.2 — wholesale replace `Project.output_target.rgb_matrix`.
     /// Per-cell edits in the W8.3 calibration UI emit one of these
     /// per change. Delegates to [`SetOutputRgbMatrix`].
@@ -1752,6 +1849,7 @@ impl Mutation {
             Mutation::SetLayerTreatmentParams(s) => {
                 Mutation::SetLayerTreatmentParams(s.apply(project))
             }
+            Mutation::SetFxLayerParams(s) => Mutation::SetFxLayerParams(s.apply(project)),
             Mutation::SetOutputRgbMatrix(s) => Mutation::SetOutputRgbMatrix(s.apply(project)),
             Mutation::SetModulator(s) => Mutation::SetModulator(s.apply(project)),
             Mutation::ResetLayerWarpMesh(s) => Mutation::ResetLayerWarpMesh(s.apply(project)),
@@ -1881,6 +1979,7 @@ impl Mutation {
             | Mutation::SetLayerKind(_)
             | Mutation::SetLayerTreatment(_)
             | Mutation::SetLayerTreatmentParams(_)
+            | Mutation::SetFxLayerParams(_)
             | Mutation::SetOutputRgbMatrix(_)
             | Mutation::SetVideoSpeed(_)
             | Mutation::SetVideoLoopMode(_)
@@ -2041,6 +2140,52 @@ impl Project {
             new,
             old,
         })
+    }
+
+    /// P2.5.6 — build a `SetFxLayerParams` mutation for the given layer
+    /// index. Captures the layer's current `FxLayer.params` as `old`.
+    /// **Panics** if the layer is not `LayerKind::FxLayer` — the UI
+    /// dispatch site must only call this when the layer is an FxLayer
+    /// (param sliders render only for FxLayer).
+    pub fn set_fx_layer_params_mutation(
+        &self,
+        layer_idx: usize,
+        new: std::collections::HashMap<String, f32>,
+    ) -> Mutation {
+        let old = match &self.layers[layer_idx].kind {
+            crate::project::schema::LayerKind::FxLayer { params, .. } => params.clone(),
+            _ => panic!(
+                "set_fx_layer_params_mutation called on a layer that is not FxLayer \
+                 — UI dispatch site must guard"
+            ),
+        };
+        Mutation::SetFxLayerParams(SetFxLayerParams {
+            layer_idx,
+            new,
+            old,
+        })
+    }
+
+    /// P2.5.6 — pre-flight budget check. Returns `Some((key, value, max))`
+    /// if `new_params` would exceed any descriptor's `max_particle_count`
+    /// for the current preset. Returns `None` when the params are within
+    /// budget. **Panics** if the layer is not `LayerKind::FxLayer`.
+    ///
+    /// The UI calls this before dispatching `SetFxLayerParams` to surface
+    /// a warning toast without going through the mutation path.
+    pub fn fx_layer_params_over_budget(
+        &self,
+        layer_idx: usize,
+        new_params: &std::collections::HashMap<String, f32>,
+    ) -> Option<(String, f32, u32)> {
+        let preset_id = match &self.layers[layer_idx].kind {
+            crate::project::schema::LayerKind::FxLayer { preset_id, .. } => preset_id.clone(),
+            _ => panic!(
+                "fx_layer_params_over_budget called on a layer that is not FxLayer \
+                 — UI dispatch site must guard"
+            ),
+        };
+        particle_budget_exceeded(&preset_id, new_params)
     }
 
     /// P0.8.1 — build a `SetOutputRgbMatrix` mutation for the given output
@@ -2744,6 +2889,133 @@ mod tests {
         let p = fresh_project();
         // `fresh_project`'s layer has treatment: None — panic expected.
         let _ = p.set_layer_treatment_params_mutation(0, std::collections::HashMap::new());
+    }
+
+    // -----------------------------------------------------------------------
+    // P2.5.6 — SetFxLayerParams tests
+    // -----------------------------------------------------------------------
+
+    /// Helper: build a fresh project with an FxLayer at index 0.
+    fn fresh_fx_project() -> crate::project::schema::Project {
+        use crate::render::fx_presets::PARTICLES_IDENTITY_PRESET_ID;
+        let mut p = fresh_project();
+        // Replace the SVG layer with an FxLayer.
+        p.layers[0].kind = crate::project::schema::LayerKind::FxLayer {
+            preset_id: PARTICLES_IDENTITY_PRESET_ID.to_string(),
+            params: {
+                let mut m = std::collections::HashMap::new();
+                m.insert("particle_count".to_string(), 8.0_f32);
+                m
+            },
+            seed: 0,
+            t_layer_added_secs: 0.0,
+        };
+        p
+    }
+
+    /// P2.5.6 — `SetFxLayerParams` apply + reverse restores the original
+    /// params map byte-equal. Exercises the whole-HashMap snapshot Reverse.
+    #[test]
+    fn set_fx_layer_params_round_trip() {
+        let mut p = fresh_fx_project();
+
+        let mut new_params = std::collections::HashMap::new();
+        new_params.insert("particle_count".to_string(), 12.0_f32);
+
+        let m = p.set_fx_layer_params_mutation(0, new_params.clone());
+        let reverse = m.apply(&mut p);
+
+        // After apply the project should reflect `new_params`.
+        let params_after = match &p.layers[0].kind {
+            crate::project::schema::LayerKind::FxLayer { params, .. } => params.clone(),
+            _ => panic!("expected FxLayer"),
+        };
+        assert_eq!(params_after, new_params, "apply should install new_params");
+
+        // Applying the reverse should restore the original params.
+        let _ = reverse.apply(&mut p);
+        let params_restored = match &p.layers[0].kind {
+            crate::project::schema::LayerKind::FxLayer { params, .. } => params.clone(),
+            _ => panic!("expected FxLayer"),
+        };
+        assert_eq!(
+            params_restored["particle_count"].to_bits(),
+            8.0_f32.to_bits()
+        );
+    }
+
+    /// P2.5.6 — when `new` exceeds `max_particle_count`, `apply` is a no-op:
+    /// the project state is unchanged and the returned Reverse has new == old.
+    #[test]
+    fn set_fx_layer_params_over_budget_is_noop() {
+        let mut p = fresh_fx_project();
+
+        // max_particle_count for particles_identity is 16; 99999 exceeds it.
+        let mut over_budget = std::collections::HashMap::new();
+        over_budget.insert("particle_count".to_string(), 99999.0_f32);
+
+        let m = p.set_fx_layer_params_mutation(0, over_budget.clone());
+        let reverse = m.apply(&mut p);
+
+        // Project state must be unchanged.
+        let params_after = match &p.layers[0].kind {
+            crate::project::schema::LayerKind::FxLayer { params, .. } => params.clone(),
+            _ => panic!("expected FxLayer"),
+        };
+        assert_eq!(
+            params_after["particle_count"].to_bits(),
+            8.0_f32.to_bits(),
+            "over-budget apply must not mutate the project"
+        );
+
+        // The returned Reverse is also a no-op (new == old == current).
+        let reverse_inner = match reverse {
+            Mutation::SetFxLayerParams(s) => s,
+            _ => panic!("expected SetFxLayerParams"),
+        };
+        assert_eq!(
+            reverse_inner.new, reverse_inner.old,
+            "refused Reverse must have new == old"
+        );
+    }
+
+    /// P2.5.6 — `fx_layer_params_over_budget` returns `Some(...)` when
+    /// particle count exceeds the descriptor cap, and `None` when within.
+    #[test]
+    fn fx_layer_params_over_budget_pre_flight() {
+        let p = fresh_fx_project();
+
+        let mut within_budget = std::collections::HashMap::new();
+        within_budget.insert("particle_count".to_string(), 14.0_f32);
+        assert!(
+            p.fx_layer_params_over_budget(0, &within_budget).is_none(),
+            "14 <= 16: should be within budget"
+        );
+
+        let mut over_budget = std::collections::HashMap::new();
+        over_budget.insert("particle_count".to_string(), 99.0_f32);
+        let result = p.fx_layer_params_over_budget(0, &over_budget);
+        assert!(result.is_some(), "99 > 16: should be over budget");
+        let (key, val, max) = result.unwrap();
+        assert_eq!(key, "particle_count");
+        assert!((val - 99.0).abs() < 1e-6);
+        assert_eq!(max, 16);
+    }
+
+    /// P2.5.6 — `SetFxLayerParams` is undoable and does not trigger a
+    /// layer-GPU rebuild (params flow through the per-frame uniform write;
+    /// no `LayerState` Vec reshape is needed).
+    #[test]
+    fn set_fx_layer_params_is_undoable_no_rebuild() {
+        let p = fresh_fx_project();
+        let mut params = std::collections::HashMap::new();
+        params.insert("particle_count".to_string(), 10.0_f32);
+        let m = p.set_fx_layer_params_mutation(0, params);
+        assert!(!m.is_non_undoable(), "SetFxLayerParams must be undoable");
+        assert!(
+            !m.needs_layer_rebuild(),
+            "SetFxLayerParams must not need layer rebuild"
+        );
     }
 
     /// 003-T3.28 — overrides are user-driven and Cmd-Z reversible.
@@ -3777,6 +4049,15 @@ mod tests {
                 exposure: f32,
                 contrast: f32,
             },
+            /// P2.5.6 — set an FxLayer's params HashMap. The strategy
+            /// targets layer 0, overwriting `particle_count` with a
+            /// value WITHIN the `particles_identity` cap (≤ 16) so the
+            /// mutation commits (over-budget is tested in unit tests, not
+            /// proptest). Falls back to a no-op when layer 0 is not
+            /// FxLayer (harness doesn't force FxLayer topology).
+            SetFxLayerParams {
+                particle_count: f32,
+            },
         }
 
         fn to_mutation(kind: &MutationKind, project: &Project) -> Mutation {
@@ -4208,6 +4489,25 @@ mod tests {
                         project.set_layer_treatment_params_mutation(0, new)
                     }
                 }
+                MutationKind::SetFxLayerParams { particle_count } => {
+                    // Only fire when layer 0 is an FxLayer; otherwise
+                    // fall back to a no-op gamma. The proptest fixture
+                    // uses an SVG layer by default so this will usually
+                    // be the no-op path — that's fine; the dedicated
+                    // unit tests exercise the FxLayer path directly.
+                    if !project.layers.is_empty()
+                        && matches!(
+                            project.layers[0].kind,
+                            crate::project::schema::LayerKind::FxLayer { .. }
+                        )
+                    {
+                        let mut new = std::collections::HashMap::new();
+                        new.insert("particle_count".to_string(), *particle_count);
+                        project.set_fx_layer_params_mutation(0, new)
+                    } else {
+                        project.set_gamma_mutation(project.gamma) // no-op fallback
+                    }
+                }
             }
         }
 
@@ -4455,6 +4755,16 @@ mod tests {
                 (-2.0_f32..=2.0_f32, 0.5_f32..=1.5_f32).prop_map(|(exposure, contrast)| {
                     MutationKind::SetLayerTreatmentParams { exposure, contrast }
                 },),
+                // P2.5.6 — FxLayer params. Values are bounded to ≤ 16 to
+                // stay within the `particles_identity` `max_particle_count`
+                // cap so the mutation commits (over-budget refusal is
+                // exercised in dedicated unit tests, not here). When layer 0
+                // is not FxLayer the `to_mutation` dispatch falls back to a
+                // no-op gamma, which is a valid sequence for the round-trip
+                // harness.
+                (1.0_f32..=16.0_f32).prop_map(|particle_count| {
+                    MutationKind::SetFxLayerParams { particle_count }
+                }),
             ]
         }
 

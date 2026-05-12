@@ -24,6 +24,7 @@ pub mod project;
 #[cfg(feature = "v3")]
 pub mod render {
     pub mod fx_compute;
+    pub mod fx_fluid;
     pub mod fx_presets;
     pub mod sdf;
     pub mod treatments;

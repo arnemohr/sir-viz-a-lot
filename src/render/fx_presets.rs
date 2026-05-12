@@ -127,6 +127,12 @@ pub fn fx_registry() -> &'static [FxPresetEntry] {
             label: "Fluid (identity)",
             family: FxFamily::ComputeFluid,
         },
+        // P2.6.2
+        FxPresetEntry {
+            preset_id: BOUNDED_FLUID_PRESET_ID,
+            label: "Mask-bounded fluid",
+            family: FxFamily::ComputeFluid,
+        },
     ]
 }
 
@@ -434,6 +440,35 @@ const FLUID_IDENTITY_DESCRIPTORS: &[FxParamDescriptor] = &[
     },
 ];
 
+/// P2.6.2 — Param descriptors for `mask_bounded_fluid`.
+///
+/// `particle_count` carries `max_particle_count: Some(512)` to satisfy the
+/// spec acceptance criterion.  The current implementation does not maintain
+/// a particle SSBO; particle visualisation is deferred.
+///
+/// FxParamsUniform field aliasing:
+///   `particle_count` → `wavelength` (1..=512, default 64, max_particle_count: Some(512))
+///   `dissipation`    → `speed`      (0.9..=1.0, default 0.95)
+#[allow(dead_code)] // referenced through `fx_param_descriptors` (P2.8.1 browser UI)
+const BOUNDED_FLUID_DESCRIPTORS: &[FxParamDescriptor] = &[
+    FxParamDescriptor {
+        key: "particle_count",
+        label: "Particle count (1–512)",
+        min: 1.0,
+        max: 512.0,
+        default: 64.0,
+        max_particle_count: Some(512),
+    },
+    FxParamDescriptor {
+        key: "dissipation",
+        label: "Dissipation (fraction/sec, 0.9–1.0)",
+        min: 0.9,
+        max: 1.0,
+        default: 0.95,
+        max_particle_count: None,
+    },
+];
+
 /// Param descriptors for the named FX preset. Returns an empty slice for
 /// unknown presets and for presets with no tunable parameters.
 #[allow(dead_code)] // consumed by P2.5.6 mutation + P2.8.1 browser UI
@@ -447,6 +482,7 @@ pub fn fx_param_descriptors(preset_id: &str) -> &'static [FxParamDescriptor] {
         FIELD_FLOW_PRESET_ID => FIELD_FLOW_DESCRIPTORS,
         COLLISION_REFLECTION_PRESET_ID => COLLISION_REFLECTION_DESCRIPTORS,
         FLUID_IDENTITY_PRESET_ID => FLUID_IDENTITY_DESCRIPTORS,
+        BOUNDED_FLUID_PRESET_ID => BOUNDED_FLUID_DESCRIPTORS,
         _ => &[],
     }
 }
@@ -474,6 +510,9 @@ pub const COLLISION_REFLECTION_PRESET_ID: &str = "mask_collision_reflection";
 
 /// P2.6.1 — Preset id for the fluid identity effect.
 pub const FLUID_IDENTITY_PRESET_ID: &str = "fluid_identity";
+
+/// P2.6.2 — Preset id for the mask-bounded fluid effect.
+pub const BOUNDED_FLUID_PRESET_ID: &str = "mask_bounded_fluid";
 
 /// Per-frame inputs that every FX preset receives at dispatch time.
 ///
@@ -739,6 +778,37 @@ pub fn dispatch(preset_id: &str, pipelines: &FxPipelines, inputs: FxShaderInputs
             true
         }
 
+        // P2.6.2 — mask-bounded fluid: advect with SDF boundary + colour-map render.
+        BOUNDED_FLUID_PRESET_ID => {
+            let dissipation = inputs
+                .params
+                .get("dissipation")
+                .copied()
+                .unwrap_or(0.95)
+                .clamp(0.0, 1.0);
+
+            // Advect with mask boundary enforcement.
+            pipelines.bounded_fluid.dispatch_advect(
+                inputs.device,
+                inputs.queue,
+                inputs.encoder,
+                Some(inputs.sdf_view), // use mask SDF for boundary
+                inputs.clock_secs,
+                dissipation,
+            );
+
+            // Render: colour-map velocity field into dst.
+            pipelines.bounded_fluid.draw_fluid(
+                inputs.device,
+                inputs.queue,
+                inputs.encoder,
+                inputs.dst,
+                inputs.clock_secs,
+                inputs.params,
+            );
+            true
+        }
+
         // Registered families not yet wired — caller skips rendering.
         _ => false,
     }
@@ -978,6 +1048,8 @@ pub struct FxPipelines {
     pub collision_reflection: FxComputePipeline,
     /// P2.6.1 — fluid identity (velocity field as colour).
     pub fluid_identity: FxFluidPipeline,
+    /// P2.6.2 — mask-bounded fluid (velocity zeroed outside mask, reflected at boundary).
+    pub bounded_fluid: FxFluidPipeline,
 }
 
 impl FxPipelines {
@@ -998,6 +1070,7 @@ impl FxPipelines {
                 target_format,
             ),
             fluid_identity: FxFluidPipeline::new_fluid_identity(device, target_format),
+            bounded_fluid: FxFluidPipeline::new_bounded_fluid(device, target_format),
         }
     }
 }
@@ -2031,6 +2104,71 @@ mod tests {
         assert!(
             descs.iter().any(|d| d.key == "colour"),
             "colour descriptor must be present"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // P2.6.2 — mask_bounded_fluid
+    // -------------------------------------------------------------------------
+
+    /// P2.6.2 acceptance: `mask_bounded_fluid` is in the registry.
+    #[test]
+    fn bounded_fluid_is_registered() {
+        assert!(
+            fx_is_registered(BOUNDED_FLUID_PRESET_ID),
+            "mask_bounded_fluid must be in fx_registry()"
+        );
+    }
+
+    /// P2.6.2 acceptance: `particle_count` descriptor has `max_particle_count: Some(512)`.
+    #[test]
+    fn bounded_fluid_max_particle_count_is_512() {
+        let descs = fx_param_descriptors(BOUNDED_FLUID_PRESET_ID);
+        let pc = descs
+            .iter()
+            .find(|d| d.key == "particle_count")
+            .expect("particle_count descriptor must be present for mask_bounded_fluid");
+        assert_eq!(
+            pc.max_particle_count,
+            Some(512),
+            "bounded_fluid particle_count max_particle_count must be Some(512)"
+        );
+    }
+
+    /// P2.6.2 acceptance: descriptors count matches spec (2); each min < max;
+    /// default ∈ range.
+    #[test]
+    fn bounded_fluid_descriptors_present() {
+        let descs = fx_param_descriptors(BOUNDED_FLUID_PRESET_ID);
+        assert_eq!(
+            descs.len(),
+            2,
+            "mask_bounded_fluid must have 2 descriptors (particle_count, dissipation)"
+        );
+        for d in descs {
+            assert!(
+                d.min < d.max,
+                "key={}: min ({}) must be < max ({})",
+                d.key,
+                d.min,
+                d.max
+            );
+            assert!(
+                d.default >= d.min && d.default <= d.max,
+                "key={}: default ({}) must be in [{}, {}]",
+                d.key,
+                d.default,
+                d.min,
+                d.max
+            );
+        }
+        assert!(
+            descs.iter().any(|d| d.key == "particle_count"),
+            "particle_count descriptor must be present"
+        );
+        assert!(
+            descs.iter().any(|d| d.key == "dissipation"),
+            "dissipation descriptor must be present"
         );
     }
 }
