@@ -282,7 +282,7 @@ pub struct LayerConfig {
 ///
 /// `#[serde(rename_all = "kebab-case")]` so the saved JSON string is
 /// `"window"`, `"light-source"`, etc. — matches the plan identifiers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ZoneRole {
     Window,
