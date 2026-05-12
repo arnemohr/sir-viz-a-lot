@@ -25,6 +25,8 @@ below is sized for a single PR.
 - [x] P2.5.3 abfa9fe — mask_edge_emission particle preset
 - [x] P2.5.4 2841575 — mask_field_flow particle preset
 - [x] P2.5.5 d2cf749 — mask_collision_reflection particle preset
+- [x] P2.6.1 18bba7b — fluid advection infrastructure + fluid_identity preset
+- [x] P2.6.2 5f86eac — mask_bounded_fluid preset (no particle visualisation — RGBA16Float velocity field rendered as colour)
 
 ---
 
