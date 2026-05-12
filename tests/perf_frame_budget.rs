@@ -1912,6 +1912,177 @@ fn render_frame_max_amp(
 }
 
 // ---------------------------------------------------------------------------
+// P3.1.2 — zone-tagged FX layer perf gate (stub fixture)
+// ---------------------------------------------------------------------------
+
+// M-series baseline p99 ≈ 11.5 ms (2026-05-12, Apple Silicon, headless wgpu).
+// TODO(P3.5.3): update fixture to use fx_zone_portal_drift once that preset
+// lands; the stub uses ripple_wash (zone_role = None) so the test is runnable
+// before zone-consuming presets exist.
+
+/// P3.1.2 — show-day perf gate for a single zone-tagged FX layer at max budget.
+///
+/// The fixture uses a single `mask_edge_ripple_wash` layer (with `zone_role =
+/// None` — the stub) to verify that zone-tag dispatch overhead doesn't regress
+/// the frame budget once real zone-consuming presets land in P3.5.x. The
+/// 16.6 ms p99 target matches one frame period at 60 Hz on show-day hardware.
+///
+/// This test is intentionally a stub. When P3.5.3 lands, replace
+/// `FxPipeline::new_ripple_wash` with the portal-drift pipeline and update the
+/// comment above to reflect the new fixture.
+#[cfg(feature = "gpu-tests")]
+#[test]
+fn perf_zone_tagged_fx_layer_within_budget() {
+    let h = Headless::new().expect("Headless::new — no GPU adapter available");
+    let device = &h.device;
+    let queue = &h.queue;
+
+    // ---- Build shared pipelines (one layer, zone_role = None stub) ----
+    let fx_pipeline = FxPipeline::new_ripple_wash(device, FORMAT);
+    let compositor = Compositor::new(device, OUT_W, OUT_H, FORMAT);
+    let gamma = GammaPipeline::new(device, FORMAT);
+    let edge_blend = EdgeBlendPipeline::new(device, FORMAT);
+
+    // ---- Build single-layer GPU state ----
+    let poly = layer_polygon(0);
+    let (_fx_tex, fx_view) = make_render_texture(device, OUT_W, OUT_H, FORMAT, "zone stub fx tex");
+    let (_warp_tex, warp_view) =
+        make_render_texture(device, OUT_W, OUT_H, FORMAT, "zone stub warp tex");
+    let (_sdf_tex, sdf_view) = make_sdf_texture(device, queue, &poly, "zone stub sdf");
+    let compositor_uniform = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("zone stub comp uniform"),
+        size: 16,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let warp_pipeline = WarpPipeline::new(device, FORMAT);
+    warp_pipeline.init_buffers(queue, poly.len() >= 3);
+    let mut layers = vec![LayerGpu {
+        _fx_tex,
+        fx_view,
+        _warp_tex,
+        warp_view,
+        _sdf_tex,
+        sdf_view,
+        compositor_uniform,
+        warp_pipeline,
+    }];
+
+    // ---- Per-output render targets (two outputs, edge blend) ----
+    let output_targets: Vec<(wgpu::Texture, wgpu::TextureView)> = (0..OUTPUT_COUNT)
+        .map(|i| {
+            make_render_texture(
+                device,
+                OUT_W,
+                OUT_H,
+                FORMAT,
+                &format!("zone stub output rt {i}"),
+            )
+        })
+        .collect();
+
+    let (_warp_rt_tex, warp_rt_view) =
+        make_render_texture(device, OUT_W, OUT_H, FORMAT, "zone stub warp rt");
+
+    // ---- Frame timing accumulator ----
+    let mut frame_times_ms: Vec<f64> = Vec::with_capacity(FRAME_COUNT);
+    let texture_upload_drop_count: u64 = 0;
+    let mut panic_count: usize = 0;
+
+    let start_time = Instant::now();
+
+    for frame_idx in 0..FRAME_COUNT {
+        let frame_start = Instant::now();
+        let clock_secs = start_time.elapsed().as_secs_f32();
+
+        let frame_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            render_frame_max_amp(
+                device,
+                queue,
+                &fx_pipeline,
+                &compositor,
+                &gamma,
+                &edge_blend,
+                &mut layers,
+                &output_targets,
+                &warp_rt_view,
+                clock_secs,
+            );
+        }));
+
+        if frame_result.is_err() {
+            panic_count += 1;
+        }
+
+        device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("device.poll failed");
+
+        let elapsed_ms = frame_start.elapsed().as_secs_f64() * 1000.0;
+        frame_times_ms.push(elapsed_ms);
+
+        if (frame_idx + 1) % 100 == 0 {
+            println!(
+                "[perf_zone_tagged_fx_layer_within_budget] frame {}/{FRAME_COUNT}: last={:.2}ms",
+                frame_idx + 1,
+                elapsed_ms
+            );
+        }
+    }
+
+    // ---- Compute statistics ----
+    frame_times_ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let min_ms = frame_times_ms[0];
+    let max_ms = *frame_times_ms.last().unwrap();
+    let p50_ms = percentile(&frame_times_ms, 50.0);
+    let p99_ms = percentile(&frame_times_ms, 99.0);
+    let total_frames = frame_times_ms.len();
+
+    // ---- Print results ----
+    println!();
+    println!("=== P3.1.2 Frame-Budget Gate: 1× zone-tagged FX layer (stub) ===");
+    println!("  Frames rendered:  {total_frames}");
+    println!("  Min frame time:   {min_ms:.2} ms");
+    println!("  p50 frame time:   {p50_ms:.2} ms");
+    println!("  p99 frame time:   {p99_ms:.2} ms");
+    println!("  Max frame time:   {max_ms:.2} ms");
+    println!("  Texture drops:    {texture_upload_drop_count}");
+    println!("  Panic count:      {panic_count}");
+    println!();
+    println!("  CI assertion:     p99 < 100 ms (regression guard)");
+    println!("  Show-day target:  p99 ≤ 16.6 ms on actual projector hardware");
+    println!(
+        "  NOTE: stub fixture (ripple_wash, zone_role = None); \
+         update to fx_zone_portal_drift in P3.5.3."
+    );
+    println!("=================================================================");
+
+    // ---- Assertions ----
+    assert_eq!(
+        texture_upload_drop_count, 0,
+        "texture upload drop count must be zero"
+    );
+    assert_eq!(
+        panic_count, 0,
+        "panic_count must be zero: {panic_count} frame(s) panicked"
+    );
+    // CI-portable loose gate (10× regression guard).
+    assert!(
+        p99_ms < 100.0,
+        "p99 frame time {p99_ms:.2} ms exceeds 100 ms CI regression gate \
+         (zone-tagged stub fixture: 1 FxLayer, {OUTPUT_COUNT} outputs, \
+         edge-blend {EDGE_BLEND_OVERLAP_PX}px)"
+    );
+    // Show-day acceptance: p99 ≤ 16.6 ms (one frame at 60 Hz).
+    // M-series baseline: ~11.5 ms p99 on Apple Silicon (2026-05-12).
+    assert!(
+        p99_ms <= 16.6,
+        "p99 frame time {p99_ms:.2} ms exceeds show-day budget of 16.6 ms \
+         (zone-tagged stub fixture: 1 FxLayer at max amplitude)"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Percentile helper
 // ---------------------------------------------------------------------------
 

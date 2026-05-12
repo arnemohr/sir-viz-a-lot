@@ -139,6 +139,39 @@ pub enum GlossaryTerm {
     DisplacementRipple,
     /// P2.1.1 — built-in preset: lens-refraction distortion at the mask edge.
     Refraction,
+    // -----------------------------------------------------------------------
+    // P3.1.1 — Phase 3 zone domain terms and role labels.
+    // -----------------------------------------------------------------------
+    /// P3.1.1 — semantic zone role: a transparent opening (window pane, glass
+    /// facade). Distinct from `ZoneTemplate` (a geometry shortcut).
+    ZoneRoleWindow,
+    /// P3.1.1 — semantic zone role: a visual passageway or threshold that
+    /// warrants through-the-surface effects.
+    ZoneRolePortal,
+    /// P3.1.1 — semantic zone role: a non-emitting blank region that should
+    /// remain dark (recessed area, shadow pocket).
+    ZoneRoleVoid,
+    /// P3.1.1 — semantic zone role: a surface that catches stray light from
+    /// a nearby bright zone (wall beside a lit window).
+    ZoneRoleSpill,
+    /// P3.1.1 — semantic zone role: the perimeter or boundary of a surface
+    /// feature (sill, reveal, trim).
+    ZoneRoleEdge,
+    /// P3.1.1 — semantic zone role: a surface intended to catch a key light
+    /// or colour accent (ceiling cove, accentuated panel).
+    ZoneRoleHighlight,
+    /// P3.1.1 — semantic zone role: a practical luminaire or architectural
+    /// element that emits light in the scene (sconce, lantern, ceiling
+    /// fixture).
+    ZoneRoleLightSource,
+    /// P3.1.1 — an FX preset whose behaviour changes based on the zone tag of
+    /// the layer it is applied to.
+    ZoneAwareShader,
+    /// P3.1.1 — the semantic role tag attached to a mask polygon, drawn from
+    /// the closed seven-role palette (Window, Portal, Void, Spill, Edge,
+    /// Highlight, LightSource). Different from `ZoneTemplate` (a geometry
+    /// shortcut for common polygon shapes).
+    ZoneTag,
 }
 
 /// A single glossary entry: a short headline and a 1–2 sentence body.
@@ -573,6 +606,81 @@ pub fn entry(t: GlossaryTerm) -> GlossaryEntry {
                    surface appearance.  Index controls how strongly light \
                    bends; blur softens the distorted region.",
         },
+        // -------------------------------------------------------------------
+        // P3.1.1 — Phase 3 zone domain terms.
+        // -------------------------------------------------------------------
+        GlossaryTerm::ZoneRoleWindow => GlossaryEntry {
+            headline: "Zone Role: Window",
+            body: "Tags a mask as a transparent opening (window pane, glass \
+                   facade).  Zone-aware presets such as \"light spill from \
+                   window zones\" read this tag and activate their effect only \
+                   on layers with this role.  Unlike Zone Template, this is a \
+                   semantic label — not a geometry shortcut.",
+        },
+        GlossaryTerm::ZoneRolePortal => GlossaryEntry {
+            headline: "Zone Role: Portal",
+            body: "Tags a mask as a visual passageway or threshold (archway, \
+                   doorway, gap in a surface).  Presets such as \"particle drift \
+                   through portal zones\" spawn their effect inside this \
+                   boundary.  Apply to any region where you want through-the-\
+                   surface-style visual depth.",
+        },
+        GlossaryTerm::ZoneRoleVoid => GlossaryEntry {
+            headline: "Zone Role: Void",
+            body: "Tags a mask as a non-emitting blank region intended to stay \
+                   dark — a recessed area, shadow pocket, or unlit surface.  \
+                   Zone-aware presets skip or invert their effect for Void-tagged \
+                   layers so the dark region stays visually quiet.",
+        },
+        GlossaryTerm::ZoneRoleSpill => GlossaryEntry {
+            headline: "Zone Role: Spill",
+            body: "Tags a mask as a surface that catches stray light from a \
+                   nearby bright zone — the wall beside a lit window, or a \
+                   floor below a lantern.  Presets respond with a softer, \
+                   indirect-light treatment rather than the full brightness \
+                   reserved for the source zone.",
+        },
+        GlossaryTerm::ZoneRoleEdge => GlossaryEntry {
+            headline: "Zone Role: Edge",
+            body: "Tags a mask as the perimeter or boundary of a surface feature \
+                   (window sill, door reveal, architectural trim).  The \
+                   \"ripple at edge zones\" preset amplifies its wave effect \
+                   specifically at Edge-tagged layers.  Distinct from the mask \
+                   feather, which is a render setting rather than a semantic role.",
+        },
+        GlossaryTerm::ZoneRoleHighlight => GlossaryEntry {
+            headline: "Zone Role: Highlight",
+            body: "Tags a mask as a surface intended to catch a key light or \
+                   colour accent — a ceiling cove, decorative panel, or any \
+                   area you want to pop.  Zone-aware presets can use this tag \
+                   to brighten or saturate the region relative to the rest of \
+                   the scene.",
+        },
+        GlossaryTerm::ZoneRoleLightSource => GlossaryEntry {
+            headline: "Zone Role: Light Source",
+            body: "Tags a mask as a practical luminaire or architectural \
+                   element that emits light in the scene — a sconce, lantern, \
+                   or ceiling fixture.  Phase 5 will let fixtures bind to \
+                   Light Source zone activity; in Phase 3 this tag acts as a \
+                   semantic label FX presets can branch on.",
+        },
+        GlossaryTerm::ZoneAwareShader => GlossaryEntry {
+            headline: "Zone-Aware Shader",
+            body: "An FX preset whose behaviour adapts based on the zone tag \
+                   of the layer it is applied to.  A zone-aware preset reads \
+                   the tag at runtime and activates its effect only when the \
+                   tag matches its target role; applying it to an untagged layer \
+                   produces a neutral (transparent) output.",
+        },
+        GlossaryTerm::ZoneTag => GlossaryEntry {
+            headline: "Zone Tag",
+            body: "The semantic role attached to a mask polygon, chosen from \
+                   the closed seven-role palette: Window, Portal, Void, Spill, \
+                   Edge, Highlight, or Light Source.  Set the tag in the zone \
+                   palette inside Mask mode.  Unlike Zone Template (a geometry \
+                   shortcut for common polygon shapes), a Zone Tag is purely \
+                   semantic — it does not change the polygon's shape.",
+        },
     }
 }
 
@@ -655,6 +763,16 @@ pub fn all_terms() -> &'static [GlossaryTerm] {
         GlossaryTerm::MaskBoundedFluid,
         GlossaryTerm::DisplacementRipple,
         GlossaryTerm::Refraction,
+        // P3.1.1 — Phase 3 zone domain terms.
+        GlossaryTerm::ZoneRoleWindow,
+        GlossaryTerm::ZoneRolePortal,
+        GlossaryTerm::ZoneRoleVoid,
+        GlossaryTerm::ZoneRoleSpill,
+        GlossaryTerm::ZoneRoleEdge,
+        GlossaryTerm::ZoneRoleHighlight,
+        GlossaryTerm::ZoneRoleLightSource,
+        GlossaryTerm::ZoneAwareShader,
+        GlossaryTerm::ZoneTag,
     ]
 }
 
@@ -731,7 +849,7 @@ mod tests {
     #[test]
     fn all_terms_covers_every_variant() {
         // Bump this when you add a new GlossaryTerm variant.
-        const EXPECTED_VARIANT_COUNT: usize = 63;
+        const EXPECTED_VARIANT_COUNT: usize = 72;
         assert_eq!(
             super::all_terms().len(),
             EXPECTED_VARIANT_COUNT,

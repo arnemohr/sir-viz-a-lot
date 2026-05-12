@@ -92,6 +92,15 @@ a parameter map. The shipped preset, `mask_edge_ripple_wash`, applies an
 animated ripple wash along the edges of the layer's mask polygon. The demo
 project `fx-ripple-wash` in the launcher shows the preset in action.
 
+## Spatial Zones (v0.7)
+
+Operators can tag any mask polygon with a semantic zone role — Window, Portal,
+Void, Spill, Edge, Highlight, or Light Source — from a small palette inside Mask
+mode. Zone-aware FX presets read these tags at runtime and adapt their
+behaviour to the tagged surface type, without additional configuration.
+
+_Full prose to be added in P3.7.3._
+
 ## FX Preset Library (v0.6)
 
 rmap ships 14 built-in procedural presets across three families — **Wave**

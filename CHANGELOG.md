@@ -4,7 +4,19 @@ All notable changes to rmap are documented here.
 
 ---
 
-## [Unreleased]
+## [Unreleased] — v0.7
+
+### Spatial Zones
+
+_Placeholder — to be filled in P3.7.2._
+
+### Zone-Consuming FX Presets
+
+_Placeholder — to be filled in P3.7.2._
+
+### Zone Authoring UI
+
+_Placeholder — to be filled in P3.7.2._
 
 ---
 
