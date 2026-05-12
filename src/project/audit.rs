@@ -1486,6 +1486,8 @@ mod tests {
         p.layers[0].kind = crate::project::schema::LayerKind::FxLayer {
             preset_id: "definitely_fake".into(),
             params: HashMap::new(),
+            seed: 0,
+            t_layer_added_secs: 0.0,
         };
         let findings = ProjectAudit::run(&p, &AuditEnv::default());
         let unknown: Vec<_> = findings
@@ -1510,6 +1512,8 @@ mod tests {
         p.layers[0].kind = crate::project::schema::LayerKind::FxLayer {
             preset_id: crate::render::fx_presets::RIPPLE_WASH_PRESET_ID.into(),
             params: HashMap::new(),
+            seed: 0,
+            t_layer_added_secs: 0.0,
         };
         let findings = ProjectAudit::run(&p, &AuditEnv::default());
         assert!(
@@ -1529,6 +1533,8 @@ mod tests {
         p.layers[0].kind = crate::project::schema::LayerKind::FxLayer {
             preset_id: String::new(),
             params: HashMap::new(),
+            seed: 0,
+            t_layer_added_secs: 0.0,
         };
         let findings = ProjectAudit::run(&p, &AuditEnv::default());
         assert!(

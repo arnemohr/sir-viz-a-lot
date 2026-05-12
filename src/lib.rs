@@ -23,6 +23,7 @@ pub mod project;
 /// same underlying `.rs` files; the binary just gets more of them.
 #[cfg(feature = "v3")]
 pub mod render {
+    pub mod fx_compute;
     pub mod fx_presets;
     pub mod sdf;
     pub mod treatments;

@@ -3801,49 +3801,62 @@ fn render_m5_pipeline(
             // Unknown preset_id → no fx_texture written → layer invisible
             // (matches the P0.5.1 audit-warns-but-renders contract).
             // P2.2.3: dispatch is now registry-driven via fx_presets::dispatch.
-            let fx_tex_view: Option<&wgpu::TextureView> =
-                if let schema::LayerKind::FxLayer { preset_id, params } = &cfg.kind {
-                    if crate::render::fx_presets::fx_is_registered(preset_id) {
-                        if let Some((_tex, fx_view)) = ls.fx_texture.as_ref() {
-                            // sync_mesh_and_mask updates the SDF from cfg.warp;
-                            // call it here so sdf_view() is up to date before
-                            // dispatch reads it.
-                            ls.warp_renderer.sync_mesh_and_mask(
-                                &renderer.gpu.device,
-                                &renderer.gpu.queue,
-                                &cfg.warp,
-                            );
-                            let clock_secs = clock.elapsed().as_secs_f32();
-                            // Collect the views before calling dispatch so the
-                            // borrow checker sees separate field borrows.
-                            let sdf_v = ls.warp_renderer.sdf_view();
-                            let rendered = crate::render::fx_presets::dispatch(
-                                preset_id,
-                                fx_pipelines,
-                                crate::render::fx_presets::FxShaderInputs {
-                                    device: &renderer.gpu.device,
-                                    queue: &renderer.gpu.queue,
-                                    encoder: &mut encoder,
-                                    dst: fx_view,
-                                    sdf_view: sdf_v,
-                                    clock_secs,
-                                    params,
-                                    source: None,
-                                    particle_ssbo: None,
-                                },
-                            );
-                            if rendered { Some(fx_view) } else { None }
-                        } else {
-                            None
-                        }
+            let fx_tex_view: Option<&wgpu::TextureView> = if let schema::LayerKind::FxLayer {
+                preset_id,
+                params,
+                seed,
+                t_layer_added_secs,
+            } = &cfg.kind
+            {
+                if crate::render::fx_presets::fx_is_registered(preset_id) {
+                    if let Some((_tex, fx_view)) = ls.fx_texture.as_ref() {
+                        // sync_mesh_and_mask updates the SDF from cfg.warp;
+                        // call it here so sdf_view() is up to date before
+                        // dispatch reads it.
+                        ls.warp_renderer.sync_mesh_and_mask(
+                            &renderer.gpu.device,
+                            &renderer.gpu.queue,
+                            &cfg.warp,
+                        );
+                        let clock_secs = clock.elapsed().as_secs_f32();
+                        // Collect the views before calling dispatch so the
+                        // borrow checker sees separate field borrows.
+                        let sdf_v = ls.warp_renderer.sdf_view();
+                        // P2.5.1: output size for particle vertex shader.
+                        let out_size = outputs
+                            .first()
+                            .map(|o| [o.config.width, o.config.height])
+                            .unwrap_or([1920, 1080]);
+                        let rendered = crate::render::fx_presets::dispatch(
+                            preset_id,
+                            fx_pipelines,
+                            crate::render::fx_presets::FxShaderInputs {
+                                device: &renderer.gpu.device,
+                                queue: &renderer.gpu.queue,
+                                encoder: &mut encoder,
+                                dst: fx_view,
+                                sdf_view: sdf_v,
+                                clock_secs,
+                                params,
+                                source: None,
+                                particle_ssbo: None,
+                                seed: *seed,
+                                t_layer_added_secs: *t_layer_added_secs,
+                                output_size: out_size,
+                            },
+                        );
+                        if rendered { Some(fx_view) } else { None }
                     } else {
-                        // Unknown preset_id — the P0.5.1 audit already emitted
-                        // a warning. Skip rendering this layer.
                         None
                     }
                 } else {
+                    // Unknown preset_id — the P0.5.1 audit already emitted
+                    // a warning. Skip rendering this layer.
                     None
-                };
+                }
+            } else {
+                None
+            };
 
             // Resolve the source texture view: FxLayer uses fx_tex_view;
             // Video layers use video_texture (uploaded by the drain above);

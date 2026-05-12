@@ -55,6 +55,7 @@
 
 use std::collections::HashMap;
 
+use crate::render::fx_compute::FxComputePipeline;
 use crate::render::sdf::SDF_HELPER_WGSL;
 
 /// Internal pipeline-shape tag; not user-visible. Drives dispatch routing in
@@ -93,6 +94,11 @@ pub fn fx_registry() -> &'static [FxPresetEntry] {
             preset_id: EDGE_WAVE_WASH_PRESET_ID,
             label: "Mask-edge wave wash",
             family: FxFamily::Fragment,
+        },
+        FxPresetEntry {
+            preset_id: PARTICLES_IDENTITY_PRESET_ID,
+            label: "Particles (identity)",
+            family: FxFamily::ComputeParticle,
         },
     ]
 }
@@ -226,6 +232,20 @@ const EDGE_WAVE_WASH_DESCRIPTORS: &[FxParamDescriptor] = &[
     },
 ];
 
+/// P2.5.1 — Param descriptors for the `particles_identity` preset.
+///
+/// FxParamsUniform field aliasing:
+///   `particle_count` → `wavelength` (1..=16, default 16).
+#[allow(dead_code)] // referenced only through `fx_param_descriptors` (P2.8.1 UI)
+const PARTICLES_IDENTITY_DESCRIPTORS: &[FxParamDescriptor] = &[FxParamDescriptor {
+    key: "particle_count",
+    label: "Particle count (1–16)",
+    min: 1.0,
+    max: 16.0,
+    default: 16.0,
+    max_particle_count: Some(16),
+}];
+
 /// Param descriptors for the named FX preset. Returns an empty slice for
 /// unknown presets and for presets with no tunable parameters.
 #[allow(dead_code)] // consumed by P2.5.6 mutation + P2.8.1 browser UI
@@ -233,6 +253,7 @@ pub fn fx_param_descriptors(preset_id: &str) -> &'static [FxParamDescriptor] {
     match preset_id {
         RIPPLE_WASH_PRESET_ID => RIPPLE_WASH_DESCRIPTORS,
         EDGE_WAVE_WASH_PRESET_ID => EDGE_WAVE_WASH_DESCRIPTORS,
+        PARTICLES_IDENTITY_PRESET_ID => PARTICLES_IDENTITY_DESCRIPTORS,
         _ => &[],
     }
 }
@@ -242,6 +263,9 @@ pub const RIPPLE_WASH_PRESET_ID: &str = "mask_edge_ripple_wash";
 
 /// Preset id for the mask-edge wave wash effect (P2.4.3).
 pub const EDGE_WAVE_WASH_PRESET_ID: &str = "mask_edge_wave_wash";
+
+/// P2.5.1 — Preset id for the particles identity effect.
+pub const PARTICLES_IDENTITY_PRESET_ID: &str = "particles_identity";
 
 /// Per-frame inputs that every FX preset receives at dispatch time.
 ///
@@ -277,6 +301,19 @@ pub struct FxShaderInputs<'a> {
     /// (P2.5.1's `FxComputePipeline`). Fragment presets leave this `None`.
     #[allow(dead_code)] // wired by P2.5.1
     pub particle_ssbo: Option<&'a wgpu::Buffer>,
+
+    /// P2.5.1 — RNG seed from `LayerKind::FxLayer.seed`. Fragment presets
+    /// ignore this; compute-particle presets use it for deterministic positions.
+    pub seed: u64,
+
+    /// P2.5.1 — seconds from `LayerKind::FxLayer.t_layer_added_secs`.
+    /// Compute presets derive particle-system local time as
+    /// `clock_secs - t_layer_added_secs`. Fragment presets ignore this.
+    pub t_layer_added_secs: f32,
+
+    /// P2.5.1 — output resolution `[width, height]`. Particle vertex shader
+    /// uses this to convert positions to NDC. Fragment presets ignore this.
+    pub output_size: [u32; 2],
 }
 
 /// Route `preset_id` to its registered render implementation.
@@ -316,6 +353,38 @@ pub fn dispatch(preset_id: &str, pipelines: &FxPipelines, inputs: FxShaderInputs
                 inputs.sdf_view,
                 inputs.clock_secs,
                 &params_uniform,
+            );
+            true
+        }
+        PARTICLES_IDENTITY_PRESET_ID => {
+            // Particle count from params; clamped to 1..=16.
+            let n_particles = inputs
+                .params
+                .get("particle_count")
+                .copied()
+                .unwrap_or(16.0)
+                .clamp(1.0, 16.0) as u32;
+
+            // Compute pass: write particle positions into the write SSBO.
+            pipelines.particles_identity.dispatch_compute(
+                inputs.queue,
+                inputs.device,
+                inputs.encoder,
+                n_particles,
+                inputs.seed,
+                inputs.clock_secs,
+                inputs.t_layer_added_secs,
+                inputs.params,
+            );
+
+            // Render pass: draw quads for each particle into dst.
+            pipelines.particles_identity.draw_particles(
+                inputs.device,
+                inputs.queue,
+                inputs.encoder,
+                inputs.dst,
+                n_particles,
+                inputs.output_size,
             );
             true
         }
@@ -546,10 +615,12 @@ pub struct FxPipelines {
     pub ripple_wash: FxPresetPipeline,
     /// P2.4.3 — mask-edge wave wash (traveling wave along edge).
     pub edge_wave_wash: FxEdgeWaveWashPipeline,
+    /// P2.5.1 — particles identity (stationary grid of white dots).
+    pub particles_identity: FxComputePipeline,
 }
 
 impl FxPipelines {
-    /// Build both FX preset pipelines for the given surface format.
+    /// Build all FX preset pipelines for the given surface format.
     ///
     /// Called once in `init_render_graph`; the result is stored on
     /// `EditingState` as `fx_pipelines` and passed to `dispatch` each frame.
@@ -557,6 +628,7 @@ impl FxPipelines {
         Self {
             ripple_wash: FxPresetPipeline::new_ripple_wash(device, target_format),
             edge_wave_wash: FxEdgeWaveWashPipeline::new(device, target_format),
+            particles_identity: FxComputePipeline::new_particles_identity(device, target_format),
         }
     }
 }
@@ -893,6 +965,29 @@ impl FxParamsUniform {
             _pad1: 0.0,
         }
     }
+
+    /// P2.5.1 — Build from the `LayerKind::FxLayer.params` HashMap for the
+    /// `particles_identity` preset.
+    ///
+    /// # Field mapping
+    ///
+    /// | HashMap key      | maps to uniform field | default |
+    /// |------------------|-----------------------|---------|
+    /// | `particle_count` | `wavelength`          | 16.0    |
+    ///
+    /// All other fields are zero (unused by the shader).
+    pub fn for_particles_identity(params: &HashMap<String, f32>) -> Self {
+        Self {
+            wavelength: params.get("particle_count").copied().unwrap_or(16.0),
+            speed: 0.0,
+            falloff: 0.0,
+            base_r: 0.0,
+            base_g: 0.0,
+            base_b: 0.0,
+            _pad0: 0.0,
+            _pad1: 0.0,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1139,5 +1234,74 @@ mod tests {
         assert_eq!(u.base_b, 0.0, "base_b must be 0.0 (unused)");
         assert_eq!(u._pad0, 0.0, "_pad0 must be 0.0");
         assert_eq!(u._pad1, 0.0, "_pad1 must be 0.0");
+    }
+
+    // --- P2.5.1 particles_identity registry tests ---
+
+    /// P2.5.1 acceptance: `particles_identity` is in the registry.
+    #[test]
+    fn particles_identity_is_registered() {
+        assert!(
+            fx_is_registered(PARTICLES_IDENTITY_PRESET_ID),
+            "particles_identity must be in fx_registry()"
+        );
+    }
+
+    /// P2.5.1 acceptance: the registry entry for `particles_identity` has
+    /// `FxFamily::ComputeParticle`.
+    #[test]
+    fn particles_identity_family_is_compute_particle() {
+        let entry = fx_registry()
+            .iter()
+            .find(|e| e.preset_id == PARTICLES_IDENTITY_PRESET_ID)
+            .expect("particles_identity must be in fx_registry");
+        assert_eq!(entry.family, FxFamily::ComputeParticle);
+    }
+
+    /// P2.5.1 acceptance: `particles_identity` descriptors are non-empty and
+    /// have `max_particle_count = Some(16)` on the `particle_count` key.
+    #[test]
+    fn particles_identity_descriptors_valid() {
+        let descs = fx_param_descriptors(PARTICLES_IDENTITY_PRESET_ID);
+        assert!(
+            !descs.is_empty(),
+            "particles_identity must have at least one descriptor"
+        );
+        let pc = descs
+            .iter()
+            .find(|d| d.key == "particle_count")
+            .expect("particle_count descriptor must be present");
+        assert_eq!(
+            pc.max_particle_count,
+            Some(16),
+            "particle_count max_particle_count must be Some(16)"
+        );
+        assert_eq!(pc.default, 16.0, "default particle_count must be 16");
+    }
+
+    /// P2.5.1 acceptance: `FxParamsUniform::for_particles_identity` maps
+    /// `particle_count` to `wavelength` and defaults to 16 when the key is absent.
+    #[test]
+    fn particles_identity_params_uniform_defaults() {
+        let u = FxParamsUniform::for_particles_identity(&HashMap::new());
+        assert_eq!(
+            u.wavelength, 16.0,
+            "particle_count (default) → wavelength = 16"
+        );
+        assert_eq!(u.speed, 0.0, "speed must be 0.0 (unused)");
+        assert_eq!(u.falloff, 0.0, "falloff must be 0.0 (unused)");
+        assert_eq!(u.base_r, 0.0, "base_r must be 0.0 (unused)");
+        assert_eq!(u.base_g, 0.0, "base_g must be 0.0 (unused)");
+        assert_eq!(u.base_b, 0.0, "base_b must be 0.0 (unused)");
+    }
+
+    /// P2.5.1 acceptance: `FxParamsUniform::for_particles_identity` respects
+    /// the `particle_count` key when present.
+    #[test]
+    fn particles_identity_params_uniform_custom_count() {
+        let mut map = HashMap::new();
+        map.insert("particle_count".into(), 9.0_f32);
+        let u = FxParamsUniform::for_particles_identity(&map);
+        assert_eq!(u.wavelength, 9.0, "particle_count=9 → wavelength=9");
     }
 }

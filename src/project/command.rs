@@ -2814,6 +2814,8 @@ mod tests {
         let new_kind = crate::project::schema::LayerKind::FxLayer {
             preset_id: "ripple_wash".to_string(),
             params,
+            seed: 0,
+            t_layer_added_secs: 0.0,
         };
 
         // Apply: replaces the Svg kind with FxLayer.
@@ -4566,5 +4568,82 @@ mod tests {
                 prop_assert_eq!(after_apply, after_redo);
             }
         }
+    }
+
+    /// P2.7.1 — `SetLayerEffects` with a reordered Vec round-trips through
+    /// apply + reverse correctly. Verifies the Effects-Vec Reverse rule 2
+    /// for the drag-reorder path specifically: apply installs the new order;
+    /// undo (apply the returned reverse) restores the original order
+    /// byte-exactly.
+    ///
+    /// Start: `[Color, Blur, Transform]` — the default chain from
+    /// `default_effect_chain()`.
+    /// Reorder to: `[Blur, Color, Transform]` (drag Blur above Color,
+    /// src=1, dst=0: remove(1)→[Color,Transform], insert(0,Blur)→result).
+    #[test]
+    fn set_layer_effects_reorder_round_trips() {
+        use crate::effects::{Effect, default_effect_chain};
+
+        let mut p = fresh_project();
+        // Install a known three-element chain: [Color, Blur, Transform].
+        p.layers[0].effects = default_effect_chain();
+        let original = p.layers[0].effects.clone();
+        assert_eq!(original.len(), 3, "default chain should have 3 effects");
+        assert!(
+            matches!(original[0], Effect::Color { .. }),
+            "original[0] should be Color"
+        );
+        assert!(
+            matches!(original[1], Effect::Blur { .. }),
+            "original[1] should be Blur"
+        );
+        assert!(
+            matches!(original[2], Effect::Transform { .. }),
+            "original[2] should be Transform"
+        );
+
+        // Build reordered chain: [Blur, Color, Transform].
+        let mut reordered = original.clone();
+        let item = reordered.remove(1); // remove Blur
+        reordered.insert(0, item); // insert before Color
+        assert!(
+            matches!(reordered[0], Effect::Blur { .. }),
+            "reordered[0] should be Blur"
+        );
+        assert!(
+            matches!(reordered[1], Effect::Color { .. }),
+            "reordered[1] should be Color"
+        );
+        assert!(
+            matches!(reordered[2], Effect::Transform { .. }),
+            "reordered[2] should be Transform"
+        );
+
+        // Build and apply the mutation.
+        let mutation = p.set_layer_effects_mutation(0, reordered.clone());
+        let reverse = mutation.apply(&mut p);
+
+        // After apply: chain should match the reordered order.
+        assert!(
+            matches!(p.layers[0].effects[0], Effect::Blur { .. }),
+            "after apply: effects[0] should be Blur"
+        );
+        assert!(
+            matches!(p.layers[0].effects[1], Effect::Color { .. }),
+            "after apply: effects[1] should be Color"
+        );
+        assert!(
+            matches!(p.layers[0].effects[2], Effect::Transform { .. }),
+            "after apply: effects[2] should be Transform"
+        );
+
+        // Apply the reverse (undo): should restore the original order.
+        let _ = reverse.apply(&mut p);
+        let after_undo = serde_json::to_value(&p.layers[0].effects).unwrap();
+        let original_val = serde_json::to_value(&original).unwrap();
+        assert_eq!(
+            after_undo, original_val,
+            "after undo: effect chain should be restored to original order"
+        );
     }
 }

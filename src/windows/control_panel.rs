@@ -1171,25 +1171,70 @@ fn show_effects_tab(ui: &mut Ui, project: &mut Project, st: &mut ControlPanelSta
     // caller ignores it.
     #[cfg(feature = "v3")]
     let mut staged_changes: Vec<(usize, EffectChange)> = Vec::new();
+    // P2.7.1: drag-reorder state — (source_idx, target_idx) captured during
+    // the loop and applied after all borrows on project.layers are released.
+    // The mutation dispatch is v3-only; the variable is assigned in the
+    // unconditional drop handler, so suppress the unused-assignment warning
+    // when building without v3.
+    #[allow(unused_assignments, unused_mut)]
+    let mut pending_reorder: Option<(usize, usize)> = None;
     for idx in 0..effects_len {
-        let effect = &mut project.layers[layer_idx].effects[idx];
-        egui::CollapsingHeader::new(effect_label(effect))
-            .id_salt(idx)
-            .default_open(true)
-            .show(ui, |ui| {
-                #[cfg(feature = "v3")]
-                {
-                    if let Some(change) = show_effect(ui, idx, effect, true, layer_idx) {
-                        staged_changes.push((idx, change));
-                    }
-                }
-                #[cfg(not(feature = "v3"))]
-                {
-                    // v2 has no Advanced panel; always show JSON for External.
-                    // layer_idx is unused in non-v3 but present for signature uniformity.
-                    let _ = show_effect(ui, idx, effect, true, layer_idx);
-                }
+        // P2.7.1: wrap each row in a horizontal layout so the drag handle
+        // sits at the left of the CollapsingHeader. The drop zone spans the
+        // entire row; the drag source is scoped to the handle only so the
+        // CollapsingHeader click-to-expand is not captured by the drag sense.
+        let (_, drop_payload) = ui.dnd_drop_zone::<usize, _>(egui::Frame::default(), |ui| {
+            ui.horizontal(|ui| {
+                // Drag handle: ≡ glyph, draggable, payload = source index.
+                let handle = ui.add(egui::Label::new("\u{2261}").sense(egui::Sense::drag()));
+                handle.dnd_set_drag_payload(idx);
+
+                let effect = &mut project.layers[layer_idx].effects[idx];
+                egui::CollapsingHeader::new(effect_label(effect))
+                    .id_salt(idx)
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        #[cfg(feature = "v3")]
+                        {
+                            if let Some(change) = show_effect(ui, idx, effect, true, layer_idx) {
+                                staged_changes.push((idx, change));
+                            }
+                        }
+                        #[cfg(not(feature = "v3"))]
+                        {
+                            // v2 has no Advanced panel; always show JSON for External.
+                            // layer_idx is unused in non-v3 but present for signature uniformity.
+                            let _ = show_effect(ui, idx, effect, true, layer_idx);
+                        }
+                    });
             });
+        });
+        // If a drag payload was dropped onto this row's zone, record the
+        // (source, target) pair. We defer the reorder until after the loop
+        // so the mutable borrow on project.layers is fully released first.
+        if let Some(source) = drop_payload {
+            let source_idx = *source;
+            if source_idx != idx {
+                pending_reorder = Some((source_idx, idx));
+            }
+        }
+    }
+    // P2.7.1 (v3 only): apply the drag-reorder as a single SetLayerEffects
+    // mutation so undo/redo round-trips correctly (Effects-Vec Reverse rule 2).
+    #[cfg(feature = "v3")]
+    if let Some((src, dst)) = pending_reorder {
+        let old = project.layers[layer_idx].effects.clone();
+        let mut new = old.clone();
+        // "Dropped onto row dst" means: the dragged item should occupy slot
+        // dst in the final array. remove-then-insert(dst) achieves this
+        // regardless of whether src < dst or src > dst:
+        //   drag B onto C (src=1,dst=2): remove→[A,C], insert(2,B)→[A,C,B] ✓
+        //   drag C onto A (src=2,dst=0): remove→[A,B], insert(0,C)→[C,A,B] ✓
+        //   drag B onto A (src=1,dst=0): remove→[A,C], insert(0,B)→[B,A,C] ✓
+        let item = new.remove(src);
+        new.insert(dst, item);
+        st.pending_mutations
+            .push(project.set_layer_effects_mutation(layer_idx, new));
     }
     // 003-T1.21/T1.22: after the loop, apply staged changes.
     // T1.22: ModulatorSwitch emits SetModulator (per-slot, whole-enum Reverse);

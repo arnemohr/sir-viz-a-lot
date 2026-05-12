@@ -124,6 +124,17 @@ pub enum LayerKind {
         preset_id: String,
         #[serde(default)]
         params: HashMap<String, f32>,
+        /// P2.5.1 — RNG seed for deterministic particle layouts.
+        /// Defaults to 0 for older projects; the launcher / Add-layer
+        /// flow picks a fresh u64 for new layers (P2.8.1 wires this).
+        #[serde(default)]
+        seed: u64,
+        /// P2.5.1 — seconds since the project clock at which this
+        /// layer was added. The compute shader uses `clock_secs -
+        /// t_layer_added_secs` as the system's local time. Defaults
+        /// to 0.0 for older projects.
+        #[serde(default)]
+        t_layer_added_secs: f32,
     },
     /// v0.4 W6 — live NDI input as a layer source. Real receiver lands
     /// in P0.6.2; the scaffold carries the source name only and renders
@@ -941,6 +952,59 @@ mod tests {
                 lc.effects.len(),
                 lc.effects
             ),
+        }
+    }
+
+    // --- P2.5.1 schema round-trip tests ---
+
+    /// P2.5.1 acceptance: `LayerKind::FxLayer` with explicit `seed` and
+    /// `t_layer_added_secs` serializes and deserializes correctly.
+    #[test]
+    fn fx_layer_seed_round_trip() {
+        let kind = LayerKind::FxLayer {
+            preset_id: "particles_identity".into(),
+            params: HashMap::new(),
+            seed: 42,
+            t_layer_added_secs: 1.5,
+        };
+        let json = serde_json::to_string(&kind).expect("serialize");
+        let back: LayerKind = serde_json::from_str(&json).expect("deserialize");
+        match back {
+            LayerKind::FxLayer {
+                seed,
+                t_layer_added_secs,
+                ..
+            } => {
+                assert_eq!(seed, 42, "seed must round-trip");
+                assert!(
+                    (t_layer_added_secs - 1.5).abs() < 1e-6,
+                    "t_layer_added_secs must round-trip, got {t_layer_added_secs}"
+                );
+            }
+            other => panic!("expected FxLayer, got {:?}", other),
+        }
+    }
+
+    /// P2.5.1 acceptance: an older-format `FxLayer` JSON without `seed` /
+    /// `t_layer_added_secs` loads with both fields defaulting to 0 / 0.0.
+    #[test]
+    fn fx_layer_old_format_defaults_seed_and_t_layer() {
+        // Simulate a v7 project file that predates P2.5.1 (no seed/t_layer_added_secs).
+        let json = r#"{"FxLayer":{"preset_id":"mask_edge_ripple_wash","params":{}}}"#;
+        let kind: LayerKind = serde_json::from_str(json).expect("old-format FxLayer must load");
+        match kind {
+            LayerKind::FxLayer {
+                seed,
+                t_layer_added_secs,
+                ..
+            } => {
+                assert_eq!(seed, 0, "seed must default to 0 for old-format FxLayer");
+                assert_eq!(
+                    t_layer_added_secs, 0.0,
+                    "t_layer_added_secs must default to 0.0 for old-format FxLayer"
+                );
+            }
+            other => panic!("expected FxLayer, got {:?}", other),
         }
     }
 }
