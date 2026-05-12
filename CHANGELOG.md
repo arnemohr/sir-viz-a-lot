@@ -4,6 +4,22 @@ All notable changes to rmap are documented here.
 
 ---
 
+## [Unreleased] — v0.8
+
+### Scene Templates
+
+<!-- P4.9.2 will fill this section. -->
+
+### Scene Wizard
+
+<!-- P4.9.2 will fill this section. -->
+
+### Selected-Layer Scene Card
+
+<!-- P4.9.2 will fill this section. -->
+
+---
+
 ## [0.7.0] — 2026-05-13
 
 v0.7 adds spatial zones as first-class authored objects: operators draw a

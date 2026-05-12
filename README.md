@@ -111,6 +111,13 @@ Mask mode for a concise definition.
 Old projects without zone tags load and render identically; the schema migration
 adds `zone_role: null` automatically.
 
+## Scene Grammars (v0.8)
+
+<!-- P4.9.3 will expand this section with full prose. -->
+Scene templates let operators build a complete immersive scene in under five
+minutes: pick a template, assign a few media assets, map zone roles, and
+confirm.
+
 ## FX Preset Library (v0.6)
 
 rmap ships 14 built-in procedural presets across three families — **Wave**
