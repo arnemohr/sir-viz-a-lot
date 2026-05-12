@@ -22,11 +22,13 @@ use egui::Ui;
 
 use crate::project::schema::{BlendMode, LayerKind, Project};
 use crate::windows::control_panel::{
-    ControlPanelAction, ControlPanelState, EffectChange, command_checkbox, command_dragvalue_u32,
-    command_slider, effect_label, show_effect,
+    ControlPanelAction, ControlPanelState, EffectChange, command_checkbox, command_dragvalue_f32,
+    command_dragvalue_u32, command_slider, effect_label, show_effect,
 };
 use crate::windows::glossary::{GlossaryTerm, glossary_label};
-use crate::windows::scene_editor::{SceneEditorState, Selection};
+use crate::windows::scene_editor::{
+    SceneEditorState, Selection, effective_static_transform, mutate_transform_effect,
+};
 
 // ---------------------------------------------------------------------------
 // T3.18 — stable id_source strings for CollapsingHeader / ScrollArea.
@@ -49,6 +51,11 @@ const HDR_VIDEO: &str = "adv_video";
 const HDR_TREATMENT: &str = "adv_treatment";
 // P1.2.4 — fit-mode + focal-point sub-section inside "Selected layer".
 const HDR_SOURCE_FIT: &str = "adv_source_fit";
+// P1.UX — Transform + Placement sub-sections (P/S/R, opacity, warp
+// summary) — moved from the right-edge Inspector for the v0.5 layout
+// consolidation.
+const HDR_TRANSFORM: &str = "adv_transform";
+const HDR_PLACEMENT: &str = "adv_placement";
 
 /// Render the Advanced panel body. Called from `control_panel::show` when
 /// `st.advanced_open` is `true`, inside a `SidePanel::right("rmap_advanced")`.
@@ -192,6 +199,27 @@ pub fn show(
                         ui.label("Layer index out of range.");
                         return;
                     }
+
+                    // Header strip: layer id + tiny separator. Mirrors
+                    // the cue the right-edge inspector used to give
+                    // ("you're editing this layer").
+                    ui.strong(project.layers[layer_idx].id.clone());
+                    ui.add_space(2.0);
+
+                    // --------------------------------------------------------
+                    // P1.UX — Transform (position / scale / rotate / opacity)
+                    // moved from the right-edge Inspector. Lives at the top
+                    // because "where the layer is" is the operator's first
+                    // question; blend mode + treatment come after.
+                    // --------------------------------------------------------
+                    egui::CollapsingHeader::new("Transform")
+                        .id_salt(HDR_TRANSFORM)
+                        .default_open(true)
+                        .show(ui, |ui| {
+                            show_transform_section(ui, project, st, layer_idx);
+                        });
+
+                    ui.add_space(4.0);
 
                     // --------------------------------------------------------
                     // T3.16 — Blend mode picker
@@ -496,6 +524,20 @@ pub fn show(
                     ui.add_space(4.0);
 
                     // --------------------------------------------------------
+                    // P1.UX — Placement / Warp summary (lifted from the
+                    // right-edge Inspector). Read-out of the current warp
+                    // grid + Edit warp / Edit mask buttons.
+                    // --------------------------------------------------------
+                    egui::CollapsingHeader::new("Placement")
+                        .id_salt(HDR_PLACEMENT)
+                        .default_open(false)
+                        .show(ui, |ui| {
+                            show_placement_section(ui, project, layer_idx);
+                        });
+
+                    ui.add_space(4.0);
+
+                    // --------------------------------------------------------
                     // T3.15 — Mapping: mesh rows/cols + mask feather
                     // --------------------------------------------------------
                     egui::CollapsingHeader::new("Mapping")
@@ -583,6 +625,104 @@ pub fn show(
         });
 
     ControlPanelAction::None
+}
+
+// ---------------------------------------------------------------------------
+// Transform + Placement section bodies (P1.UX, lifted from
+// `windows::inspector`).
+// ---------------------------------------------------------------------------
+/// Position / Scale / Rotate (drag-values) + Opacity (slider) for the
+/// selected layer. Identical math to the right-edge Inspector's
+/// `show_layer` — the transform fields are stored as `Modulator::Static`
+/// values inside the layer's first `Effect::Transform`. The effects-Vec
+/// Reverse rule applies: snapshot the old vec, mutate, then revert +
+/// push the `SetLayerEffects` mutation so the drain reapplies the new
+/// vec atomically.
+fn show_transform_section(
+    ui: &mut Ui,
+    project: &mut Project,
+    st: &mut ControlPanelState,
+    layer_idx: usize,
+) {
+    let layer = &project.layers[layer_idx];
+    let (translate, scale, rotate) = effective_static_transform(layer);
+
+    ui.label("Position");
+    let new_tx = command_dragvalue_f32(ui, "adv_tx", translate[0], -2.0..=2.0, " x");
+    let new_ty = command_dragvalue_f32(ui, "adv_ty", translate[1], -2.0..=2.0, " y");
+
+    ui.label("Scale");
+    let new_sx = command_dragvalue_f32(ui, "adv_sx", scale[0], 0.05..=8.0, " x");
+    let new_sy = command_dragvalue_f32(ui, "adv_sy", scale[1], 0.05..=8.0, " y");
+
+    ui.label("Rotate (deg)");
+    let new_rot = command_dragvalue_f32(ui, "adv_rot", rotate, -360.0..=360.0, "°");
+
+    let transform_changed = [new_tx, new_ty, new_sx, new_sy, new_rot]
+        .iter()
+        .any(|v| v.is_some());
+    if transform_changed {
+        let final_tx = new_tx.unwrap_or(translate[0]);
+        let final_ty = new_ty.unwrap_or(translate[1]);
+        let final_sx = new_sx.unwrap_or(scale[0]);
+        let final_sy = new_sy.unwrap_or(scale[1]);
+        let final_rot = new_rot.unwrap_or(rotate);
+
+        // Effects-Vec Reverse rule: snapshot the whole effects vec
+        // before mutating, then revert + emit a SetLayerEffects
+        // mutation so the drain reapplies the new vec atomically.
+        let old_effects = project.layers[layer_idx].effects.clone();
+        mutate_transform_effect(&mut project.layers[layer_idx], |t, r, sx, sy| {
+            *t = [final_tx, final_ty];
+            *sx = crate::modulators::Modulator::Static(final_sx);
+            *sy = crate::modulators::Modulator::Static(final_sy);
+            *r = crate::modulators::Modulator::Static(final_rot);
+        });
+        let new_effects = project.layers[layer_idx].effects.clone();
+        project.layers[layer_idx].effects = old_effects.clone();
+        st.pending_mutations
+            .push(crate::project::command::Mutation::SetLayerEffects(
+                crate::project::command::SetLayerEffects {
+                    layer_idx,
+                    new: new_effects,
+                    old: old_effects,
+                },
+            ));
+    }
+
+    ui.add_space(6.0);
+    let current_opacity = project.layers[layer_idx].opacity;
+    if let Some(new_op) = command_slider(ui, "adv_opacity", "Opacity", current_opacity, 0.0..=1.0) {
+        st.pending_mutations
+            .push(project.set_layer_opacity_mutation(layer_idx, new_op));
+    }
+}
+
+/// Placement / Warp read-out + Edit warp / Edit mask buttons.
+/// Replaces the right-edge Inspector's identically-named section.
+fn show_placement_section(ui: &mut Ui, project: &Project, layer_idx: usize) {
+    let warp = &project.layers[layer_idx].warp;
+    ui.weak(format!("{}×{} warp grid", warp.rows, warp.cols));
+    ui.weak(format!("mask vertices: {}", warp.mask_polygon.len()));
+    ui.add_space(2.0);
+    ui.horizontal(|ui| {
+        if ui.button("Edit warp").clicked() {
+            tracing::info!(
+                target: "rmap::ux",
+                layer_idx,
+                event = "advanced_edit_warp_clicked",
+                "edit-warp action — wiring to EditMode::Warp is a follow-up",
+            );
+        }
+        if ui.button("Edit mask").clicked() {
+            tracing::info!(
+                target: "rmap::ux",
+                layer_idx,
+                event = "advanced_edit_mask_clicked",
+                "edit-mask action — wiring to EditMode::Mask is a follow-up",
+            );
+        }
+    });
 }
 
 // ---------------------------------------------------------------------------

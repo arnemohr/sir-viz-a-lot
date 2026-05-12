@@ -14,13 +14,9 @@
 
 use egui::Ui;
 
-use crate::modulators::Modulator;
-use crate::project::command::Mutation;
 use crate::project::schema::Project;
-use crate::windows::control_panel::{ControlPanelState, command_dragvalue_f32, command_slider};
-use crate::windows::scene_editor::{
-    SceneEditorState, Selection, effective_static_transform, mutate_transform_effect,
-};
+use crate::windows::control_panel::ControlPanelState;
+use crate::windows::scene_editor::{SceneEditorState, Selection};
 
 /// Render the right-edge inspector panel.
 /// Called from `control_panel::show` when `scene.selected.is_some()`.
@@ -41,7 +37,14 @@ pub fn show(
     };
 
     match selection {
-        Selection::Layer(idx) => show_layer(ui, project, st, scene, idx),
+        // P1.UX: Layer-selection controls (Position / Scale / Rotate /
+        // Opacity / Placement) moved to the Advanced panel's
+        // "Selected layer" section to eliminate the double-column
+        // right rail. The mount site in `control_panel` no longer
+        // creates this inspector for Layer selections; we early-
+        // return defensively so a future re-routing can't accidentally
+        // duplicate the controls.
+        Selection::Layer(_) => {}
         Selection::WarpCorner { warp, r, c } => show_warp_corner(ui, project, st, warp, r, c),
         Selection::MaskVertex { warp, idx } => show_mask_vertex(ui, project, warp, idx),
         Selection::SourceRect { .. } => {
@@ -51,112 +54,11 @@ pub fn show(
 }
 
 // ---------------------------------------------------------------------------
-// Layer selection
+// Layer selection — handled in `windows::advanced` since P1.UX. See the
+// `Selection::Layer(_)` early-return in `show` above and the
+// `show_transform_section` / `show_placement_section` helpers in
+// `advanced.rs`. The pre-P1.UX `show_layer` body lived here.
 // ---------------------------------------------------------------------------
-
-fn show_layer(
-    ui: &mut Ui,
-    project: &mut Project,
-    st: &mut ControlPanelState,
-    scene: &mut SceneEditorState,
-    idx: usize,
-) {
-    let Some(layer) = project.layers.get(idx) else {
-        // Layer was removed; clear the stale selection.
-        scene.selected = None;
-        return;
-    };
-
-    ui.strong(layer.id.clone());
-    ui.separator();
-
-    // ---- Transform controls ----
-    // Read current static values for display.
-    let (translate, scale, rotate) = effective_static_transform(layer);
-
-    ui.label("Position");
-    let new_tx = command_dragvalue_f32(ui, "inspector_tx", translate[0], -2.0..=2.0, " x");
-    let new_ty = command_dragvalue_f32(ui, "inspector_ty", translate[1], -2.0..=2.0, " y");
-
-    ui.label("Scale");
-    let new_sx = command_dragvalue_f32(ui, "inspector_sx", scale[0], 0.05..=8.0, " x");
-    let new_sy = command_dragvalue_f32(ui, "inspector_sy", scale[1], 0.05..=8.0, " y");
-
-    ui.label("Rotate (deg)");
-    let new_rot = command_dragvalue_f32(ui, "inspector_rot", rotate, -360.0..=360.0, "°");
-
-    // If any transform field changed, emit a single SetLayerEffects mutation
-    // (rule 2: whole effects-Vec Reverse for anything touching LayerConfig.effects).
-    let transform_changed = [new_tx, new_ty, new_sx, new_sy, new_rot]
-        .iter()
-        .any(|v| v.is_some());
-    if transform_changed {
-        let final_tx = new_tx.unwrap_or(translate[0]);
-        let final_ty = new_ty.unwrap_or(translate[1]);
-        let final_sx = new_sx.unwrap_or(scale[0]);
-        let final_sy = new_sy.unwrap_or(scale[1]);
-        let final_rot = new_rot.unwrap_or(rotate);
-
-        // Snapshot the old effects before mutating (rule 2).
-        let old_effects = project.layers[idx].effects.clone();
-        mutate_transform_effect(&mut project.layers[idx], |t, r, sx, sy| {
-            *t = [final_tx, final_ty];
-            *sx = Modulator::Static(final_sx);
-            *sy = Modulator::Static(final_sy);
-            *r = Modulator::Static(final_rot);
-        });
-        let new_effects = project.layers[idx].effects.clone();
-        // Revert the live mutation; the drain re-applies `new_effects`.
-        project.layers[idx].effects = old_effects.clone();
-        st.pending_mutations.push(Mutation::SetLayerEffects(
-            crate::project::command::SetLayerEffects {
-                layer_idx: idx,
-                new: new_effects,
-                old: old_effects,
-            },
-        ));
-    }
-
-    ui.separator();
-
-    // ---- Opacity ----
-    let current_opacity = project.layers[idx].opacity;
-    if let Some(new_op) = command_slider(
-        ui,
-        "inspector_opacity",
-        "Opacity",
-        current_opacity,
-        0.0..=1.0,
-    ) {
-        st.pending_mutations
-            .push(project.set_layer_opacity_mutation(idx, new_op));
-    }
-
-    ui.separator();
-
-    // ---- Placement / Warp sub-section (003-T3.29 — warp is the layer's
-    // placement on the projector under v5; the heading reflects that).
-    ui.strong("Placement / Warp");
-    let warp = &project.layers[idx].warp;
-    ui.label(format!("{}×{} grid", warp.rows, warp.cols));
-    ui.label(format!("mask vertices: {}", warp.mask_polygon.len()));
-
-    ui.horizontal(|ui| {
-        if ui.button("Edit warp").clicked() {
-            tracing::info!(layer_idx = idx, "T3.7 will wire EditMode::Warp");
-        }
-        if ui.button("Edit mask").clicked() {
-            tracing::info!(layer_idx = idx, "T3.7 will wire EditMode::Mask");
-        }
-    });
-
-    ui.separator();
-
-    // ---- More link ----
-    if ui.small_button("More…").clicked() {
-        st.advanced_open = true;
-    }
-}
 
 // ---------------------------------------------------------------------------
 // WarpCorner selection

@@ -478,18 +478,29 @@ pub fn show(
     // can still reach those controls while the proper inspector
     // (T3.3) and Advanced disclosure (T3.11) are in flight.
 
-    // 003-T3.3: selection-driven right-edge inspector. Appears when
-    // `scene.selected.is_some()`; rendered before the Advanced panel
-    // so it sits closer to the canvas. The Advanced panel claims the
-    // outermost right column when both are visible.
+    // 003-T3.3 + P1.UX: selection-driven right-edge inspector. P1.UX
+    // moves Layer-selection controls (Position / Scale / Rotate /
+    // Opacity / Placement) into the Advanced panel's "Selected layer"
+    // section to eliminate the cramped double-column right rail the
+    // operator reported. The inspector now appears **only** for edit-
+    // mode selections (warp corners + mask vertices) where the
+    // affordances are distinct from Advanced's per-layer controls.
     #[cfg(feature = "v3")]
-    if scene.selected.is_some() {
-        egui::SidePanel::right("rmap_inspector")
-            .resizable(false)
-            .exact_width(280.0)
-            .show_inside(ui, |ui| {
-                crate::windows::inspector::show(ui, project, st, scene);
-            });
+    {
+        let inspector_visible = matches!(
+            scene.selected,
+            Some(crate::windows::scene_editor::Selection::WarpCorner { .. })
+                | Some(crate::windows::scene_editor::Selection::MaskVertex { .. })
+                | Some(crate::windows::scene_editor::Selection::SourceRect { .. })
+        );
+        if inspector_visible {
+            egui::SidePanel::right("rmap_inspector")
+                .resizable(false)
+                .exact_width(280.0)
+                .show_inside(ui, |ui| {
+                    crate::windows::inspector::show(ui, project, st, scene);
+                });
+        }
     }
 
     // 003-T3.11: structured Advanced disclosure panel replacing the T3.1
