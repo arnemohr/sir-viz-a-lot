@@ -5,6 +5,7 @@ pub mod audit;
 #[cfg(feature = "v3")]
 pub mod command;
 pub mod migrate;
+pub mod scene_instantiation;
 pub mod scene_templates;
 pub mod schema;
 #[cfg(feature = "v3")]
