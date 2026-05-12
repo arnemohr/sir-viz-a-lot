@@ -23,6 +23,7 @@
 #![allow(dead_code)]
 
 pub mod error;
+pub mod thread;
 pub mod transport;
 pub mod universe;
 
