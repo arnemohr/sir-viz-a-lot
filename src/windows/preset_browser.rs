@@ -350,7 +350,9 @@ impl PresetBrowserWindow {
         let mut open = self.open;
         egui::Window::new("FX preset library")
             .open(&mut open)
-            .default_size([640.0, 480.0])
+            .default_size([720.0, 520.0])
+            .min_width(560.0)
+            .max_width(960.0)
             .resizable(true)
             .show(ctx, |ui| {
                 self.show_body(ui, project, st, layer_idx);
@@ -473,80 +475,95 @@ impl PresetBrowserWindow {
 
         let cell_id = ui.id().with(("cell", &pid));
         egui::Frame::default()
-            .inner_margin(egui::Margin::same(4))
+            .inner_margin(egui::Margin::same(6))
             .stroke(egui::Stroke::new(
                 1.0,
                 crate::windows::theme::ACCENT.linear_multiply(0.3),
             ))
             .show(ui, |ui| {
-                ui.set_min_width(120.0);
-                ui.set_max_width(160.0);
+                // Force a vertical, top-aligned layout inside the cell so the
+                // widgets stack predictably — the parent here is a
+                // `horizontal_wrapped` Ui whose default layout would otherwise
+                // place these widgets side-by-side instead of as a tile.
+                ui.allocate_ui_with_layout(
+                    egui::vec2(150.0, 0.0),
+                    egui::Layout::top_down(egui::Align::LEFT),
+                    |ui| {
+                        ui.set_width(150.0);
 
-                // Star toggle
-                let star_label = if is_starred { "★" } else { "☆" };
-                if ui
-                    .small_button(star_label)
-                    .on_hover_text(if is_starred { "Unstar" } else { "Star" })
-                    .clicked()
-                {
-                    if let Some(stars) = &mut self.stars {
-                        stars.toggle(&pid);
-                    }
-                }
+                        // Row 1: star toggle + family badge on the same line.
+                        ui.horizontal(|ui| {
+                            let star_label = if is_starred { "★" } else { "☆" };
+                            if ui
+                                .small_button(star_label)
+                                .on_hover_text(if is_starred { "Unstar" } else { "Star" })
+                                .clicked()
+                            {
+                                if let Some(stars) = &mut self.stars {
+                                    stars.toggle(&pid);
+                                }
+                            }
+                            if !family_badge.is_empty() {
+                                ui.weak(&family_badge);
+                            }
+                        });
 
-                // Preset button (applies preset on click)
-                if ui.button(&lbl).clicked() {
-                    let new_kind = LayerKind::FxLayer {
-                        preset_id: pid.clone(),
-                        params: default_params(&pid),
-                        seed: fresh_seed(),
-                        t_layer_added_secs: 0.0,
-                    };
-                    if let Some(layer) = project.layers.get(layer_idx) {
-                        let old = layer.kind.clone();
-                        st.pending_mutations
-                            .push(Mutation::SetLayerKind(SetLayerKind {
-                                layer_idx,
-                                new: new_kind,
-                                old,
-                            }));
-                    }
-                    self.open = false;
-                }
-
-                // Family badge
-                if !family_badge.is_empty() {
-                    ui.weak(&family_badge);
-                }
-
-                // Export button (P2.8.5)
-                if ui.small_button("Export…").clicked() {
-                    let preset_data = match preset {
-                        BrowserPreset::Builtin(e) => RmapPresetJson {
-                            preset_id: e.preset_id.to_string(),
-                            params: default_params(e.preset_id),
-                            name: e.label.to_string(),
-                            author: None,
-                        },
-                        BrowserPreset::User(p, _) => p.clone(),
-                    };
-                    self.handle_export(&preset_data);
-                }
-
-                // Delete button — user presets only (P2.8.4)
-                if is_user {
-                    if let BrowserPreset::User(_, path) = preset {
+                        // Row 2: preset label button (full cell width).
                         if ui
-                            .small_button("✕")
-                            .on_hover_text("Delete this user preset")
+                            .add_sized(
+                                egui::vec2(ui.available_width(), 28.0),
+                                egui::Button::new(&lbl),
+                            )
                             .clicked()
                         {
-                            self.delete_confirm.open = true;
-                            self.delete_confirm.preset_name = lbl.clone();
-                            self.delete_confirm.preset_path = path.clone();
+                            let new_kind = LayerKind::FxLayer {
+                                preset_id: pid.clone(),
+                                params: default_params(&pid),
+                                seed: fresh_seed(),
+                                t_layer_added_secs: 0.0,
+                            };
+                            if let Some(layer) = project.layers.get(layer_idx) {
+                                let old = layer.kind.clone();
+                                st.pending_mutations
+                                    .push(Mutation::SetLayerKind(SetLayerKind {
+                                        layer_idx,
+                                        new: new_kind,
+                                        old,
+                                    }));
+                            }
+                            self.open = false;
                         }
-                    }
-                }
+
+                        // Row 3: action buttons (export + delete on user presets).
+                        ui.horizontal(|ui| {
+                            if ui.small_button("Export…").clicked() {
+                                let preset_data = match preset {
+                                    BrowserPreset::Builtin(e) => RmapPresetJson {
+                                        preset_id: e.preset_id.to_string(),
+                                        params: default_params(e.preset_id),
+                                        name: e.label.to_string(),
+                                        author: None,
+                                    },
+                                    BrowserPreset::User(p, _) => p.clone(),
+                                };
+                                self.handle_export(&preset_data);
+                            }
+                            if is_user {
+                                if let BrowserPreset::User(_, path) = preset {
+                                    if ui
+                                        .small_button("✕")
+                                        .on_hover_text("Delete this user preset")
+                                        .clicked()
+                                    {
+                                        self.delete_confirm.open = true;
+                                        self.delete_confirm.preset_name = lbl.clone();
+                                        self.delete_confirm.preset_path = path.clone();
+                                    }
+                                }
+                            }
+                        });
+                    },
+                );
             });
 
         // Suppress unused warning for cell_id (used for potential future key).
