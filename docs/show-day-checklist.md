@@ -229,3 +229,76 @@ toolchain managed by `mise install`. Specifically:
 
 Run `mise install` once per checkout (`make setup`) to ensure the pinned
 Rust toolchain and cargo subcommands (nextest, cargo-bundle) are available.
+
+---
+
+## Phase 2 acceptance smoke test
+
+Run once against the v0.6 release-candidate build; record pass/fail per step
+in a commit comment when the script lands. Target: under five minutes against
+a debug build with the demo project.
+
+1. **Three-click acceptance**
+   - [ ] Open a fresh project (no layers).
+   - [ ] Draw a polygon mask on the canvas.
+   - [ ] Open Advanced → Selected layer → FX Preset browser. (click 1)
+   - [ ] Select the `mask_edge_wave_wash` preset ("Mask-edge ripple wash"). (click 2)
+   - [ ] Confirm the preset is running on the canvas — the animated edge wash
+         is visible. (click 3)
+   - **Pass:** preset running after at most three clicks from fresh project.
+   - _Traces to `specs/004-phase-2.md` §Acceptance criteria, criterion 1:_
+     _"An operator can drop a polygon mask, pick 'mask-edge ripple wash' from_
+     _the preset library, and see it run within three clicks."_
+
+2. **Particle budget enforcement**
+   - [ ] Add a particle FxLayer and pick `mask_constrained_drift`.
+   - [ ] In Advanced → FX Params, drag the `particle_count` slider past its
+         declared `max_particle_count` limit.
+   - [ ] Confirm: the mutation is refused, an inline warning appears in the
+         control panel, the slider snaps back to the previous value, and the
+         project state is unchanged (verify via undo stack depth).
+   - **Pass:** mutation refuses and slider snaps back; no project-state change.
+   - _Traces to `specs/004-phase-2.md` §Acceptance criteria, criterion 2:_
+     _"Particle counts per layer are enforced to keep the show-day frame_
+     _budget; over-budget configurations refuse to commit with an inline warning."_
+
+3. **Scene recall preserves FxLayer state**
+   - [ ] With a particle FxLayer active (e.g. `mask_constrained_drift`,
+         any seed), save the current state as a scene slot (Cue strip → Save).
+   - [ ] Modify the layer (change a parameter) so the state visually differs.
+   - [ ] Recall the saved scene. Confirm the particles render identically to
+         the saved state — same visual output, same seed.
+   - **Pass:** recalled scene renders bit-identically to the saved state.
+   - _Traces to `specs/004-phase-2.md` §Acceptance criteria, criterion 3:_
+     _"FX layer state survives scene recall and undo (proptest harness in_
+     _`src/project/` extended to cover FX layer mutations)."_
+
+4. **Effect-chain reorder + undo**
+   - [ ] Select an Image layer that has both Blur and Color effects in its
+         chain.
+   - [ ] In Advanced → Selected layer → Effect chain, drag the Blur effect
+         above the Color effect.
+   - [ ] Confirm the render order changes (Blur applies before Color).
+   - [ ] Press Cmd-Z (undo). Confirm the effect order is restored to the
+         pre-drag state.
+   - **Pass:** drag changes order; undo restores; no crash.
+   - _Traces to `specs/004-phase-2.md` §Effect-chain reordering ("resolves_
+     _UX item M7")._
+
+5. **Preset export / import**
+   - [ ] Open a project with a tuned particle preset (custom parameter values).
+   - [ ] Use Advanced → FX Preset → Export preset. A `.rmap-preset.json` file
+         is written to disk.
+   - [ ] Open a fresh project. Use Advanced → FX Preset → Import preset and
+         select the exported file.
+   - [ ] Confirm: the preset appears in the browser with the same `preset_id`
+         and parameter values. Verify the exported file contains no media paths
+         or warp data (open the JSON and inspect).
+   - **Pass:** `preset_id` + params round-trip identically; file contains no
+     media or warp fields.
+   - _Traces to `specs/004-phase-2.md` §Acceptance criteria, criterion 4:_
+     _"The preset library exports a single `.rmap-preset.json` per preset that_
+     _can be shared across projects without media or warp data."_
+
+> **Note:** run this script once against the v0.6 release-candidate build and
+> record pass/fail per step in a commit comment when the script lands.
