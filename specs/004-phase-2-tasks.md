@@ -9,6 +9,9 @@ below is sized for a single PR.
 - [x] P2.1.2 62822eb — perf-gate refresh: 4× ripple_wash stub fixture
 - [x] P2.1.3 f777c7e — CHANGELOG + README v0.6 placeholders
 - [x] P2.2.1 8430b00 — FxPresetRegistry skeleton
+- [x] P2.2.2 d423cec — FxParamDescriptor API
+- [x] P2.2.4 9b7d58a — audit: UnknownFxPreset + UnknownTreatment findings (notes lib.rs parallel-render-tree workaround — see follow-up task in TaskList)
+- [x] P2.3.1 0a73d7a — sample_sdf_normal helper + fx_ in SDF_CONSUMERS
 
 ---
 
