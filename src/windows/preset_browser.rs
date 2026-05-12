@@ -167,7 +167,6 @@ struct DeleteConfirm {
 /// Floating preset library browser.
 ///
 /// Add as a field on `ControlPanelState`; call `show` every frame.
-#[derive(Default)]
 pub struct PresetBrowserWindow {
     pub open: bool,
     /// Which layer is targeted for preset application.
@@ -175,8 +174,8 @@ pub struct PresetBrowserWindow {
 
     // P2.8.2 — filter state
     pub filter_query: String,
-    /// Three family filter toggles: [Fragment/Wave, ComputeParticle, ComputeFluid].
-    /// Default: all on.
+    /// Three family filter toggles: [Wave/Fragment, ComputeParticle, ComputeFluid].
+    /// All on by default so the full registry is shown immediately.
     pub family_filters: [bool; 3],
 
     // P2.8.3 — star state
@@ -192,15 +191,29 @@ pub struct PresetBrowserWindow {
     pub staged_toasts: Vec<crate::windows::toast::Toast>,
 }
 
+impl Default for PresetBrowserWindow {
+    fn default() -> Self {
+        Self {
+            open: false,
+            target_layer_idx: None,
+            filter_query: String::new(),
+            // P2.8.2 — all family filters on by default so the full grid is
+            // visible without any extra setup from the operator.
+            family_filters: [true; 3],
+            stars: None,
+            user_presets: Vec::new(),
+            save_dialog: SaveDialog::default(),
+            delete_confirm: DeleteConfirm::default(),
+            staged_toasts: Vec::new(),
+        }
+    }
+}
+
 impl PresetBrowserWindow {
     /// Open the browser targeting the given layer index.
     pub fn open_for_layer(&mut self, layer_idx: usize) {
         self.open = true;
         self.target_layer_idx = Some(layer_idx);
-        if self.family_filters == [false; 3] {
-            // First open: enable all filters.
-            self.family_filters = [true; 3];
-        }
         // Reload stars + user presets.
         self.stars = Some(PresetStars::load_or_default());
         self.reload_user_presets();
@@ -296,11 +309,6 @@ impl PresetBrowserWindow {
     pub fn show(&mut self, ctx: &egui::Context, project: &Project, st: &mut ControlPanelState) {
         if !self.open {
             return;
-        }
-
-        // Initialize family filters to all-on if never set.
-        if self.family_filters == [false; 3] {
-            self.family_filters = [true; 3];
         }
 
         let Some(layer_idx) = self.target_layer_idx else {
