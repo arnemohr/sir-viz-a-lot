@@ -549,9 +549,11 @@ impl PresetBrowserWindow {
             .default_size([280.0, 100.0])
             .show(ctx, |ui| {
                 ui.label("Name:");
-                egui::TextEdit::singleline(&mut self.save_dialog.name_buf)
+                let resp = egui::TextEdit::singleline(&mut self.save_dialog.name_buf)
                     .hint_text("My cool preset")
                     .show(ui);
+                // P2.8.4 — request focus so the operator can type immediately.
+                resp.response.request_focus();
                 ui.horizontal(|ui| {
                     let can_save = !self.save_dialog.name_buf.trim().is_empty();
                     if ui
