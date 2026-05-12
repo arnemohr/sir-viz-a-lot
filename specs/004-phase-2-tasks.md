@@ -12,6 +12,11 @@ below is sized for a single PR.
 - [x] P2.2.2 d423cec — FxParamDescriptor API
 - [x] P2.2.4 9b7d58a — audit: UnknownFxPreset + UnknownTreatment findings (notes lib.rs parallel-render-tree workaround — see follow-up task in TaskList)
 - [x] P2.3.1 0a73d7a — sample_sdf_normal helper + fx_ in SDF_CONSUMERS
+- [x] P2.2.3 00b3dac — registry-driven FX dispatch (move ripple_wash arm out of app.rs)
+- [x] P2.3.2 5d441eb — FxShaderInputs canonical bind-group contract + optional source/SSBO
+- [x] P2.4.1 cdd7da8 — displacement_ripple Treatment preset
+- [x] P2.4.2 63b63c9 — refraction Treatment preset
+- [x] P2.4.3 8d499d8 — mask_edge_wave_wash FxLayer preset (FxPipelines wrapper)
 
 ---
 
