@@ -6,6 +6,7 @@ below is sized for a single PR.
 ## Implementation status (2026-05-12)
 
 - [x] P2.1.1 12b5dcd — glossary entries for Phase 2 domain terms
+- [x] P2.1.2 62822eb — perf-gate refresh: 4× ripple_wash stub fixture
 
 ---
 
