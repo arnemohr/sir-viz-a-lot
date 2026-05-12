@@ -220,6 +220,44 @@ pub enum GlossaryTerm {
     /// P4.1.1 — built-in scene template: light appears to spill outward from
     /// tagged window zones as if leaking from an interior source.
     LightSpillFromWindows,
+    // -----------------------------------------------------------------------
+    // P5.1.1 — Phase 5 lighting output domain terms.
+    // -----------------------------------------------------------------------
+    /// P5.1.1 — a 512-channel DMX universe, the fundamental unit of lighting
+    /// network traffic. Art-Net and sACN both address fixtures by universe
+    /// number + channel offset.
+    DmxUniverse,
+    /// P5.1.1 — a named collection of fixtures sharing the same personality,
+    /// DMX universe, and canvas sampling region. The operator's primary
+    /// lighting object in rmap.
+    FixtureGroup,
+    /// P5.1.1 — a grid of sample points that maps a canvas region to a
+    /// fixture group's DMX channels row-by-row, column-by-column.
+    PixelMap,
+    /// P5.1.1 — abstraction over the DMX wire protocol; Phase 5 ships
+    /// Art-Net; Phase 7 can add sACN by implementing a second instance of
+    /// this trait without changing the fixture or sampling code.
+    DmxTransport,
+    /// P5.1.1 — the Art-Net UDP transport that implements `DmxTransport`;
+    /// sends Art-Net `ArtDmx` PDUs to a configurable unicast or broadcast
+    /// address on port 6454.
+    ArtNetTransport,
+    /// P5.1.1 — the role of a single DMX channel within a fixture's footprint
+    /// (e.g. Red, Green, Blue). Phase 5 ships three roles; Phase 7 adds White
+    /// and colour-temperature channels additively.
+    ChannelRole,
+    /// P5.1.1 — the colour-space conversion applied when mapping a sampled
+    /// canvas pixel to DMX byte values. Phase 5 ships RGB Direct and HSV
+    /// Intensity Gate; Phase 7 adds RGBW Fill.
+    ColorStrategy,
+    /// P5.1.1 — the low-resolution (64×36) texture blit that downsamples the
+    /// composited canvas once per frame so the lighting thread can sample any
+    /// fixture region without stalling the render thread.
+    LightingTap,
+    /// P5.1.1 — the per-fixture-group choice of how canvas colour maps to DMX
+    /// values: RGB Direct copies pixel bytes; HSV Intensity Gate dims the
+    /// fixture by the pixel's brightness; more strategies land in Phase 7.
+    OutputStrategy,
 }
 
 /// A single glossary entry: a short headline and a 1–2 sentence body.
@@ -838,6 +876,74 @@ pub fn entry(t: GlossaryTerm) -> GlossaryEntry {
                    aperture onto the surrounding wall.  Assign an interior-\
                    light image to the media slot for the strongest effect.",
         },
+        // -------------------------------------------------------------------
+        // P5.1.1 — Phase 5 lighting output domain terms.
+        // -------------------------------------------------------------------
+        GlossaryTerm::DmxUniverse => GlossaryEntry {
+            headline: "DMX Universe",
+            body: "A 512-channel DMX data packet, the fundamental unit of \
+                   lighting network traffic.  Each Art-Net or sACN packet \
+                   carries one universe; fixtures are addressed by universe \
+                   number + channel offset within that universe.",
+        },
+        GlossaryTerm::FixtureGroup => GlossaryEntry {
+            headline: "Fixture Group",
+            body: "A named collection of fixtures that share a personality \
+                   (channel layout), DMX universe, and canvas sampling region.  \
+                   rmap sends one DMX value per fixture in the group each \
+                   frame, derived from the assigned canvas area.",
+        },
+        GlossaryTerm::PixelMap => GlossaryEntry {
+            headline: "Pixel Map",
+            body: "A grid of UV sample points spread across a canvas region.  \
+                   rmap averages the pixel colours at each grid point and maps \
+                   the result to the fixture group's DMX channels, letting \
+                   physical lights chase the projected image in real time.",
+        },
+        GlossaryTerm::DmxTransport => GlossaryEntry {
+            headline: "DMX Transport",
+            body: "The network protocol used to carry DMX universe packets to \
+                   fixtures.  Phase 5 ships Art-Net (UDP, port 6454); the \
+                   transport abstraction lets Phase 7 add sACN (E1.31) without \
+                   changing the fixture or canvas-sampling code.",
+        },
+        GlossaryTerm::ArtNetTransport => GlossaryEntry {
+            headline: "Art-Net Transport",
+            body: "The Phase 5 implementation of the DMX Transport that sends \
+                   Art-Net ArtDmx PDUs over UDP to a configurable unicast or \
+                   subnet-broadcast address on port 6454.  Compatible with \
+                   Enttec, Artistic Licence, and most budget Art-Net nodes.",
+        },
+        GlossaryTerm::ChannelRole => GlossaryEntry {
+            headline: "Channel Role",
+            body: "The function of a single DMX channel within a fixture's \
+                   footprint — Red, Green, or Blue in Phase 5.  rmap uses the \
+                   channel map to write the correct colour byte to the correct \
+                   DMX address; unknown roles are left at zero and will be \
+                   extended in Phase 7.",
+        },
+        GlossaryTerm::ColorStrategy => GlossaryEntry {
+            headline: "Colour Strategy",
+            body: "How the sampled canvas pixel colour is converted to DMX byte \
+                   values.  RGB Direct copies the pixel bytes unchanged.  HSV \
+                   Intensity Gate dims all channels by the pixel's brightness \
+                   so dark canvas areas fade the fixture toward black.  \
+                   RGBW Fill is planned for Phase 7.",
+        },
+        GlossaryTerm::LightingTap => GlossaryEntry {
+            headline: "Lighting Tap",
+            body: "A 64×36 downsampled copy of the composited canvas rendered \
+                   once per frame on the GPU and read back by the lighting \
+                   thread.  The low resolution keeps readback bandwidth to \
+                   under 10 KB per frame, leaving the render thread unaffected.",
+        },
+        GlossaryTerm::OutputStrategy => GlossaryEntry {
+            headline: "Output Strategy",
+            body: "The per-fixture-group setting that controls how canvas colour \
+                   is translated to DMX values: RGB Direct for accurate colour \
+                   reproduction, HSV Intensity Gate for brightness-following \
+                   wash behaviour.  Additional strategies are planned for Phase 7.",
+        },
     }
 }
 
@@ -947,6 +1053,16 @@ pub fn all_terms() -> &'static [GlossaryTerm] {
         GlossaryTerm::ArchitecturalWash,
         GlossaryTerm::MaskEdgeRippleWashScene,
         GlossaryTerm::LightSpillFromWindows,
+        // P5.1.1 — Phase 5 lighting output domain terms.
+        GlossaryTerm::DmxUniverse,
+        GlossaryTerm::FixtureGroup,
+        GlossaryTerm::PixelMap,
+        GlossaryTerm::DmxTransport,
+        GlossaryTerm::ArtNetTransport,
+        GlossaryTerm::ChannelRole,
+        GlossaryTerm::ColorStrategy,
+        GlossaryTerm::LightingTap,
+        GlossaryTerm::OutputStrategy,
     ]
 }
 
@@ -1023,7 +1139,7 @@ mod tests {
     #[test]
     fn all_terms_covers_every_variant() {
         // Bump this when you add a new GlossaryTerm variant.
-        const EXPECTED_VARIANT_COUNT: usize = 87;
+        const EXPECTED_VARIANT_COUNT: usize = 96;
         assert_eq!(
             super::all_terms().len(),
             EXPECTED_VARIANT_COUNT,
