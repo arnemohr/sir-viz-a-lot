@@ -28,6 +28,12 @@ below is sized for a single PR.
 - [x] P2.6.1 18bba7b — fluid advection infrastructure + fluid_identity preset
 - [x] P2.6.2 5f86eac — mask_bounded_fluid preset (no particle visualisation — RGBA16Float velocity field rendered as colour)
 - [x] P2.5.6 5f86eac — SetFxLayerParams mutation + particle budget refusal (NOTE: rolled into the P2.6.2 commit message; no standalone SHA. 8 fx_layer_params tests pass.)
+- [x] P2.9.1 85396c2 — proptest extension: SetFxLayerParams + FxLayer seed/t_layer round-trip
+- [x] P2.8.1 6a83275 — preset library browser modal
+- [x] P2.8.2 ad13f42 — search/filter in preset browser
+- [x] P2.8.3 71a6492 — star/favourite presets
+- [x] P2.8.4 cfb4361 — save/delete user presets
+- [x] P2.8.5 aa4db23 (+ 2194d16 fmt + d9cc01e ux fix) — .rmap-preset.json export/import
 
 ---
 
