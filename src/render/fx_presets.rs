@@ -143,6 +143,25 @@ pub fn fx_is_registered(preset_id: &str) -> bool {
     fx_registry().iter().any(|e| e.preset_id == preset_id)
 }
 
+/// P3.2.5 — returns `true` if the preset requires a zone tag to function as
+/// intended. Zone-consuming presets read `u_zone.zone_tag` in their shader and
+/// output transparent black when the tag does not match their target role.
+///
+/// Returns `false` for all non-zone presets. W5 tasks (`P3.5.1–P3.5.3`) flip
+/// the three zone-consuming preset IDs to `true` as they land.
+///
+/// Used by:
+///  - `ProjectAudit` to emit `MissingZoneTag` findings.
+///  - `preset_browser.rs` to display a "requires zone tag" supplemental label.
+///  - `FxPresetPipeline` to decide whether to allocate a `zone_tag_buffer`.
+#[allow(dead_code)] // wired by P3.2.5 audit + P3.4.2 browser + P3.3.2 pipeline
+pub fn fx_requires_zone(preset_id: &str) -> bool {
+    matches!(
+        preset_id,
+        "fx_zone_light_spill" | "fx_zone_edge_ripple" | "fx_zone_portal_drift"
+    )
+}
+
 /// Returns the display label for a registered FX preset, or `None` if the
 /// `preset_id` is not in the registry.
 #[allow(dead_code)] // wired by P2.2.4 audit + P2.8.1 browser

@@ -171,6 +171,16 @@ pub enum AuditKind {
         /// The unrecognised role string that was found in the saved JSON.
         role: String,
     },
+    /// P3.2.5 — an `FxLayer` uses a zone-consuming preset but its
+    /// `warp.zone_role` is `None`. The layer will render in the no-zone
+    /// fallback path (transparent black). `Severity::Info` — not an error,
+    /// but the operator probably intended to tag the mask.
+    MissingZoneTag {
+        /// Index into `Project.layers`.
+        layer_idx: usize,
+        /// The zone-consuming `preset_id` that triggered the finding.
+        preset_id: String,
+    },
 }
 
 /// One finding from a `ProjectAudit::run` walk. The `message` field is
@@ -446,6 +456,27 @@ impl ProjectAudit {
                             "Layer {} has unknown FxLayer preset '{}'. \
                              The layer will render invisible until the preset is registered.",
                             layer_idx, preset_id,
+                        ),
+                        autofix: None,
+                    });
+                }
+            }
+
+            // P3.2.5 — MissingZoneTag: zone-consuming preset applied to a layer
+            // without a zone tag. The layer will render in the no-zone fallback
+            // (transparent black). Severity::Info — the operator may have
+            // intentionally applied the preset before tagging.
+            if let crate::project::schema::LayerKind::FxLayer { preset_id, .. } = &layer.kind {
+                if fx_presets::fx_requires_zone(preset_id) && layer.warp.zone_role.is_none() {
+                    findings.push(AuditFinding {
+                        kind: AuditKind::MissingZoneTag {
+                            layer_idx,
+                            preset_id: preset_id.clone(),
+                        },
+                        severity: Severity::Info,
+                        message: format!(
+                            "Layer {layer_idx} uses zone-consuming preset '{preset_id}' but has \
+                             no zone tag. Set a zone role in Mask mode to activate the effect.",
                         ),
                         autofix: None,
                     });
@@ -1706,6 +1737,69 @@ mod tests {
                 .iter()
                 .all(|f| !matches!(f.kind, AuditKind::UnknownZoneRole { .. })),
             "known zone role must not produce UnknownZoneRole finding, got: {findings:?}"
+        );
+    }
+
+    // --- P3.2.5 MissingZoneTag tests ---
+
+    /// P3.2.5 — a project with a zone-consuming FX preset and `zone_role = None`
+    /// produces exactly one `MissingZoneTag` finding at the correct `layer_idx`.
+    #[test]
+    fn audit_missing_zone_tag_emits_finding() {
+        use crate::project::schema::layer_from_fx_preset;
+
+        let mut p = Project::default();
+        // Use a zone-consuming preset ID.
+        let layer = layer_from_fx_preset("fx0", "fx_zone_light_spill", Default::default(), 0);
+        p.layers.push(layer);
+        assert_eq!(p.layers[0].warp.zone_role, None);
+
+        let findings = ProjectAudit::run(&p, &AuditEnv::default());
+        let zone_findings: Vec<_> = findings
+            .iter()
+            .filter(|f| matches!(f.kind, AuditKind::MissingZoneTag { .. }))
+            .collect();
+        assert_eq!(
+            zone_findings.len(),
+            1,
+            "expected exactly one MissingZoneTag finding, got: {findings:?}"
+        );
+        assert!(matches!(
+            &zone_findings[0].kind,
+            AuditKind::MissingZoneTag { layer_idx: 0, preset_id }
+                if preset_id == "fx_zone_light_spill"
+        ));
+        assert_eq!(zone_findings[0].severity, Severity::Info);
+        assert!(zone_findings[0].autofix.is_none());
+    }
+
+    /// P3.2.5 — a project with a zone-consuming preset and `zone_role = Some(Window)`
+    /// produces no `MissingZoneTag` finding.
+    #[test]
+    fn audit_zone_consuming_preset_with_zone_tag_emits_no_finding() {
+        use crate::project::schema::{ZoneRole, layer_from_fx_preset};
+
+        let mut p = Project::default();
+        let mut layer = layer_from_fx_preset("fx0", "fx_zone_light_spill", Default::default(), 0);
+        layer.warp.zone_role = Some(ZoneRole::Window);
+        p.layers.push(layer);
+
+        let findings = ProjectAudit::run(&p, &AuditEnv::default());
+        assert!(
+            findings
+                .iter()
+                .all(|f| !matches!(f.kind, AuditKind::MissingZoneTag { .. })),
+            "tagged zone-consuming preset must not produce MissingZoneTag, got: {findings:?}"
+        );
+    }
+
+    /// P3.2.5 — `fx_requires_zone("mask_edge_ripple_wash")` returns `false`
+    /// (a non-zone-consuming preset).
+    #[test]
+    fn fx_requires_zone_returns_false_for_non_zone_preset() {
+        assert!(
+            !crate::render::fx_presets::fx_requires_zone("mask_edge_ripple_wash"),
+            "mask_edge_ripple_wash is not zone-consuming"
         );
     }
 }
