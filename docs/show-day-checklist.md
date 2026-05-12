@@ -302,3 +302,63 @@ a debug build with the demo project.
 
 > **Note:** run this script once against the v0.6 release-candidate build and
 > record pass/fail per step in a commit comment when the script lands.
+
+---
+
+## Phase 3 acceptance smoke test (v0.7) — manual
+
+Run against the v0.7 release-candidate build (`make build-release`).
+Traces to `specs/004-phase-3.md` acceptance criteria.
+
+6. **Zone palette in Mask mode**
+   - [ ] Create a new FxLayer and enter Mask mode (edit mode pill → Mask).
+   - [ ] Below the mask-feather slider, confirm the Zone Tag combobox is
+         visible with "None" selected.
+   - [ ] Draw a polygon (≥ 3 vertices). Open the Zone Tag picker; select
+         "Window". Confirm the combobox updates to "Window".
+   - [ ] Close Mask mode. Confirm the layer row shows a "[window]" badge in
+         muted text below the layer ID.
+   - [ ] Press Cmd-Z (undo). Confirm the zone role reverts to None and the
+         badge disappears.
+   - [ ] Press Cmd-Shift-Z (redo). Confirm it comes back.
+   - [ ] Hover a role name inside the combobox; confirm the Glossary popover
+         appears describing the role.
+   - **Pass:** palette visible in Mask mode; selection changes role; undo/redo
+     works; badge appears; glossary tooltip shown.
+
+7. **Zone-consuming FX preset — light spill**
+   - [ ] Apply "Light spill from window zones" preset to the window-tagged
+         layer. Confirm the effect renders a warm glow inside the mask.
+   - [ ] Apply the same preset to an untagged layer. Confirm transparent output
+         (no visible effect, no crash).
+   - [ ] In the preset browser, confirm "Light spill from window zones" shows
+         a "— requires zone tag" supplemental label.
+   - **Pass:** glow renders for window tag; transparent for None; browser label
+     present.
+
+8. **Old project backward compatibility**
+   - [ ] Load a v0.6 project file (pre-zone-tags). Confirm it opens without
+         errors, all layers render identically, and no zone-related audit
+         findings appear (UnknownZoneRole / MissingZoneTag should NOT fire for
+         non-zone-consuming presets).
+   - **Pass:** project opens and renders identically; no spurious audit toasts.
+
+9. **Glossary coverage**
+   - [ ] Open the Glossary window (Help → Glossary, or from the control panel).
+   - [ ] Search "window" — confirm a "Zone Role: Window" entry appears.
+   - [ ] Search "zone" — confirm "Zone Tag" and "Zone-Aware Shader" entries
+         appear.
+   - **Pass:** all zone-role glossary terms are reachable and have meaningful
+     definitions.
+
+10. **GPU zone-tag dispatch tests** (developer-only)
+    - [ ] Run `make test-gpu` (requires a Metal GPU adapter).
+    - [ ] Confirm `zone_light_spill_window_tag_golden`,
+          `zone_edge_ripple_edge_tag_golden`, and
+          `zone_portal_drift_portal_tag_golden` all pass.
+    - [ ] Confirm `zone_light_spill_window_tag_golden` verifies ZONE_NONE →
+          transparent black (bit-exact).
+    - **Pass:** all three GPU golden tests pass; no tolerance violations.
+
+> **Note:** record pass/fail per step as a commit comment when this script is
+> run against the v0.7 release-candidate build.
