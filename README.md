@@ -113,10 +113,52 @@ adds `zone_role: null` automatically.
 
 ## Scene Grammars (v0.8)
 
-<!-- P4.9.3 will expand this section with full prose. -->
 Scene templates let operators build a complete immersive scene in under five
 minutes: pick a template, assign a few media assets, map zone roles, and
-confirm.
+confirm. Every template is a portable, self-contained recipe — it carries no
+projector-specific warp geometry, only semantic declarations (zones, media
+slots, FX presets).
+
+### Starting the wizard
+
+Click **"New scene…"** in the toolbar (available while in Editing mode). A
+five-step wizard opens:
+
+1. **Template** — pick from the eight built-in templates.
+2. **Media** — assign image or video files to each slot via the native file
+   picker. Empty slots produce invisible layers; you can assign media after
+   confirming.
+3. **Zones** — bind project zone roles to the template's declared zones.
+   (Requires masks tagged in Phase 3 Zone mode; templates still instantiate
+   without zone bindings.)
+4. **Palette & Mood** — choose a colour accent (Warm / Cool / Neutral) and
+   mood character (Calm / Energetic / Ethereal).
+5. **Tempo** — enable BPM sync to lock animation speed to the project clock.
+
+Press **Confirm** (or Return) to apply. The resulting layers appear in the
+layer list as ordinary entries — you can adjust them via the usual editor
+tools. Press Cmd-Z to undo the entire wizard in one step.
+
+### Built-in templates
+
+| Template | Zones | Media | Effect |
+|---|---|---|---|
+| Window Reveal | Window | Background | Ripple wash |
+| Pixel Drift | — | Source | Constrained drift |
+| Collage Bloom | — | 4 images | Edge emission |
+| Glow Behind Openings | Portal | Glow source | Bounded fluid |
+| Fragmented Portrait | — | Portrait | Collision reflection |
+| Architectural Wash | Edge | Surface | Ripple wash |
+| Mask-Edge Ripple Wash (Scene) | — | — | Ripple wash |
+| Light Spill from Windows | Window | Interior | Field flow |
+
+### Zone binding note
+
+Templates that declare `zones_consumed` (Window Reveal, Glow Behind Openings,
+Architectural Wash, Light Spill from Windows) emit a `TemplateZonesMissing`
+audit warning if the project has no masks tagged with the required roles.
+The template still instantiates and renders — zone roles improve the output
+but are not required. Tag masks in Mask mode (Phase 3) for full effect.
 
 ## FX Preset Library (v0.6)
 

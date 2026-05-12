@@ -4,19 +4,68 @@ All notable changes to rmap are documented here.
 
 ---
 
-## [Unreleased] — v0.8
+## [0.8.0] — 2026-05-13
+
+v0.8 moves rmap from a renderer with a UI to a **scene engine**. Operators
+can now select a named scene template, assign a few media assets, bind zone
+roles, and confirm — a coherent immersive scene is live in under a minute.
 
 ### Scene Templates
 
-<!-- P4.9.2 will fill this section. -->
+Eight built-in scene templates ship in v0.8, each a portable recipe
+combining media, zones, and FX presets:
+
+- **Window Reveal** — soft light flows through Window-tagged zones.
+- **Pixel Drift** — fine particles drift gently across source media.
+- **Collage Bloom** — four-image grid with particle blooms at each edge.
+- **Glow Behind Openings** — fluid light pools in Portal-tagged zones.
+- **Fragmented Portrait** — portrait image shattered by mask-boundary particles.
+- **Architectural Wash** — wave wash traces Edge-tagged architectural surfaces
+  (upgrade of the v0.4 Architectural Wash FX preset).
+- **Mask-Edge Ripple Wash (Scene)** — the classic ripple wash as a standalone
+  scene; no source media required.
+- **Light Spill from Windows** — light leaks outward from Window-tagged zones.
+
+Templates are read-only recipes: they carry no warp geometry (projector-specific)
+and no layer-level state. Template identity is not stored on layers — the wizard
+produces ordinary `LayerConfig` entries.
 
 ### Scene Wizard
 
-<!-- P4.9.2 will fill this section. -->
+A guided five-step flow for creating a scene from a template:
+
+1. **Template select** — scrollable grid of template cards with descriptions.
+2. **Media** — assign image/video files to each template slot via native file picker.
+3. **Zone binding** — bind project zone roles to the template's `zones_consumed` list.
+4. **Palette & mood** — choose Warm/Cool/Neutral palette and Calm/Energetic/Ethereal mood.
+5. **Tempo** — toggle BPM sync.
+
+Navigation: Escape cancels (non-undoable rollback); ← backs one step; Return
+confirms on the final step. Cancel dispatches a non-undoable `ApplyProjectSnapshot`;
+Confirm dispatches an undoable `ApplyProjectSnapshot` — one Cmd-Z undoes the
+entire wizard.
+
+Access: "New scene…" button in the toolbar (Editing mode only).
 
 ### Selected-Layer Scene Card
 
-<!-- P4.9.2 will fill this section. -->
+FxLayer selected-layer cards now show FX preset parameters above the fold
+(before Transform / Blend mode). A new "Advanced" disclosure wraps Placement
+and Mapping — collapsed by default for wizard-produced FxLayers, expanded
+for Image/Video/SVG layers.
+
+### Capability-Availability Hints
+
+The mode banner now shows inline hints when relevant:
+- Mask mode + mask selected: "Bezier handles — Phase 7"
+- Mask mode + no mask: "Fluid sim — Phase 2 preset in the FX layer menu"
+- Scene Wizard: "AI scene generation — not planned (pick a template instead)"
+
+### Audit
+
+A new `TemplateZonesMissing` audit finding (Severity::Warn) is emitted when
+a project's FxLayers use presets from a zone-consuming template but the project
+has no masks tagged with the required zone roles.
 
 ---
 

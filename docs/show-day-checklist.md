@@ -360,5 +360,36 @@ Traces to `specs/004-phase-3.md` acceptance criteria.
           transparent black (bit-exact).
     - **Pass:** all three GPU golden tests pass; no tolerance violations.
 
+---
+
+## Phase 4 — Scene template validation (v0.8)
+
+11. **Scene template audit: no TemplateZonesMissing warnings**
+    - [ ] Run the project audit (File → Audit, or load the project file and watch
+          for orange toast banners).
+    - [ ] If any `TemplateZonesMissing` Warn finding appears, either:
+          (a) add the required zone tags to the relevant masks in Mask mode, or
+          (b) confirm the template will render without zones (the operator
+          intentionally skipped zone binding).
+    - **Pass:** no `TemplateZonesMissing` warnings, or each one is acknowledged
+      and the operator accepts degraded (non-zoned) output.
+
+12. **Scene template media slots: all slots assigned**
+    - [ ] For each layer produced by a scene template wizard, confirm its media
+          path is set and the file exists on disk.
+    - [ ] If a layer has an empty path (no media assigned in the wizard), assign
+          it now via the Selected-Layer card → FX params → file picker, or return
+          to Editing and add a media layer manually.
+    - **Pass:** no layers with empty `path` fields that the operator intended
+      to fill.
+
+13. **BPM-synced templates: clock running before go-live**
+    - [ ] If any template was created with "Sync to project BPM" enabled, confirm
+          the BPM is set (tap the BPM strip or enter a value) and the clock is
+          running before pressing Go live.
+    - [ ] A BPM of 0 or an uninitialised clock will produce no animation; test
+          the animation looks correct at show pace before doors open.
+    - **Pass:** animation speed matches the musical tempo; no stalled presets.
+
 > **Note:** record pass/fail per step as a commit comment when this script is
-> run against the v0.7 release-candidate build.
+> run against the v0.8 release-candidate build.
