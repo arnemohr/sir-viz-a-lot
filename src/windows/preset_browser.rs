@@ -311,6 +311,11 @@ impl PresetBrowserWindow {
             return;
         }
 
+        // P2.8.3 — lazy-load stars if not yet loaded (e.g. first open).
+        if self.stars.is_none() {
+            self.stars = Some(PresetStars::load_or_default());
+        }
+
         let Some(layer_idx) = self.target_layer_idx else {
             return;
         };
