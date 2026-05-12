@@ -105,6 +105,11 @@ pub fn fx_registry() -> &'static [FxPresetEntry] {
             label: "Mask-constrained drift",
             family: FxFamily::ComputeParticle,
         },
+        FxPresetEntry {
+            preset_id: EDGE_EMISSION_PRESET_ID,
+            label: "Mask-edge emission",
+            family: FxFamily::ComputeParticle,
+        },
     ]
 }
 
@@ -285,6 +290,40 @@ const CONSTRAINED_DRIFT_DESCRIPTORS: &[FxParamDescriptor] = &[
     },
 ];
 
+/// P2.5.3 — Param descriptors for `mask_edge_emission`.
+///
+/// FxParamsUniform field aliasing:
+///   `particle_count`  → `wavelength` (1..=1024, default 128)
+///   `emission_speed`  → `speed`      (0.01..=0.15, default 0.05)
+///   `lifetime_secs`   → `falloff`    (0.5..=5.0, default 2.0)
+#[allow(dead_code)] // referenced only through `fx_param_descriptors` (P2.8.1 UI)
+const EDGE_EMISSION_DESCRIPTORS: &[FxParamDescriptor] = &[
+    FxParamDescriptor {
+        key: "particle_count",
+        label: "Particle count (1–1024)",
+        min: 1.0,
+        max: 1024.0,
+        default: 128.0,
+        max_particle_count: Some(1024),
+    },
+    FxParamDescriptor {
+        key: "emission_speed",
+        label: "Emission speed (UV/s)",
+        min: 0.01,
+        max: 0.15,
+        default: 0.05,
+        max_particle_count: None,
+    },
+    FxParamDescriptor {
+        key: "lifetime_secs",
+        label: "Lifetime (seconds)",
+        min: 0.5,
+        max: 5.0,
+        default: 2.0,
+        max_particle_count: None,
+    },
+];
+
 /// Param descriptors for the named FX preset. Returns an empty slice for
 /// unknown presets and for presets with no tunable parameters.
 #[allow(dead_code)] // consumed by P2.5.6 mutation + P2.8.1 browser UI
@@ -294,6 +333,7 @@ pub fn fx_param_descriptors(preset_id: &str) -> &'static [FxParamDescriptor] {
         EDGE_WAVE_WASH_PRESET_ID => EDGE_WAVE_WASH_DESCRIPTORS,
         PARTICLES_IDENTITY_PRESET_ID => PARTICLES_IDENTITY_DESCRIPTORS,
         CONSTRAINED_DRIFT_PRESET_ID => CONSTRAINED_DRIFT_DESCRIPTORS,
+        EDGE_EMISSION_PRESET_ID => EDGE_EMISSION_DESCRIPTORS,
         _ => &[],
     }
 }
@@ -309,6 +349,9 @@ pub const PARTICLES_IDENTITY_PRESET_ID: &str = "particles_identity";
 
 /// P2.5.2 — Preset id for the mask-constrained drift effect.
 pub const CONSTRAINED_DRIFT_PRESET_ID: &str = "mask_constrained_drift";
+
+/// P2.5.3 — Preset id for the mask-edge emission effect.
+pub const EDGE_EMISSION_PRESET_ID: &str = "mask_edge_emission";
 
 /// Per-frame inputs that every FX preset receives at dispatch time.
 ///
@@ -450,6 +493,34 @@ pub fn dispatch(preset_id: &str, pipelines: &FxPipelines, inputs: FxShaderInputs
                 inputs.sdf_view,
             );
             pipelines.constrained_drift.draw_particles(
+                inputs.device,
+                inputs.queue,
+                inputs.encoder,
+                inputs.dst,
+                n_particles,
+                inputs.output_size,
+            );
+            true
+        }
+        EDGE_EMISSION_PRESET_ID => {
+            let n_particles = inputs
+                .params
+                .get("particle_count")
+                .copied()
+                .unwrap_or(128.0)
+                .clamp(1.0, 1024.0) as u32;
+            pipelines.edge_emission.dispatch_compute_with_sdf(
+                inputs.queue,
+                inputs.device,
+                inputs.encoder,
+                n_particles,
+                inputs.seed,
+                inputs.clock_secs,
+                inputs.t_layer_added_secs,
+                inputs.params,
+                inputs.sdf_view,
+            );
+            pipelines.edge_emission.draw_particles(
                 inputs.device,
                 inputs.queue,
                 inputs.encoder,
@@ -690,6 +761,8 @@ pub struct FxPipelines {
     pub particles_identity: FxComputePipeline,
     /// P2.5.2 — mask-constrained drift (particles drift inside mask).
     pub constrained_drift: FxComputePipeline,
+    /// P2.5.3 — mask-edge emission (particles spawn at edge, fly outward).
+    pub edge_emission: FxComputePipeline,
 }
 
 impl FxPipelines {
@@ -703,6 +776,7 @@ impl FxPipelines {
             edge_wave_wash: FxEdgeWaveWashPipeline::new(device, target_format),
             particles_identity: FxComputePipeline::new_particles_identity(device, target_format),
             constrained_drift: FxComputePipeline::new_constrained_drift(device, target_format),
+            edge_emission: FxComputePipeline::new_edge_emission(device, target_format),
         }
     }
 }
@@ -1487,5 +1561,59 @@ mod tests {
         assert_eq!(entry.family, FxFamily::ComputeParticle);
     }
 
-    // P2.5.3-P2.5.5 tests added in subsequent commits.
+    // -------------------------------------------------------------------------
+    // P2.5.3 — mask_edge_emission
+    // -------------------------------------------------------------------------
+
+    /// P2.5.3 acceptance: `mask_edge_emission` is in the registry.
+    #[test]
+    fn edge_emission_is_registered() {
+        assert!(
+            fx_is_registered(EDGE_EMISSION_PRESET_ID),
+            "mask_edge_emission must be in fx_registry()"
+        );
+    }
+
+    /// P2.5.3 acceptance: descriptors count matches spec (3); each min < max;
+    /// default ∈ range.
+    #[test]
+    fn edge_emission_descriptors_present() {
+        let descs = fx_param_descriptors(EDGE_EMISSION_PRESET_ID);
+        assert_eq!(descs.len(), 3, "mask_edge_emission must have 3 descriptors");
+        for d in descs {
+            assert!(d.min < d.max, "key={}: min < max", d.key);
+            assert!(
+                d.default >= d.min && d.default <= d.max,
+                "key={}: default ∈ range",
+                d.key
+            );
+        }
+    }
+
+    /// P2.5.3 acceptance: `particle_count` descriptor has `max_particle_count: Some(1024)`.
+    #[test]
+    fn edge_emission_max_particle_count_matches_spec() {
+        let descs = fx_param_descriptors(EDGE_EMISSION_PRESET_ID);
+        let pc = descs
+            .iter()
+            .find(|d| d.key == "particle_count")
+            .expect("particle_count descriptor must be present");
+        assert_eq!(
+            pc.max_particle_count,
+            Some(1024),
+            "edge_emission particle_count max_particle_count must be Some(1024)"
+        );
+    }
+
+    /// P2.5.3 acceptance: registry entry has `FxFamily::ComputeParticle`.
+    #[test]
+    fn edge_emission_family_is_compute_particle() {
+        let entry = fx_registry()
+            .iter()
+            .find(|e| e.preset_id == EDGE_EMISSION_PRESET_ID)
+            .expect("mask_edge_emission must be in fx_registry");
+        assert_eq!(entry.family, FxFamily::ComputeParticle);
+    }
+
+    // P2.5.4-P2.5.5 tests added in subsequent commits.
 }
