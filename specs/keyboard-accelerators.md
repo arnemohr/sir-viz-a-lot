@@ -62,6 +62,7 @@ window path.
 |-------|---------|--------|--------|
 | `Cmd-Z` (control window focused) | `undo_stack.undo()` | Undo last mutation. | `src/app.rs:3143–3167` |
 | `Cmd-Shift-Z` (control window focused) | `undo_stack.redo()` | Redo last undone mutation. | `src/app.rs:3143–3167` |
+| `Cmd-Backspace` (control window focused) | `Mutation::RemoveLayer { idx: selected_layer }` | Delete the selected layer; restore via Cmd-Z. | `src/app.rs:4444–4471` |
 
 ---
 

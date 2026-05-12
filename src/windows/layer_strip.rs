@@ -459,6 +459,16 @@ pub fn show(
                 {
                     scene.selected = Some(Selection::Layer(idx));
                 }
+
+                // ── right-click context menu ────────────────────────────
+                // Single item for now: delete the layer. Cmd-Z undoes it.
+                // No confirmation dialog — undo is the recovery path.
+                row_resp.context_menu(|ui| {
+                    if ui.button("Delete layer").clicked() {
+                        pending.push(Mutation::RemoveLayer { idx });
+                        ui.close();
+                    }
+                });
             }
 
             // ── "+ Add image" button ──────────────────────────────────────

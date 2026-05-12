@@ -4441,6 +4441,37 @@ fn handle_editing_window_event(
                                 }
                             }
                         }
+                        // 004-P2-followup — Cmd-Backspace deletes the
+                        // currently selected layer (from control_panel.selected_layer).
+                        // Cmd-Z undoes it via the undo stack (RemoveLayer's
+                        // Reverse is AddLayer — the asymmetric exception).
+                        #[cfg(feature = "v3")]
+                        {
+                            let delete_layer_intent = ui.input(|i| {
+                                (i.modifiers.command || i.modifiers.ctrl)
+                                    && i.key_pressed(egui::Key::Backspace)
+                            });
+                            if delete_layer_intent {
+                                let idx = state.control_panel.selected_layer;
+                                // Guard: must be a valid index and the project
+                                // must have at least one layer to remove.
+                                if idx < state.project.layers.len() {
+                                    let mutation =
+                                        crate::project::command::Mutation::RemoveLayer { idx };
+                                    state.undo_stack.push(mutation, &mut state.project);
+                                    state.dirty = true;
+                                    // Selected-layer index may now be out of
+                                    // bounds (e.g. we deleted the last layer).
+                                    // Clamp it to the new last index.
+                                    state.control_panel.selected_layer = state
+                                        .control_panel
+                                        .selected_layer
+                                        .min(state.project.layers.len().saturating_sub(1));
+                                    // Layer topology changed — rebuild GPU LayerState vec.
+                                    undo_rebuild_after_render = true;
+                                }
+                            }
+                        }
                         // 003-T1.42 — render the toast strip in the
                         // canvas top-right after the control panel so it
                         // overlays on top. The Area widget anchors to

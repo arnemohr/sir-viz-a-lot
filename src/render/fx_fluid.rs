@@ -498,6 +498,7 @@ impl FxFluidPipeline {
     /// For `fluid_identity`, pass `None`.
     ///
     /// `dissipation` should be in [0.0, 1.0] (fraction/second energy loss).
+    #[allow(clippy::too_many_arguments)]
     pub fn dispatch_advect(
         &self,
         device: &wgpu::Device,
