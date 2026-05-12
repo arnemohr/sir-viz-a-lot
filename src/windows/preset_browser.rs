@@ -41,7 +41,9 @@ use egui::Ui;
 
 use crate::project::command::{Mutation, SetLayerKind};
 use crate::project::schema::{LayerKind, Project};
-use crate::render::fx_presets::{FxFamily, FxPresetEntry, fx_param_descriptors, fx_registry};
+use crate::render::fx_presets::{
+    FxFamily, FxPresetEntry, fx_param_descriptors, fx_registry, fx_requires_zone,
+};
 use crate::windows::control_panel::ControlPanelState;
 use crate::windows::preset_io::{RmapPresetJson, read_preset, write_preset};
 use crate::windows::preset_stars::PresetStars;
@@ -526,6 +528,17 @@ impl PresetBrowserWindow {
                                 ui.weak(&family_badge);
                             }
                         });
+
+                        // P3.4.2 — "requires zone tag" supplemental label for
+                        // zone-consuming presets. Drives by fx_requires_zone so
+                        // the label auto-appears when W5 presets land.
+                        if fx_requires_zone(&pid) {
+                            ui.label(
+                                egui::RichText::new("— requires zone tag")
+                                    .small()
+                                    .color(ui.visuals().weak_text_color()),
+                            );
+                        }
 
                         // Row 2: preset label button (full cell width).
                         if ui

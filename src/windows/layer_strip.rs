@@ -33,7 +33,7 @@ use crate::windows::anim;
 use crate::windows::theme;
 
 use crate::project::command::Mutation;
-use crate::project::schema::{self, Project};
+use crate::project::schema::{self, Project, ZoneRole};
 use crate::windows::control_panel::ControlPanelState;
 use crate::windows::scene_editor::{SceneEditorState, Selection};
 
@@ -326,6 +326,33 @@ pub fn show(
                     label_rect.top(),
                 );
                 painter.galley(label_pos, galley, label_colour);
+
+                // P3.4.2 — zone role badge: rendered below the id label in a
+                // muted colour when `zone_role` is `Some`. Short abbreviation
+                // so it fits under the thumbnail without overflow.
+                if let Some(role) = layer.warp.zone_role {
+                    let badge_text = match role {
+                        ZoneRole::Window => "[window]",
+                        ZoneRole::Portal => "[portal]",
+                        ZoneRole::Void => "[void]",
+                        ZoneRole::Spill => "[spill]",
+                        ZoneRole::Edge => "[edge]",
+                        ZoneRole::Highlight => "[highlight]",
+                        ZoneRole::LightSource => "[light-src]",
+                    };
+                    let badge_colour = theme::TEXT_SECONDARY.linear_multiply(dim);
+                    let badge_galley = painter.layout(
+                        badge_text.to_string(),
+                        egui::FontId::proportional(8.5),
+                        badge_colour,
+                        thumb_rect.width(),
+                    );
+                    let badge_pos = egui::pos2(
+                        label_rect.center().x - badge_galley.size().x * 0.5,
+                        label_rect.top() + 11.0, // below the id label
+                    );
+                    painter.galley(badge_pos, badge_galley, badge_colour);
+                }
 
                 // ── right-side controls column ──────────────────────────
                 // Controls column to the right of the thumbnail: eye toggle + arrows.
