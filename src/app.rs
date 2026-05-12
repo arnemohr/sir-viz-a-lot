@@ -1282,6 +1282,10 @@ enum EditingTransition {
     /// `set_fullscreen(false, None)`.
     #[cfg(feature = "v3")]
     ExitGoLive,
+    /// P4.4.1: Operator clicked "New scene from template". Swap `Editing →
+    /// SceneWizard` via `enter_scene_wizard(editing)`.
+    #[cfg(feature = "v3")]
+    EnterSceneWizard,
 }
 
 /// Rebuild GPU layer state for the current `project.layers`. Common
@@ -5001,6 +5005,14 @@ fn handle_editing_window_event(
                             );
                         }
                     }
+                    // P4.4.1 — "New scene from template" toolbar button enters the wizard.
+                    // The EditingState is MOVED OUT of self.state; the transition is handled
+                    // after the current match exits (mirrors the GoLive pattern at line ~5670).
+                    #[cfg(feature = "v3")]
+                    ControlPanelAction::RequestEnterSceneWizard => {
+                        tracing::info!(target: "rmap::ux", event = "new_scene_from_template_clicked");
+                        editing_transition = Some(EditingTransition::EnterSceneWizard);
+                    }
                 }
             }
             _ => {}
@@ -5969,6 +5981,18 @@ impl ApplicationHandler for App {
                             }
                             self.state = AppState::Editing(editing);
                         }
+                    }
+                    // P4.4.1: "New scene from template" → SceneWizard.
+                    #[cfg(feature = "v3")]
+                    EditingTransition::EnterSceneWizard => {
+                        let AppState::Editing(editing) = prev else {
+                            tracing::warn!(
+                                "EnterSceneWizard received in non-Editing state; ignoring"
+                            );
+                            self.state = prev;
+                            return;
+                        };
+                        self.state = enter_scene_wizard(editing);
                     }
                     EditingTransition::ExitGoLive => {
                         let AppState::GoLive(editing) = prev else {

@@ -366,6 +366,10 @@ pub enum ControlPanelAction {
     /// front via `Window::focus_window()`.
     #[cfg(feature = "v3")]
     FocusPreview,
+    /// P4.4.1 — operator clicked "New scene from template" in the toolbar.
+    /// App transitions `Editing → SceneWizard` via `enter_scene_wizard`.
+    #[cfg(feature = "v3")]
+    RequestEnterSceneWizard,
 }
 
 /// Per-frame inputs from the App into the control panel render. Bundled so the

@@ -232,6 +232,18 @@ pub fn show(
                 ui.add_space(4.0);
             }
 
+            // P4.4.1 — "New scene from template" button opens the scene wizard.
+            // Only available while in Editing (not GoLive) — wizarding from GoLive
+            // is undefined. The button is absent in GoLive mode so the operator
+            // isn't confused by a disabled button that doesn't explain itself.
+            #[cfg(feature = "v3")]
+            if !inputs.is_go_live {
+                if ui.button("New scene…").clicked() {
+                    action = Some(ControlPanelAction::RequestEnterSceneWizard);
+                }
+                ui.add_space(4.0);
+            }
+
             // 003-T4.17: Go-live / Stop button. Label flips on is_go_live;
             // the click returns RequestEnterGoLive or RequestExitGoLive so
             // App::window_event can perform the AppState swap.
