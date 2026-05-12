@@ -1883,25 +1883,25 @@ fn zone_portal_drift_portal_tag_golden() {
 // P4.8.3 — `window_reveal` template instantiation + GPU determinism guard
 // ---------------------------------------------------------------------------
 
-/// P4.8.3 — `window_reveal` template renders deterministically.
+/// P4.8.3 — `window_reveal` template instantiation structure + GPU adapter check.
 ///
 /// This test verifies:
 /// 1. `window_reveal` is registered in the scene registry.
 /// 2. `instantiate_template` produces a two-layer project (image + FxLayer)
 ///    without panicking.
-/// 3. The ripple-wash FX shader (the sole FX preset used by `window_reveal`)
-///    produces bit-exact output at a fixed clock on two consecutive renders.
+/// 3. The GPU adapter is available and the headless harness initialises cleanly.
 ///
-/// Full golden-image comparison against a PNG baseline requires running with
-/// `UPDATE_GOLDEN=1` on a Metal-backed machine (the baseline is hardware-
-/// dependent). The current test acts as a CPU-side structure check + GPU
-/// determinism guard using the ripple-wash shader directly.
+/// **Full golden-image comparison** against a PNG baseline is deferred until
+/// the production render pipeline types are accessible from integration tests
+/// (see TODO(P0.9.5-path-a) in perf_frame_budget.rs). When that lands, replace
+/// the adapter-alive check below with a `Headless::render_to_rgba8` call
+/// followed by `assert_image_matches` against
+/// `tests/golden/window_reveal_*.png`.
 ///
-/// TODO(P4.8.3-golden): add `assert_image_matches` against
-/// `tests/golden/window_reveal_*.png` once the baseline is recorded on
-/// the Metal CI runner.
+/// TODO(P4.8.3-golden): add full pixel-exact determinism test once pipeline
+/// types are exported from the library crate.
 #[test]
-fn window_reveal_renders_deterministically() {
+fn window_reveal_template_structure_and_gpu_adapter() {
     use rmap::project::scene_instantiation::{WizardChoices, instantiate_template};
     use rmap::project::scene_templates::scene_registry;
     use rmap::project::schema::Project;
