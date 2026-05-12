@@ -98,16 +98,188 @@ pub struct SceneTemplate {
 }
 
 // ---------------------------------------------------------------------------
-// Registry — empty for now; W5 tasks add entries.
+// Registry — W5 built-in templates.
 // ---------------------------------------------------------------------------
+
+/// Lazy-initialised registry of built-in scene templates.
+///
+/// Uses `std::sync::LazyLock` (stable since Rust 1.80) so the `String`
+/// fields can be heap-allocated at first access without `unsafe`. The
+/// registry is read-only after initialisation.
+static SCENE_REGISTRY: std::sync::LazyLock<Vec<SceneTemplate>> = std::sync::LazyLock::new(|| {
+    vec![
+        // P4.5.1 — window_reveal
+        SceneTemplate {
+            id: "window_reveal".to_string(),
+            display_name: "Window Reveal".to_string(),
+            description: "A soft reveal that flows light through tagged window zones.".to_string(),
+            zones_consumed: vec![ZoneRole::Window],
+            media_slots: vec![MediaSlotDescriptor {
+                name: "bg".to_string(),
+                label: "Background image".to_string(),
+                accepts: vec![MediaSlotKind::Image, MediaSlotKind::Video],
+            }],
+            fx_presets_used: vec!["mask_edge_ripple_wash".to_string()],
+            palette: PaletteHint::Warm,
+            mood: MoodHint::Calm,
+            tempo_sync: false,
+            builtin: true,
+        },
+        // P4.5.2 — pixel_drift
+        SceneTemplate {
+            id: "pixel_drift".to_string(),
+            display_name: "Pixel Drift".to_string(),
+            description: "Fine particles drift gently across the source media.".to_string(),
+            zones_consumed: vec![],
+            media_slots: vec![MediaSlotDescriptor {
+                name: "source".to_string(),
+                label: "Source media".to_string(),
+                accepts: vec![MediaSlotKind::Image, MediaSlotKind::Video],
+            }],
+            fx_presets_used: vec!["mask_constrained_drift".to_string()],
+            palette: PaletteHint::Cool,
+            mood: MoodHint::Calm,
+            tempo_sync: false,
+            builtin: true,
+        },
+        // P4.5.3 — collage_bloom
+        SceneTemplate {
+            id: "collage_bloom".to_string(),
+            display_name: "Collage Bloom".to_string(),
+            description:
+                "A four-image collage with particles blooming from the edges of each image."
+                    .to_string(),
+            zones_consumed: vec![],
+            media_slots: vec![
+                MediaSlotDescriptor {
+                    name: "slot_a".to_string(),
+                    label: "Image A".to_string(),
+                    accepts: vec![MediaSlotKind::Image],
+                },
+                MediaSlotDescriptor {
+                    name: "slot_b".to_string(),
+                    label: "Image B".to_string(),
+                    accepts: vec![MediaSlotKind::Image],
+                },
+                MediaSlotDescriptor {
+                    name: "slot_c".to_string(),
+                    label: "Image C".to_string(),
+                    accepts: vec![MediaSlotKind::Image],
+                },
+                MediaSlotDescriptor {
+                    name: "slot_d".to_string(),
+                    label: "Image D".to_string(),
+                    accepts: vec![MediaSlotKind::Image],
+                },
+            ],
+            fx_presets_used: vec!["mask_edge_emission".to_string()],
+            palette: PaletteHint::Warm,
+            mood: MoodHint::Energetic,
+            tempo_sync: false,
+            builtin: true,
+        },
+        // P4.5.4 — glow_behind_openings
+        SceneTemplate {
+            id: "glow_behind_openings".to_string(),
+            display_name: "Glow Behind Openings".to_string(),
+            description: "Fluid light pools in portal zones, evoking glow from behind \
+                              architectural openings."
+                .to_string(),
+            zones_consumed: vec![ZoneRole::Portal],
+            media_slots: vec![MediaSlotDescriptor {
+                name: "glow_source".to_string(),
+                label: "Glow source".to_string(),
+                accepts: vec![MediaSlotKind::Image, MediaSlotKind::Video],
+            }],
+            fx_presets_used: vec!["mask_bounded_fluid".to_string()],
+            palette: PaletteHint::Warm,
+            mood: MoodHint::Ethereal,
+            tempo_sync: false,
+            builtin: true,
+        },
+        // P4.5.5 — fragmented_portrait
+        SceneTemplate {
+            id: "fragmented_portrait".to_string(),
+            display_name: "Fragmented Portrait".to_string(),
+            description: "A portrait broken into fragments by colliding particles at the \
+                              mask boundary."
+                .to_string(),
+            zones_consumed: vec![],
+            media_slots: vec![MediaSlotDescriptor {
+                name: "portrait".to_string(),
+                label: "Portrait image".to_string(),
+                accepts: vec![MediaSlotKind::Image],
+            }],
+            fx_presets_used: vec!["mask_collision_reflection".to_string()],
+            palette: PaletteHint::Neutral,
+            mood: MoodHint::Energetic,
+            tempo_sync: false,
+            builtin: true,
+        },
+        // P4.5.6 — architectural_wash
+        // The underlying FX preset (mask_edge_ripple_wash) is unchanged;
+        // this scene template adds media + zone composition.
+        SceneTemplate {
+            id: "architectural_wash".to_string(),
+            display_name: "Architectural Wash".to_string(),
+            description: "A gentle wave wash that traces the edges of architectural \
+                              surfaces tagged as edge zones. Upgrade of the v3 Architectural \
+                              Wash preset."
+                .to_string(),
+            zones_consumed: vec![ZoneRole::Edge],
+            media_slots: vec![MediaSlotDescriptor {
+                name: "surface".to_string(),
+                label: "Architectural surface".to_string(),
+                accepts: vec![MediaSlotKind::Image, MediaSlotKind::Video],
+            }],
+            fx_presets_used: vec!["mask_edge_ripple_wash".to_string()],
+            palette: PaletteHint::Cool,
+            mood: MoodHint::Calm,
+            tempo_sync: false,
+            builtin: true,
+        },
+        // P4.5.7 — mask_edge_ripple_wash_scene
+        SceneTemplate {
+            id: "mask_edge_ripple_wash_scene".to_string(),
+            display_name: "Mask-Edge Ripple Wash (Scene)".to_string(),
+            description: "The classic mask-edge ripple wash as a standalone scene. \
+                              No media required."
+                .to_string(),
+            zones_consumed: vec![],
+            media_slots: vec![],
+            fx_presets_used: vec!["mask_edge_ripple_wash".to_string()],
+            palette: PaletteHint::Neutral,
+            mood: MoodHint::Calm,
+            tempo_sync: false,
+            builtin: true,
+        },
+        // P4.5.8 — light_spill_from_windows
+        SceneTemplate {
+            id: "light_spill_from_windows".to_string(),
+            display_name: "Light Spill from Windows".to_string(),
+            description: "Light appears to spill outward from tagged window zones, \
+                              as if an interior source is leaking through the aperture."
+                .to_string(),
+            zones_consumed: vec![ZoneRole::Window],
+            media_slots: vec![MediaSlotDescriptor {
+                name: "interior".to_string(),
+                label: "Interior light source".to_string(),
+                accepts: vec![MediaSlotKind::Image, MediaSlotKind::Video],
+            }],
+            fx_presets_used: vec!["mask_field_flow".to_string()],
+            palette: PaletteHint::Warm,
+            mood: MoodHint::Ethereal,
+            tempo_sync: false,
+            builtin: true,
+        },
+    ]
+});
 
 /// All registered built-in scene templates.
 ///
-/// Empty at P4.2.1 stage; each W5 task appends one entry.  The slice is
-/// `'static` (mirrors `fx_registry()` in `src/render/fx_presets.rs`).
+/// Returns a reference to the static registry populated at first call.
 pub fn scene_registry() -> &'static [SceneTemplate] {
-    // W5 tasks will replace this with a populated static slice.
-    &[]
+    &SCENE_REGISTRY
 }
 
 /// Returns `true` if `id` corresponds to a registered scene template.
@@ -215,6 +387,110 @@ mod tests {
             let json = serde_json::to_string(&hint).expect("serialize");
             let back: MoodHint = serde_json::from_str(&json).expect("deserialize");
             assert_eq!(back, hint);
+        }
+    }
+
+    // W5 — built-in template tests.
+
+    /// P4.5.1–P4.5.8 — registry has exactly 8 built-in templates.
+    #[test]
+    fn scene_registry_has_eight_builtin_templates() {
+        assert_eq!(
+            scene_registry().len(),
+            8,
+            "expected 8 built-in templates, found {}",
+            scene_registry().len()
+        );
+    }
+
+    /// P4.5.1–P4.5.8 — all registry IDs are unique.
+    #[test]
+    fn scene_registry_ids_are_unique() {
+        let ids: Vec<&str> = scene_registry().iter().map(|t| t.id.as_str()).collect();
+        let mut seen = std::collections::HashSet::new();
+        for id in &ids {
+            assert!(seen.insert(*id), "duplicate template id: {id}");
+        }
+    }
+
+    /// P4.5.1 — window_reveal is registered and has expected fields.
+    #[test]
+    fn window_reveal_is_registered() {
+        assert!(scene_is_registered("window_reveal"));
+        let t = scene_registry()
+            .iter()
+            .find(|t| t.id == "window_reveal")
+            .unwrap();
+        assert_eq!(
+            t.zones_consumed,
+            vec![crate::project::schema::ZoneRole::Window]
+        );
+        assert_eq!(t.media_slots.len(), 1);
+        assert_eq!(t.fx_presets_used, vec!["mask_edge_ripple_wash"]);
+        assert!(t.builtin);
+    }
+
+    /// P4.5.2 — pixel_drift is registered with no zones.
+    #[test]
+    fn pixel_drift_is_registered() {
+        assert!(scene_is_registered("pixel_drift"));
+        let t = scene_registry()
+            .iter()
+            .find(|t| t.id == "pixel_drift")
+            .unwrap();
+        assert!(t.zones_consumed.is_empty());
+        assert_eq!(t.fx_presets_used, vec!["mask_constrained_drift"]);
+    }
+
+    /// P4.5.3 — collage_bloom has four media slots.
+    #[test]
+    fn collage_bloom_has_four_media_slots() {
+        assert!(scene_is_registered("collage_bloom"));
+        let t = scene_registry()
+            .iter()
+            .find(|t| t.id == "collage_bloom")
+            .unwrap();
+        assert_eq!(t.media_slots.len(), 4);
+    }
+
+    /// P4.5.7 — mask_edge_ripple_wash_scene has no media slots.
+    #[test]
+    fn mask_edge_ripple_wash_scene_has_no_media_slots() {
+        assert!(scene_is_registered("mask_edge_ripple_wash_scene"));
+        let t = scene_registry()
+            .iter()
+            .find(|t| t.id == "mask_edge_ripple_wash_scene")
+            .unwrap();
+        assert!(t.media_slots.is_empty());
+        assert!(t.zones_consumed.is_empty());
+    }
+
+    /// P4.5.1–P4.5.8 — every template has a non-empty display_name and description.
+    #[test]
+    fn all_builtin_templates_have_labels() {
+        for t in scene_registry() {
+            assert!(
+                !t.display_name.is_empty(),
+                "template {} has empty display_name",
+                t.id
+            );
+            assert!(
+                !t.description.is_empty(),
+                "template {} has empty description",
+                t.id
+            );
+        }
+    }
+
+    /// P4.5.1–P4.5.8 — scene_display_label returns Some for all registered IDs.
+    #[test]
+    fn scene_display_label_returns_some_for_all_registered() {
+        for t in scene_registry() {
+            assert!(
+                scene_display_label(&t.id).is_some(),
+                "scene_display_label returned None for registered id: {}",
+                t.id
+            );
         }
     }
 }
