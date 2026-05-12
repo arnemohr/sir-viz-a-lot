@@ -5,7 +5,7 @@ use std::cell::Cell;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 pub const CURRENT_SCHEMA_VERSION: u32 = 7;
 
@@ -271,6 +271,55 @@ pub struct LayerConfig {
     pub treatment: Option<Treatment>,
 }
 
+/// P3.2.1 — semantic role tag for a mask polygon, drawn from a closed
+/// seven-variant palette.
+///
+/// The enum's variant order is load-bearing: `impl From<ZoneRole> for u32`
+/// maps `None` → 0, `Window` → 1, `Portal` → 2, …, `LightSource` → 7.
+/// The WGSL constants in `ZONE_TAG_WGSL` (P3.3.1) must match this order.
+/// Adding a new variant requires updating both the Rust enum *and* the WGSL
+/// constants.
+///
+/// `#[serde(rename_all = "kebab-case")]` so the saved JSON string is
+/// `"window"`, `"light-source"`, etc. — matches the plan identifiers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ZoneRole {
+    Window,
+    Portal,
+    Void,
+    Spill,
+    Edge,
+    Highlight,
+    LightSource,
+}
+
+/// Lenient deserializer for `Option<ZoneRole>`.
+///
+/// A `null` or absent JSON value deserializes to `None`. A known role string
+/// deserializes to `Some(ZoneRole::…)`. An unknown role string (e.g. from a
+/// hand-edited file or a future version) also deserializes to `None` — the
+/// audit pass (P3.2.4) is responsible for detecting and reporting the unknown
+/// string by inspecting the raw JSON.
+fn deserialize_optional_zone_role<'de, D>(d: D) -> Result<Option<ZoneRole>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let v: Option<serde_json::Value> = Option::deserialize(d)?;
+    match v {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(s)) => {
+            // Try to parse via serde_json round-trip.
+            let quoted = format!("\"{}\"", s);
+            match serde_json::from_str::<ZoneRole>(&quoted) {
+                Ok(role) => Ok(Some(role)),
+                Err(_) => Ok(None), // Unknown role — audit handles it.
+            }
+        }
+        Some(_) => Ok(None), // Unexpected JSON type — treat as None.
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WarpMesh {
     pub rows: u32,
@@ -281,6 +330,18 @@ pub struct WarpMesh {
     /// Normalized fraction of output extent (0..0.5 useful), not pixels.
     #[serde(default)]
     pub mask_feather: f32,
+    /// P3.2.1 — semantic zone role for this mask polygon. `None` means the
+    /// mask carries no zone semantics; zone-aware FX presets fall back to a
+    /// neutral (transparent) output when the tag is `None`.
+    ///
+    /// Uses a lenient deserializer: unknown role strings (from hand-edited
+    /// files or newer builds) map to `None` at runtime — the audit pass
+    /// (P3.2.4) detects and reports them by inspecting the raw JSON.
+    ///
+    /// `#[serde(default)]` ensures old projects (v7 and earlier) that lack
+    /// the `zone_role` key load with `zone_role = None`.
+    #[serde(default, deserialize_with = "deserialize_optional_zone_role")]
+    pub zone_role: Option<ZoneRole>,
 }
 
 impl WarpMesh {
@@ -297,6 +358,7 @@ impl WarpMesh {
             grid: vec![vec![[0.0, 0.0], [1.0, 0.0]], vec![[0.0, 1.0], [1.0, 1.0]]],
             mask_polygon: Vec::new(),
             mask_feather: 0.02,
+            zone_role: None,
         }
     }
 
@@ -316,6 +378,7 @@ impl WarpMesh {
             ],
             mask_polygon: Vec::new(),
             mask_feather: 0.02,
+            zone_role: None,
         }
     }
 }
@@ -621,6 +684,39 @@ impl Project {
             None => !layer.muted,
         }
     }
+}
+
+/// P3.3.1 — convert a `ZoneRole` to its u32 discriminant for the WGSL uniform.
+///
+/// The mapping must stay in sync with the WGSL constants in `ZONE_TAG_WGSL`:
+///   None / absent → 0 (ZONE_NONE)
+///   Window        → 1 (ZONE_WINDOW)
+///   Portal        → 2 (ZONE_PORTAL)
+///   Void          → 3 (ZONE_VOID)
+///   Spill         → 4 (ZONE_SPILL)
+///   Edge          → 5 (ZONE_EDGE)
+///   Highlight     → 6 (ZONE_HIGHLIGHT)
+///   LightSource   → 7 (ZONE_LIGHT_SOURCE)
+impl From<ZoneRole> for u32 {
+    fn from(role: ZoneRole) -> u32 {
+        match role {
+            ZoneRole::Window => 1,
+            ZoneRole::Portal => 2,
+            ZoneRole::Void => 3,
+            ZoneRole::Spill => 4,
+            ZoneRole::Edge => 5,
+            ZoneRole::Highlight => 6,
+            ZoneRole::LightSource => 7,
+        }
+    }
+}
+
+/// Convert an `Option<ZoneRole>` to its u32 discriminant for WGSL uniforms.
+/// `None` → 0 (ZONE_NONE); `Some(role)` → `u32::from(role)`.
+/// Used by the zone-tag uniform write path (P3.3.2) and GPU tests (P3.6.2).
+#[allow(dead_code)] // P3.3.2 wires the render-path call site.
+pub fn zone_role_to_u32(opt: Option<ZoneRole>) -> u32 {
+    opt.map(u32::from).unwrap_or(0)
 }
 
 /// Bilinear-resample a mesh-warp grid to new `rows`/`cols` cell counts,
@@ -1069,5 +1165,92 @@ mod tests {
             }
             other => panic!("expected FxLayer, got {:?}", other),
         }
+    }
+
+    // --- P3.2.1 ZoneRole schema tests ---
+
+    /// P3.2.1 — `WarpMesh::identity()` round-trips through serde with
+    /// `zone_role = None`.
+    #[test]
+    fn warp_mesh_identity_zone_role_round_trip() {
+        let warp = WarpMesh::identity();
+        assert_eq!(
+            warp.zone_role, None,
+            "identity() must have zone_role = None"
+        );
+        let json = serde_json::to_string(&warp).expect("serialize identity warp");
+        let back: WarpMesh = serde_json::from_str(&json).expect("deserialize identity warp");
+        assert_eq!(
+            back.zone_role, None,
+            "identity() must round-trip with zone_role = None"
+        );
+    }
+
+    /// P3.2.1 — a `WarpMesh` JSON object without a `zone_role` key
+    /// deserialises to `zone_role = None` (regression guard for old projects).
+    #[test]
+    fn warp_mesh_missing_zone_role_key_deserializes_as_none() {
+        let json = r#"{"rows":1,"cols":1,"grid":[[[0.0,0.0],[1.0,0.0]],[[0.0,1.0],[1.0,1.0]]],"mask_polygon":[],"mask_feather":0.02}"#;
+        let warp: WarpMesh = serde_json::from_str(json).expect("old warp JSON must load");
+        assert_eq!(
+            warp.zone_role, None,
+            "WarpMesh without zone_role key must deserialize to None"
+        );
+    }
+
+    /// P3.2.1 — each `ZoneRole` variant serialises to the expected kebab-case
+    /// string and deserialises back correctly.
+    #[test]
+    fn zone_role_kebab_case_round_trip() {
+        let cases = [
+            (ZoneRole::Window, "\"window\""),
+            (ZoneRole::Portal, "\"portal\""),
+            (ZoneRole::Void, "\"void\""),
+            (ZoneRole::Spill, "\"spill\""),
+            (ZoneRole::Edge, "\"edge\""),
+            (ZoneRole::Highlight, "\"highlight\""),
+            (ZoneRole::LightSource, "\"light-source\""),
+        ];
+        for (role, expected_json) in cases {
+            let json = serde_json::to_string(&role).expect("serialize ZoneRole");
+            assert_eq!(
+                json, expected_json,
+                "ZoneRole::{role:?} must serialize to {expected_json}"
+            );
+            let back: ZoneRole = serde_json::from_str(&json).expect("deserialize ZoneRole");
+            assert_eq!(back, role, "ZoneRole::{role:?} must round-trip");
+        }
+    }
+
+    /// P3.2.1 — an unknown `zone_role` string in a `WarpMesh` JSON deserialises
+    /// to `None` (the lenient deserializer's unknown-variant fallback). Regression
+    /// guard: if this changes, the audit (P3.2.4) must still fire `UnknownZoneRole`.
+    #[test]
+    fn warp_mesh_unknown_zone_role_deserializes_as_none() {
+        let json = r#"{"rows":1,"cols":1,"grid":[[[0.0,0.0],[1.0,0.0]],[[0.0,1.0],[1.0,1.0]]],"mask_polygon":[],"mask_feather":0.02,"zone_role":"sky-bridge"}"#;
+        let warp: WarpMesh = serde_json::from_str(json).expect("warp with unknown role must load");
+        assert_eq!(
+            warp.zone_role, None,
+            "Unknown zone_role string must deserialize to None"
+        );
+    }
+
+    /// P3.3.1 — `From<ZoneRole> for u32` mapping matches WGSL constant order.
+    #[test]
+    fn zone_role_to_u32_mapping() {
+        assert_eq!(u32::from(ZoneRole::Window), 1u32);
+        assert_eq!(u32::from(ZoneRole::Portal), 2u32);
+        assert_eq!(u32::from(ZoneRole::Void), 3u32);
+        assert_eq!(u32::from(ZoneRole::Spill), 4u32);
+        assert_eq!(u32::from(ZoneRole::Edge), 5u32);
+        assert_eq!(u32::from(ZoneRole::Highlight), 6u32);
+        assert_eq!(u32::from(ZoneRole::LightSource), 7u32);
+    }
+
+    /// P3.3.1 — `zone_role_to_u32`: None maps to 0 (ZONE_NONE).
+    #[test]
+    fn option_zone_role_none_maps_to_zero() {
+        assert_eq!(zone_role_to_u32(None), 0u32);
+        assert_eq!(zone_role_to_u32(Some(ZoneRole::Window)), 1u32);
     }
 }

@@ -555,6 +555,7 @@ impl ProjectAudit {
                     grid: vec![vec![[0.0, 0.0], [1.0, 0.0]], vec![[0.0, 1.0], [1.0, 1.0]]],
                     mask_polygon: warp.mask_polygon.clone(),
                     mask_feather: warp.mask_feather,
+                    zone_role: warp.zone_role,
                 };
                 findings.push(AuditFinding {
                     kind: AuditKind::DegenerateLayerWarp { layer_idx },
