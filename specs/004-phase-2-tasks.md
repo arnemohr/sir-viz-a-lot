@@ -17,6 +17,8 @@ below is sized for a single PR.
 - [x] P2.4.1 cdd7da8 — displacement_ripple Treatment preset
 - [x] P2.4.2 63b63c9 — refraction Treatment preset
 - [x] P2.4.3 8d499d8 — mask_edge_wave_wash FxLayer preset (FxPipelines wrapper)
+- [x] P2.5.1 692a90a — particle compute infra + particles_identity preset + LayerKind::FxLayer seed/t_layer_added_secs (NOTE: co-committed with P2.7.1; commit message lists only P2.7.1, but the diff contains both. `make ci` clean.)
+- [x] P2.7.1 692a90a — drag-reorder effect chain (SetLayerEffects dispatch)
 
 ---
 
