@@ -4286,6 +4286,13 @@ fn handle_wizard_window_event(
                 }
                 return None;
             }
+            // P4.3.3: Return on the last step (Tempo) commits the wizard.
+            Key::Named(NamedKey::Enter) => {
+                use crate::windows::wizard::WizardStep;
+                if state.step == WizardStep::Tempo {
+                    return Some(WizardTransition::Commit);
+                }
+            }
             _ => {}
         }
     }
