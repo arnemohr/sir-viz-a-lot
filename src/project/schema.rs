@@ -604,6 +604,18 @@ pub struct Project {
     /// behaviour).
     #[serde(default)]
     pub edge_blend: Option<EdgeBlendConfig>,
+    /// P5.3.1 — fixture groups for DMX light output. `#[serde(default)]`
+    /// keeps existing projects loading without the field; the lighting
+    /// feature gate ensures the field is only compiled when lighting is
+    /// enabled, keeping the schema lean for show-day builds without lighting.
+    #[serde(default)]
+    #[cfg(feature = "lighting")]
+    pub fixture_groups: Vec<crate::lighting::fixture::FixtureGroup>,
+    /// P5.7.1 — BPM-locked fixture chases. `#[serde(default)]` for
+    /// backward compatibility with pre-Phase-5 project files.
+    #[serde(default)]
+    #[cfg(feature = "lighting")]
+    pub fixture_chases: Vec<crate::lighting::chase::FixtureChase>,
     /// Side-channel state surfaced by [`migrate::migrate_v3_to_v4`] to the
     /// audit pass (T3.0d). `previous_warp_count > 1` triggers a one-shot
     /// `MultipleWarpsConsolidated` finding so the operator knows the
@@ -646,6 +658,10 @@ impl Default for Project {
             solo: None,
             quantize_bars: None,
             edge_blend: None,
+            #[cfg(feature = "lighting")]
+            fixture_groups: Vec::new(),
+            #[cfg(feature = "lighting")]
+            fixture_chases: Vec::new(),
             transient_audit_signals: Cell::new(TransientAuditSignals::default()),
         }
     }

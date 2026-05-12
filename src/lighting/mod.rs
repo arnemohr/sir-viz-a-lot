@@ -22,7 +22,9 @@
 // Until then, suppress dead-code lint for the lighting module.
 #![allow(dead_code)]
 
+pub mod chase;
 pub mod error;
+pub mod fixture;
 pub mod thread;
 pub mod transport;
 pub mod universe;
