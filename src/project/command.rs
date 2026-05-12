@@ -4646,4 +4646,49 @@ mod tests {
             "after undo: effect chain should be restored to original order"
         );
     }
+
+    /// P2.7.2 — verify that appending a default `Effect::Blur` via
+    /// `SetLayerEffects` and then applying the reverse restores the
+    /// original empty-effects list (Effects-Vec Reverse rule 2).
+    #[test]
+    fn set_layer_effects_append_default_blur_round_trips() {
+        use crate::effects::Effect;
+        use crate::modulators::Modulator;
+
+        let mut p = fresh_project();
+        // Start with an empty effect chain so the "append" semantics are clear.
+        p.layers[0].effects = vec![];
+        let original = p.layers[0].effects.clone();
+        assert_eq!(original.len(), 0, "starting chain should be empty");
+
+        // Build a chain with a single default Blur (matches default_effect_chain defaults).
+        let default_blur = Effect::Blur {
+            radius_px: Modulator::Static(0.0),
+        };
+        let new_chain = vec![default_blur];
+
+        // Build and apply the mutation (Effects-Vec Reverse snapshots the full old vec).
+        let mutation = p.set_layer_effects_mutation(0, new_chain);
+        let reverse = mutation.apply(&mut p);
+
+        // After apply: chain should have one Blur entry.
+        assert_eq!(
+            p.layers[0].effects.len(),
+            1,
+            "after apply: chain should have 1 effect"
+        );
+        assert!(
+            matches!(p.layers[0].effects[0], Effect::Blur { .. }),
+            "after apply: effects[0] should be Blur"
+        );
+
+        // Apply the reverse (undo): should restore the original empty chain.
+        let _ = reverse.apply(&mut p);
+        let after_undo = serde_json::to_value(&p.layers[0].effects).unwrap();
+        let original_val = serde_json::to_value(&original).unwrap();
+        assert_eq!(
+            after_undo, original_val,
+            "after undo: effect chain should be restored to empty"
+        );
+    }
 }

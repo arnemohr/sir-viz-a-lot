@@ -1178,6 +1178,11 @@ fn show_effects_tab(ui: &mut Ui, project: &mut Project, st: &mut ControlPanelSta
     // when building without v3.
     #[allow(unused_assignments, unused_mut)]
     let mut pending_reorder: Option<(usize, usize)> = None;
+    // P2.7.2: remove-row state — index captured inside the loop so the
+    // mutable borrow on project.layers is released before we mutate the vec.
+    // Like pending_reorder, assigned unconditionally but consumed only under v3.
+    #[allow(unused_assignments, unused_mut)]
+    let mut pending_remove: Option<usize> = None;
     for idx in 0..effects_len {
         // P2.7.1: wrap each row in a horizontal layout so the drag handle
         // sits at the left of the CollapsingHeader. The drop zone spans the
@@ -1207,6 +1212,15 @@ fn show_effects_tab(ui: &mut Ui, project: &mut Project, st: &mut ControlPanelSta
                             let _ = show_effect(ui, idx, effect, true, layer_idx);
                         }
                     });
+
+                // P2.7.2: × remove button, right-aligned after the header.
+                if ui
+                    .add(egui::Button::new("\u{00D7}").small())
+                    .on_hover_text("Remove this effect")
+                    .clicked()
+                {
+                    pending_remove = Some(idx);
+                }
             });
         });
         // If a drag payload was dropped onto this row's zone, record the
@@ -1236,6 +1250,86 @@ fn show_effects_tab(ui: &mut Ui, project: &mut Project, st: &mut ControlPanelSta
         st.pending_mutations
             .push(project.set_layer_effects_mutation(layer_idx, new));
     }
+    // P2.7.2: remove effect — dispatch SetLayerEffects without the removed index.
+    // Both v3 and non-v3 paths mirror the preset-apply pattern at line 1143.
+    if let Some(remove_idx) = pending_remove {
+        let mut new = project.layers[layer_idx].effects.clone();
+        new.remove(remove_idx);
+        #[cfg(feature = "v3")]
+        {
+            st.pending_mutations
+                .push(project.set_layer_effects_mutation(layer_idx, new));
+        }
+        #[cfg(not(feature = "v3"))]
+        {
+            project.layers[layer_idx].effects = new;
+        }
+    }
+
+    // P2.7.2: "Add effect" button — opens a popup menu listing Effect variants.
+    // Selecting one appends a default-constructed effect and dispatches
+    // SetLayerEffects (Effects-Vec Reverse rule 2 — wholesale snapshot).
+    // Default values match default_effect_chain() in src/effects/mod.rs.
+    ui.add_space(4.0);
+    egui::ComboBox::from_id_salt("add_effect_picker")
+        .selected_text("+ Add effect")
+        .show_ui(ui, |ui| {
+            if ui.selectable_label(false, "Color").clicked() {
+                let new_effect = crate::effects::Effect::Color {
+                    hue: crate::modulators::Modulator::Static(0.0),
+                    saturation: crate::modulators::Modulator::Static(1.0),
+                    brightness: crate::modulators::Modulator::Static(0.0),
+                    contrast: crate::modulators::Modulator::Static(1.0),
+                };
+                let mut new = project.layers[layer_idx].effects.clone();
+                new.push(new_effect);
+                #[cfg(feature = "v3")]
+                {
+                    st.pending_mutations
+                        .push(project.set_layer_effects_mutation(layer_idx, new));
+                }
+                #[cfg(not(feature = "v3"))]
+                {
+                    project.layers[layer_idx].effects = new;
+                }
+            }
+            if ui.selectable_label(false, "Blur").clicked() {
+                let new_effect = crate::effects::Effect::Blur {
+                    radius_px: crate::modulators::Modulator::Static(0.0),
+                };
+                let mut new = project.layers[layer_idx].effects.clone();
+                new.push(new_effect);
+                #[cfg(feature = "v3")]
+                {
+                    st.pending_mutations
+                        .push(project.set_layer_effects_mutation(layer_idx, new));
+                }
+                #[cfg(not(feature = "v3"))]
+                {
+                    project.layers[layer_idx].effects = new;
+                }
+            }
+            if ui.selectable_label(false, "Transform").clicked() {
+                let new_effect = crate::effects::Effect::Transform {
+                    translate: [0.0, 0.0],
+                    rotate_deg: crate::modulators::Modulator::Static(0.0),
+                    scale_x: crate::modulators::Modulator::Static(1.0),
+                    scale_y: crate::modulators::Modulator::Static(1.0),
+                };
+                let mut new = project.layers[layer_idx].effects.clone();
+                new.push(new_effect);
+                #[cfg(feature = "v3")]
+                {
+                    st.pending_mutations
+                        .push(project.set_layer_effects_mutation(layer_idx, new));
+                }
+                #[cfg(not(feature = "v3"))]
+                {
+                    project.layers[layer_idx].effects = new;
+                }
+            }
+        });
+
     // 003-T1.21/T1.22: after the loop, apply staged changes.
     // T1.22: ModulatorSwitch emits SetModulator (per-slot, whole-enum Reverse);
     // field changes (TransformTranslate*) still funnel into a single SetLayerEffects.
