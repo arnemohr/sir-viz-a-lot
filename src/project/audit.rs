@@ -162,6 +162,15 @@ pub enum AuditKind {
         /// The `fallback_index` the project intended as a secondary fallback.
         fallback_index: usize,
     },
+    /// P3.2.4 — `WarpMesh.zone_role` contains a string that is not in the
+    /// current `ZoneRole` palette (hand-edited file or newer build). The layer
+    /// renders as if `zone_role = None`. `Severity::Warn`.
+    UnknownZoneRole {
+        /// Index into `Project.layers`.
+        layer_idx: usize,
+        /// The unrecognised role string that was found in the saved JSON.
+        role: String,
+    },
 }
 
 /// One finding from a `ProjectAudit::run` walk. The `message` field is
@@ -556,6 +565,7 @@ impl ProjectAudit {
                     mask_polygon: warp.mask_polygon.clone(),
                     mask_feather: warp.mask_feather,
                     zone_role: warp.zone_role,
+                    unknown_zone_role_raw: None, // autofix resets to a clean state
                 };
                 findings.push(AuditFinding {
                     kind: AuditKind::DegenerateLayerWarp { layer_idx },
@@ -575,6 +585,26 @@ impl ProjectAudit {
                             old: warp.clone(),
                         },
                     )),
+                });
+            }
+
+            // P3.2.4 — UnknownZoneRole: the warp carries a zone_role string that
+            // does not map to any known ZoneRole variant. The custom WarpMesh
+            // Deserialize impl (schema.rs) populates `unknown_zone_role_raw` when
+            // it encounters an unrecognised role string, so the typed field is None
+            // but the raw string survives for audit purposes.
+            if let Some(ref raw) = warp.unknown_zone_role_raw {
+                findings.push(AuditFinding {
+                    kind: AuditKind::UnknownZoneRole {
+                        layer_idx,
+                        role: raw.clone(),
+                    },
+                    severity: Severity::Warn,
+                    message: format!(
+                        "Layer {layer_idx} has an unrecognised zone role '{raw}'. \
+                         The layer will render as if zone_role is None until the role is cleared.",
+                    ),
+                    autofix: None,
                 });
             }
 
@@ -1616,5 +1646,66 @@ mod tests {
             "expected exactly one UnknownTreatment finding for empty preset_id, got: {findings:?}"
         );
         assert_eq!(unknown[0].severity, Severity::Warn);
+    }
+
+    // --- P3.2.4 UnknownZoneRole tests ---
+
+    /// P3.2.4 — a project with `"zone_role": "sky-bridge"` on a layer
+    /// produces exactly one `UnknownZoneRole` finding at the correct `layer_idx`.
+    #[test]
+    fn audit_unknown_zone_role_emits_finding() {
+        // Deserialise a WarpMesh with an unknown zone_role so `unknown_zone_role_raw` is set.
+        let warp_json = r#"{"rows":1,"cols":1,"grid":[[[0.0,0.0],[1.0,0.0]],[[0.0,1.0],[1.0,1.0]]],"mask_polygon":[],"mask_feather":0.02,"zone_role":"sky-bridge"}"#;
+        let warp: crate::project::schema::WarpMesh =
+            serde_json::from_str(warp_json).expect("deserialize warp with unknown role");
+        assert_eq!(warp.zone_role, None, "unknown role must map to None");
+        assert_eq!(
+            warp.unknown_zone_role_raw.as_deref(),
+            Some("sky-bridge"),
+            "unknown_zone_role_raw must carry the raw string"
+        );
+
+        let mut p = fresh_project();
+        p.layers[0].warp = warp;
+        let findings = ProjectAudit::run(&p, &AuditEnv::default());
+        let role_findings: Vec<_> = findings
+            .iter()
+            .filter(|f| matches!(f.kind, AuditKind::UnknownZoneRole { .. }))
+            .collect();
+        assert_eq!(
+            role_findings.len(),
+            1,
+            "expected exactly one UnknownZoneRole finding, got: {findings:?}"
+        );
+        assert!(matches!(
+            &role_findings[0].kind,
+            AuditKind::UnknownZoneRole { layer_idx: 0, role } if role == "sky-bridge"
+        ));
+        assert_eq!(role_findings[0].severity, Severity::Warn);
+        assert!(role_findings[0].autofix.is_none());
+    }
+
+    /// P3.2.4 — a project with `"zone_role": "window"` (a known role) produces no
+    /// `UnknownZoneRole` finding.
+    #[test]
+    fn audit_known_zone_role_emits_no_unknown_finding() {
+        let warp_json = r#"{"rows":1,"cols":1,"grid":[[[0.0,0.0],[1.0,0.0]],[[0.0,1.0],[1.0,1.0]]],"mask_polygon":[],"mask_feather":0.02,"zone_role":"window"}"#;
+        let warp: crate::project::schema::WarpMesh =
+            serde_json::from_str(warp_json).expect("deserialize warp with known role");
+        assert_eq!(
+            warp.zone_role,
+            Some(crate::project::schema::ZoneRole::Window)
+        );
+        assert!(warp.unknown_zone_role_raw.is_none());
+
+        let mut p = fresh_project();
+        p.layers[0].warp = warp;
+        let findings = ProjectAudit::run(&p, &AuditEnv::default());
+        assert!(
+            findings
+                .iter()
+                .all(|f| !matches!(f.kind, AuditKind::UnknownZoneRole { .. })),
+            "known zone role must not produce UnknownZoneRole finding, got: {findings:?}"
+        );
     }
 }

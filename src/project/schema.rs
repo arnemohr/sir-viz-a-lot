@@ -5,7 +5,7 @@ use std::cell::Cell;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 
 pub const CURRENT_SCHEMA_VERSION: u32 = 8;
 
@@ -294,33 +294,7 @@ pub enum ZoneRole {
     LightSource,
 }
 
-/// Lenient deserializer for `Option<ZoneRole>`.
-///
-/// A `null` or absent JSON value deserializes to `None`. A known role string
-/// deserializes to `Some(ZoneRole::…)`. An unknown role string (e.g. from a
-/// hand-edited file or a future version) also deserializes to `None` — the
-/// audit pass (P3.2.4) is responsible for detecting and reporting the unknown
-/// string by inspecting the raw JSON.
-fn deserialize_optional_zone_role<'de, D>(d: D) -> Result<Option<ZoneRole>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let v: Option<serde_json::Value> = Option::deserialize(d)?;
-    match v {
-        None | Some(serde_json::Value::Null) => Ok(None),
-        Some(serde_json::Value::String(s)) => {
-            // Try to parse via serde_json round-trip.
-            let quoted = format!("\"{}\"", s);
-            match serde_json::from_str::<ZoneRole>(&quoted) {
-                Ok(role) => Ok(Some(role)),
-                Err(_) => Ok(None), // Unknown role — audit handles it.
-            }
-        }
-        Some(_) => Ok(None), // Unexpected JSON type — treat as None.
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct WarpMesh {
     pub rows: u32,
     pub cols: u32,
@@ -334,14 +308,68 @@ pub struct WarpMesh {
     /// mask carries no zone semantics; zone-aware FX presets fall back to a
     /// neutral (transparent) output when the tag is `None`.
     ///
-    /// Uses a lenient deserializer: unknown role strings (from hand-edited
-    /// files or newer builds) map to `None` at runtime — the audit pass
-    /// (P3.2.4) detects and reports them by inspecting the raw JSON.
-    ///
-    /// `#[serde(default)]` ensures old projects (v7 and earlier) that lack
-    /// the `zone_role` key load with `zone_role = None`.
-    #[serde(default, deserialize_with = "deserialize_optional_zone_role")]
+    /// Uses a custom `Deserialize` impl (see below) that handles unknown
+    /// role strings: `zone_role` is set to `None` for unknowns and the raw
+    /// string is preserved in `unknown_zone_role_raw` so the audit (P3.2.4)
+    /// can emit `UnknownZoneRole` findings.
     pub zone_role: Option<ZoneRole>,
+    /// P3.2.4 — sidecar for audit: when the saved JSON contains an
+    /// unrecognised `zone_role` string, it is stored here so the audit
+    /// pass can emit `UnknownZoneRole` without re-parsing raw JSON.
+    /// `None` for well-formed projects; populated only when deserialization
+    /// encounters an unknown variant.
+    /// `#[serde(skip_serializing)]` excludes it from saved JSON — the audit
+    /// field is transient (session-only, like `transient_audit_signals`).
+    #[serde(skip_serializing)]
+    pub unknown_zone_role_raw: Option<String>,
+}
+
+impl<'de> serde::Deserialize<'de> for WarpMesh {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        /// Helper struct for the actual JSON fields.
+        #[derive(Deserialize)]
+        struct WarpMeshRaw {
+            pub rows: u32,
+            pub cols: u32,
+            pub grid: Vec<Vec<[f32; 2]>>,
+            #[serde(default)]
+            pub mask_polygon: Vec<[f32; 2]>,
+            #[serde(default)]
+            pub mask_feather: f32,
+            /// Raw zone_role — kept as JSON Value so we can distinguish
+            /// null / absent / known-string / unknown-string.
+            #[serde(default)]
+            pub zone_role: Option<serde_json::Value>,
+        }
+
+        let raw = WarpMeshRaw::deserialize(deserializer)?;
+
+        // Parse the zone_role from the raw JSON value.
+        let (zone_role, unknown_zone_role_raw) = match raw.zone_role {
+            None | Some(serde_json::Value::Null) => (None, None),
+            Some(serde_json::Value::String(s)) => {
+                let quoted = format!("\"{}\"", s);
+                match serde_json::from_str::<ZoneRole>(&quoted) {
+                    Ok(role) => (Some(role), None),
+                    Err(_) => (None, Some(s)), // Unknown — audit will report it.
+                }
+            }
+            Some(_) => (None, None), // Unexpected type — treat as None.
+        };
+
+        Ok(WarpMesh {
+            rows: raw.rows,
+            cols: raw.cols,
+            grid: raw.grid,
+            mask_polygon: raw.mask_polygon,
+            mask_feather: raw.mask_feather,
+            zone_role,
+            unknown_zone_role_raw,
+        })
+    }
 }
 
 impl WarpMesh {
@@ -359,6 +387,7 @@ impl WarpMesh {
             mask_polygon: Vec::new(),
             mask_feather: 0.02,
             zone_role: None,
+            unknown_zone_role_raw: None,
         }
     }
 
@@ -379,6 +408,7 @@ impl WarpMesh {
             mask_polygon: Vec::new(),
             mask_feather: 0.02,
             zone_role: None,
+            unknown_zone_role_raw: None,
         }
     }
 }
