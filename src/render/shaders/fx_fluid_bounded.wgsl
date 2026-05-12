@@ -38,7 +38,7 @@
 // u_advect.x = dt_secs
 // u_advect.y = dissipation_rate
 // u_advect.z = clock_secs
-// u_advect.w = unused
+// u_advect.w = inject_intensity  (centred swirl source; 0 = no injection)
 @group(0) @binding(4) var                 t_sdf      : texture_2d<f32>;
 
 // Distance threshold for boundary cell detection (in normalised SDF units).
@@ -53,6 +53,8 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     let dt          = u_advect.x;
     let dissipation = u_advect.y;
+    let clock_secs  = u_advect.z;
+    let inject      = u_advect.w;
 
     // Current cell centre in UV [0, 1) space.
     let uv = (vec2<f32>(f32(x), f32(y)) + vec2<f32>(0.5)) / vec2<f32>(f32(dims.x), f32(dims.y));
@@ -84,7 +86,19 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     // --- Dissipation ---
-    let result_vel = advected_vel * (1.0 - dissipation * dt);
+    var result_vel = advected_vel * (1.0 - dissipation * dt);
+
+    // --- Velocity injection (swirl source at mask centre) ---
+    // Inject only when fully inside the mask, so the source point isn't
+    // killed by the no-slip boundary on the same tick.
+    if inject > 0.0 && sdf_val < -BOUNDARY_EPSILON {
+        let d = uv - vec2<f32>(0.5, 0.5);
+        let r = length(d);
+        let falloff = exp(-r * r * 32.0);
+        let phase = clock_secs * 0.4;
+        let swirl = vec2<f32>(-d.y, d.x) + vec2<f32>(cos(phase), sin(phase)) * 0.15;
+        result_vel = result_vel + swirl * (inject * falloff * dt * 4.0);
+    }
 
     textureStore(t_velocity_dst, vec2<i32>(i32(x), i32(y)), vec4<f32>(result_vel.x, result_vel.y, 0.0, 1.0));
 }

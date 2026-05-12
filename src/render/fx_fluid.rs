@@ -506,13 +506,14 @@ impl FxFluidPipeline {
         sdf_view: Option<&wgpu::TextureView>,
         clock_secs: f32,
         dissipation: f32,
+        inject_intensity: f32,
     ) {
         let parity = self.frame_parity.get();
         let src = parity as usize;
         let dst = 1 - src;
 
-        // Upload advect uniform: vec4(dt, dissipation, clock_secs, 0.0)
-        let uniform_data: [f32; 4] = [DT, dissipation, clock_secs, 0.0];
+        // Upload advect uniform: vec4(dt, dissipation, clock_secs, inject_intensity)
+        let uniform_data: [f32; 4] = [DT, dissipation, clock_secs, inject_intensity];
         let mut bytes = [0u8; 16];
         for (i, f) in uniform_data.iter().enumerate() {
             bytes[i * 4..(i + 1) * 4].copy_from_slice(&f.to_le_bytes());

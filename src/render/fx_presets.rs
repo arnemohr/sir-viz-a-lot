@@ -757,6 +757,9 @@ pub fn dispatch(preset_id: &str, pipelines: &FxPipelines, inputs: FxShaderInputs
                 .clamp(0.0, 1.0);
 
             // Advect step (no SDF — identity preset ignores mask boundary).
+            // inject_intensity=0.5 seeds a steady swirl in the centre so the
+            // operator sees motion; the field would otherwise stay at zero
+            // forever (an empty fluid sim has nothing to advect).
             pipelines.fluid_identity.dispatch_advect(
                 inputs.device,
                 inputs.queue,
@@ -764,6 +767,7 @@ pub fn dispatch(preset_id: &str, pipelines: &FxPipelines, inputs: FxShaderInputs
                 None, // sdf_view: identity preset does not use mask
                 inputs.clock_secs,
                 dissipation,
+                0.5,
             );
 
             // Render: colour-map velocity field into dst.
@@ -788,6 +792,8 @@ pub fn dispatch(preset_id: &str, pipelines: &FxPipelines, inputs: FxShaderInputs
                 .clamp(0.0, 1.0);
 
             // Advect with mask boundary enforcement.
+            // inject_intensity=0.4 so the bounded-fluid preset also produces
+            // visible motion. (Without an injector, the field stays empty.)
             pipelines.bounded_fluid.dispatch_advect(
                 inputs.device,
                 inputs.queue,
@@ -795,6 +801,7 @@ pub fn dispatch(preset_id: &str, pipelines: &FxPipelines, inputs: FxShaderInputs
                 Some(inputs.sdf_view), // use mask SDF for boundary
                 inputs.clock_secs,
                 dissipation,
+                0.4,
             );
 
             // Render: colour-map velocity field into dst.

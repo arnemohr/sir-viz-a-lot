@@ -31,7 +31,7 @@
 // u_advect.x = dt_secs
 // u_advect.y = dissipation_rate  (fraction/sec, e.g. 0.1)
 // u_advect.z = clock_secs
-// u_advect.w = unused
+// u_advect.w = inject_intensity  (0 = none; ~0.5 = visible swirl for fluid_identity)
 
 @compute @workgroup_size(16, 16, 1)
 fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -40,8 +40,10 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let y = gid.y;
     if x >= dims.x || y >= dims.y { return; }
 
-    let dt           = u_advect.x;
-    let dissipation  = u_advect.y;
+    let dt          = u_advect.x;
+    let dissipation = u_advect.y;
+    let clock_secs  = u_advect.z;
+    let inject      = u_advect.w;
 
     // Current cell centre in UV [0, 1) space.
     let uv = (vec2<f32>(f32(x), f32(y)) + vec2<f32>(0.5)) / vec2<f32>(f32(dims.x), f32(dims.y));
@@ -57,7 +59,24 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let back_vel = textureSampleLevel(t_velocity_src, s_linear, clamped_uv, 0.0).xy;
 
     // Dissipation: decay velocity toward zero.
-    let result_vel = back_vel * (1.0 - dissipation * dt);
+    var result_vel = back_vel * (1.0 - dissipation * dt);
+
+    // Optional velocity injection: a swirl source centred at (0.5, 0.5) with
+    // gaussian falloff. Without this the field stays at zero forever (a fluid
+    // sim that nothing is stirring just sits there). The fluid_identity preset
+    // sets `inject > 0` so the operator sees a steady swirl. bounded_fluid
+    // can keep `inject = 0` if it has another source of motion.
+    if inject > 0.0 {
+        let d = uv - vec2<f32>(0.5, 0.5);
+        let r = length(d);
+        let falloff = exp(-r * r * 32.0); // gaussian, ~0.1 UV radius
+        // Perpendicular to the radial vector → rotational flow. Slowly
+        // wobble the rotation direction with the clock so it's not a
+        // static-looking pattern.
+        let phase = clock_secs * 0.4;
+        let swirl = vec2<f32>(-d.y, d.x) + vec2<f32>(cos(phase), sin(phase)) * 0.15;
+        result_vel = result_vel + swirl * (inject * falloff * dt * 4.0);
+    }
 
     // Write result (store as RGBA; BA = 0).
     textureStore(t_velocity_dst, vec2<i32>(i32(x), i32(y)), vec4<f32>(result_vel.x, result_vel.y, 0.0, 1.0));
