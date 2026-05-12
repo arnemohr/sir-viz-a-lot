@@ -1392,7 +1392,13 @@ fn loop_mode_label(m: crate::project::schema::LoopMode) -> &'static str {
     match m {
         crate::project::schema::LoopMode::Once => "Once (stop at end)",
         crate::project::schema::LoopMode::Loop => "Loop (seamless)",
-        crate::project::schema::LoopMode::PingPong => "Ping-pong (reverse on end)",
+        // P1.4.2 ships PingPong as a forward-only stub — true
+        // reverse decode needs the I-frame cache (Phase 7). The
+        // label is explicit so the operator isn't surprised when
+        // the clip just loops normally.
+        crate::project::schema::LoopMode::PingPong => {
+            "Ping-pong (currently loops; reverse in Phase 7)"
+        }
     }
 }
 
