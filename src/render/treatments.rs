@@ -154,7 +154,7 @@ pub fn is_registered(preset_id: &str) -> bool {
 
 /// Param descriptors for the named preset. Returns an empty slice for
 /// unknown presets and for presets with no tunable parameters (identity).
-#[allow(dead_code)] // consumed by `windows::advanced` (v3-gated picker)
+#[allow(dead_code)] // consumed by `windows::controls` (v3-gated picker)
 pub fn param_descriptors(preset_id: &str) -> &'static [ParamDescriptor] {
     match preset_id {
         IDENTITY_PRESET_ID => &[],

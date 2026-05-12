@@ -2,7 +2,7 @@
 //!
 //! Left side: project-name placeholder + Undo / Redo buttons (disabled when
 //! stacks are empty). Right side: Warp toggle (flips `EditMode` between Layer
-//! and Warp), Advanced disclosure toggle (binds to `st.advanced_open`), and a
+//! and Warp), Controls window toggle (binds to `st.controls_open`), and a
 //! Go-live stub (Phase 4 wires the fullscreen transition).
 //!
 //! Returns `Some(ControlPanelAction)` when the operator triggers Undo or Redo;
@@ -197,8 +197,11 @@ pub fn show(
             }
             ui.add_space(8.0);
 
-            // Advanced disclosure toggle
-            ui.toggle_value(&mut st.advanced_open, "Advanced");
+            // P1.UX — renamed from "Advanced". The window now floats
+            // over the canvas (glossary-style) and contains every
+            // per-layer + project-level control, so "Advanced"
+            // (which read as "expert-only") no longer fit.
+            ui.toggle_value(&mut st.controls_open, "Controls");
             ui.add_space(8.0);
 
             // P0.7.5 — Output panel toggle. The minimum-viable "Output

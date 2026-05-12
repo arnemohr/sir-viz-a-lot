@@ -271,11 +271,11 @@ pub struct ControlPanelState {
     pub presets_loaded: bool,
     /// Selected preset index in the Effects-tab dropdown; reset on layer change.
     pub preset_picker_index: usize,
-    /// 003-T3.1: when true under `--features v3`, the Advanced disclosure
-    /// panel renders alongside the canvas. T3.4 wires the toolbar
-    /// button that toggles this; T3.11+ refines the panel's content
-    /// layout. v2 builds ignore this flag (the tabbed UI stays).
-    pub advanced_open: bool,
+    /// 003-T3.1 + P1.UX: when true under `--features v3`, the
+    /// **Controls** window (renamed from "Advanced") opens as a
+    /// floating egui window alongside the canvas. Toggled by the
+    /// toolbar button; v2 builds ignore this flag (tabbed UI stays).
+    pub controls_open: bool,
     /// 003-T4.2 — per-session cache of egui `TextureHandle`s for scene
     /// thumbnails, keyed by a hash of the thumbnail pixel bytes. Rebuilt
     /// automatically when a scene is saved with a new thumbnail; stale
@@ -503,55 +503,59 @@ pub fn show(
         }
     }
 
-    // 003-T3.11: structured Advanced disclosure panel replacing the T3.1
-    // temporary stack.  Content migrated: T3.12 (Master), T3.13 (Modulator
-    // picker), T3.14 (effect chain), T3.15 (Mapping), T3.16 (blend mode),
-    // T3.17 (External JSON gating).  T3.18 persistence via egui id_sources.
+    // 003-T3.11 + P1.UX: structured **Controls** window (was the
+    // "Advanced" SidePanel pre-P1.UX). Now floats over the canvas as
+    // an egui Window (glossary-style) so it doesn't steal a fixed
+    // right column from the scene preview when the operator wants
+    // more canvas room. Toggled by the toolbar button.
     //
-    // T4.15 — animated slide-in/out: the panel width is animated from 0 to
-    // 360 over TRANSITION_MS so it slides in rather than snapping open.
-    // SidePanel doesn't natively animate; we control the width ourselves and
-    // skip rendering when the animated width rounds to zero.
+    // Why a Window instead of a SidePanel:
+    //  • The panel grew to contain Master + Display output + every
+    //    per-layer control + Project + OSC bindings + Diagnostics,
+    //    so it's now the operator's primary work surface — not an
+    //    occasional "advanced" disclosure.
+    //  • Floating + resizable lets the operator size it to their
+    //    workflow (tall + narrow for quick tweaks; short + wide for
+    //    side-by-side with the canvas).
+    //  • Window's built-in close button + drag-to-move match what
+    //    the glossary already does, so the two floating surfaces
+    //    feel consistent.
     #[cfg(feature = "v3")]
-    {
-        const ADVANCED_MAX_WIDTH: f32 = 360.0;
-        let adv_anim_id = ui.id().with("adv_panel_open");
-        let adv_t = anim::animate_bool_to(ui, adv_anim_id, st.advanced_open, anim::TRANSITION_MS);
-        let adv_width = adv_t * ADVANCED_MAX_WIDTH;
-
-        if adv_width >= 1.0 {
-            // 003-T3.11 — animated-width Advanced panel.
-            //
-            // The panel is **non-resizable** so its left edge can't overlap
-            // the canvas's right column with a drag-to-resize cursor zone.
-            // Warp grid corners at normalized (1.0, *) sit exactly there;
-            // with a resizable panel an operator dragging the rightmost warp
-            // handle would accidentally grab the panel resize handle instead,
-            // get a "panel-grew" surprise, and lose their warp drag entirely.
-            egui::SidePanel::right("rmap_advanced")
-                .resizable(false)
-                .exact_width(adv_width)
-                .show_inside(ui, |ui| {
-                    // Esc closes the panel.
-                    if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                        st.advanced_open = false;
-                        return;
-                    }
-                    ui.heading("Advanced");
-                    ui.separator();
-                    let act = crate::windows::advanced::show(
-                        ui,
-                        project,
-                        st,
-                        scene,
-                        &inputs.monitor_names,
-                        inputs.texture_upload_dropped,
-                    );
-                    match act {
-                        ControlPanelAction::None => {}
-                        _ => action = act,
-                    }
-                });
+    if st.controls_open {
+        let ctx = ui.ctx().clone();
+        let mut still_open = true;
+        egui::Window::new(egui::RichText::new("Controls").color(crate::windows::theme::ACCENT))
+            .id(egui::Id::new("rmap_controls_window"))
+            .open(&mut still_open)
+            .resizable(true)
+            .default_width(380.0)
+            .default_height(640.0)
+            .show(&ctx, |ui| {
+                // Esc closes the window.
+                if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    st.controls_open = false;
+                    return;
+                }
+                let act = crate::windows::controls::show(
+                    ui,
+                    project,
+                    st,
+                    scene,
+                    &inputs.monitor_names,
+                    inputs.texture_upload_dropped,
+                );
+                match act {
+                    ControlPanelAction::None => {}
+                    _ => action = act,
+                }
+            });
+        // Window's close button writes `still_open = false`; mirror
+        // that back into operator state. (We can't pass
+        // `&mut st.controls_open` directly because the closure also
+        // mutably borrows `st` via the inner `crate::windows::controls::show`
+        // call.)
+        if !still_open {
+            st.controls_open = false;
         }
     }
 

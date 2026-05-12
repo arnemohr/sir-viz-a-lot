@@ -1,8 +1,11 @@
 //! winit `ApplicationHandler`-driven window management. The output window
 //! lives on the projector; the control window lives on the primary display.
 
+// 004-P1.UX — renamed from `advanced` to `controls`; the panel now
+// hosts both per-layer and project-level controls, so the
+// "Advanced = expert-only" framing no longer fit.
 #[cfg(feature = "v3")]
-pub mod advanced;
+pub mod controls;
 // 004-V31.9.2: audio bands strip — gated on both v3 and audio features so the
 // module is entirely absent from the build graph when either is off.
 pub mod anim;

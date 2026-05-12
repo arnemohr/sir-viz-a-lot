@@ -33,8 +33,8 @@
 use egui::Ui;
 
 use crate::project::schema::{EdgeBlendConfig, FalloffCurve, Project};
-use crate::windows::advanced::show_rgb_matrix_editor;
 use crate::windows::control_panel::{ControlPanelAction, ControlPanelState};
+use crate::windows::controls::show_rgb_matrix_editor;
 use crate::windows::glossary::{GlossaryTerm, glossary_label};
 use crate::windows::theme;
 

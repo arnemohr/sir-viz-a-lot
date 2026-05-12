@@ -54,10 +54,10 @@ pub fn show(
 }
 
 // ---------------------------------------------------------------------------
-// Layer selection — handled in `windows::advanced` since P1.UX. See the
+// Layer selection — handled in `windows::controls` since P1.UX. See the
 // `Selection::Layer(_)` early-return in `show` above and the
 // `show_transform_section` / `show_placement_section` helpers in
-// `advanced.rs`. The pre-P1.UX `show_layer` body lived here.
+// `controls.rs`. The pre-P1.UX `show_layer` body lived here.
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------

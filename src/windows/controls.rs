@@ -1,20 +1,35 @@
-//! 003-T3.11–T3.18 — Advanced disclosure panel.
+//! 003-T3.11–T3.18 + P1.UX — **Controls** window.
 //!
-//! A structured right-edge side panel housing controls that were previously
-//! scattered across the legacy v2 tabs.  Opened and closed by the toolbar
-//! Advanced button or by pressing Esc while the panel is focused.
+//! Floats over the canvas as an `egui::Window` (glossary-style); was a
+//! right-edge SidePanel called "Advanced" pre-P1.UX. The rename + layout
+//! change happened because the panel grew to contain Master, Display
+//! output, every per-layer control, Project, OSC bindings, and
+//! Diagnostics — i.e. the operator's primary work surface, not an
+//! occasional "advanced disclosure". Toggled by the toolbar's
+//! "Controls" button; Esc-inside or the window's close-X dismisses it.
 //!
-//! Section order (per spec):
-//!   1. Master   (gamma / brightness / contrast) — default-collapsed
-//!   2. Selected layer (effect chain, blend mode, mapping) — default-open
-//!   3. Project  (output_windowed, project-file save/load) — default-collapsed
-//!   4. Diagnostics — default-collapsed stub
+//! Section order:
+//!   1. Master — gamma / brightness / contrast
+//!   2. Display output — per-output overrides (1 output) or Output panel (≥2 outputs)
+//!   3. Selected layer — Transform / Blend / Treatment / Source fit / Video / Effect chain / Placement / Mapping
+//!   4. Project — windowed flag + save/load
+//!   5. OSC bindings — read-only summary
+//!   6. Diagnostics — fps + dropped-frame counters
 //!
-//! T3.18: sub-section open/closed state persists across panel close/reopen
-//! because egui's CollapsingHeader keyed by a stable id_source stores its
-//! toggle in egui's per-frame memory, which survives widget re-creation on
-//! the same widget tree (same egui context / window).  ScrollArea scroll
-//! position is persisted the same way via `id_source("adv_scroll")`.
+//! T3.18: sub-section open/closed state persists across window
+//! close/reopen because egui's CollapsingHeader keyed by a stable
+//! id_source stores its toggle in egui's per-frame memory, which
+//! survives widget re-creation on the same widget tree. ScrollArea
+//! scroll position persists the same way via `id_salt(SCROLL_ID)`.
+//!
+//! ## Section-header styling
+//!
+//! Top-level section headers (Master / Display output / Selected
+//! layer / Project / OSC bindings / Diagnostics) and the
+//! Selected-layer sub-section headers use the warm `ACCENT` colour
+//! via [`section_header`] so they pop against the body text. Mirrors
+//! the glossary's "headline" colour treatment so the two surfaces
+//! feel like one design system.
 //!
 //! This module is `#[cfg(feature = "v3")]`-only; see `src/windows/mod.rs`.
 
@@ -57,8 +72,18 @@ const HDR_SOURCE_FIT: &str = "adv_source_fit";
 const HDR_TRANSFORM: &str = "adv_transform";
 const HDR_PLACEMENT: &str = "adv_placement";
 
-/// Render the Advanced panel body. Called from `control_panel::show` when
-/// `st.advanced_open` is `true`, inside a `SidePanel::right("rmap_advanced")`.
+/// Build a section-header `RichText` — accent-coloured + strong.
+/// Mirrors the glossary's `headline` styling so the two surfaces share
+/// a visual vocabulary.
+fn section_header(label: &str) -> egui::RichText {
+    egui::RichText::new(label)
+        .color(crate::windows::theme::ACCENT)
+        .strong()
+}
+
+/// Render the Controls window body. Called from `control_panel::show`
+/// when `st.controls_open` is `true`, inside an
+/// `egui::Window::new("Controls")`.
 ///
 /// Returns a `ControlPanelAction` (usually `None`; `RebuildLayers` if a
 /// layer add/remove happens, which currently can't originate here but the
@@ -91,7 +116,7 @@ pub fn show(
             // ----------------------------------------------------------------
             // 1. Master (T3.12) — gamma / brightness / contrast
             // ----------------------------------------------------------------
-            egui::CollapsingHeader::new("Master")
+            egui::CollapsingHeader::new(section_header("Master"))
                 .id_salt(HDR_MASTER)
                 .default_open(false)
                 .show(ui, |ui| {
@@ -156,7 +181,7 @@ pub fn show(
                     }
                     1 => {
                         // Single projector: existing "Display output" unchanged.
-                        egui::CollapsingHeader::new("Display output")
+                        egui::CollapsingHeader::new(section_header("Display output"))
                             .id_salt(HDR_DISPLAY_OUTPUT)
                             .default_open(false)
                             .show(ui, |ui| {
@@ -171,7 +196,7 @@ pub fn show(
                     _ => {
                         // ≥2 projectors: output panel replaces the single-output
                         // "Display output" CollapsingHeader entirely.
-                        egui::CollapsingHeader::new("Output panel")
+                        egui::CollapsingHeader::new(section_header("Output panel"))
                             .id_salt("adv_output_panel")
                             .default_open(false)
                             .show(ui, |ui| {
@@ -187,7 +212,7 @@ pub fn show(
             // 2. Selected layer (T3.13 + T3.14 + T3.15 + T3.16) — only
             //    visible when a layer is selected.
             // ----------------------------------------------------------------
-            egui::CollapsingHeader::new("Selected layer")
+            egui::CollapsingHeader::new(section_header("Selected layer"))
                 .id_salt(HDR_SELECTED_LAYER)
                 .default_open(true)
                 .show(ui, |ui| {
@@ -556,7 +581,7 @@ pub fn show(
             // ----------------------------------------------------------------
             // 3. Project — output_windowed + project file save/load (T3.11)
             // ----------------------------------------------------------------
-            egui::CollapsingHeader::new("Project")
+            egui::CollapsingHeader::new(section_header("Project"))
                 .id_salt(HDR_PROJECT)
                 .default_open(false)
                 .show(ui, |ui| {
@@ -573,7 +598,7 @@ pub fn show(
             // picker (P0.2.3a-c); this surface is the operator's
             // single-page overview of "what's wired to OSC right now".
             // ----------------------------------------------------------------
-            egui::CollapsingHeader::new("OSC bindings")
+            egui::CollapsingHeader::new(section_header("OSC bindings"))
                 .id_salt("rmap_osc_bindings_summary")
                 .default_open(false)
                 .show(ui, |ui| {
@@ -585,7 +610,7 @@ pub fn show(
             // ----------------------------------------------------------------
             // 5. Diagnostics stub (T3.11) + P0.3.2 dropped-frames counter
             // ----------------------------------------------------------------
-            egui::CollapsingHeader::new("Diagnostics")
+            egui::CollapsingHeader::new(section_header("Diagnostics"))
                 .id_salt(HDR_DIAGNOSTICS)
                 .default_open(false)
                 .show(ui, |ui| {
