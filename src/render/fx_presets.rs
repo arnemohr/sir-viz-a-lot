@@ -63,7 +63,7 @@ use std::collections::HashMap;
 
 use crate::render::fx_compute::FxComputePipeline;
 use crate::render::fx_fluid::FxFluidPipeline;
-use crate::render::sdf::SDF_HELPER_WGSL;
+use crate::render::sdf::{SDF_HELPER_WGSL, ZONE_TAG_WGSL};
 
 /// Internal pipeline-shape tag; not user-visible. Drives dispatch routing in
 /// `fx_presets::dispatch` once P2.2.3 lands.
@@ -138,6 +138,22 @@ pub fn fx_registry() -> &'static [FxPresetEntry] {
             preset_id: BOUNDED_FLUID_PRESET_ID,
             label: "Mask-bounded fluid",
             family: FxFamily::ComputeFluid,
+        },
+        // P3.5.1-3 — zone-consuming presets (Fragment family; zone-aware).
+        FxPresetEntry {
+            preset_id: ZONE_LIGHT_SPILL_PRESET_ID,
+            label: "Light spill from window zones",
+            family: FxFamily::Fragment,
+        },
+        FxPresetEntry {
+            preset_id: ZONE_EDGE_RIPPLE_PRESET_ID,
+            label: "Ripple at edge zones",
+            family: FxFamily::Fragment,
+        },
+        FxPresetEntry {
+            preset_id: ZONE_PORTAL_DRIFT_PRESET_ID,
+            label: "Particle drift through portal zones",
+            family: FxFamily::Fragment,
         },
     ]
 }
@@ -494,6 +510,159 @@ const BOUNDED_FLUID_DESCRIPTORS: &[FxParamDescriptor] = &[
     },
 ];
 
+/// P3.5.1 — param descriptors for `fx_zone_light_spill`.
+#[allow(dead_code)] // referenced through `fx_param_descriptors`
+const ZONE_LIGHT_SPILL_DESCRIPTORS: &[FxParamDescriptor] = &[
+    FxParamDescriptor {
+        key: "spill_radius",
+        label: "Spill radius (normalised)",
+        min: 0.05,
+        max: 1.0,
+        default: 0.3,
+        max_particle_count: None,
+    },
+    FxParamDescriptor {
+        key: "falloff",
+        label: "Falloff sharpness",
+        min: 0.01,
+        max: 1.0,
+        default: 0.08,
+        max_particle_count: None,
+    },
+    FxParamDescriptor {
+        key: "colour_r",
+        label: "Colour red",
+        min: 0.0,
+        max: 1.0,
+        default: 1.0,
+        max_particle_count: None,
+    },
+    FxParamDescriptor {
+        key: "colour_g",
+        label: "Colour green",
+        min: 0.0,
+        max: 1.0,
+        default: 0.85,
+        max_particle_count: None,
+    },
+    FxParamDescriptor {
+        key: "colour_b",
+        label: "Colour blue",
+        min: 0.0,
+        max: 1.0,
+        default: 0.55,
+        max_particle_count: None,
+    },
+];
+
+/// P3.5.2 — param descriptors for `fx_zone_edge_ripple`.
+#[allow(dead_code)] // referenced through `fx_param_descriptors`
+const ZONE_EDGE_RIPPLE_DESCRIPTORS: &[FxParamDescriptor] = &[
+    FxParamDescriptor {
+        key: "frequency",
+        label: "Wave frequency (higher = tighter)",
+        min: 1.0,
+        max: 100.0,
+        default: 20.0,
+        max_particle_count: None,
+    },
+    FxParamDescriptor {
+        key: "speed",
+        label: "Animation speed",
+        min: 0.0,
+        max: 10.0,
+        default: 3.0,
+        max_particle_count: None,
+    },
+    FxParamDescriptor {
+        key: "falloff",
+        label: "Falloff from edge",
+        min: 0.005,
+        max: 0.2,
+        default: 0.04,
+        max_particle_count: None,
+    },
+    FxParamDescriptor {
+        key: "colour_r",
+        label: "Colour red",
+        min: 0.0,
+        max: 1.0,
+        default: 0.3,
+        max_particle_count: None,
+    },
+    FxParamDescriptor {
+        key: "colour_g",
+        label: "Colour green",
+        min: 0.0,
+        max: 1.0,
+        default: 0.7,
+        max_particle_count: None,
+    },
+    FxParamDescriptor {
+        key: "colour_b",
+        label: "Colour blue",
+        min: 0.0,
+        max: 1.0,
+        default: 1.0,
+        max_particle_count: None,
+    },
+];
+
+/// P3.5.3 — param descriptors for `fx_zone_portal_drift`.
+/// `particle_count` carries `max_particle_count: Some(256)` per the P3.5.3
+/// spec requirement ("budget-capped particle_count descriptor").
+#[allow(dead_code)] // referenced through `fx_param_descriptors`
+const ZONE_PORTAL_DRIFT_DESCRIPTORS: &[FxParamDescriptor] = &[
+    FxParamDescriptor {
+        key: "particle_count",
+        label: "Particle density (1–256)",
+        min: 1.0,
+        max: 256.0,
+        default: 64.0,
+        max_particle_count: Some(256),
+    },
+    FxParamDescriptor {
+        key: "drift_speed",
+        label: "Drift speed",
+        min: 0.0,
+        max: 2.0,
+        default: 0.2,
+        max_particle_count: None,
+    },
+    FxParamDescriptor {
+        key: "particle_size",
+        label: "Particle size (bloom radius)",
+        min: 0.01,
+        max: 0.2,
+        default: 0.06,
+        max_particle_count: None,
+    },
+    FxParamDescriptor {
+        key: "colour_r",
+        label: "Colour red",
+        min: 0.0,
+        max: 1.0,
+        default: 0.6,
+        max_particle_count: None,
+    },
+    FxParamDescriptor {
+        key: "colour_g",
+        label: "Colour green",
+        min: 0.0,
+        max: 1.0,
+        default: 0.8,
+        max_particle_count: None,
+    },
+    FxParamDescriptor {
+        key: "colour_b",
+        label: "Colour blue",
+        min: 0.0,
+        max: 1.0,
+        default: 1.0,
+        max_particle_count: None,
+    },
+];
+
 /// Param descriptors for the named FX preset. Returns an empty slice for
 /// unknown presets and for presets with no tunable parameters.
 #[allow(dead_code)] // consumed by P2.5.6 mutation + P2.8.1 browser UI
@@ -508,6 +677,9 @@ pub fn fx_param_descriptors(preset_id: &str) -> &'static [FxParamDescriptor] {
         COLLISION_REFLECTION_PRESET_ID => COLLISION_REFLECTION_DESCRIPTORS,
         FLUID_IDENTITY_PRESET_ID => FLUID_IDENTITY_DESCRIPTORS,
         BOUNDED_FLUID_PRESET_ID => BOUNDED_FLUID_DESCRIPTORS,
+        ZONE_LIGHT_SPILL_PRESET_ID => ZONE_LIGHT_SPILL_DESCRIPTORS,
+        ZONE_EDGE_RIPPLE_PRESET_ID => ZONE_EDGE_RIPPLE_DESCRIPTORS,
+        ZONE_PORTAL_DRIFT_PRESET_ID => ZONE_PORTAL_DRIFT_DESCRIPTORS,
         _ => &[],
     }
 }
@@ -538,6 +710,15 @@ pub const FLUID_IDENTITY_PRESET_ID: &str = "fluid_identity";
 
 /// P2.6.2 — Preset id for the mask-bounded fluid effect.
 pub const BOUNDED_FLUID_PRESET_ID: &str = "mask_bounded_fluid";
+
+/// P3.5.1 — zone-aware: light spill from window zones.
+pub const ZONE_LIGHT_SPILL_PRESET_ID: &str = "fx_zone_light_spill";
+
+/// P3.5.2 — zone-aware: ripple at edge zones.
+pub const ZONE_EDGE_RIPPLE_PRESET_ID: &str = "fx_zone_edge_ripple";
+
+/// P3.5.3 — zone-aware: particle drift through portal zones (fragment impl).
+pub const ZONE_PORTAL_DRIFT_PRESET_ID: &str = "fx_zone_portal_drift";
 
 /// Per-frame inputs that every FX preset receives at dispatch time.
 ///
@@ -848,6 +1029,54 @@ pub fn dispatch(preset_id: &str, pipelines: &FxPipelines, inputs: FxShaderInputs
             true
         }
 
+        // P3.5.1 — light spill from window zones.
+        ZONE_LIGHT_SPILL_PRESET_ID => {
+            let params_uniform = FxParamsUniform::for_zone_light_spill(inputs.params);
+            pipelines.zone_light_spill.render(
+                inputs.device,
+                inputs.queue,
+                inputs.encoder,
+                inputs.dst,
+                inputs.sdf_view,
+                inputs.clock_secs,
+                &params_uniform,
+                inputs.zone_role,
+            );
+            true
+        }
+
+        // P3.5.2 — ripple at edge zones.
+        ZONE_EDGE_RIPPLE_PRESET_ID => {
+            let params_uniform = FxParamsUniform::for_zone_edge_ripple(inputs.params);
+            pipelines.zone_edge_ripple.render(
+                inputs.device,
+                inputs.queue,
+                inputs.encoder,
+                inputs.dst,
+                inputs.sdf_view,
+                inputs.clock_secs,
+                &params_uniform,
+                inputs.zone_role,
+            );
+            true
+        }
+
+        // P3.5.3 — particle drift through portal zones.
+        ZONE_PORTAL_DRIFT_PRESET_ID => {
+            let params_uniform = FxParamsUniform::for_zone_portal_drift(inputs.params);
+            pipelines.zone_portal_drift.render(
+                inputs.device,
+                inputs.queue,
+                inputs.encoder,
+                inputs.dst,
+                inputs.sdf_view,
+                inputs.clock_secs,
+                &params_uniform,
+                inputs.zone_role,
+            );
+            true
+        }
+
         // Registered families not yet wired — caller skips rendering.
         _ => false,
     }
@@ -1092,6 +1321,12 @@ pub struct FxPipelines {
     pub fluid_identity: FxFluidPipeline,
     /// P2.6.2 — mask-bounded fluid (velocity zeroed outside mask, reflected at boundary).
     pub bounded_fluid: FxFluidPipeline,
+    /// P3.5.1 — zone-aware: light spill from window zones.
+    pub zone_light_spill: FxPresetPipeline,
+    /// P3.5.2 — zone-aware: ripple at edge zones.
+    pub zone_edge_ripple: FxPresetPipeline,
+    /// P3.5.3 — zone-aware: particle drift through portal zones (fragment impl).
+    pub zone_portal_drift: FxPresetPipeline,
 }
 
 impl FxPipelines {
@@ -1113,6 +1348,10 @@ impl FxPipelines {
             ),
             fluid_identity: FxFluidPipeline::new_fluid_identity(device, target_format),
             bounded_fluid: FxFluidPipeline::new_bounded_fluid(device, target_format),
+            // P3.5.x — zone-consuming presets.
+            zone_light_spill: FxPresetPipeline::new_zone_light_spill(device, target_format),
+            zone_edge_ripple: FxPresetPipeline::new_zone_edge_ripple(device, target_format),
+            zone_portal_drift: FxPresetPipeline::new_zone_portal_drift(device, target_format),
         }
     }
 }
@@ -1415,6 +1654,198 @@ impl FxPresetPipeline {
             pass.draw(0..3, 0..1);
         }
     }
+
+    // P3.5.x — shared constructor for zone-aware fragment presets.
+    //
+    // Zone-aware presets differ from the standard `new_ripple_wash` pipeline
+    // in two ways:
+    //  1. The bind-group-layout includes slot 6 (`ZoneTagUniform`).
+    //  2. `zone_tag_buffer` is `Some(wgpu::Buffer)` — a 16-byte UNIFORM
+    //     buffer written per-frame by `render()`.
+    //  3. The shader source includes `ZONE_TAG_WGSL` (from sdf.rs) before
+    //     the preset's own source, alongside `SDF_HELPER_WGSL`.
+    fn new_zone_aware(
+        device: &wgpu::Device,
+        target_format: wgpu::TextureFormat,
+        shader_src: &str,
+        label: &str,
+    ) -> Self {
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some(label),
+            source: wgpu::ShaderSource::Wgsl(shader_src.into()),
+        });
+
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some(&format!("{label} bgl")),
+            entries: &[
+                // binding 0: SDF texture
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                // binding 1: sampler
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
+                    count: None,
+                },
+                // binding 2: FxParams uniform
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // binding 3: clock uniform
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // binding 6: ZoneTagUniform — zone-aware only (P3.3.2 slot contract)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 6,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some(&format!("{label} layout")),
+            bind_group_layouts: &[Some(&bind_group_layout)],
+            immediate_size: 0,
+        });
+
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some(&format!("{label} pipeline")),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: target_format,
+                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some(&format!("{label} sampler")),
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+
+        let params_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(&format!("{label} params")),
+            size: std::mem::size_of::<FxParamsUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let clock_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(&format!("{label} clock")),
+            size: 16,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        // P3.3.2 — zone-tag buffer (16 bytes: u32 + 3 × u32 pad).
+        let zone_tag_buffer = Some(device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(&format!("{label} zone_tag")),
+            size: 16,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+
+        Self {
+            pipeline,
+            bind_group_layout,
+            sampler,
+            params_buf,
+            clock_buf,
+            zone_tag_buffer,
+        }
+    }
+
+    /// P3.5.1 — build the zone_light_spill pipeline.
+    pub fn new_zone_light_spill(device: &wgpu::Device, target_format: wgpu::TextureFormat) -> Self {
+        let shader_src = format!(
+            "{}\n{}\n{}",
+            SDF_HELPER_WGSL,
+            ZONE_TAG_WGSL,
+            include_str!("shaders/fx_zone_light_spill.wgsl")
+        );
+        Self::new_zone_aware(device, target_format, &shader_src, "fx_zone_light_spill")
+    }
+
+    /// P3.5.2 — build the zone_edge_ripple pipeline.
+    pub fn new_zone_edge_ripple(device: &wgpu::Device, target_format: wgpu::TextureFormat) -> Self {
+        let shader_src = format!(
+            "{}\n{}\n{}",
+            SDF_HELPER_WGSL,
+            ZONE_TAG_WGSL,
+            include_str!("shaders/fx_zone_edge_ripple.wgsl")
+        );
+        Self::new_zone_aware(device, target_format, &shader_src, "fx_zone_edge_ripple")
+    }
+
+    /// P3.5.3 — build the zone_portal_drift pipeline (fragment impl).
+    pub fn new_zone_portal_drift(
+        device: &wgpu::Device,
+        target_format: wgpu::TextureFormat,
+    ) -> Self {
+        let shader_src = format!(
+            "{}\n{}\n{}",
+            SDF_HELPER_WGSL,
+            ZONE_TAG_WGSL,
+            include_str!("shaders/fx_zone_portal_drift.wgsl")
+        );
+        Self::new_zone_aware(device, target_format, &shader_src, "fx_zone_portal_drift")
+    }
 }
 
 /// Fixed-shape parameter struct for FX presets. Each preset documents which
@@ -1571,6 +2002,74 @@ impl FxParamsUniform {
             base_r: 0.0,
             base_g: 0.0,
             base_b: 0.0,
+            _pad0: 0.0,
+            _pad1: 0.0,
+        }
+    }
+
+    /// P3.5.1 — build from params for `fx_zone_light_spill`.
+    ///
+    /// | key           | alias       | default |
+    /// |---------------|-------------|---------|
+    /// | spill_radius  | wavelength  | 0.3     |
+    /// | falloff       | falloff     | 0.08    |
+    /// | colour_r      | base_r      | 1.0     |
+    /// | colour_g      | base_g      | 0.85    |
+    /// | colour_b      | base_b      | 0.55    |
+    pub fn for_zone_light_spill(params: &HashMap<String, f32>) -> Self {
+        Self {
+            wavelength: params.get("spill_radius").copied().unwrap_or(0.3),
+            speed: 0.0,
+            falloff: params.get("falloff").copied().unwrap_or(0.08),
+            base_r: params.get("colour_r").copied().unwrap_or(1.0),
+            base_g: params.get("colour_g").copied().unwrap_or(0.85),
+            base_b: params.get("colour_b").copied().unwrap_or(0.55),
+            _pad0: 0.0,
+            _pad1: 0.0,
+        }
+    }
+
+    /// P3.5.2 — build from params for `fx_zone_edge_ripple`.
+    ///
+    /// | key        | alias     | default |
+    /// |------------|-----------|---------|
+    /// | frequency  | wavelength| 20.0    |
+    /// | speed      | speed     | 3.0     |
+    /// | falloff    | falloff   | 0.04    |
+    /// | colour_r   | base_r    | 0.3     |
+    /// | colour_g   | base_g    | 0.7     |
+    /// | colour_b   | base_b    | 1.0     |
+    pub fn for_zone_edge_ripple(params: &HashMap<String, f32>) -> Self {
+        Self {
+            wavelength: params.get("frequency").copied().unwrap_or(20.0),
+            speed: params.get("speed").copied().unwrap_or(3.0),
+            falloff: params.get("falloff").copied().unwrap_or(0.04),
+            base_r: params.get("colour_r").copied().unwrap_or(0.3),
+            base_g: params.get("colour_g").copied().unwrap_or(0.7),
+            base_b: params.get("colour_b").copied().unwrap_or(1.0),
+            _pad0: 0.0,
+            _pad1: 0.0,
+        }
+    }
+
+    /// P3.5.3 — build from params for `fx_zone_portal_drift`.
+    ///
+    /// | key             | alias           | default |
+    /// |-----------------|-----------------|---------|
+    /// | particle_count  | wavelength      | 64.0    |
+    /// | drift_speed     | speed           | 0.2     |
+    /// | particle_size   | falloff         | 0.06    |
+    /// | colour_r        | base_r          | 0.6     |
+    /// | colour_g        | base_g          | 0.8     |
+    /// | colour_b        | base_b          | 1.0     |
+    pub fn for_zone_portal_drift(params: &HashMap<String, f32>) -> Self {
+        Self {
+            wavelength: params.get("particle_count").copied().unwrap_or(64.0),
+            speed: params.get("drift_speed").copied().unwrap_or(0.2),
+            falloff: params.get("particle_size").copied().unwrap_or(0.06),
+            base_r: params.get("colour_r").copied().unwrap_or(0.6),
+            base_g: params.get("colour_g").copied().unwrap_or(0.8),
+            base_b: params.get("colour_b").copied().unwrap_or(1.0),
             _pad0: 0.0,
             _pad1: 0.0,
         }
@@ -2289,5 +2788,92 @@ mod tests {
     #[test]
     fn unknown_preset_returns_false_for_fx_requires_zone() {
         assert!(!fx_requires_zone("bogus_unknown_preset"));
+    }
+
+    // --- P3.5.x zone-consuming preset tests ---
+
+    /// P3.5.1 — fx_zone_light_spill is registered.
+    #[test]
+    fn zone_light_spill_is_registered() {
+        assert!(fx_is_registered(ZONE_LIGHT_SPILL_PRESET_ID));
+    }
+
+    /// P3.5.1 — fx_zone_light_spill requires a zone tag.
+    #[test]
+    fn zone_light_spill_requires_zone() {
+        assert!(fx_requires_zone(ZONE_LIGHT_SPILL_PRESET_ID));
+    }
+
+    /// P3.5.1 — fx_zone_light_spill descriptors are non-empty, all in range.
+    #[test]
+    fn zone_light_spill_descriptors_valid() {
+        let descs = fx_param_descriptors(ZONE_LIGHT_SPILL_PRESET_ID);
+        assert!(!descs.is_empty());
+        for d in descs {
+            assert!(d.min < d.max, "descriptor {} min >= max", d.key);
+            assert!(
+                d.default >= d.min && d.default <= d.max,
+                "descriptor {} default out of range",
+                d.key
+            );
+        }
+    }
+
+    /// P3.5.2 — fx_zone_edge_ripple is registered.
+    #[test]
+    fn zone_edge_ripple_is_registered() {
+        assert!(fx_is_registered(ZONE_EDGE_RIPPLE_PRESET_ID));
+    }
+
+    /// P3.5.2 — fx_zone_edge_ripple requires a zone tag.
+    #[test]
+    fn zone_edge_ripple_requires_zone() {
+        assert!(fx_requires_zone(ZONE_EDGE_RIPPLE_PRESET_ID));
+    }
+
+    /// P3.5.2 — fx_zone_edge_ripple descriptors are non-empty, all in range.
+    #[test]
+    fn zone_edge_ripple_descriptors_valid() {
+        let descs = fx_param_descriptors(ZONE_EDGE_RIPPLE_PRESET_ID);
+        assert!(!descs.is_empty());
+        for d in descs {
+            assert!(d.min < d.max, "descriptor {} min >= max", d.key);
+            assert!(
+                d.default >= d.min && d.default <= d.max,
+                "descriptor {} default out of range",
+                d.key
+            );
+        }
+    }
+
+    /// P3.5.3 — fx_zone_portal_drift is registered.
+    #[test]
+    fn zone_portal_drift_is_registered() {
+        assert!(fx_is_registered(ZONE_PORTAL_DRIFT_PRESET_ID));
+    }
+
+    /// P3.5.3 — fx_zone_portal_drift requires a zone tag.
+    #[test]
+    fn zone_portal_drift_requires_zone() {
+        assert!(fx_requires_zone(ZONE_PORTAL_DRIFT_PRESET_ID));
+    }
+
+    /// P3.5.3 — fx_zone_portal_drift descriptors include a budget-capped
+    /// particle_count descriptor (per P3.5.3 acceptance criterion).
+    #[test]
+    fn zone_portal_drift_has_budget_capped_particle_count() {
+        let descs = fx_param_descriptors(ZONE_PORTAL_DRIFT_PRESET_ID);
+        let pc = descs
+            .iter()
+            .find(|d| d.key == "particle_count")
+            .expect("particle_count descriptor must be present");
+        assert!(
+            pc.max_particle_count.is_some(),
+            "particle_count must have max_particle_count cap"
+        );
+        assert!(
+            pc.max_particle_count.unwrap() <= 256,
+            "particle_count cap must be ≤ 256"
+        );
     }
 }

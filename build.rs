@@ -10,6 +10,10 @@
 //!
 //! `SDF_CONSUMERS` lists basename prefixes that need the helper prepended.
 //! P0.5.3 will add "fx_" for fx_ripple_wash.wgsl — a one-line extension.
+//!
+//! P3.3.1: zone-aware presets (`fx_zone_` prefix) need BOTH `sdf_helper.wgsl`
+//! AND `zone_tag_helper.wgsl` prepended, in that order. `ZONE_CONSUMERS` lists
+//! these prefixes; they are also in `SDF_CONSUMERS` so both helpers are added.
 
 use std::fs;
 use std::path::Path;
@@ -24,6 +28,12 @@ const SDF_CONSUMERS: &[&str] = &[
     "treat_displacement",
     "treat_refraction",
 ];
+
+/// P3.3.1 — Basename prefixes that additionally need zone_tag_helper.wgsl
+/// prepended after sdf_helper.wgsl. Zone-aware preset shaders declare
+/// `@group(0) @binding(6) var<uniform> u_zone: ZoneTagUniform;` in their
+/// own source; the helper provides the constants and struct.
+const ZONE_CONSUMERS: &[&str] = &["fx_zone_"];
 
 fn main() {
     let shader_dir = Path::new("src/render/shaders");
@@ -40,6 +50,14 @@ fn main() {
         String::new()
     };
 
+    // P3.3.1 — zone-tag helper for zone-aware preset shaders.
+    let zone_helper_path = shader_dir.join("zone_tag_helper.wgsl");
+    let zone_helper_src = if zone_helper_path.exists() {
+        fs::read_to_string(&zone_helper_path).expect("read zone_tag_helper.wgsl")
+    } else {
+        String::new()
+    };
+
     for entry in fs::read_dir(shader_dir).expect("read shader dir") {
         let path = entry.expect("dir entry").path();
         if path.extension().and_then(|e| e.to_str()) != Some("wgsl") {
@@ -52,19 +70,27 @@ fn main() {
             .and_then(|n| n.to_str())
             .unwrap_or_default();
 
-        // sdf_helper.wgsl is a function-only module (no entry points). Validate
-        // it standalone so naga confirms the helper itself is well-formed.
-        // Consumer shaders get the helper prepended (see SDF_CONSUMERS).
+        // sdf_helper.wgsl and zone_tag_helper.wgsl are function-only modules
+        // (no entry points). Validate them standalone; consumer shaders get
+        // them prepended.
         let src = fs::read_to_string(&path).expect("read shader source");
 
-        let is_consumer = SDF_CONSUMERS
+        let is_sdf_consumer = SDF_CONSUMERS
             .iter()
             .any(|prefix| basename.starts_with(prefix));
 
-        let validated_src = if is_consumer && !sdf_helper_src.is_empty() {
-            format!("{}\n{}", sdf_helper_src, src)
-        } else {
-            src
+        let is_zone_consumer = ZONE_CONSUMERS
+            .iter()
+            .any(|prefix| basename.starts_with(prefix));
+
+        // Build the validated source: SDF helper first, then zone helper (if
+        // needed), then the shader's own source. Order matches runtime concat.
+        let validated_src = match (is_sdf_consumer, is_zone_consumer) {
+            (true, true) => format!("{}\n{}\n{}", sdf_helper_src, zone_helper_src, src),
+            (true, false) if !sdf_helper_src.is_empty() => {
+                format!("{}\n{}", sdf_helper_src, src)
+            }
+            _ => src,
         };
 
         let module = match naga::front::wgsl::parse_str(&validated_src) {
