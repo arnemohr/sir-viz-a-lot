@@ -14,9 +14,24 @@
 //!
 //! User presets are stored in
 //! `~/Library/Application Support/rmap/presets/*.rmap-preset.json`.
-//! The directory path is resolved at runtime via
-//! [`user_presets_dir`]. Directory creation failures are silently ignored —
-//! the feature degrades to built-ins-only.
+//! The directory path is resolved at runtime via [`user_presets_dir`].
+//! Directory creation failures are silently ignored — the feature degrades
+//! to built-ins-only.
+//!
+//! # Export / import (P2.8.5)
+//!
+//! Each preset cell in the browser has an "Export…" button that opens an
+//! `rfd::FileDialog` save-file dialog and writes a `.rmap-preset.json`.
+//! The "Import…" button at the top of the browser opens a file-picker and
+//! validates that the `preset_id` is registered via [`fx_is_registered`];
+//! unknown IDs surface a toast: "This preset requires a version of rmap
+//! that supports '<id>'. It was not imported."
+//!
+//! Drag-drop import (`.rmap-preset.json` onto the app window) is deferred
+//! to Phase 4 — the egui drag-drop surface needs the main window event-loop
+//! to forward `DroppedFile` events from winit, which requires wiring in
+//! `src/windows/control.rs`. The file-dialog import path covers the
+//! v0.6 acceptance criterion.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
