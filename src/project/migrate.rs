@@ -45,7 +45,7 @@ pub fn migrate(mut value: Value) -> Result<(Value, MigrationOutcome), ProjectErr
         // layer's new `warp` field. `Project.warps` is preserved during
         // T3.0a so the renderer + audit + mutations keep compiling; T3.0b
         // deletes it once the render graph reads per-layer warps.
-        0..=6 => {
+        0..=7 => {
             if version <= 2 {
                 migrate_v2_to_v3_layers(&mut value);
             }
@@ -72,6 +72,15 @@ pub fn migrate(mut value: Value) -> Result<(Value, MigrationOutcome), ProjectErr
             //     fresh single-element vec.
             if version <= 6 {
                 migrate_v6_to_v7_output_targets(&mut value);
+            }
+            // v7 → v8 (P3.2.2):
+            //   • Adds `WarpMesh.zone_role: null` to every layer's warp
+            //     object that lacks it. Technically a no-op for serde
+            //     (the field defaults to None), but the explicit migration
+            //     step lets audit tooling report "migrated from v7" and
+            //     future phases reason about when zone_role first appeared.
+            if version <= 7 {
+                migrate_v7_to_v8_zone_role(&mut value);
             }
             value["schema_version"] = serde_json::json!(CURRENT_SCHEMA_VERSION);
             Ok((value, outcome))
@@ -390,6 +399,29 @@ fn migrate_v6_to_v7_output_targets(value: &mut Value) {
         return;
     };
     obj.insert("output_targets".into(), Value::Array(vec![legacy]));
+}
+
+/// P3.2.2 — migrate v7 projects to v8: ensure every layer's `warp` object
+/// has a `zone_role: null` key.
+///
+/// This migration is technically a no-op for serde — the `#[serde(default)]`
+/// attribute on `WarpMesh.zone_role` already maps an absent key to `None`.
+/// The explicit migration step ensures the audit log can report "migrated
+/// from v7" and future tooling can reason about which version introduced
+/// `zone_role`.
+fn migrate_v7_to_v8_zone_role(value: &mut Value) {
+    let Some(layers) = value.get_mut("layers").and_then(|v| v.as_array_mut()) else {
+        return;
+    };
+    for layer in layers.iter_mut() {
+        let Some(layer_obj) = layer.as_object_mut() else {
+            continue;
+        };
+        let Some(warp) = layer_obj.get_mut("warp").and_then(|w| w.as_object_mut()) else {
+            continue;
+        };
+        warp.entry("zone_role").or_insert(Value::Null);
+    }
 }
 
 /// V31.2.1 — migrate v5 projects to v6: replace `output_monitor_index: usize`
@@ -1042,5 +1074,105 @@ mod tests {
             }
             _ => panic!("expected Video layer"),
         }
+    }
+
+    // --- P3.2.2 schema migration v7 → v8 tests ---
+
+    /// P3.2.2 — `CURRENT_SCHEMA_VERSION == 8`.
+    #[test]
+    fn current_schema_version_is_8() {
+        assert_eq!(
+            CURRENT_SCHEMA_VERSION, 8,
+            "CURRENT_SCHEMA_VERSION must be 8 after P3.2.2"
+        );
+    }
+
+    /// P3.2.2 — a v7 project JSON (without `zone_role` keys) migrates cleanly
+    /// to v8 with `zone_role: null` on every warp.
+    #[test]
+    fn migrate_v7_to_v8_adds_zone_role_null() {
+        let v7_json = serde_json::json!({
+            "schema_version": 7u32,
+            "layers": [
+                {
+                    "id": "img0",
+                    "kind": {"Image": {"path": "/tmp/photo.jpg", "fit": "Cover", "focal": [0.5, 0.5]}},
+                    "enabled": true,
+                    "transform": {"translate": [0.0, 0.0], "rotate_deg": 0.0, "scale": [1.0, 1.0], "anchor": [0.0, 0.0]},
+                    "effects": [],
+                    "blend_mode": "Normal",
+                    "opacity": 1.0,
+                    "warp": {
+                        "rows": 1, "cols": 1,
+                        "grid": [[[0.0, 0.0], [1.0, 0.0]], [[0.0, 1.0], [1.0, 1.0]]],
+                        "mask_polygon": [], "mask_feather": 0.02
+                    }
+                },
+                {
+                    "id": "fx0",
+                    "kind": {"FxLayer": {"preset_id": "mask_edge_ripple_wash", "params": {}}},
+                    "enabled": true,
+                    "transform": {"translate": [0.0, 0.0], "rotate_deg": 0.0, "scale": [1.0, 1.0], "anchor": [0.0, 0.0]},
+                    "effects": [],
+                    "blend_mode": "Normal",
+                    "opacity": 1.0,
+                    "warp": {
+                        "rows": 1, "cols": 1,
+                        "grid": [[[0.0, 0.0], [1.0, 0.0]], [[0.0, 1.0], [1.0, 1.0]]],
+                        "mask_polygon": [[0.2, 0.2], [0.8, 0.2], [0.8, 0.8], [0.2, 0.8]],
+                        "mask_feather": 0.02
+                    }
+                }
+            ],
+            "output_targets": [{"fallback_index": 0, "rgb_matrix": [[1.0,0.0,0.0],[0.0,1.0,0.0],[0.0,0.0,1.0]]}]
+        });
+
+        let (migrated, _) = migrate(v7_json).expect("migrate v7 → v8");
+
+        // schema_version must be 8.
+        assert_eq!(migrated["schema_version"], 8u32);
+
+        // Every warp must have zone_role: null.
+        for layer in migrated["layers"].as_array().unwrap() {
+            let zone_role = &layer["warp"]["zone_role"];
+            assert!(
+                zone_role.is_null(),
+                "zone_role must be null after v7→v8 migration, got {zone_role}"
+            );
+        }
+    }
+
+    /// P3.2.2 — a v8 project JSON with an explicit `zone_role: "window"` on
+    /// one layer round-trips through `migrate()` unchanged.
+    #[test]
+    fn migrate_v8_with_zone_role_unchanged() {
+        let v8_json = serde_json::json!({
+            "schema_version": 8u32,
+            "layers": [
+                {
+                    "id": "img0",
+                    "kind": {"Image": {"path": "/tmp/photo.jpg", "fit": "Cover", "focal": [0.5, 0.5]}},
+                    "enabled": true,
+                    "transform": {"translate": [0.0, 0.0], "rotate_deg": 0.0, "scale": [1.0, 1.0], "anchor": [0.0, 0.0]},
+                    "effects": [],
+                    "blend_mode": "Normal",
+                    "opacity": 1.0,
+                    "warp": {
+                        "rows": 1, "cols": 1,
+                        "grid": [[[0.0, 0.0], [1.0, 0.0]], [[0.0, 1.0], [1.0, 1.0]]],
+                        "mask_polygon": [], "mask_feather": 0.02,
+                        "zone_role": "window"
+                    }
+                }
+            ],
+            "output_targets": [{"fallback_index": 0, "rgb_matrix": [[1.0,0.0,0.0],[0.0,1.0,0.0],[0.0,0.0,1.0]]}]
+        });
+
+        let (migrated, _) = migrate(v8_json).expect("migrate v8 is no-op");
+        assert_eq!(migrated["schema_version"], 8u32);
+        assert_eq!(
+            migrated["layers"][0]["warp"]["zone_role"], "window",
+            "zone_role must not be modified by the v8 no-op migration"
+        );
     }
 }
