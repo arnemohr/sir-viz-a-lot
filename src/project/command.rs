@@ -2618,6 +2618,33 @@ mod tests {
         if p.layers[0].warp.mask_polygon.len() < 4 {
             p.layers[0].warp.mask_polygon = vec![[0.1, 0.1], [0.9, 0.1], [0.9, 0.9], [0.1, 0.9]];
         }
+        // P2.9.1 — Append an FxLayer at index 1 so the `SetFxLayerParams`
+        // proptest strategy has a real target. Uses RIPPLE_WASH_PRESET_ID
+        // (no `max_particle_count` on any descriptor → every in-range value
+        // commits). Non-zero `seed` and `t_layer_added_secs` ensure the
+        // `ApplyProjectSnapshot` Reverse exercises both new P2.5.1 fields.
+        // Layer 0 remains SVG so all strategies that target index 0 are
+        // unaffected.
+        if p.layers.len() == 1 {
+            use crate::render::fx_presets::RIPPLE_WASH_PRESET_ID;
+            p.layers.push(crate::project::schema::LayerConfig {
+                id: "test_fx_layer".to_string(),
+                kind: crate::project::schema::LayerKind::FxLayer {
+                    preset_id: RIPPLE_WASH_PRESET_ID.to_string(),
+                    params: std::collections::HashMap::new(),
+                    seed: 42,
+                    t_layer_added_secs: 1.5,
+                },
+                enabled: true,
+                transform: crate::project::schema::Transform2D::default(),
+                effects: crate::effects::default_effect_chain(),
+                blend_mode: crate::project::schema::BlendMode::Normal,
+                opacity: 1.0,
+                warp: crate::project::schema::WarpMesh::default_placement(),
+                muted: false,
+                treatment: None,
+            });
+        }
         p
     }
 
@@ -4049,14 +4076,15 @@ mod tests {
                 exposure: f32,
                 contrast: f32,
             },
-            /// P2.5.6 — set an FxLayer's params HashMap. The strategy
-            /// targets layer 0, overwriting `particle_count` with a
-            /// value WITHIN the `particles_identity` cap (≤ 16) so the
-            /// mutation commits (over-budget is tested in unit tests, not
-            /// proptest). Falls back to a no-op when layer 0 is not
-            /// FxLayer (harness doesn't force FxLayer topology).
+            /// P2.9.1 — set a `RIPPLE_WASH_PRESET_ID` FxLayer's params HashMap.
+            /// Targets layer 1 (the FxLayer appended by `fresh_project`),
+            /// overwriting `wavelength` with a value in `[10.0, 400.0]` —
+            /// the descriptor's full range, with no `max_particle_count` cap
+            /// so every generated value commits. Falls back to a no-op gamma
+            /// when layer 1 is absent or is not an FxLayer (possible after
+            /// `RemoveLayer` steps reduce the project to 1 layer).
             SetFxLayerParams {
-                particle_count: f32,
+                wavelength: f32,
             },
         }
 
@@ -4489,21 +4517,21 @@ mod tests {
                         project.set_layer_treatment_params_mutation(0, new)
                     }
                 }
-                MutationKind::SetFxLayerParams { particle_count } => {
-                    // Only fire when layer 0 is an FxLayer; otherwise
-                    // fall back to a no-op gamma. The proptest fixture
-                    // uses an SVG layer by default so this will usually
-                    // be the no-op path — that's fine; the dedicated
-                    // unit tests exercise the FxLayer path directly.
-                    if !project.layers.is_empty()
+                MutationKind::SetFxLayerParams { wavelength } => {
+                    // P2.9.1 — target layer 1 (the RIPPLE_WASH FxLayer
+                    // appended by fresh_project). Guard: the layer must
+                    // exist AND still be FxLayer (SwapLayers / RemoveLayer
+                    // steps in the same proptest sequence can change the
+                    // topology). Fall back to a no-op gamma when absent.
+                    if project.layers.len() > 1
                         && matches!(
-                            project.layers[0].kind,
+                            project.layers[1].kind,
                             crate::project::schema::LayerKind::FxLayer { .. }
                         )
                     {
                         let mut new = std::collections::HashMap::new();
-                        new.insert("particle_count".to_string(), *particle_count);
-                        project.set_fx_layer_params_mutation(0, new)
+                        new.insert("wavelength".to_string(), *wavelength);
+                        project.set_fx_layer_params_mutation(1, new)
                     } else {
                         project.set_gamma_mutation(project.gamma) // no-op fallback
                     }
@@ -4755,16 +4783,15 @@ mod tests {
                 (-2.0_f32..=2.0_f32, 0.5_f32..=1.5_f32).prop_map(|(exposure, contrast)| {
                     MutationKind::SetLayerTreatmentParams { exposure, contrast }
                 },),
-                // P2.5.6 — FxLayer params. Values are bounded to ≤ 16 to
-                // stay within the `particles_identity` `max_particle_count`
-                // cap so the mutation commits (over-budget refusal is
-                // exercised in dedicated unit tests, not here). When layer 0
-                // is not FxLayer the `to_mutation` dispatch falls back to a
-                // no-op gamma, which is a valid sequence for the round-trip
-                // harness.
-                (1.0_f32..=16.0_f32).prop_map(|particle_count| {
-                    MutationKind::SetFxLayerParams { particle_count }
-                }),
+                // P2.9.1 — FxLayer params targeting layer 1 (RIPPLE_WASH).
+                // `wavelength` spans the full descriptor range [10, 400] —
+                // RIPPLE_WASH has no `max_particle_count` on any descriptor
+                // so every value in range commits. When layer 1 is absent or
+                // not FxLayer (after RemoveLayer / SwapLayers steps), the
+                // `to_mutation` dispatch falls back to a no-op gamma, which
+                // is a valid sequence for the round-trip harness.
+                (10.0_f32..=400.0_f32)
+                    .prop_map(|wavelength| { MutationKind::SetFxLayerParams { wavelength } }),
             ]
         }
 
