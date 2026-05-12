@@ -478,13 +478,19 @@ pub fn show(
     // can still reach those controls while the proper inspector
     // (T3.3) and Advanced disclosure (T3.11) are in flight.
 
-    // 003-T3.3 + P1.UX: selection-driven right-edge inspector. P1.UX
-    // moves Layer-selection controls (Position / Scale / Rotate /
-    // Opacity / Placement) into the Advanced panel's "Selected layer"
-    // section to eliminate the cramped double-column right rail the
-    // operator reported. The inspector now appears **only** for edit-
-    // mode selections (warp corners + mask vertices) where the
-    // affordances are distinct from Advanced's per-layer controls.
+    // 003-T3.3 + P1.UX: selection-driven inspector. The Layer-selection
+    // controls moved into the Controls window's "Selected layer"
+    // section; this surface stays around for **edit-mode selections**
+    // (warp corners + mask vertices), where the affordances are a
+    // small read-out + a Reset button.
+    //
+    // P1.UX (second pass): re-mounted as a small floating
+    // `egui::Window` instead of a right-edge `SidePanel`. When the
+    // operator clicked a mask vertex the old SidePanel would appear
+    // and squeeze the canvas left by 280 px on the next frame —
+    // visually the image *jumped* during selection. A floating window
+    // sits over the canvas without consuming layout width, so the
+    // canvas stays still.
     #[cfg(feature = "v3")]
     {
         let inspector_visible = matches!(
@@ -494,12 +500,17 @@ pub fn show(
                 | Some(crate::windows::scene_editor::Selection::SourceRect { .. })
         );
         if inspector_visible {
-            egui::SidePanel::right("rmap_inspector")
-                .resizable(false)
-                .exact_width(280.0)
-                .show_inside(ui, |ui| {
-                    crate::windows::inspector::show(ui, project, st, scene);
-                });
+            let ctx = ui.ctx().clone();
+            egui::Window::new(
+                egui::RichText::new("Selection details").color(crate::windows::theme::ACCENT),
+            )
+            .id(egui::Id::new("rmap_inspector_window"))
+            .resizable(true)
+            .default_width(260.0)
+            .default_height(160.0)
+            .show(&ctx, |ui| {
+                crate::windows::inspector::show(ui, project, st, scene);
+            });
         }
     }
 

@@ -30,14 +30,21 @@ use crate::windows::theme::{
 };
 
 /// Pixel radius for mask-vertex hit-testing in preview space (M11).
-const MASK_HANDLE_HIT_PX: f32 = 9.0;
+///
+/// P1.UX: bumped 9 → 14. The painted handle is 5.5 px so the original
+/// 9 px hit radius gave only 3.5 px of slop around the visible dot —
+/// too tight to grab reliably on HiDPI, and the operator reported
+/// off-by-a-pixel clicks falling through to the layer-body drag
+/// (translating the image instead of moving the vertex). 14 px matches
+/// the warp-corner hit radius's Fitts's-law intent — still well clear
+/// of any neighbouring vertex in a typical polygon mask.
+const MASK_HANDLE_HIT_PX: f32 = 14.0;
 /// Pixel radius for the painted mask handle.
 const MASK_HANDLE_DRAW_PX: f32 = 5.5;
-/// Hit-test radius for warp grid corners. Larger than the mask radius
-/// (Fitts's law — warp corners are the canvas's primary direct-
-/// manipulation surface; an 9 px target on a HiDPI display is too
-/// tight to grab reliably). Stays well under WARP_SNAP_RADIUS_PX so
-/// the magnetic-corner snap behaviour at drag-end is unaffected.
+/// Hit-test radius for warp grid corners. Same intent as
+/// `MASK_HANDLE_HIT_PX` — Fitts's law on a HiDPI display. Stays well
+/// under `WARP_SNAP_RADIUS_PX` so the magnetic-corner snap behaviour
+/// at drag-end is unaffected.
 #[cfg_attr(not(feature = "v3"), allow(dead_code))]
 const WARP_HANDLE_HIT_PX: f32 = 16.0;
 /// Painted radius for warp grid handles. Slightly larger than the
@@ -411,18 +418,27 @@ pub fn hit_mask_vertex(
         )
     };
     let r2 = MASK_HANDLE_HIT_PX * MASK_HANDLE_HIT_PX;
+    // P1.UX: pick the *closest* vertex within the hit radius, not the
+    // first one walked. With the new 14-px hit radius two adjacent
+    // vertices on a tight polygon edge can both be in range; first-
+    // match would silently bind the click to whichever vertex appeared
+    // earlier in iteration order even when the operator clearly
+    // targeted the other one. `hit_warp_corner` already uses this
+    // closest-wins policy — bringing the two in line.
+    let mut best: Option<(f32, usize, usize)> = None;
     for (w_idx, layer) in project.layers.iter().enumerate() {
         let warp = &layer.warp;
         for (v_idx, p) in warp.mask_polygon.iter().enumerate() {
             let s = to_screen(*p);
             let dx = pos_screen.x - s.x;
             let dy = pos_screen.y - s.y;
-            if dx * dx + dy * dy <= r2 {
-                return Some((w_idx, v_idx));
+            let d2 = dx * dx + dy * dy;
+            if d2 <= r2 && best.as_ref().map(|(bd, ..)| d2 < *bd).unwrap_or(true) {
+                best = Some((d2, w_idx, v_idx));
             }
         }
     }
-    None
+    best.map(|(_, w, v)| (w, v))
 }
 
 /// Distance from `p` to segment `(a, b)` in 2D.
@@ -573,6 +589,49 @@ pub fn handle_scene_input(
 ) -> Option<crate::project::command::Mutation> {
     let mut emitted: Option<crate::project::command::Mutation> = None;
 
+    // P1.UX — cursor feedback. The operator reported that "iffy" mask-
+    // vertex hits felt random; surfacing a Grab cursor when the
+    // pointer is inside a handle's hit radius gives clear affordance
+    // before the click. Priority mirrors the drag-started priority
+    // (warp corner → mask vertex → layer body) so what the cursor
+    // promises is what the click delivers.
+    //
+    // While actively dragging, the cursor is Grabbing — egui's
+    // standard direct-manipulation pair.
+    if response.hovered() {
+        let cursor = if scene.drag.is_some() {
+            Some(egui::CursorIcon::Grabbing)
+        } else if let Some(pos) = pointer {
+            let warp_layer_idx = if scene.mode == EditMode::Warp {
+                match scene.selected {
+                    Some(Selection::Layer(idx)) => Some(idx),
+                    Some(Selection::WarpCorner { warp, .. }) => Some(warp),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            let warp_hover =
+                warp_layer_idx.and_then(|idx| hit_warp_corner(project, idx, pos, preview_rect));
+            let handle_hover =
+                warp_hover.is_some() || hit_mask_vertex(project, pos, preview_rect).is_some();
+            if handle_hover {
+                Some(egui::CursorIcon::Grab)
+            } else if hit_layer(project, pos, preview_rect).is_some() {
+                // Layer body — translate / scale / rotate is a "move"
+                // gesture, not a "grab a handle" gesture.
+                Some(egui::CursorIcon::Move)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        if let Some(c) = cursor {
+            response.ctx.set_cursor_icon(c);
+        }
+    }
+
     if response.drag_started() {
         if let Some(pos) = pointer {
             scene.drag = None;
@@ -631,13 +690,17 @@ pub fn handle_scene_input(
                     },
                 });
             } else if let Some(idx) = hit_layer(project, pos, preview_rect) {
-                // 003-T3.5 follow-up — in Warp mode a layer-body click selects
-                // the layer (so its grid becomes visible and its corners are
-                // hit-testable) but does NOT start a translate/scale/rotate
-                // drag. Otherwise an operator who clicks slightly off a small
-                // corner handle accidentally moves the whole layer instead of
-                // missing the corner and leaving state untouched.
-                if scene.mode == EditMode::Warp {
+                // 003-T3.5 follow-up + P1.UX — in Warp **or Mask** mode a
+                // layer-body click selects the layer (so its grid /
+                // mask edges become visible and its handles are hit-
+                // testable) but does NOT start a translate/scale/
+                // rotate drag. Otherwise an operator who clicks
+                // slightly off a small handle accidentally moves the
+                // whole layer instead of missing the handle and
+                // leaving state untouched. The Mask-mode half closes
+                // a specific bug report: clicking near (but not on) a
+                // mask vertex was translating the underlying image.
+                if matches!(scene.mode, EditMode::Warp | EditMode::Mask) {
                     scene.selected = Some(Selection::Layer(idx));
                 } else {
                     let (translate, scale, rotate) =
