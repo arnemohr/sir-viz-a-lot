@@ -15,6 +15,18 @@ below is sized for a single PR.
 - [x] P3.2.5 04ed707 — audit finding MissingZoneTag + fx_requires_zone()
 - [x] P3.3.1 d8caa81 — ZONE_TAG_WGSL constant + zone_tag_helper.wgsl (naga validated)
 - [x] P3.3.2 bb2e96b — bind-group slot 6 contract doc + zone_tag_buffer + per-frame write
+- [x] P3.4.1 06b34cc — zone role ComboBox palette in Mask mode (sub-mode, undo/redo, tooltips)
+- [x] P3.4.2 c73c2a8 — zone badge in layer list + "requires zone tag" in preset browser
+- [x] P3.5.1 71e2378 — fx_zone_light_spill: warm glow for ZONE_WINDOW
+- [x] P3.5.2 71e2378 — fx_zone_edge_ripple: tight ripple for ZONE_EDGE
+- [x] P3.5.3 71e2378 — fx_zone_portal_drift: particle drift for ZONE_PORTAL (fragment impl)
+- [x] P3.6.1 48f82d1 — proptest SetMaskZoneRole round-trip (1024 cases)
+- [x] P3.6.2 8862494 — GPU golden: zone-tag dispatch verification (3 golden tests)
+- [x] P3.6.3 2f0113e — old-project-loads-identically regression test
+- [x] P3.7.1 9e093d9 — version bump 0.6.0 → 0.7.0
+- [x] P3.7.2 c9e7a19 — CHANGELOG body for v0.7
+- [x] P3.7.3 fb4174b — README Spatial Zones section (full prose)
+- [x] P3.7.4 f6e4175 — show-day checklist: Phase 3 acceptance smoke test items 6–10
 
 ---
 
