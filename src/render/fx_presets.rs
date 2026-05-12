@@ -40,6 +40,56 @@ use std::collections::HashMap;
 
 use crate::render::sdf::SDF_HELPER_WGSL;
 
+/// Internal pipeline-shape tag; not user-visible. Drives dispatch routing in
+/// `fx_presets::dispatch` once P2.2.3 lands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // wired by P2.2.4 audit + P2.8.1 browser
+pub enum FxFamily {
+    Fragment,
+    ComputeParticle,
+    ComputeFluid,
+}
+
+/// Static descriptor for a single FX preset entry in the registry.
+#[derive(Debug, Clone, Copy)]
+#[allow(dead_code)] // wired by P2.2.4 audit + P2.8.1 browser
+pub struct FxPresetEntry {
+    /// Stable identifier stored in project files; must never be renamed.
+    pub preset_id: &'static str,
+    /// Human-readable label shown in the picker UI.
+    pub label: &'static str,
+    /// Pipeline shape tag; drives dispatch routing once P2.2.3 lands.
+    pub family: FxFamily,
+}
+
+/// All registered FX presets. Zero-allocation static slice — mirrors the
+/// `treatments::registry()` shape.
+#[allow(dead_code)] // wired by P2.2.4 audit + P2.8.1 browser
+pub fn fx_registry() -> &'static [FxPresetEntry] {
+    &[FxPresetEntry {
+        preset_id: RIPPLE_WASH_PRESET_ID,
+        label: "Mask-edge ripple wash",
+        family: FxFamily::Fragment,
+    }]
+}
+
+/// `true` if `preset_id` corresponds to a registered FX preset.
+/// CPU-only; safe to call without a GPU device.
+#[allow(dead_code)] // wired by P2.2.4 audit + P2.8.1 browser
+pub fn fx_is_registered(preset_id: &str) -> bool {
+    fx_registry().iter().any(|e| e.preset_id == preset_id)
+}
+
+/// Returns the display label for a registered FX preset, or `None` if the
+/// `preset_id` is not in the registry.
+#[allow(dead_code)] // wired by P2.2.4 audit + P2.8.1 browser
+pub fn fx_display_label(preset_id: &str) -> Option<&'static str> {
+    fx_registry()
+        .iter()
+        .find(|e| e.preset_id == preset_id)
+        .map(|e| e.label)
+}
+
 /// Preset id for the mask-edge ripple wash effect.
 pub const RIPPLE_WASH_PRESET_ID: &str = "mask_edge_ripple_wash";
 
@@ -376,5 +426,54 @@ mod tests {
         assert_eq!(params.base_b, 0.2);
         assert_eq!(params._pad0, 0.0, "_pad0 must still be zero");
         assert_eq!(params._pad1, 0.0, "_pad1 must still be zero");
+    }
+
+    // --- P2.2.1 registry tests ---
+
+    /// P2.2.1 acceptance: fx_registry() contains RIPPLE_WASH_PRESET_ID.
+    #[test]
+    fn registry_contains_ripple_wash() {
+        assert!(fx_is_registered(RIPPLE_WASH_PRESET_ID));
+    }
+
+    /// P2.2.1 acceptance: fx_is_registered rejects an unknown id.
+    #[test]
+    fn registry_rejects_bogus_id() {
+        assert!(!fx_is_registered("bogus_preset_id"));
+    }
+
+    /// P2.2.1 acceptance: fx_display_label returns Some for a known preset.
+    #[test]
+    fn display_label_returns_some_for_known() {
+        assert!(fx_display_label(RIPPLE_WASH_PRESET_ID).is_some());
+    }
+
+    /// P2.2.1 acceptance: fx_display_label returns None for an unknown preset.
+    #[test]
+    fn display_label_returns_none_for_unknown() {
+        assert!(fx_display_label("bogus").is_none());
+    }
+
+    /// P2.2.1 acceptance: no duplicate preset_ids in the registry.
+    #[test]
+    fn registry_has_no_duplicates() {
+        let mut seen = std::collections::HashSet::new();
+        for entry in fx_registry() {
+            assert!(
+                seen.insert(entry.preset_id),
+                "duplicate preset_id in fx_registry: {}",
+                entry.preset_id
+            );
+        }
+    }
+
+    /// P2.2.1 acceptance: ripple_wash entry has FxFamily::Fragment.
+    #[test]
+    fn ripple_wash_family_is_fragment() {
+        let entry = fx_registry()
+            .iter()
+            .find(|e| e.preset_id == RIPPLE_WASH_PRESET_ID)
+            .expect("ripple_wash must be in fx_registry");
+        assert_eq!(entry.family, FxFamily::Fragment);
     }
 }
