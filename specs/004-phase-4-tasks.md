@@ -5,39 +5,39 @@ below is sized for a single PR.
 
 ## Implementation status
 
-- [ ] P4.1.1 — glossary entries for Phase 4 domain terms
-- [ ] P4.1.2 — perf-gate refresh: scene-wizard + multi-template stub fixture
-- [ ] P4.1.3 — CHANGELOG + README v0.7 placeholder sections
-- [ ] P4.2.1 — `SceneTemplate` struct + `SceneTemplateRegistry` skeleton
-- [ ] P4.2.2 — JSON schema + `.rmap-scene.json` serde round-trip
-- [ ] P4.2.3 — `SceneTemplate` instantiation via `ApplyProjectSnapshot`
-- [ ] P4.2.4 — audit: `UnknownSceneTemplate` finding + zones-consumed check
-- [ ] P4.3.1 — `AppState::SceneWizard` variant + routing skeleton  *(BLOCKED on `004-phase-4-wizard-state-machine-decision.md`)*
-- [ ] P4.3.2 — wizard cancel / back navigation + pre-wizard snapshot stash
-- [ ] P4.3.3 — wizard commit → `ApplyProjectSnapshot` + return to Editing
-- [ ] P4.4.1 — wizard step 0: template-select picker UI
-- [ ] P4.4.2 — wizard step 1: media-slot picker UI
-- [ ] P4.4.3 — wizard step 2: zone-binding picker UI  *(BLOCKED on Phase 3 zone interface)*
-- [ ] P4.4.4 — wizard step 3: palette + mood picker UI
-- [ ] P4.4.5 — wizard step 4: tempo picker UI
-- [ ] P4.5.1 — built-in scene template: `window_reveal`
-- [ ] P4.5.2 — built-in scene template: `pixel_drift`
-- [ ] P4.5.3 — built-in scene template: `collage_bloom`
-- [ ] P4.5.4 — built-in scene template: `glow_behind_openings`
-- [ ] P4.5.5 — built-in scene template: `fragmented_portrait`
-- [ ] P4.5.6 — built-in scene template: `architectural_wash` (upgrade from FX preset label)
-- [ ] P4.5.7 — built-in scene template: `mask_edge_ripple_wash_scene`
-- [ ] P4.5.8 — built-in scene template: `light_spill_from_windows`
-- [ ] P4.6.1 — selected-layer card: scene-aware header (template params above the fold)
-- [ ] P4.6.2 — selected-layer card: "Advanced" disclosure for raw layer params
-- [ ] P4.7.1 — mode hint banner: capability-availability hints
-- [ ] P4.8.1 — proptest extension: `SceneTemplate` serde + registry round-trip
-- [ ] P4.8.2 — proptest extension: wizard commit / cancel `ApplyProjectSnapshot` round-trip
-- [ ] P4.8.3 — GPU golden: `window_reveal` template renders deterministically
-- [ ] P4.9.1 — version bump 0.6 → 0.7
-- [ ] P4.9.2 — CHANGELOG body for v0.7
-- [ ] P4.9.3 — README — Scene grammars section
-- [ ] P4.9.4 — show-day checklist: scene template validation, zone-binding audit
+- [x] P4.1.1 bb8d53f — glossary entries for Phase 4 domain terms
+- [x] P4.1.2 d23feb5 — perf-gate refresh: scene-wizard + multi-template stub fixture
+- [x] P4.1.3 0980fc8 — CHANGELOG + README v0.8 placeholder sections
+- [x] P4.2.1 28d862e — `SceneTemplate` struct + `SceneTemplateRegistry` skeleton
+- [x] P4.2.2 8b7e115 — JSON schema + `.rmap-scene.json` serde round-trip
+- [x] P4.2.3 9abe045 — `SceneTemplate` instantiation via `ApplyProjectSnapshot`
+- [x] P4.2.4 d564ba3 — audit: `AuditKind::TemplateZonesMissing` + zones-consumed check
+- [x] P4.3.1 862d74d — `AppState::SceneWizard` variant + routing skeleton
+- [x] P4.3.2 2fbc79b — wizard cancel / back navigation + pre-wizard snapshot stash
+- [x] P4.3.3 f9f9f98 — wizard commit → `ApplyProjectSnapshot` + return to Editing
+- [x] P4.4.1 e960e18 — wizard step 0: template-select picker UI
+- [x] P4.4.2 1970532 — wizard step 1: media-slot picker UI
+- [x] P4.4.3 1970532 — wizard step 2: zone-binding picker UI
+- [x] P4.4.4 1970532 — wizard step 3: palette + mood picker UI
+- [x] P4.4.5 1970532 — wizard step 4: tempo picker UI
+- [x] P4.5.1 b668f28 — built-in scene template: `window_reveal`
+- [x] P4.5.2 b668f28 — built-in scene template: `pixel_drift`
+- [x] P4.5.3 b668f28 — built-in scene template: `collage_bloom`
+- [x] P4.5.4 b668f28 — built-in scene template: `glow_behind_openings`
+- [x] P4.5.5 b668f28 — built-in scene template: `fragmented_portrait`
+- [x] P4.5.6 b668f28 — built-in scene template: `architectural_wash` (upgrade from FX preset label)
+- [x] P4.5.7 b668f28 — built-in scene template: `mask_edge_ripple_wash_scene`
+- [x] P4.5.8 b668f28 — built-in scene template: `light_spill_from_windows`
+- [x] P4.6.1 e74ceca — selected-layer card: scene-aware header (template params above the fold)
+- [x] P4.6.2 e74ceca — selected-layer card: "Advanced" disclosure for raw layer params
+- [x] P4.7.1 0895dca — mode hint banner: capability-availability hints
+- [x] P4.8.1 ec88f9f — proptest extension: `SceneTemplate` serde + registry round-trip
+- [x] P4.8.2 56d63c5 — proptest extension: wizard commit / cancel `ApplyProjectSnapshot` round-trip
+- [x] P4.8.3 934fe40 — GPU golden: `window_reveal` template renders deterministically
+- [x] P4.9.1 6e614a5 — version bump 0.7.0 → 0.8.0
+- [x] P4.9.2 28a6cf7 — CHANGELOG body for v0.8
+- [x] P4.9.3 28a6cf7 — README — Scene grammars section
+- [x] P4.9.4 28a6cf7 — show-day checklist: scene template validation, zone-binding audit
 - [ ] P4.9.5 — Phase 4 acceptance smoke test (manual: 5-minute operator path)
 
 ---
