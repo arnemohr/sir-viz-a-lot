@@ -48,6 +48,7 @@ use crate::effects::Effect;
 use crate::modulators::Modulator;
 use crate::project::command::Mutation;
 use crate::project::schema::{LayerConfig, Project};
+use crate::render::{fx_presets, treatments};
 
 /// Severity of an audit finding. Drives UX routing: `Info` and `Warn`
 /// surface as toasts the operator can dismiss; `Critical` blocks the
@@ -116,6 +117,22 @@ pub enum AuditKind {
         layer_idx: usize,
         /// The path that didn't resolve.
         path: PathBuf,
+    },
+    /// P2.2.4 — `FxLayer`'s `preset_id` is not in `fx_presets::fx_registry()`.
+    /// The layer renders invisible; the operator sees a `Warn`.
+    UnknownFxPreset {
+        /// Index into `Project.layers`.
+        layer_idx: usize,
+        /// The preset_id string that had no registered entry.
+        preset_id: String,
+    },
+    /// P2.2.4 — Treatment's `preset_id` is not in `treatments::registry()`.
+    /// The layer falls back to the default blit (renders source as-is).
+    UnknownTreatment {
+        /// Index into `Project.layers`.
+        layer_idx: usize,
+        /// The preset_id string that had no registered entry (may be empty).
+        preset_id: String,
     },
     /// The saved monitor index exceeds the available monitor count
     /// on this machine.
@@ -404,30 +421,63 @@ impl ProjectAudit {
                 }
             }
 
-            // P1.2.1 — Treatment audit. Three checks per layer that
-            // carries `treatment.is_some()`:
-            //   (1) unknown preset_id  → Warn (mirrors P0.5.1 FxLayer)
-            //   (2) missing overlay_path file        → Warn MissingAsset
-            //   (3) missing collage_paths[i] file    → Warn MissingAsset
-            //
-            // The preset registry isn't built yet (P1.3 ships it) so we
-            // can't validate preset_id against a live list of known
-            // presets today. The check is wired but currently accepts
-            // every id; W3 tasks tighten it once `treatments::registry`
-            // exists.
-            if let Some(treatment) = layer.treatment.as_ref() {
-                // (1) unknown preset_id — placeholder until W3 ships
-                // the registry. The empty-string case is the only
-                // detectable error today (caller dispatched a
-                // SetLayerTreatment with an empty preset_id).
-                if treatment.preset_id.is_empty() {
+            // P2.2.4 — FxLayer unknown-preset check. An FxLayer whose
+            // preset_id is non-empty but unregistered renders invisible;
+            // emit a Warn so the operator sees an actionable finding.
+            // Empty preset_id is "not configured yet" — no warning.
+            if let crate::project::schema::LayerKind::FxLayer { preset_id, .. } = &layer.kind {
+                if !preset_id.is_empty() && !fx_presets::fx_is_registered(preset_id) {
                     findings.push(AuditFinding {
-                        kind: AuditKind::EmptyProject, // closest existing kind; W3 may add a dedicated variant
+                        kind: AuditKind::UnknownFxPreset {
+                            layer_idx,
+                            preset_id: preset_id.clone(),
+                        },
                         severity: Severity::Warn,
                         message: format!(
+                            "Layer {} has unknown FxLayer preset '{}'. \
+                             The layer will render invisible until the preset is registered.",
+                            layer_idx, preset_id,
+                        ),
+                        autofix: None,
+                    });
+                }
+            }
+
+            // P1.2.1 — Treatment audit. Three checks per layer that
+            // carries `treatment.is_some()`:
+            //   (1) unknown preset_id  → Warn UnknownTreatment
+            //   (2) missing overlay_path file        → Warn MissingAsset
+            //   (3) missing collage_paths[i] file    → Warn MissingAsset
+            if let Some(treatment) = layer.treatment.as_ref() {
+                // (1) unknown/empty preset_id — both cases emit
+                // UnknownTreatment (Warn). Empty string: operator
+                // dispatched SetLayerTreatment with no preset selected.
+                // Non-empty but unregistered: project was written by a
+                // newer build or mistyped id. Either way the layer will
+                // fall back to the default blit. The message distinguishes
+                // the two sub-cases so the operator gets actionable text.
+                if treatment.preset_id.is_empty()
+                    || !treatments::is_registered(&treatment.preset_id)
+                {
+                    let message = if treatment.preset_id.is_empty() {
+                        format!(
                             "Layer {} has a treatment with no preset_id; it will render as a no-op.",
                             layer.id,
-                        ),
+                        )
+                    } else {
+                        format!(
+                            "Layer {} has an unknown treatment preset '{}'; \
+                             the layer will render as-is (no treatment applied).",
+                            layer.id, treatment.preset_id,
+                        )
+                    };
+                    findings.push(AuditFinding {
+                        kind: AuditKind::UnknownTreatment {
+                            layer_idx,
+                            preset_id: treatment.preset_id.clone(),
+                        },
+                        severity: Severity::Warn,
+                        message,
                         autofix: None,
                     });
                 }
@@ -1423,5 +1473,141 @@ mod tests {
             oor[0].message
         );
         assert!(oor[0].autofix.is_some());
+    }
+
+    // --- P2.2.4 tests ---
+
+    /// P2.2.4 — FxLayer with an unregistered preset_id emits exactly one
+    /// UnknownFxPreset Warn finding.
+    #[test]
+    fn audit_unknown_fx_preset_emits_warn() {
+        use std::collections::HashMap;
+        let mut p = fresh_project();
+        p.layers[0].kind = crate::project::schema::LayerKind::FxLayer {
+            preset_id: "definitely_fake".into(),
+            params: HashMap::new(),
+        };
+        let findings = ProjectAudit::run(&p, &AuditEnv::default());
+        let unknown: Vec<_> = findings
+            .iter()
+            .filter(|f| matches!(f.kind, AuditKind::UnknownFxPreset { .. }))
+            .collect();
+        assert_eq!(
+            unknown.len(),
+            1,
+            "expected exactly one UnknownFxPreset finding, got: {findings:?}"
+        );
+        assert_eq!(unknown[0].severity, Severity::Warn);
+        assert!(unknown[0].autofix.is_none());
+    }
+
+    /// P2.2.4 — FxLayer with the registered RIPPLE_WASH_PRESET_ID produces
+    /// no UnknownFxPreset finding.
+    #[test]
+    fn audit_known_fx_preset_emits_no_unknown_finding() {
+        use std::collections::HashMap;
+        let mut p = fresh_project();
+        p.layers[0].kind = crate::project::schema::LayerKind::FxLayer {
+            preset_id: crate::render::fx_presets::RIPPLE_WASH_PRESET_ID.into(),
+            params: HashMap::new(),
+        };
+        let findings = ProjectAudit::run(&p, &AuditEnv::default());
+        assert!(
+            findings
+                .iter()
+                .all(|f| !matches!(f.kind, AuditKind::UnknownFxPreset { .. })),
+            "registered preset should not produce UnknownFxPreset, got: {findings:?}"
+        );
+    }
+
+    /// P2.2.4 — FxLayer with an empty preset_id (not yet configured) produces
+    /// no UnknownFxPreset finding. Empty is "not configured yet", not an error.
+    #[test]
+    fn audit_empty_fx_preset_id_emits_no_finding() {
+        use std::collections::HashMap;
+        let mut p = fresh_project();
+        p.layers[0].kind = crate::project::schema::LayerKind::FxLayer {
+            preset_id: String::new(),
+            params: HashMap::new(),
+        };
+        let findings = ProjectAudit::run(&p, &AuditEnv::default());
+        assert!(
+            findings
+                .iter()
+                .all(|f| !matches!(f.kind, AuditKind::UnknownFxPreset { .. })),
+            "empty FxLayer preset_id should not warn, got: {findings:?}"
+        );
+    }
+
+    /// P2.2.4 — Treatment with an unregistered preset_id emits exactly one
+    /// UnknownTreatment Warn finding.
+    #[test]
+    fn audit_unknown_treatment_emits_warn() {
+        use crate::project::schema::Treatment;
+        let mut p = fresh_project();
+        p.layers[0].treatment = Some(Treatment {
+            preset_id: "definitely_fake".into(),
+            params: std::collections::HashMap::new(),
+            overlay_path: None,
+            collage_paths: vec![],
+        });
+        let findings = ProjectAudit::run(&p, &AuditEnv::default());
+        let unknown: Vec<_> = findings
+            .iter()
+            .filter(|f| matches!(f.kind, AuditKind::UnknownTreatment { .. }))
+            .collect();
+        assert_eq!(
+            unknown.len(),
+            1,
+            "expected exactly one UnknownTreatment finding, got: {findings:?}"
+        );
+        assert_eq!(unknown[0].severity, Severity::Warn);
+        assert!(unknown[0].autofix.is_none());
+    }
+
+    /// P2.2.4 — Treatment with a registered preset_id (IDENTITY_PRESET_ID)
+    /// produces no UnknownTreatment finding.
+    #[test]
+    fn audit_known_treatment_emits_no_unknown_finding() {
+        use crate::project::schema::Treatment;
+        let mut p = fresh_project();
+        p.layers[0].treatment = Some(Treatment {
+            preset_id: crate::render::treatments::IDENTITY_PRESET_ID.into(),
+            params: std::collections::HashMap::new(),
+            overlay_path: None,
+            collage_paths: vec![],
+        });
+        let findings = ProjectAudit::run(&p, &AuditEnv::default());
+        assert!(
+            findings
+                .iter()
+                .all(|f| !matches!(f.kind, AuditKind::UnknownTreatment { .. })),
+            "registered treatment should not produce UnknownTreatment, got: {findings:?}"
+        );
+    }
+
+    /// P2.2.4 — Treatment with an empty preset_id still emits a Warn finding
+    /// (the operator must see something — empty preset_id is operator error).
+    #[test]
+    fn audit_empty_treatment_preset_id_still_warns() {
+        use crate::project::schema::Treatment;
+        let mut p = fresh_project();
+        p.layers[0].treatment = Some(Treatment {
+            preset_id: String::new(),
+            params: std::collections::HashMap::new(),
+            overlay_path: None,
+            collage_paths: vec![],
+        });
+        let findings = ProjectAudit::run(&p, &AuditEnv::default());
+        let unknown: Vec<_> = findings
+            .iter()
+            .filter(|f| matches!(f.kind, AuditKind::UnknownTreatment { .. }))
+            .collect();
+        assert_eq!(
+            unknown.len(),
+            1,
+            "expected exactly one UnknownTreatment finding for empty preset_id, got: {findings:?}"
+        );
+        assert_eq!(unknown[0].severity, Severity::Warn);
     }
 }

@@ -12,3 +12,18 @@ pub mod macos;
 pub mod modulators;
 pub mod monitors;
 pub mod project;
+/// Partial render module stub for the library crate. Exposes the
+/// CPU-only, GPU-free sub-modules (`sdf`, `fx_presets`, `treatments`)
+/// so that `project::audit` (v3-gated) can call registry lookups
+/// without depending on the full `render/mod.rs` (which references
+/// `crate::windows` and `crate::show_day`, both binary-only).
+///
+/// The binary crate (`main.rs`) declares `mod render;` normally,
+/// loading the full `render/mod.rs`. Both module trees compile the
+/// same underlying `.rs` files; the binary just gets more of them.
+#[cfg(feature = "v3")]
+pub mod render {
+    pub mod fx_presets;
+    pub mod sdf;
+    pub mod treatments;
+}
