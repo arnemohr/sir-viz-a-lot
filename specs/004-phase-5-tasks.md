@@ -9,6 +9,11 @@ below is sized for a single PR.
 - [x] P5.0.2 — Fixture personality format decision (`004-phase-5-fixture-personality-decision.md`)
 - [x] P5.0.3 — Colour-space + readback decision (`004-phase-5-color-space-decision.md`)
 
+- [x] P5.1.4 5f3939c — `lighting` cargo feature gate skeleton (`artnet_protocol` dep, empty `src/lighting/mod.rs`, `#[cfg(feature = "lighting")]` in lib.rs + main.rs)
+- [x] P5.1.1 e5fe4f4 — glossary entries for 9 Phase 5 lighting domain terms
+- [x] P5.1.2 59c31ce — lighting frame-budget stub test in `src/lighting/mod.rs`
+- [x] P5.1.3 59c31ce — CHANGELOG v0.9.0 placeholder + README lighting section placeholder
+
 All other tasks: not yet started.
 
 ---

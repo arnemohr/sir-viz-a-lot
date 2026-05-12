@@ -18,6 +18,14 @@
 //!
 //! All files in this module compile only when `cfg(feature = "lighting")`.
 
+// Phase 5 types are built incrementally; wire-up happens in W2.4/W3/W4.
+// Until then, suppress dead-code lint for the lighting module.
+#![allow(dead_code)]
+
+pub mod error;
+pub mod transport;
+pub mod universe;
+
 // P5.1.2 — Frame-budget constraint documentation (stub assertion).
 //
 // With up to 16 DMX universes sent per frame by the background
