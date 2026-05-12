@@ -37,6 +37,7 @@
 pub mod compositor;
 pub mod edge_blend;
 pub mod fx_compute;
+pub mod fx_fluid;
 pub mod fx_presets;
 pub mod gamma;
 pub mod overlay;

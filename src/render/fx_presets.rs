@@ -56,6 +56,7 @@
 use std::collections::HashMap;
 
 use crate::render::fx_compute::FxComputePipeline;
+use crate::render::fx_fluid::FxFluidPipeline;
 use crate::render::sdf::SDF_HELPER_WGSL;
 
 /// Internal pipeline-shape tag; not user-visible. Drives dispatch routing in
@@ -119,6 +120,12 @@ pub fn fx_registry() -> &'static [FxPresetEntry] {
             preset_id: COLLISION_REFLECTION_PRESET_ID,
             label: "Mask collision reflection",
             family: FxFamily::ComputeParticle,
+        },
+        // P2.6.1 — fluid family
+        FxPresetEntry {
+            preset_id: FLUID_IDENTITY_PRESET_ID,
+            label: "Fluid (identity)",
+            family: FxFamily::ComputeFluid,
         },
     ]
 }
@@ -402,6 +409,31 @@ const COLLISION_REFLECTION_DESCRIPTORS: &[FxParamDescriptor] = &[
     },
 ];
 
+/// P2.6.1 — Param descriptors for `fluid_identity`.
+///
+/// FxParamsUniform field aliasing:
+///   `dissipation` → `speed`  (0.0..=1.0, default 0.1)
+///   `colour`      → `base_r` (0.0..=1.0, default 0.5)
+#[allow(dead_code)] // referenced through `fx_param_descriptors` (P2.8.1 browser UI)
+const FLUID_IDENTITY_DESCRIPTORS: &[FxParamDescriptor] = &[
+    FxParamDescriptor {
+        key: "dissipation",
+        label: "Dissipation (fraction/sec)",
+        min: 0.0,
+        max: 1.0,
+        default: 0.1,
+        max_particle_count: None,
+    },
+    FxParamDescriptor {
+        key: "colour",
+        label: "Colour (0=cold, 1=warm)",
+        min: 0.0,
+        max: 1.0,
+        default: 0.5,
+        max_particle_count: None,
+    },
+];
+
 /// Param descriptors for the named FX preset. Returns an empty slice for
 /// unknown presets and for presets with no tunable parameters.
 #[allow(dead_code)] // consumed by P2.5.6 mutation + P2.8.1 browser UI
@@ -414,6 +446,7 @@ pub fn fx_param_descriptors(preset_id: &str) -> &'static [FxParamDescriptor] {
         EDGE_EMISSION_PRESET_ID => EDGE_EMISSION_DESCRIPTORS,
         FIELD_FLOW_PRESET_ID => FIELD_FLOW_DESCRIPTORS,
         COLLISION_REFLECTION_PRESET_ID => COLLISION_REFLECTION_DESCRIPTORS,
+        FLUID_IDENTITY_PRESET_ID => FLUID_IDENTITY_DESCRIPTORS,
         _ => &[],
     }
 }
@@ -438,6 +471,9 @@ pub const FIELD_FLOW_PRESET_ID: &str = "mask_field_flow";
 
 /// P2.5.5 — Preset id for the mask collision reflection effect.
 pub const COLLISION_REFLECTION_PRESET_ID: &str = "mask_collision_reflection";
+
+/// P2.6.1 — Preset id for the fluid identity effect.
+pub const FLUID_IDENTITY_PRESET_ID: &str = "fluid_identity";
 
 /// Per-frame inputs that every FX preset receives at dispatch time.
 ///
@@ -672,6 +708,37 @@ pub fn dispatch(preset_id: &str, pipelines: &FxPipelines, inputs: FxShaderInputs
             );
             true
         }
+        // P2.6.1 — fluid identity: advect + colour-map render.
+        FLUID_IDENTITY_PRESET_ID => {
+            let dissipation = inputs
+                .params
+                .get("dissipation")
+                .copied()
+                .unwrap_or(0.1)
+                .clamp(0.0, 1.0);
+
+            // Advect step (no SDF — identity preset ignores mask boundary).
+            pipelines.fluid_identity.dispatch_advect(
+                inputs.device,
+                inputs.queue,
+                inputs.encoder,
+                None, // sdf_view: identity preset does not use mask
+                inputs.clock_secs,
+                dissipation,
+            );
+
+            // Render: colour-map velocity field into dst.
+            pipelines.fluid_identity.draw_fluid(
+                inputs.device,
+                inputs.queue,
+                inputs.encoder,
+                inputs.dst,
+                inputs.clock_secs,
+                inputs.params,
+            );
+            true
+        }
+
         // Registered families not yet wired — caller skips rendering.
         _ => false,
     }
@@ -909,6 +976,8 @@ pub struct FxPipelines {
     pub field_flow: FxComputePipeline,
     /// P2.5.5 — mask collision reflection (particles bounce inside mask).
     pub collision_reflection: FxComputePipeline,
+    /// P2.6.1 — fluid identity (velocity field as colour).
+    pub fluid_identity: FxFluidPipeline,
 }
 
 impl FxPipelines {
@@ -928,6 +997,7 @@ impl FxPipelines {
                 device,
                 target_format,
             ),
+            fluid_identity: FxFluidPipeline::new_fluid_identity(device, target_format),
         }
     }
 }
@@ -1896,5 +1966,71 @@ mod tests {
             .find(|e| e.preset_id == COLLISION_REFLECTION_PRESET_ID)
             .expect("mask_collision_reflection must be in fx_registry");
         assert_eq!(entry.family, FxFamily::ComputeParticle);
+    }
+
+    // -------------------------------------------------------------------------
+    // P2.6.1 — fluid_identity
+    // -------------------------------------------------------------------------
+
+    /// P2.6.1 acceptance: `fluid_identity` is in the registry.
+    #[test]
+    fn fluid_identity_is_registered() {
+        assert!(
+            fx_is_registered(FLUID_IDENTITY_PRESET_ID),
+            "fluid_identity must be in fx_registry()"
+        );
+    }
+
+    /// P2.6.1 acceptance: the registry entry for `fluid_identity` has
+    /// `FxFamily::ComputeFluid`.
+    #[test]
+    fn fluid_identity_family_is_compute_fluid() {
+        let entry = fx_registry()
+            .iter()
+            .find(|e| e.preset_id == FLUID_IDENTITY_PRESET_ID)
+            .expect("fluid_identity must be in fx_registry");
+        assert_eq!(entry.family, FxFamily::ComputeFluid);
+    }
+
+    /// P2.6.1 acceptance: `fluid_identity` has `dissipation` and `colour`
+    /// param descriptors with valid ranges and defaults.
+    #[test]
+    fn fluid_identity_descriptors_present() {
+        let descs = fx_param_descriptors(FLUID_IDENTITY_PRESET_ID);
+        assert_eq!(
+            descs.len(),
+            2,
+            "fluid_identity must have 2 descriptors (dissipation, colour)"
+        );
+        for d in descs {
+            assert!(
+                d.min < d.max,
+                "key={}: min ({}) must be < max ({})",
+                d.key,
+                d.min,
+                d.max
+            );
+            assert!(
+                d.default >= d.min && d.default <= d.max,
+                "key={}: default ({}) must be in [{}, {}]",
+                d.key,
+                d.default,
+                d.min,
+                d.max
+            );
+            assert!(
+                d.max_particle_count.is_none(),
+                "key={}: fluid_identity descriptors must have max_particle_count = None",
+                d.key
+            );
+        }
+        assert!(
+            descs.iter().any(|d| d.key == "dissipation"),
+            "dissipation descriptor must be present"
+        );
+        assert!(
+            descs.iter().any(|d| d.key == "colour"),
+            "colour descriptor must be present"
+        );
     }
 }
