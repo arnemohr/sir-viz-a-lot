@@ -347,6 +347,15 @@ pub fn show(
                 // sub-ui. We use `ui.allocate_ui_at_rect` to punch a fresh child into the
                 // controls column.
                 let mut child = ui.new_child(egui::UiBuilder::new().max_rect(controls_rect));
+                // P1.UX: the global theme bumped `item_spacing.x` 4 → 8
+                // for breathing room in the Controls window, but inside
+                // the layer rail's controls column that 8 px gap pushes
+                // the S | M (and ▲ | ▼) pair past the available width
+                // — `M` was rendering past the right edge of the rail.
+                // Tighten spacing inside this child UI only; other UI
+                // surfaces keep the wider gap.
+                child.spacing_mut().item_spacing = egui::vec2(1.0, 2.0);
+                child.spacing_mut().button_padding = egui::vec2(2.0, 1.0);
 
                 let eye_label = if layer.enabled { "👁" } else { "○" };
                 let eye_resp = child.add(
