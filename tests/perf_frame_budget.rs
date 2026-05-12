@@ -455,6 +455,72 @@ impl FxPipeline {
         pass.set_bind_group(0, &bg, &[]);
         pass.draw(0..3, 0..1);
     }
+
+    /// Render with explicit params floats (wavelength, speed, falloff, base_r, base_g, base_b, pad, pad).
+    /// Used by `perf_four_fx_layers_within_budget` to pass max-amplitude values.
+    #[allow(clippy::too_many_arguments)]
+    fn render_with_params(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        dst: &wgpu::TextureView,
+        sdf_view: &wgpu::TextureView,
+        clock_secs: f32,
+        params: &[f32; 8],
+    ) {
+        let mut pb = [0u8; 32];
+        for (i, f) in params.iter().enumerate() {
+            pb[i * 4..(i + 1) * 4].copy_from_slice(&f.to_le_bytes());
+        }
+        queue.write_buffer(&self.params_buf, 0, &pb);
+        let mut cb = [0u8; 16];
+        cb[0..4].copy_from_slice(&clock_secs.to_le_bytes());
+        queue.write_buffer(&self.clock_buf, 0, &cb);
+
+        let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("perf fx bg (max-amp)"),
+            layout: &self.bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(sdf_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: self.params_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: self.clock_buf.as_entire_binding(),
+                },
+            ],
+        });
+
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("perf fx pass (max-amp)"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: dst,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &bg, &[]);
+        pass.draw(0..3, 0..1);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1560,6 +1626,276 @@ fn render_frame(
         // Pass 5b: edge-blend multiply.
         // output 0 = left projector (right-edge falloff, edge_side=0.0)
         // output 1 = right projector (left-edge falloff, edge_side=1.0)
+        let edge_side = if out_idx == 0 { 0.0f32 } else { 1.0 };
+        edge_blend.render(
+            device,
+            queue,
+            &mut enc,
+            out_view,
+            OUT_W,
+            EDGE_BLEND_OVERLAP_PX,
+            edge_side,
+        );
+
+        queue.submit(std::iter::once(enc.finish()));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// P2.1.2 — 4× ripple_wash stub fixture at max amplitude
+// ---------------------------------------------------------------------------
+
+/// Max-amplitude params for `mask_edge_ripple_wash`:
+/// wavelength=200, speed=10, falloff=0.5, base_r/g/b=1.0/1.0/1.0, pad=0/0.
+///
+/// "Max amplitude" pushes wavelength, speed and falloff toward their high end.
+/// The colour channels are clamped in the shader so 1.0 is the effective ceiling.
+/// FIXME(P2.5.1): replace stub fixture with real particle layers at max budget.
+const MAX_AMP_PARAMS: [f32; 8] = [200.0, 10.0, 0.5, 1.0, 1.0, 1.0, 0.0, 0.0];
+
+/// Same layer count as the existing gate — four FxLayers — but exercising
+/// max-amplitude parameters rather than defaults.
+const FX4_LAYER_COUNT: usize = 4;
+
+// M-series baseline p99 ≈ 11.5 ms (2026-05-12, Apple Silicon, headless wgpu).
+
+/// P2.1.2 — show-day perf gate for 4 maximally-parametrised ripple_wash FxLayers.
+///
+/// The fixture substitutes a stub of four `mask_edge_ripple_wash` layers at
+/// max-amplitude params for the eventual real particle layers (P2.5.1).
+/// The 16.6 ms p99 target matches one frame period at 60 Hz.
+#[cfg(feature = "gpu-tests")]
+#[test]
+fn perf_four_fx_layers_within_budget() {
+    let h = Headless::new().expect("Headless::new — no GPU adapter available");
+    let device = &h.device;
+    let queue = &h.queue;
+
+    // ---- Build shared pipelines (own instance so no state bleeds from the
+    //      default-params test) ----
+    let fx_pipeline = FxPipeline::new_ripple_wash(device, FORMAT);
+    let compositor = Compositor::new(device, OUT_W, OUT_H, FORMAT);
+    let gamma = GammaPipeline::new(device, FORMAT);
+    let edge_blend = EdgeBlendPipeline::new(device, FORMAT);
+
+    // ---- Build per-layer GPU state ----
+    let mut layers: Vec<LayerGpu> = (0..FX4_LAYER_COUNT)
+        .map(|i| {
+            let poly = layer_polygon(i);
+            let (_fx_tex, fx_view) = make_render_texture(
+                device,
+                OUT_W,
+                OUT_H,
+                FORMAT,
+                &format!("fx4 fx tex layer {i}"),
+            );
+            let (_warp_tex, warp_view) = make_render_texture(
+                device,
+                OUT_W,
+                OUT_H,
+                FORMAT,
+                &format!("fx4 warp tex layer {i}"),
+            );
+            let (_sdf_tex, sdf_view) =
+                make_sdf_texture(device, queue, &poly, &format!("fx4 sdf layer {i}"));
+            let compositor_uniform = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(&format!("fx4 comp uniform layer {i}")),
+                size: 16,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            let warp_pipeline = WarpPipeline::new(device, FORMAT);
+            warp_pipeline.init_buffers(queue, poly.len() >= 3);
+            LayerGpu {
+                _fx_tex,
+                fx_view,
+                _warp_tex,
+                warp_view,
+                _sdf_tex,
+                sdf_view,
+                compositor_uniform,
+                warp_pipeline,
+            }
+        })
+        .collect();
+
+    // ---- Per-output render targets ----
+    let output_targets: Vec<(wgpu::Texture, wgpu::TextureView)> = (0..OUTPUT_COUNT)
+        .map(|i| make_render_texture(device, OUT_W, OUT_H, FORMAT, &format!("fx4 output rt {i}")))
+        .collect();
+
+    let (_warp_rt_tex, warp_rt_view) =
+        make_render_texture(device, OUT_W, OUT_H, FORMAT, "fx4 warp rt");
+
+    // ---- Frame timing accumulator ----
+    let mut frame_times_ms: Vec<f64> = Vec::with_capacity(FRAME_COUNT);
+    let texture_upload_drop_count: u64 = 0;
+    let mut panic_count: usize = 0;
+
+    let start_time = Instant::now();
+
+    for frame_idx in 0..FRAME_COUNT {
+        let frame_start = Instant::now();
+        let clock_secs = start_time.elapsed().as_secs_f32();
+
+        let frame_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            render_frame_max_amp(
+                device,
+                queue,
+                &fx_pipeline,
+                &compositor,
+                &gamma,
+                &edge_blend,
+                &mut layers,
+                &output_targets,
+                &warp_rt_view,
+                clock_secs,
+            );
+        }));
+
+        if frame_result.is_err() {
+            panic_count += 1;
+        }
+
+        device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("device.poll failed");
+
+        let elapsed_ms = frame_start.elapsed().as_secs_f64() * 1000.0;
+        frame_times_ms.push(elapsed_ms);
+
+        if (frame_idx + 1) % 100 == 0 {
+            println!(
+                "[perf_four_fx_layers_within_budget] frame {}/{FRAME_COUNT}: last={:.2}ms",
+                frame_idx + 1,
+                elapsed_ms
+            );
+        }
+    }
+
+    // ---- Compute statistics ----
+    frame_times_ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let min_ms = frame_times_ms[0];
+    let max_ms = *frame_times_ms.last().unwrap();
+    let p50_ms = percentile(&frame_times_ms, 50.0);
+    let p99_ms = percentile(&frame_times_ms, 99.0);
+    let total_frames = frame_times_ms.len();
+
+    // ---- Print results ----
+    println!();
+    println!("=== P2.1.2 Frame-Budget Gate: 4× ripple_wash max-amplitude ===");
+    println!("  Frames rendered:  {total_frames}");
+    println!("  Min frame time:   {min_ms:.2} ms");
+    println!("  p50 frame time:   {p50_ms:.2} ms");
+    println!("  p99 frame time:   {p99_ms:.2} ms");
+    println!("  Max frame time:   {max_ms:.2} ms");
+    println!("  Texture drops:    {texture_upload_drop_count}");
+    println!("  Panic count:      {panic_count}");
+    println!();
+    println!("  CI assertion:     p99 < 100 ms (regression guard)");
+    println!("  Show-day target:  p99 ≤ 16.6 ms on actual projector hardware");
+    println!("  FIXME(P2.5.1): replace stub fixture with real particle layers at max budget.");
+    println!("===============================================================");
+
+    // ---- Assertions ----
+    assert_eq!(
+        texture_upload_drop_count, 0,
+        "texture upload drop count must be zero (no producers configured in fixture)"
+    );
+    assert_eq!(
+        panic_count, 0,
+        "panic_count must be zero: {panic_count} frame(s) panicked — check render graph"
+    );
+    // CI-portable loose gate (10× regression guard). Show-day target (≤ 16.6 ms) is
+    // verified by the operator on M-series hardware and recorded in the comment above.
+    assert!(
+        p99_ms < 100.0,
+        "p99 frame time {p99_ms:.2} ms exceeds 100 ms CI regression gate \
+         (fixture: {FX4_LAYER_COUNT} FxLayers max-amplitude, {OUTPUT_COUNT} outputs, \
+         edge-blend {EDGE_BLEND_OVERLAP_PX}px)"
+    );
+    // Show-day acceptance: p99 ≤ 16.6 ms (one frame at 60 Hz).
+    assert!(
+        p99_ms <= 16.6,
+        "p99 frame time {p99_ms:.2} ms exceeds show-day budget of 16.6 ms \
+         (fixture: {FX4_LAYER_COUNT} FxLayers at max amplitude)"
+    );
+}
+
+/// Per-frame render sequence for the max-amplitude fixture.
+///
+/// Mirrors `render_frame` but passes `MAX_AMP_PARAMS` to each FxLayer.
+#[allow(clippy::too_many_arguments)]
+fn render_frame_max_amp(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    fx_pipeline: &FxPipeline,
+    compositor: &Compositor,
+    gamma: &GammaPipeline,
+    edge_blend: &EdgeBlendPipeline,
+    layers: &mut [LayerGpu],
+    output_targets: &[(wgpu::Texture, wgpu::TextureView)],
+    warp_rt_view: &wgpu::TextureView,
+    clock_secs: f32,
+) {
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("perf fx4 offscreen encoder"),
+    });
+
+    let comp_inputs: Vec<(&wgpu::TextureView, f32, f32, &wgpu::Buffer)> = layers
+        .iter_mut()
+        .map(|ls| {
+            fx_pipeline.render_with_params(
+                device,
+                queue,
+                &mut encoder,
+                &ls.fx_view,
+                &ls.sdf_view,
+                clock_secs,
+                &MAX_AMP_PARAMS,
+            );
+
+            ls.warp_pipeline.render(
+                device,
+                queue,
+                &mut encoder,
+                &ls.warp_view,
+                &ls.fx_view,
+                &ls.sdf_view,
+            );
+
+            (
+                &ls.warp_view as &wgpu::TextureView,
+                1.0f32,
+                0.0f32,
+                &ls.compositor_uniform as &wgpu::Buffer,
+            )
+        })
+        .collect();
+
+    compositor.composite(
+        device,
+        queue,
+        &mut encoder,
+        wgpu::Color {
+            r: 0.0,
+            g: 0.0,
+            b: 0.0,
+            a: 1.0,
+        },
+        warp_rt_view,
+        &comp_inputs,
+    );
+
+    queue.submit(std::iter::once(encoder.finish()));
+
+    for (out_idx, (_out_tex, out_view)) in output_targets.iter().enumerate() {
+        let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("perf fx4 gamma encoder"),
+        });
+
+        gamma.render(device, queue, &mut enc, out_view, warp_rt_view);
+
         let edge_side = if out_idx == 0 { 0.0f32 } else { 1.0 };
         edge_blend.render(
             device,
