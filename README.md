@@ -94,7 +94,18 @@ project `fx-ripple-wash` in the launcher shows the preset in action.
 
 ## FX Preset Library (v0.6)
 
-_FX preset library — Wave / Particle / Fluid families with a built-in browser. Coming in v0.6._
+rmap ships 14 built-in procedural presets across three families — **Wave**
+(mask-edge ripple and displacement/refraction Treatments), **Particle** (GPU
+compute presets: constrained drift, edge emission, flow field, collision
+reflection), and **Fluid** (Navier-Stokes advection bounded inside the mask
+polygon). The three-click flow is: drop a mask, open the preset browser from
+Advanced → Selected layer → FX Preset, pick a preset, and it runs immediately.
+
+The browser lets you search by name, filter by family, and star presets you
+reach for often. Once you've tuned a preset's parameters to your taste, use
+**Export preset** to save a `.rmap-preset.json` file you can share between
+projects — the export carries only `preset_id` and parameter values, with no
+media paths or warp data embedded.
 
 ## Treatment presets (v0.5)
 
