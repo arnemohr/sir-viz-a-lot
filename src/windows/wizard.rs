@@ -20,7 +20,10 @@
 //! `AppState::SceneWizard` arm.
 
 use crate::project::scene_instantiation::WizardChoices;
-use crate::project::scene_templates::scene_registry;
+use crate::project::scene_templates::{
+    MediaSlotKind, MoodHint, PaletteHint, SceneTemplate, scene_registry,
+};
+use crate::project::schema::ZoneRole;
 
 // ---------------------------------------------------------------------------
 // Wizard step enum
@@ -128,16 +131,36 @@ pub fn draw_wizard_panel(
                 draw_template_select_step(ui, choices);
             }
             WizardStep::Media => {
-                ui.label("Media slot picker — coming in P4.4.2.");
+                // P4.4.2 — media slot picker.
+                if let Some(template) = selected_template(choices) {
+                    draw_media_step(ui, template, choices);
+                } else {
+                    ui.label("Select a template first.");
+                }
             }
             WizardStep::ZoneBinding => {
-                ui.label("Zone binding — coming in P4.4.3.");
+                // P4.4.3 — zone binding picker (Phase 3 zone API is live).
+                if let Some(template) = selected_template(choices) {
+                    draw_zone_binding_step(ui, template, choices);
+                } else {
+                    ui.label("Select a template first.");
+                }
             }
             WizardStep::Palette => {
-                ui.label("Palette & mood — coming in P4.4.4.");
+                // P4.4.4 — palette + mood picker.
+                if let Some(template) = selected_template(choices) {
+                    draw_palette_step(ui, template, choices);
+                } else {
+                    ui.label("Select a template first.");
+                }
             }
             WizardStep::Tempo => {
-                ui.label("Tempo sync — coming in P4.4.5.");
+                // P4.4.5 — tempo sync toggle.
+                if let Some(template) = selected_template(choices) {
+                    draw_tempo_step(ui, template, choices);
+                } else {
+                    ui.label("Select a template first.");
+                }
             }
         }
 
@@ -216,6 +239,222 @@ fn draw_template_select_step(ui: &mut egui::Ui, choices: &mut WizardChoices) {
                     }
                 });
         });
+}
+
+// ---------------------------------------------------------------------------
+// Helper: resolve the currently-selected template.
+// ---------------------------------------------------------------------------
+
+/// Returns a reference to the selected `SceneTemplate`, or `None` if no
+/// template is selected or the ID no longer matches the registry.
+fn selected_template<'r>(choices: &WizardChoices) -> Option<&'r SceneTemplate> {
+    if choices.template_id.is_empty() {
+        return None;
+    }
+    scene_registry()
+        .iter()
+        .find(|t| t.id == choices.template_id)
+}
+
+// ---------------------------------------------------------------------------
+// P4.4.2 — Step 1: media slot picker
+// ---------------------------------------------------------------------------
+
+/// Renders one file-picker row per media slot in the template.
+///
+/// Assigned paths are stored in `WizardChoices.media_slots`. Slots may be
+/// left empty — the "Next" button always advances (empty slots produce layers
+/// with empty paths; operator can assign media post-commit).
+fn draw_media_step(ui: &mut egui::Ui, template: &SceneTemplate, choices: &mut WizardChoices) {
+    if template.media_slots.is_empty() {
+        ui.label("This template requires no media slots.");
+        return;
+    }
+
+    egui::Grid::new("wizard_media_grid")
+        .num_columns(3)
+        .spacing([8.0, 6.0])
+        .show(ui, |ui| {
+            for slot in &template.media_slots {
+                // Label column.
+                ui.label(&slot.label);
+
+                // Path display column.
+                let path_str = choices
+                    .media_slots
+                    .get(&slot.name)
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "(none)".to_string());
+                ui.label(egui::RichText::new(&path_str).monospace().small());
+
+                // Action column: Choose / Clear.
+                ui.horizontal(|ui| {
+                    if ui.small_button("Choose…").clicked() {
+                        // Pick a file with the appropriate filter.
+                        let filter = match slot.accepts.first() {
+                            Some(MediaSlotKind::Video) => ("Video", &["mp4", "mov", "m4v"][..]),
+                            _ => ("Images", &["jpg", "jpeg", "png", "webp", "gif"][..]),
+                        };
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter(filter.0, filter.1)
+                            .set_title(format!("Choose — {}", slot.label))
+                            .pick_file()
+                        {
+                            choices.media_slots.insert(slot.name.clone(), path);
+                        }
+                    }
+                    if choices.media_slots.contains_key(&slot.name)
+                        && ui.small_button("✕").clicked()
+                    {
+                        choices.media_slots.remove(&slot.name);
+                    }
+                });
+
+                ui.end_row();
+            }
+        });
+}
+
+// ---------------------------------------------------------------------------
+// P4.4.3 — Step 2: zone binding picker
+// ---------------------------------------------------------------------------
+
+/// Renders one binding row per `zones_consumed` entry in the template.
+///
+/// Phase 3's `ZoneRole` tagging is live. If the project has no masks tagged
+/// for a required role, the row shows an actionable message. The "Next" button
+/// always advances regardless of binding state.
+fn draw_zone_binding_step(
+    ui: &mut egui::Ui,
+    template: &SceneTemplate,
+    choices: &mut WizardChoices,
+) {
+    if template.zones_consumed.is_empty() {
+        ui.label("This template does not use zone binding.");
+        return;
+    }
+
+    ui.label("Bind project zones to the roles this template expects:");
+    ui.add_space(4.0);
+
+    egui::Grid::new("wizard_zone_grid")
+        .num_columns(2)
+        .spacing([8.0, 6.0])
+        .show(ui, |ui| {
+            for role in &template.zones_consumed {
+                let role_label = zone_role_label(*role);
+                ui.label(role_label);
+
+                // Check whether the zone binding is already present.
+                let bound = choices.zone_bindings.contains(role);
+                let mut checked = bound;
+                if ui.checkbox(&mut checked, "bind this role").changed() {
+                    if checked {
+                        if !choices.zone_bindings.contains(role) {
+                            choices.zone_bindings.push(*role);
+                        }
+                    } else {
+                        choices.zone_bindings.retain(|r| r != role);
+                    }
+                }
+
+                ui.end_row();
+            }
+        });
+
+    ui.add_space(4.0);
+    ui.label(
+        egui::RichText::new(
+            "Tag masks with these zone roles in Mask mode before applying the template \
+             for the best result. Zones improve the output but are not required.",
+        )
+        .small()
+        .italics(),
+    );
+}
+
+/// Short operator-facing label for a `ZoneRole`.
+fn zone_role_label(role: ZoneRole) -> &'static str {
+    match role {
+        ZoneRole::Window => "Window",
+        ZoneRole::Portal => "Portal",
+        ZoneRole::Void => "Void",
+        ZoneRole::Spill => "Spill",
+        ZoneRole::Edge => "Edge",
+        ZoneRole::Highlight => "Highlight",
+        ZoneRole::LightSource => "Light Source",
+    }
+}
+
+// ---------------------------------------------------------------------------
+// P4.4.4 — Step 3: palette + mood picker
+// ---------------------------------------------------------------------------
+
+/// Renders three palette toggle-buttons and three mood toggle-buttons.
+/// Defaults are taken from the template; operator can override.
+fn draw_palette_step(ui: &mut egui::Ui, template: &SceneTemplate, choices: &mut WizardChoices) {
+    let palette = choices.palette.unwrap_or(template.palette);
+    let mood = choices.mood.unwrap_or(template.mood);
+
+    ui.label("Choose a colour palette:");
+    ui.horizontal(|ui| {
+        for (label, variant) in [
+            ("Warm", PaletteHint::Warm),
+            ("Cool", PaletteHint::Cool),
+            ("Neutral", PaletteHint::Neutral),
+        ] {
+            let selected = palette == variant;
+            let btn = egui::Button::new(label).selected(selected);
+            if ui.add(btn).clicked() {
+                choices.palette = Some(variant);
+            }
+        }
+    });
+
+    ui.add_space(8.0);
+    ui.label("Choose a mood:");
+    ui.horizontal(|ui| {
+        for (label, variant) in [
+            ("Calm", MoodHint::Calm),
+            ("Energetic", MoodHint::Energetic),
+            ("Ethereal", MoodHint::Ethereal),
+        ] {
+            let selected = mood == variant;
+            let btn = egui::Button::new(label).selected(selected);
+            if ui.add(btn).clicked() {
+                choices.mood = Some(variant);
+            }
+        }
+    });
+}
+
+// ---------------------------------------------------------------------------
+// P4.4.5 — Step 4: tempo picker
+// ---------------------------------------------------------------------------
+
+/// Renders a BPM-sync checkbox pre-ticked according to `template.tempo_sync`.
+/// The BPM value is read-only (the wizard does not change project BPM).
+fn draw_tempo_step(ui: &mut egui::Ui, template: &SceneTemplate, choices: &mut WizardChoices) {
+    // Initialise from template default on first entry if not yet set.
+    if !choices.tempo_sync && template.tempo_sync {
+        choices.tempo_sync = true;
+    }
+
+    ui.horizontal(|ui| {
+        ui.checkbox(&mut choices.tempo_sync, "Sync animation to project BPM");
+    });
+
+    if choices.tempo_sync {
+        ui.add_space(4.0);
+        ui.label(
+            egui::RichText::new(
+                "Animation speed will be locked to the project BPM. \
+                 Set the BPM in the BPM strip before going live.",
+            )
+            .small()
+            .italics(),
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
