@@ -110,6 +110,11 @@ pub fn fx_registry() -> &'static [FxPresetEntry] {
             label: "Mask-edge emission",
             family: FxFamily::ComputeParticle,
         },
+        FxPresetEntry {
+            preset_id: FIELD_FLOW_PRESET_ID,
+            label: "Mask field flow",
+            family: FxFamily::ComputeParticle,
+        },
     ]
 }
 
@@ -324,6 +329,40 @@ const EDGE_EMISSION_DESCRIPTORS: &[FxParamDescriptor] = &[
     },
 ];
 
+/// P2.5.4 — Param descriptors for `mask_field_flow`.
+///
+/// FxParamsUniform field aliasing:
+///   `particle_count`  → `wavelength` (1..=2048, default 256)
+///   `flow_speed`      → `speed`      (0.0..=0.1, default 0.03)
+///   `flow_direction`  → `falloff`    (-1.0..=1.0, default 1.0)
+#[allow(dead_code)] // referenced only through `fx_param_descriptors` (P2.8.1 UI)
+const FIELD_FLOW_DESCRIPTORS: &[FxParamDescriptor] = &[
+    FxParamDescriptor {
+        key: "particle_count",
+        label: "Particle count (1–2048)",
+        min: 1.0,
+        max: 2048.0,
+        default: 256.0,
+        max_particle_count: Some(2048),
+    },
+    FxParamDescriptor {
+        key: "flow_speed",
+        label: "Flow speed (UV/s)",
+        min: 0.0,
+        max: 0.1,
+        default: 0.03,
+        max_particle_count: None,
+    },
+    FxParamDescriptor {
+        key: "flow_direction",
+        label: "Flow direction (-1=inward, +1=outward)",
+        min: -1.0,
+        max: 1.0,
+        default: 1.0,
+        max_particle_count: None,
+    },
+];
+
 /// Param descriptors for the named FX preset. Returns an empty slice for
 /// unknown presets and for presets with no tunable parameters.
 #[allow(dead_code)] // consumed by P2.5.6 mutation + P2.8.1 browser UI
@@ -334,6 +373,7 @@ pub fn fx_param_descriptors(preset_id: &str) -> &'static [FxParamDescriptor] {
         PARTICLES_IDENTITY_PRESET_ID => PARTICLES_IDENTITY_DESCRIPTORS,
         CONSTRAINED_DRIFT_PRESET_ID => CONSTRAINED_DRIFT_DESCRIPTORS,
         EDGE_EMISSION_PRESET_ID => EDGE_EMISSION_DESCRIPTORS,
+        FIELD_FLOW_PRESET_ID => FIELD_FLOW_DESCRIPTORS,
         _ => &[],
     }
 }
@@ -352,6 +392,9 @@ pub const CONSTRAINED_DRIFT_PRESET_ID: &str = "mask_constrained_drift";
 
 /// P2.5.3 — Preset id for the mask-edge emission effect.
 pub const EDGE_EMISSION_PRESET_ID: &str = "mask_edge_emission";
+
+/// P2.5.4 — Preset id for the mask field flow effect.
+pub const FIELD_FLOW_PRESET_ID: &str = "mask_field_flow";
 
 /// Per-frame inputs that every FX preset receives at dispatch time.
 ///
@@ -521,6 +564,34 @@ pub fn dispatch(preset_id: &str, pipelines: &FxPipelines, inputs: FxShaderInputs
                 inputs.sdf_view,
             );
             pipelines.edge_emission.draw_particles(
+                inputs.device,
+                inputs.queue,
+                inputs.encoder,
+                inputs.dst,
+                n_particles,
+                inputs.output_size,
+            );
+            true
+        }
+        FIELD_FLOW_PRESET_ID => {
+            let n_particles = inputs
+                .params
+                .get("particle_count")
+                .copied()
+                .unwrap_or(256.0)
+                .clamp(1.0, 2048.0) as u32;
+            pipelines.field_flow.dispatch_compute_with_sdf(
+                inputs.queue,
+                inputs.device,
+                inputs.encoder,
+                n_particles,
+                inputs.seed,
+                inputs.clock_secs,
+                inputs.t_layer_added_secs,
+                inputs.params,
+                inputs.sdf_view,
+            );
+            pipelines.field_flow.draw_particles(
                 inputs.device,
                 inputs.queue,
                 inputs.encoder,
@@ -763,6 +834,8 @@ pub struct FxPipelines {
     pub constrained_drift: FxComputePipeline,
     /// P2.5.3 — mask-edge emission (particles spawn at edge, fly outward).
     pub edge_emission: FxComputePipeline,
+    /// P2.5.4 — mask field flow (particles follow SDF gradient).
+    pub field_flow: FxComputePipeline,
 }
 
 impl FxPipelines {
@@ -777,6 +850,7 @@ impl FxPipelines {
             particles_identity: FxComputePipeline::new_particles_identity(device, target_format),
             constrained_drift: FxComputePipeline::new_constrained_drift(device, target_format),
             edge_emission: FxComputePipeline::new_edge_emission(device, target_format),
+            field_flow: FxComputePipeline::new_field_flow(device, target_format),
         }
     }
 }
@@ -1615,5 +1689,79 @@ mod tests {
         assert_eq!(entry.family, FxFamily::ComputeParticle);
     }
 
-    // P2.5.4-P2.5.5 tests added in subsequent commits.
+    // -------------------------------------------------------------------------
+    // P2.5.4 — mask_field_flow
+    // -------------------------------------------------------------------------
+
+    /// P2.5.4 acceptance: `mask_field_flow` is in the registry.
+    #[test]
+    fn field_flow_is_registered() {
+        assert!(
+            fx_is_registered(FIELD_FLOW_PRESET_ID),
+            "mask_field_flow must be in fx_registry()"
+        );
+    }
+
+    /// P2.5.4 acceptance: descriptors count matches spec (3); each min < max;
+    /// default ∈ range.
+    #[test]
+    fn field_flow_descriptors_present() {
+        let descs = fx_param_descriptors(FIELD_FLOW_PRESET_ID);
+        assert_eq!(descs.len(), 3, "mask_field_flow must have 3 descriptors");
+        for d in descs {
+            assert!(d.min < d.max, "key={}: min < max", d.key);
+            assert!(
+                d.default >= d.min && d.default <= d.max,
+                "key={}: default ∈ range",
+                d.key
+            );
+        }
+    }
+
+    /// P2.5.4 acceptance: descriptor `flow_direction` range is [-1.0, 1.0].
+    #[test]
+    fn field_flow_flow_direction_range() {
+        let descs = fx_param_descriptors(FIELD_FLOW_PRESET_ID);
+        let fd = descs
+            .iter()
+            .find(|d| d.key == "flow_direction")
+            .expect("flow_direction descriptor must be present");
+        assert!(
+            (fd.min - (-1.0_f32)).abs() < 1e-6,
+            "flow_direction min must be -1.0, got {}",
+            fd.min
+        );
+        assert!(
+            (fd.max - 1.0_f32).abs() < 1e-6,
+            "flow_direction max must be 1.0, got {}",
+            fd.max
+        );
+    }
+
+    /// P2.5.4 acceptance: `particle_count` descriptor has `max_particle_count: Some(2048)`.
+    #[test]
+    fn field_flow_max_particle_count_matches_spec() {
+        let descs = fx_param_descriptors(FIELD_FLOW_PRESET_ID);
+        let pc = descs
+            .iter()
+            .find(|d| d.key == "particle_count")
+            .expect("particle_count descriptor must be present");
+        assert_eq!(
+            pc.max_particle_count,
+            Some(2048),
+            "field_flow particle_count max_particle_count must be Some(2048)"
+        );
+    }
+
+    /// P2.5.4 acceptance: registry entry has `FxFamily::ComputeParticle`.
+    #[test]
+    fn field_flow_family_is_compute_particle() {
+        let entry = fx_registry()
+            .iter()
+            .find(|e| e.preset_id == FIELD_FLOW_PRESET_ID)
+            .expect("mask_field_flow must be in fx_registry");
+        assert_eq!(entry.family, FxFamily::ComputeParticle);
+    }
+
+    // P2.5.5 tests added in subsequent commit.
 }
