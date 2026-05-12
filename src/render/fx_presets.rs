@@ -90,6 +90,94 @@ pub fn fx_display_label(preset_id: &str) -> Option<&'static str> {
         .map(|e| e.label)
 }
 
+/// Static descriptor for a tunable FX preset parameter. The FX parameter
+/// browser (P2.8.1) uses this metadata to render per-key sliders with the
+/// right label, range, and default.
+#[derive(Debug, Clone, Copy)]
+#[allow(dead_code)] // consumed by P2.5.6 mutation + P2.8.1 browser UI
+pub struct FxParamDescriptor {
+    /// HashMap key under `LayerKind::FxLayer.params`.
+    pub key: &'static str,
+    /// Human-readable label shown next to the slider.
+    pub label: &'static str,
+    /// Slider min (inclusive).
+    pub min: f32,
+    /// Slider max (inclusive).
+    pub max: f32,
+    /// Default value when the key is missing from `LayerKind::FxLayer.params`.
+    pub default: f32,
+    /// Only meaningful when `key` represents a particle-count slot
+    /// (typically `"particle_count"`). Fragment-family presets leave
+    /// this `None`. P2.5.6 `SetFxLayerParams` mutation refuses to commit
+    /// when the requested value exceeds this cap.
+    pub max_particle_count: Option<u32>,
+}
+
+/// Param descriptors for the `mask_edge_ripple_wash` preset. The six fields
+/// mirror the `FxParamsUniform::for_ripple_wash` defaults exactly — this
+/// table is the single source of truth for slider ranges in the FX browser.
+#[allow(dead_code)] // referenced only through `fx_param_descriptors` (P2.8.1 UI)
+const RIPPLE_WASH_DESCRIPTORS: &[FxParamDescriptor] = &[
+    FxParamDescriptor {
+        key: "wavelength",
+        label: "Wavelength (normalised units)",
+        min: 10.0,
+        max: 400.0,
+        default: 40.0,
+        max_particle_count: None,
+    },
+    FxParamDescriptor {
+        key: "speed",
+        label: "Speed (cycles/sec)",
+        min: 0.0,
+        max: 10.0,
+        default: 2.0,
+        max_particle_count: None,
+    },
+    FxParamDescriptor {
+        key: "falloff",
+        label: "Falloff (exp distance, normalised)",
+        min: 0.01,
+        max: 1.0,
+        default: 0.08,
+        max_particle_count: None,
+    },
+    FxParamDescriptor {
+        key: "base_r",
+        label: "Base colour — red",
+        min: 0.0,
+        max: 1.0,
+        default: 0.4,
+        max_particle_count: None,
+    },
+    FxParamDescriptor {
+        key: "base_g",
+        label: "Base colour — green",
+        min: 0.0,
+        max: 1.0,
+        default: 0.6,
+        max_particle_count: None,
+    },
+    FxParamDescriptor {
+        key: "base_b",
+        label: "Base colour — blue",
+        min: 0.0,
+        max: 1.0,
+        default: 1.0,
+        max_particle_count: None,
+    },
+];
+
+/// Param descriptors for the named FX preset. Returns an empty slice for
+/// unknown presets and for presets with no tunable parameters.
+#[allow(dead_code)] // consumed by P2.5.6 mutation + P2.8.1 browser UI
+pub fn fx_param_descriptors(preset_id: &str) -> &'static [FxParamDescriptor] {
+    match preset_id {
+        RIPPLE_WASH_PRESET_ID => RIPPLE_WASH_DESCRIPTORS,
+        _ => &[],
+    }
+}
+
 /// Preset id for the mask-edge ripple wash effect.
 pub const RIPPLE_WASH_PRESET_ID: &str = "mask_edge_ripple_wash";
 
@@ -475,5 +563,69 @@ mod tests {
             .find(|e| e.preset_id == RIPPLE_WASH_PRESET_ID)
             .expect("ripple_wash must be in fx_registry");
         assert_eq!(entry.family, FxFamily::Fragment);
+    }
+
+    // --- P2.2.2 descriptor tests ---
+
+    /// P2.2.2 acceptance: descriptors for ripple_wash are non-empty.
+    #[test]
+    fn ripple_wash_descriptors_non_empty() {
+        assert!(!fx_param_descriptors(RIPPLE_WASH_PRESET_ID).is_empty());
+    }
+
+    /// P2.2.2 acceptance: every descriptor has a valid range and default.
+    #[test]
+    fn ripple_wash_descriptors_all_valid() {
+        for d in fx_param_descriptors(RIPPLE_WASH_PRESET_ID) {
+            assert!(
+                d.min < d.max,
+                "key={}: min ({}) must be < max ({})",
+                d.key,
+                d.min,
+                d.max
+            );
+            assert!(
+                d.default >= d.min && d.default <= d.max,
+                "key={}: default ({}) must be in [{}, {}]",
+                d.key,
+                d.default,
+                d.min,
+                d.max
+            );
+            assert!(
+                d.max_particle_count.is_none(),
+                "key={}: fragment preset must have max_particle_count = None",
+                d.key
+            );
+        }
+    }
+
+    /// P2.2.2 acceptance: unknown preset returns empty slice without panic.
+    #[test]
+    fn bogus_returns_empty_descriptors() {
+        assert!(fx_param_descriptors("bogus").is_empty());
+    }
+
+    /// P2.2.2 acceptance: descriptor defaults match `FxParamsUniform::for_ripple_wash`
+    /// defaults. Catches drift between the descriptor table and the uniform builder.
+    #[test]
+    fn ripple_wash_descriptor_defaults_match_for_ripple_wash() {
+        let u = FxParamsUniform::for_ripple_wash(&HashMap::new());
+        for d in fx_param_descriptors(RIPPLE_WASH_PRESET_ID) {
+            let actual = match d.key {
+                "wavelength" => u.wavelength,
+                "speed" => u.speed,
+                "falloff" => u.falloff,
+                "base_r" => u.base_r,
+                "base_g" => u.base_g,
+                "base_b" => u.base_b,
+                other => panic!("unmapped descriptor key: {other}"),
+            };
+            assert_eq!(
+                actual, d.default,
+                "descriptor default for key={} does not match for_ripple_wash default",
+                d.key
+            );
+        }
     }
 }
