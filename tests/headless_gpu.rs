@@ -305,6 +305,237 @@ fn write_actual(got: &[u8], width: u32, height: u32, golden_path: &str) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// P3.6.2 — Zone-tag dispatch helpers.
+// ---------------------------------------------------------------------------
+
+/// Build a zone-aware render pipeline for a given WGSL source. The BGL
+/// includes slots 0 (SDF texture), 1 (sampler), 2 (FxParams), 3 (clock), and
+/// 6 (ZoneTagUniform) — matching the P3.3.2 bind-group slot contract.
+#[cfg(feature = "gpu-tests")]
+fn build_zone_aware_pipeline(
+    device: &wgpu::Device,
+    wgsl_src: &str,
+    label: &str,
+) -> (wgpu::RenderPipeline, wgpu::BindGroupLayout) {
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some(label),
+        source: wgpu::ShaderSource::Wgsl(wgsl_src.into()),
+    });
+
+    let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some(&format!("{label} bgl")),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 3,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            // slot 6: ZoneTagUniform (P3.3.2 contract)
+            wgpu::BindGroupLayoutEntry {
+                binding: 6,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+        ],
+    });
+
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some(&format!("{label} layout")),
+        bind_group_layouts: &[Some(&bgl)],
+        immediate_size: 0,
+    });
+
+    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some(&format!("{label} pipeline")),
+        layout: Some(&layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs_main"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            buffers: &[],
+        },
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            strip_index_format: None,
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: None,
+            unclipped_depth: false,
+            polygon_mode: wgpu::PolygonMode::Fill,
+            conservative: false,
+        },
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs_main"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: TARGET_FORMAT,
+                blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        multiview_mask: None,
+        cache: None,
+    });
+
+    (pipeline, bgl)
+}
+
+/// Render a zone-aware preset into a 128×128 texture. Returns the RGBA pixel bytes.
+/// `zone_tag` is the u32 zone tag written to the ZoneTagUniform at slot 6.
+#[cfg(feature = "gpu-tests")]
+fn render_zone_preset(
+    h: &Headless,
+    wgsl_src: &str,
+    label: &str,
+    zone_tag: u32,
+    clock_secs: f32,
+) -> Vec<u8> {
+    const W: u32 = 128;
+    const H: u32 = 128;
+
+    h.render_to_rgba8(W, H, |device, queue, view| {
+        let (pipeline, bgl) = build_zone_aware_pipeline(device, wgsl_src, label);
+
+        let sdf_view = make_circular_sdf(device, queue, 128);
+
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+
+        // FxParams: defaults (all zeros / preset-specific defaults).
+        let params_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("zone test params"),
+            size: 32,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        // Use preset-appropriate defaults: spill_radius=0.3, falloff=0.08, colour warm.
+        let mut params = [0u8; 32];
+        params[0..4].copy_from_slice(&0.3f32.to_le_bytes()); // spill_radius / frequency
+        params[8..12].copy_from_slice(&0.08f32.to_le_bytes()); // falloff
+        params[12..16].copy_from_slice(&1.0f32.to_le_bytes()); // base_r
+        params[16..20].copy_from_slice(&0.85f32.to_le_bytes()); // base_g
+        params[20..24].copy_from_slice(&0.55f32.to_le_bytes()); // base_b
+        queue.write_buffer(&params_buf, 0, &params);
+
+        // Clock uniform.
+        let clock_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("zone test clock"),
+            size: 16,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut clock = [0u8; 16];
+        clock[0..4].copy_from_slice(&clock_secs.to_le_bytes());
+        queue.write_buffer(&clock_buf, 0, &clock);
+
+        // ZoneTagUniform: zone_tag + 3 × 0 padding.
+        let zone_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("zone test zone_tag"),
+            size: 16,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut zone_bytes = [0u8; 16];
+        zone_bytes[0..4].copy_from_slice(&zone_tag.to_le_bytes());
+        queue.write_buffer(&zone_buf, 0, &zone_bytes);
+
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("zone test bind group"),
+            layout: &bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&sdf_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: params_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: clock_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: zone_buf.as_entire_binding(),
+                },
+            ],
+        });
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("zone test encoder"),
+        });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("zone test pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.draw(0..3, 0..1);
+        }
+        queue.submit(std::iter::once(encoder.finish()));
+    })
+}
+
 /// Smoke test: clear a 16×16 target to red, read it back, verify storage
 /// bytes are `[255, 0, 0, 255]` per pixel.
 ///
@@ -1539,5 +1770,111 @@ fn test_particle_determinism_golden_seed42() {
         128,
         "tests/golden/particle_determinism_seed42.png",
         TOLERANCE,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// P3.6.2 — Zone-tag dispatch golden tests.
+//
+// Three tests verify shader dispatch on zone tag:
+//   1. light_spill + ZONE_WINDOW tag → glow visible (golden PNG).
+//      light_spill + ZONE_NONE tag → transparent black (bit-exact).
+//   2. edge_ripple + ZONE_EDGE tag → ripple visible (golden PNG).
+//   3. portal_drift + ZONE_PORTAL tag → drift visible (golden PNG, deterministic).
+//
+// Record baselines: UPDATE_GOLDEN=1 cargo nextest run --features gpu-tests
+// ---------------------------------------------------------------------------
+
+/// P3.6.2 — zone_light_spill renders a glow for ZONE_WINDOW and transparent
+/// black for ZONE_NONE (bit-exact assertion).
+#[test]
+fn zone_light_spill_window_tag_golden() {
+    use rmap::render::sdf::{SDF_HELPER_WGSL, ZONE_TAG_WGSL};
+
+    let h = Headless::new().expect("Headless::new");
+
+    let wgsl = format!(
+        "{}\n{}\n{}",
+        SDF_HELPER_WGSL,
+        ZONE_TAG_WGSL,
+        include_str!("../src/render/shaders/fx_zone_light_spill.wgsl")
+    );
+
+    // ZONE_WINDOW = 1: expect visible glow.
+    let glow_pixels = render_zone_preset(&h, &wgsl, "light_spill window", 1, 1.0);
+    assert_image_matches(
+        &glow_pixels,
+        128,
+        128,
+        "tests/golden/zone_light_spill_window.png",
+        TOLERANCE,
+    );
+
+    // ZONE_NONE = 0: expect transparent black (bit-exact).
+    let none_pixels = render_zone_preset(&h, &wgsl, "light_spill none", 0, 1.0);
+    let is_transparent_black = none_pixels
+        .chunks(4)
+        .all(|px| px[0] == 0 && px[1] == 0 && px[2] == 0 && px[3] == 0);
+    assert!(
+        is_transparent_black,
+        "zone_light_spill with ZONE_NONE must output transparent black; found non-zero pixels"
+    );
+}
+
+/// P3.6.2 — zone_edge_ripple renders ripple for ZONE_EDGE.
+#[test]
+fn zone_edge_ripple_edge_tag_golden() {
+    use rmap::render::sdf::{SDF_HELPER_WGSL, ZONE_TAG_WGSL};
+
+    let h = Headless::new().expect("Headless::new");
+
+    let wgsl = format!(
+        "{}\n{}\n{}",
+        SDF_HELPER_WGSL,
+        ZONE_TAG_WGSL,
+        include_str!("../src/render/shaders/fx_zone_edge_ripple.wgsl")
+    );
+
+    // ZONE_EDGE = 5: expect ripple visible.
+    let ripple_pixels = render_zone_preset(&h, &wgsl, "edge_ripple edge", 5, 1.0);
+    assert_image_matches(
+        &ripple_pixels,
+        128,
+        128,
+        "tests/golden/zone_edge_ripple_edge.png",
+        TOLERANCE,
+    );
+}
+
+/// P3.6.2 — zone_portal_drift renders drift for ZONE_PORTAL with deterministic
+/// output (fragment shader uses deterministic hash of UV + clock).
+#[test]
+fn zone_portal_drift_portal_tag_golden() {
+    use rmap::render::sdf::{SDF_HELPER_WGSL, ZONE_TAG_WGSL};
+
+    let h = Headless::new().expect("Headless::new");
+
+    let wgsl = format!(
+        "{}\n{}\n{}",
+        SDF_HELPER_WGSL,
+        ZONE_TAG_WGSL,
+        include_str!("../src/render/shaders/fx_zone_portal_drift.wgsl")
+    );
+
+    // ZONE_PORTAL = 2, fixed clock=5.0 (deterministic frame).
+    let drift_pixels = render_zone_preset(&h, &wgsl, "portal_drift portal", 2, 5.0);
+    assert_image_matches(
+        &drift_pixels,
+        128,
+        128,
+        "tests/golden/zone_portal_drift_portal.png",
+        TOLERANCE,
+    );
+
+    // Same clock: bit-exact on second call (determinism guard).
+    let drift_pixels2 = render_zone_preset(&h, &wgsl, "portal_drift determinism check", 2, 5.0);
+    assert_eq!(
+        drift_pixels, drift_pixels2,
+        "zone_portal_drift at fixed clock must produce bit-exact output on repeat calls"
     );
 }
