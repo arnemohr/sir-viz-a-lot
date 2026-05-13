@@ -6628,6 +6628,24 @@ impl ApplicationHandler for App {
             }
         }
 
+        // P4-fix: SceneWizard owns its own EditingState (not exposed via
+        // editing_mut()) but still needs vsync redraws — the canvas animates
+        // behind the wizard overlay and the wizard panel itself only paints
+        // in response to RedrawRequested. Without this branch the wizard
+        // renders its first frame and then freezes.
+        #[cfg(feature = "v3")]
+        if let AppState::SceneWizard(wizard) = &mut self.state {
+            for output in &wizard.editing.outputs {
+                output.window.request_redraw();
+            }
+            wizard.editing.control_redraw_skip = !wizard.editing.control_redraw_skip;
+            if !wizard.editing.control_redraw_skip {
+                if let Some(ctrl) = wizard.editing.control.as_ref() {
+                    ctrl.window.request_redraw();
+                }
+            }
+        }
+
         if let Some(state) = self.state.editing_mut() {
             // P0.7.2: request redraws for all active output windows so each
             // surface presents a new frame every vsync tick.
