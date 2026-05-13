@@ -4666,6 +4666,9 @@ fn handle_editing_window_event(
                                 .load(std::sync::atomic::Ordering::Relaxed)
                         })
                         .unwrap_or(0),
+                    // P6.4.1 — transport state snapshot for 3-state cue tile rendering.
+                    #[cfg(feature = "v3")]
+                    transport: Some(state.transport.clone()),
                 };
                 // 003-T1.42 follow-up: drain expired toasts once per frame
                 // before render. Sticky Error toasts survive; auto-expiring

@@ -26,6 +26,17 @@ use crate::windows::theme;
 use crate::controls::Command;
 use crate::project::schema::{Project, ThumbnailRgba};
 
+/// P6.4.1 — State discriminant for a cue tile, computed from `TransportState`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TileState {
+    /// No special state — cue is not live or armed.
+    Idle,
+    /// Cue is next in line to fire (amber accent ring).
+    ArmedNext,
+    /// Cue is currently live on the projector (LIVE badge + bottom bar).
+    Live,
+}
+
 /// Thumbnail dimensions (pixels).
 pub const THUMB_W: u32 = 192;
 pub const THUMB_H: u32 = 108;
@@ -152,6 +163,10 @@ pub fn show(
     cache: &mut ThumbnailCache,
     crossfade_progress: Option<(usize, f32)>,
     #[cfg(feature = "v3")] pending_cue: Option<usize>,
+    /// P6.4.1 — optional transport state for 3-state tile rendering.
+    /// When `None`, falls back to the pre-P6.4 crossfade-only visual.
+    #[cfg(feature = "v3")]
+    transport: Option<&crate::transport::TransportState>,
 ) -> Option<Command> {
     let mut out: Option<Command> = None;
 
@@ -187,19 +202,31 @@ pub fn show(
                 ui.add_space(8.0);
 
                 for (idx, scene) in project.cues.iter().enumerate() {
+                    // P6.4.1 — compute TileState from TransportState.
+                    #[cfg(feature = "v3")]
+                    let tile_state = {
+                        if let Some(ts) = transport {
+                            if ts.current_cue == Some(idx) {
+                                TileState::Live
+                            } else if ts.armed_cue == Some(idx) {
+                                TileState::ArmedNext
+                            } else {
+                                TileState::Idle
+                            }
+                        } else {
+                            TileState::Idle
+                        }
+                    };
                     let tile_resp = scene_tile(
                         ui,
                         idx,
                         scene,
                         cache,
                         crossfade_progress,
-                        // V31.7.3: armed-pending-quantize visual reuses the
-                        // accent-border state. For V31.7.3 the pending tile
-                        // is visually indistinguishable from a crossfade
-                        // target; a future task can add a distinct pulse or
-                        // badge if operators request it.
                         #[cfg(feature = "v3")]
                         pending_cue,
+                        #[cfg(feature = "v3")]
+                        tile_state,
                     );
                     if tile_resp.clicked() {
                         out = Some(Command::SceneRecall(idx));
@@ -221,6 +248,7 @@ pub fn show(
 /// `pending_cue` (V31.7.3): index of the pending-quantize cue, if any.
 /// The pending tile is rendered with an accent border matching the
 /// crossfade-target visual so the operator can see the armed state.
+/// `tile_state` (P6.4.1): discriminant from `TransportState`.
 #[cfg_attr(not(feature = "v3"), allow(unused_variables))]
 fn scene_tile(
     ui: &mut Ui,
@@ -229,6 +257,7 @@ fn scene_tile(
     cache: &mut ThumbnailCache,
     crossfade_progress: Option<(usize, f32)>,
     #[cfg(feature = "v3")] pending_cue: Option<usize>,
+    #[cfg(feature = "v3")] tile_state: TileState,
 ) -> Response {
     let (rect, resp) = ui.allocate_exact_size(vec2(TILE_W, TILE_H), Sense::click());
 
@@ -237,13 +266,24 @@ fn scene_tile(
 
         // Background.
         let bg = theme::BG_PANEL.linear_multiply(1.5);
-        // V31.7.3: armed-pending-quantize uses the same accent border as a
-        // crossfade target. This gives the operator immediate visual feedback
-        // that the cue will fire at the next bar boundary. A future task may
-        // add a distinct pulsing badge to differentiate the two states.
+        // P6.4.1: compute border colour from TileState.
+        // ArmedNext → amber (distinct from crossfade ACCENT ring).
+        // Live → solid ACCENT.
+        // Also preserve: crossfade target → ACCENT, pending-quantize → ACCENT.
         let highlight = crossfade_progress.is_some_and(|(t, _)| t == idx);
         #[cfg(feature = "v3")]
         let highlight = highlight || pending_cue == Some(idx);
+        #[cfg(feature = "v3")]
+        let amber = egui::Color32::from_rgb(0xd4, 0x9a, 0x00); // distinct from ACCENT
+        #[cfg(feature = "v3")]
+        let border_col = match tile_state {
+            TileState::Live => theme::ACCENT,
+            TileState::ArmedNext => amber,
+            TileState::Idle if highlight => theme::ACCENT,
+            TileState::Idle if resp.hovered() => theme::TEXT_SECONDARY,
+            TileState::Idle => theme::BG_PANEL.linear_multiply(3.0),
+        };
+        #[cfg(not(feature = "v3"))]
         let border_col = if highlight {
             theme::ACCENT
         } else if resp.hovered() {
@@ -313,6 +353,39 @@ fn scene_tile(
                     Rect::from_min_size(egui::pos2(rect.min.x, bar_y), vec2(bar_w, bar_h));
                 painter.rect_filled(bar_rect, 0.0, theme::ACCENT);
             }
+        }
+
+        // P6.4.1 — Live state: solid accent bottom bar + "LIVE" badge.
+        #[cfg(feature = "v3")]
+        if tile_state == TileState::Live {
+            // Solid 3-px bottom bar in ACCENT colour.
+            let bar_rect =
+                Rect::from_min_size(egui::pos2(rect.min.x, rect.max.y - 3.0), vec2(TILE_W, 3.0));
+            painter.rect_filled(bar_rect, 0.0, theme::ACCENT);
+            // "LIVE" badge in the top-left corner, semi-opaque accent background.
+            let badge_pos = rect.min + vec2(4.0, 4.0);
+            let badge_rect = Rect::from_min_size(badge_pos, vec2(30.0, 12.0));
+            painter.rect_filled(badge_rect, 2.0, theme::ACCENT.linear_multiply(0.85));
+            painter.text(
+                badge_rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "LIVE",
+                FontId::proportional(8.0),
+                egui::Color32::WHITE,
+            );
+        }
+
+        // P6.4.1 — ArmedNext: amber pulsing ring (painted over the border).
+        #[cfg(feature = "v3")]
+        if tile_state == TileState::ArmedNext {
+            // A second, slightly inset stroke for the amber armed ring.
+            let armed_rounding = egui::CornerRadius::same(4);
+            painter.rect_stroke(
+                rect.shrink(2.0),
+                armed_rounding,
+                egui::Stroke::new(2.0, egui::Color32::from_rgb(0xd4, 0x9a, 0x00)),
+                egui::StrokeKind::Inside,
+            );
         }
     }
 

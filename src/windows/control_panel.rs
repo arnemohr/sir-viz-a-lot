@@ -465,6 +465,10 @@ pub struct ControlPanelInputs {
     /// Displayed as "DMX: N pkt/s" next to the activity LED.
     #[cfg(feature = "lighting")]
     pub dmx_packet_rate: u64,
+    /// P6.4.1 — snapshot of the transport state for three-state tile rendering.
+    /// `None` when transport is not yet initialised or in a non-Editing state.
+    #[cfg(feature = "v3")]
+    pub transport: Option<crate::transport::TransportState>,
 }
 
 /// Render the control panel. Mutates `project` in place.
@@ -736,6 +740,9 @@ pub fn show(
                 // V31.7.3: pending-quantize cue index for armed-tile visual.
                 #[cfg(feature = "v3")]
                 inputs.pending_cue,
+                // P6.4.1: transport state for 3-state tile rendering.
+                #[cfg(feature = "v3")]
+                inputs.transport.as_ref(),
             ) {
                 // P6.3.1 — clicking a cue tile also selects it for the
                 // detail panel. The detail panel appears above the cue strip.
