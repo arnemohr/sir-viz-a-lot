@@ -40,7 +40,7 @@ Blocked / deferred (GPU or Syphon.framework required):
 - [BLOCKED-GPU] P7.4.2 (GPU) + P7.4.3 MaskGraph GPU SDF + inverse mask UI — CPU SDF evaluator shipped (P7.4.2 CPU); GPU render pipeline integration deferred
 - [BLOCKED-GPU] P7.5.2, P7.6.2 Luma/Chroma key UI — depends on MaskGraph GPU pipeline
 - [BLOCKED-GPU] P7.7.2 GPU application — warp/mask/gamma override at render time deferred (apply_calibration session wiring done; GPU state override not plumbed)
-- [BLOCKED-GPU] P7.8.1–P7.8.6 Calibration verify patterns — require projector OverlayPipeline pass; CPU rasterisation would produce a control-panel preview, not projector overlay (acceptance criterion not met without GPU)
+- [BLOCKED-GPU] P7.8.1–P7.8.6 Calibration verify patterns — Note: AlignmentCross, ColorBars, EdgeBlendGradient already exist as TestPattern variants in test_patterns.rs (GPU-rendered via TestPatternRenderer); missing patterns (DotGrid, FocusChart, GeometryVerify) require new WGSL shaders. All W8 patterns must use the projector output path (TestPatternRenderer), not a control-panel egui::Image preview, to satisfy the spec acceptance criteria.
 - [BLOCKED-GPU] P7.10.2–P7.10.3 Scene pack export/import UI — context menu + file dialog changes deferred
 - [BLOCKED-GPU] P7.12.3 GPU golden (Syphon frame fidelity) — depends on P7.2.3 (Syphon render integration)
 - [BLOCKED] P7.13.4 Manual acceptance smoke — acceptance criteria 2/3/4 require GPU-blocked items
