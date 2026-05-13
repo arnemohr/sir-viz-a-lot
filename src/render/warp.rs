@@ -9,7 +9,7 @@
 use glam::{Mat3, Vec2, Vec3};
 use wgpu::util::DeviceExt;
 
-use crate::project::schema::WarpMesh;
+use crate::project::schema::{BezierHandle, BezierMesh, WarpMesh};
 use crate::render::sdf::{self, SDF_SIZE};
 
 #[repr(C)]
@@ -147,6 +147,213 @@ fn build_warp_vertices(mesh: &WarpMesh, sub: u32) -> (Vec<WarpVertex>, Vec<u32>)
     let stride = cs + 1;
     for ci in 0..rs {
         for cj in 0..cs {
+            let i0 = ci * stride + cj;
+            let i1 = i0 + 1;
+            let i2 = i0 + stride + 1;
+            let i3 = i0 + stride;
+            indices.extend_from_slice(&[
+                i0 as u32, i1 as u32, i3 as u32, i1 as u32, i2 as u32, i3 as u32,
+            ]);
+        }
+    }
+
+    (vertices, indices)
+}
+
+// ---------------------------------------------------------------------------
+// P7.3.2 — Bezier tessellation (Coons patch, CPU-side)
+// ---------------------------------------------------------------------------
+
+/// Evaluate a cubic Bezier at parameter `t` ∈ [0, 1].
+///
+/// When both handles are `None`, the curve degenerates to a straight line
+/// `lerp(p0, p3, t)` — the bilinear backward-compat invariant.
+#[inline]
+fn eval_cubic_bezier(p0: Vec2, h0: BezierHandle, h1: BezierHandle, p3: Vec2, t: f32) -> Vec2 {
+    let h0 = h0.map(Vec2::from).unwrap_or_else(|| p0.lerp(p3, 1.0 / 3.0));
+    let h1 = h1.map(Vec2::from).unwrap_or_else(|| p0.lerp(p3, 2.0 / 3.0));
+    let u = 1.0 - t;
+    u * u * u * p0 + 3.0 * u * u * t * h0 + 3.0 * u * t * t * h1 + t * t * t * p3
+}
+
+/// P7.3.2 — Build tessellated vertices for a `BezierMesh` using Coons patches.
+///
+/// `sub` is the number of sub-divisions per cell edge (≥ 1). Returns the same
+/// `(Vec<WarpVertex>, Vec<u32>)` format as `build_warp_vertices`.
+///
+/// ## Coons patch formula
+///
+/// For each cell `(r, c)` with 4 corner anchors and 4 edge Bezier curves, the
+/// interior is blended as:
+///
+/// ```text
+/// P(s, t) = C_bottom(s)*(1-t) + C_top(s)*t
+///         + C_left(t)*(1-s)  + C_right(t)*s
+///         - [(1-s)(1-t)*A00 + s(1-t)*A10 + (1-s)t*A01 + st*A11]
+/// ```
+///
+/// where `A00..A11` are the four corner anchors and `C_*` are the edge Bezier
+/// curves evaluated at `s` (horizontal edges) or `t` (vertical edges).
+///
+/// ## Backward-compat invariant
+///
+/// When every `BezierHandle` in `mesh.handles_h` and `mesh.handles_v` is `None`,
+/// each edge degenerates to a straight line and the Coons formula reduces to
+/// bilinear interpolation — pixel-identical to `build_warp_vertices`.
+fn build_bezier_vertices(mesh: &BezierMesh, sub: u32) -> (Vec<WarpVertex>, Vec<u32>) {
+    let sub = sub.max(1) as usize;
+    let rows = mesh.rows as usize;
+    let cols = mesh.cols as usize;
+    if rows == 0 || cols == 0 || mesh.anchors.len() != rows + 1 {
+        return (Vec::new(), Vec::new());
+    }
+
+    let total_s = cols * sub;
+    let total_t = rows * sub;
+    let nv = (total_t + 1) * (total_s + 1);
+    let mut vertices = Vec::with_capacity(nv);
+    let mut indices = Vec::new();
+
+    // Helper: anchor at (row, col).
+    let anchor = |row: usize, col: usize| -> Vec2 { Vec2::from(mesh.anchors[row][col]) };
+
+    // Helper: horizontal handle between (row, col) and (row, col+1).
+    // `handles_h[row][col]` = right-side handle of anchor (row, col).
+    // `handles_h[row][col+1]` = left-side handle of anchor (row, col+1).
+    // For Coons: bottom edge of cell (r, c) runs from anchor(r, c) to anchor(r, c+1).
+    let h_handle_right = |row: usize, col: usize| -> BezierHandle {
+        mesh.handles_h
+            .get(row)
+            .and_then(|r| r.get(col))
+            .copied()
+            .flatten()
+    };
+    let h_handle_left = |row: usize, col: usize| -> BezierHandle {
+        // Left handle of anchor (row, col+1) = mirror; stored at handles_h[row][col+1]
+        // but negated direction. For now, use the same slot (simplified C1 continuity
+        // assumption): handles_h[row][col+1] is the inbound handle.
+        mesh.handles_h
+            .get(row)
+            .and_then(|r| r.get(col + 1))
+            .copied()
+            .flatten()
+    };
+    // Vertical handle between (row, col) and (row+1, col).
+    let v_handle_top = |row: usize, col: usize| -> BezierHandle {
+        mesh.handles_v
+            .get(row)
+            .and_then(|r| r.get(col))
+            .copied()
+            .flatten()
+    };
+    let v_handle_bot = |row: usize, col: usize| -> BezierHandle {
+        mesh.handles_v
+            .get(row + 1)
+            .and_then(|r| r.get(col))
+            .copied()
+            .flatten()
+    };
+
+    // Pre-compute per-cell "all handles None" flag for the homography fallback.
+    // Cell (r, c) is degenerate iff all 4 edge handles are None:
+    //   h_right(r,c), h_left(r,c), h_right(r+1,c), h_left(r+1,c),
+    //   v_top(r,c), v_bot(r,c), v_top(r,c+1), v_bot(r,c+1).
+    let cell_degenerate = |row: usize, col: usize| -> bool {
+        h_handle_right(row, col).is_none()
+            && h_handle_left(row, col).is_none()
+            && h_handle_right(row + 1, col).is_none()
+            && h_handle_left(row + 1, col).is_none()
+            && v_handle_top(row, col).is_none()
+            && v_handle_bot(row, col).is_none()
+            && v_handle_top(row, col + 1).is_none()
+            && v_handle_bot(row, col + 1).is_none()
+    };
+
+    for gi in 0..=(total_t) {
+        for gj in 0..=(total_s) {
+            // Normalised source UV.
+            let fu = gj as f32 / total_s as f32;
+            let fv = gi as f32 / total_t as f32;
+
+            // Cell indices.
+            let col = (gj / sub).min(cols.saturating_sub(1));
+            let row = (gi / sub).min(rows.saturating_sub(1));
+
+            // Local parameters s, t within the cell [0, 1].
+            let s = (gj - col * sub) as f32 / sub as f32;
+            let t = (gi - row * sub) as f32 / sub as f32;
+
+            // 4 corner anchors: A00=bottom-left, A10=bottom-right, A01=top-left, A11=top-right.
+            let a00 = anchor(row, col);
+            let a10 = anchor(row, col + 1);
+            let a01 = anchor(row + 1, col);
+            let a11 = anchor(row + 1, col + 1);
+
+            // When all handles on all 4 edges of this cell are None, use the
+            // same homography path as `build_warp_vertices` to produce pixel-
+            // identical output (backward-compat invariant, P7.3.2).
+            let dst_xy = if cell_degenerate(row, col) {
+                let dst_sq = [
+                    a00.to_array(),
+                    a10.to_array(),
+                    a11.to_array(),
+                    a01.to_array(),
+                ];
+                let src_unit = [[0f32, 0.], [1., 0.], [1., 1.], [0., 1.]];
+                let h = solve_homography(src_unit, dst_sq).unwrap_or(Mat3::IDENTITY);
+                let dh = h * Vec3::new(s, t, 1.0);
+                let w = dh.z.abs().max(1e-8);
+                Vec2::new(dh.x / w, dh.y / w)
+            } else {
+                // Coons patch: evaluate 4 edge curves and blend.
+                // 4 edge curves evaluated at the local parameter.
+                // Bottom edge: row, col → col+1, at parameter s.
+                let c_bottom = eval_cubic_bezier(
+                    a00,
+                    h_handle_right(row, col),
+                    h_handle_left(row, col),
+                    a10,
+                    s,
+                );
+                // Top edge: row+1, col → col+1, at parameter s.
+                let c_top = eval_cubic_bezier(
+                    a01,
+                    h_handle_right(row + 1, col),
+                    h_handle_left(row + 1, col),
+                    a11,
+                    s,
+                );
+                // Left edge: row → row+1, col, at parameter t.
+                let c_left =
+                    eval_cubic_bezier(a00, v_handle_top(row, col), v_handle_bot(row, col), a01, t);
+                // Right edge: row → row+1, col+1, at parameter t.
+                let c_right = eval_cubic_bezier(
+                    a10,
+                    v_handle_top(row, col + 1),
+                    v_handle_bot(row, col + 1),
+                    a11,
+                    t,
+                );
+
+                // Coons blend: lofted surface minus bilinear correction.
+                let bilinear = (1.0 - s) * (1.0 - t) * a00
+                    + s * (1.0 - t) * a10
+                    + (1.0 - s) * t * a01
+                    + s * t * a11;
+                c_bottom * (1.0 - t) + c_top * t + c_left * (1.0 - s) + c_right * s - bilinear
+            };
+
+            let clip = clip_from_normalized_output(dst_xy);
+            vertices.push(WarpVertex {
+                pos_clip: clip,
+                src_uv: [fu, fv],
+            });
+        }
+    }
+
+    let stride = total_s + 1;
+    for ci in 0..total_t {
+        for cj in 0..total_s {
             let i0 = ci * stride + cj;
             let i1 = i0 + 1;
             let i2 = i0 + stride + 1;
@@ -402,6 +609,120 @@ impl WarpRenderer {
         );
     }
 
+    /// P7.3.2 — Sync the warp geometry and mask from a `LayerConfig`.
+    ///
+    /// Dispatches to `build_bezier_vertices` when `cfg.bezier_mesh` is `Some`,
+    /// otherwise falls back to the legacy `build_warp_vertices` path.
+    /// Mask polygon is sourced from `bezier_mesh.mask_polygon` / `warp.mask_polygon`
+    /// respectively (mask_graph integration pending W4.2).
+    pub fn sync_from_layer(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        cfg: &crate::project::schema::LayerConfig,
+    ) {
+        if let Some(bm) = &cfg.bezier_mesh {
+            self.sync_bezier_and_mask(device, queue, bm);
+        } else {
+            self.sync_mesh_and_mask(device, queue, &cfg.warp);
+        }
+    }
+
+    /// P7.3.2 — Sync geometry from a `BezierMesh` + mask from its polygon.
+    pub fn sync_bezier_and_mask(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        bm: &BezierMesh,
+    ) {
+        // Geometry: hash the anchors + handles.
+        use std::hash::Hash;
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        bm.rows.hash(&mut hasher);
+        bm.cols.hash(&mut hasher);
+        for row in &bm.anchors {
+            for pt in row {
+                pt[0].to_bits().hash(&mut hasher);
+                pt[1].to_bits().hash(&mut hasher);
+            }
+        }
+        // Include handles in hash so handle drags trigger re-tessellation.
+        for row in &bm.handles_h {
+            for h in row {
+                if let Some(pt) = h {
+                    pt[0].to_bits().hash(&mut hasher);
+                    pt[1].to_bits().hash(&mut hasher);
+                } else {
+                    0u64.hash(&mut hasher);
+                }
+            }
+        }
+        let geo_h = std::hash::Hasher::finish(&hasher);
+
+        if geo_h != self.last_mesh_hash {
+            self.last_mesh_hash = geo_h;
+            let (v, idx) = build_bezier_vertices(bm, 12);
+            let (vb, ib, ic) = upload_mesh(device, &v, &idx);
+            self.vertex_buffer = vb;
+            self.index_buffer = ib;
+            self.index_count = ic;
+        }
+
+        // Mask: use bezier_mesh.mask_polygon (mask_graph integration: W4.2).
+        let mask_poly = &bm.mask_polygon;
+        let feather = bm.mask_feather;
+
+        // Simple hash for mask_polygon.
+        let mut mh = std::collections::hash_map::DefaultHasher::new();
+        for pt in mask_poly {
+            pt[0].to_bits().hash(&mut mh);
+            pt[1].to_bits().hash(&mut mh);
+        }
+        feather.to_bits().hash(&mut mh);
+        let mask_h = std::hash::Hasher::finish(&mh);
+
+        if self.last_mask_hash == Some(mask_h) {
+            return;
+        }
+        self.last_mask_hash = Some(mask_h);
+
+        let data = sdf::bake_polygon_sdf(mask_poly, SDF_SIZE);
+        let size = wgpu::Extent3d {
+            width: SDF_SIZE as u32,
+            height: SDF_SIZE as u32,
+            depth_or_array_layers: 1,
+        };
+        self.sdf_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("mask sdf bezier"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R32Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        self.sdf_view = self
+            .sdf_texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let raw: Vec<u8> = data.iter().flat_map(|&f| f.to_le_bytes()).collect();
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.sdf_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &raw,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(4 * SDF_SIZE as u32),
+                rows_per_image: Some(SDF_SIZE as u32),
+            },
+            size,
+        );
+    }
+
     pub fn render(
         &self,
         device: &wgpu::Device,
@@ -541,6 +862,85 @@ mod tests {
                 (u - src[i][0]).abs() < 1e-4 && (v - src[i][1]).abs() < 1e-4,
                 "corner {i}: got ({u},{v}) want {:?}",
                 src[i]
+            );
+        }
+    }
+
+    /// P7.3.2 — CPU backward-compat invariant: all-None-handle BezierMesh
+    /// produces the same vertex positions as the equivalent WarpMesh.
+    ///
+    /// This is the prerequisite for the GPU golden test (gpu-tests feature).
+    /// If this CPU test fails, the tessellation algorithm is wrong — fix it
+    /// before running the GPU test.
+    #[test]
+    fn bezier_all_none_handles_matches_bilinear() {
+        use crate::project::schema::{BezierMesh, WarpMesh};
+
+        // Build a non-trivial 2×2 WarpMesh.
+        let warp = WarpMesh {
+            rows: 2,
+            cols: 2,
+            grid: vec![
+                vec![[0.1, 0.1], [0.5, 0.05], [0.9, 0.1]],
+                vec![[0.05, 0.5], [0.5, 0.5], [0.95, 0.5]],
+                vec![[0.1, 0.9], [0.5, 0.95], [0.9, 0.9]],
+            ],
+            mask_polygon: Vec::new(),
+            mask_feather: 0.02,
+            zone_role: None,
+            unknown_zone_role_raw: None,
+        };
+
+        // Convert to BezierMesh with all handles None.
+        let bm = BezierMesh::from_warp_mesh(&warp);
+        assert!(
+            bm.handles_h.iter().flatten().all(|h| h.is_none()),
+            "from_warp_mesh must produce all-None handles_h"
+        );
+        assert!(
+            bm.handles_v.iter().flatten().all(|h| h.is_none()),
+            "from_warp_mesh must produce all-None handles_v"
+        );
+
+        // Tessellate both at the same subdivision.
+        let sub = 4u32;
+        let (v_bilinear, idx_bilinear) = build_warp_vertices(&warp, sub);
+        let (v_bezier, idx_bezier) = build_bezier_vertices(&bm, sub);
+
+        assert_eq!(
+            v_bilinear.len(),
+            v_bezier.len(),
+            "vertex count must match: bilinear={} bezier={}",
+            v_bilinear.len(),
+            v_bezier.len()
+        );
+        assert_eq!(
+            idx_bilinear.len(),
+            idx_bezier.len(),
+            "index count must match"
+        );
+
+        // Compare clip positions and UV coordinates.
+        for (i, (vb, vz)) in v_bilinear.iter().zip(v_bezier.iter()).enumerate() {
+            let dx = (vb.pos_clip[0] - vz.pos_clip[0]).abs();
+            let dy = (vb.pos_clip[1] - vz.pos_clip[1]).abs();
+            assert!(
+                dx < 1e-4 && dy < 1e-4,
+                "vertex {i}: bilinear=({:.6},{:.6}) bezier=({:.6},{:.6}) delta=({dx:.2e},{dy:.2e})",
+                vb.pos_clip[0],
+                vb.pos_clip[1],
+                vz.pos_clip[0],
+                vz.pos_clip[1],
+            );
+            let du = (vb.src_uv[0] - vz.src_uv[0]).abs();
+            let dv = (vb.src_uv[1] - vz.src_uv[1]).abs();
+            assert!(
+                du < 1e-4 && dv < 1e-4,
+                "vertex {i} UV mismatch: bilinear=({:.6},{:.6}) bezier=({:.6},{:.6})",
+                vb.src_uv[0],
+                vb.src_uv[1],
+                vz.src_uv[0],
+                vz.src_uv[1],
             );
         }
     }

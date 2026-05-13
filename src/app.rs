@@ -3965,13 +3965,13 @@ fn render_m5_pipeline(
             {
                 if crate::render::fx_presets::fx_is_registered(preset_id) {
                     if let Some((_tex, fx_view)) = ls.fx_texture.as_ref() {
-                        // sync_mesh_and_mask updates the SDF from cfg.warp;
-                        // call it here so sdf_view() is up to date before
-                        // dispatch reads it.
-                        ls.warp_renderer.sync_mesh_and_mask(
+                        // sync_from_layer updates geometry + SDF from the layer's
+                        // warp (or bezier_mesh if present). Call it here so
+                        // sdf_view() is up to date before dispatch reads it.
+                        ls.warp_renderer.sync_from_layer(
                             &renderer.gpu.device,
                             &renderer.gpu.queue,
-                            &cfg.warp,
+                            cfg,
                         );
                         let clock_secs = clock.elapsed().as_secs_f32();
                         // Collect the views before calling dispatch so the
@@ -4106,10 +4106,10 @@ fn render_m5_pipeline(
                         // later in the warp pass collapses to the same
                         // hash check. Single-pass presets ignore both
                         // fields.
-                        ls.warp_renderer.sync_mesh_and_mask(
+                        ls.warp_renderer.sync_from_layer(
                             &renderer.gpu.device,
                             &renderer.gpu.queue,
-                            &cfg.warp,
+                            cfg,
                         );
                         let sdf_v = ls.warp_renderer.sdf_view();
 
@@ -4241,12 +4241,9 @@ fn render_m5_pipeline(
             // never bleed in.
             // Note: for FxLayer, sync_mesh_and_mask was already called above
             // (before fx_pipeline.render). The second call here is a no-op
-            // because sync_mesh_and_mask gates on a mesh-geometry hash.
-            ls.warp_renderer.sync_mesh_and_mask(
-                &renderer.gpu.device,
-                &renderer.gpu.queue,
-                &cfg.warp,
-            );
+            // because sync_from_layer gates on a mesh-geometry hash.
+            ls.warp_renderer
+                .sync_from_layer(&renderer.gpu.device, &renderer.gpu.queue, cfg);
             ls.warp_renderer.render(
                 &renderer.gpu.device,
                 &renderer.gpu.queue,
