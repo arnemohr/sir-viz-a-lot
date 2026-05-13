@@ -2379,6 +2379,205 @@ fn render_frame_scene_template(
 }
 
 // ---------------------------------------------------------------------------
+// P6.1.3 — Transport-cycle perf gate (stub; updated in P6.5.3)
+// ---------------------------------------------------------------------------
+
+/// P6.1.3 — Stub fixture for the worst-case transport tick: crossfade in
+/// progress, follow chain active, BPM-quantize timer running.
+///
+/// This test exists to give P6.5.3 a hook to replace the stub with real
+/// `Cue` + `TransportState` once those types exist. For now it validates
+/// that the existing perf harness compiles and that the test infrastructure
+/// (Headless, pipelines) can be re-used without modification.
+///
+/// The fixture uses the same 4-layer composition as `perf_frame_budget` so
+/// the GPU load represents the render work during a transport tick. The
+/// transport tick itself is CPU-only and not measured here (it has no GPU
+/// operations); the intent is to verify the *rendering* budget is not
+/// blown by the cue-strip overhead added in P6.
+///
+/// TODO(P6.5.3): Replace the scene-based fixture with a real
+/// `TransportState::tick` call over a `Vec<Cue>` once both types are
+/// defined in `src/transport/` and `src/project/schema.rs`.
+#[cfg(feature = "gpu-tests")]
+#[test]
+fn perf_transport_cycle_within_budget() {
+    // NOTE: This fixture is intentionally identical to `perf_frame_budget`
+    // until P6.5.3 wires in the real transport state. The comment is the
+    // documentation; the shape is the regression hook.
+    let h = match Headless::new() {
+        Ok(h) => h,
+        Err(e) => {
+            // Skip gracefully when no GPU adapter is available (CI without GPU).
+            eprintln!("perf_transport_cycle_within_budget: skipping — {e}");
+            return;
+        }
+    };
+    let device = &h.device;
+    let queue = &h.queue;
+
+    let fx_pipeline = FxPipeline::new_ripple_wash(device, FORMAT);
+    let compositor = Compositor::new(device, OUT_W, OUT_H, FORMAT);
+    let gamma = GammaPipeline::new(device, FORMAT);
+    let edge_blend = EdgeBlendPipeline::new(device, FORMAT);
+
+    let mut layers: Vec<LayerGpu> = (0..LAYER_COUNT)
+        .map(|i| {
+            let poly = layer_polygon(i);
+            let (_fx_tex, fx_view) = make_render_texture(
+                device,
+                OUT_W,
+                OUT_H,
+                FORMAT,
+                &format!("transport_perf fx tex layer {i}"),
+            );
+            let (_warp_tex, warp_view) = make_render_texture(
+                device,
+                OUT_W,
+                OUT_H,
+                FORMAT,
+                &format!("transport_perf warp tex layer {i}"),
+            );
+            let (_sdf_tex, sdf_view) = make_sdf_texture(
+                device,
+                queue,
+                &poly,
+                &format!("transport_perf sdf layer {i}"),
+            );
+            let compositor_uniform = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(&format!("transport_perf comp uniform layer {i}")),
+                size: 16,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            let warp_pipeline = WarpPipeline::new(device, FORMAT);
+            warp_pipeline.init_buffers(queue, poly.len() >= 3);
+            LayerGpu {
+                fx_view,
+                warp_view,
+                sdf_view,
+                compositor_uniform,
+                polygon: poly,
+                warp_pipeline,
+            }
+        })
+        .collect();
+
+    let (_warp_rt, warp_rt_view) =
+        make_render_texture(device, OUT_W, OUT_H, FORMAT, "transport_perf warp_rt");
+    let output_targets: Vec<_> = (0..OUTPUT_COUNT)
+        .map(|i| {
+            make_render_texture(
+                device,
+                OUT_W,
+                OUT_H,
+                FORMAT,
+                &format!("transport_perf out {i}"),
+            )
+        })
+        .collect();
+
+    let mut frame_times: Vec<f64> = Vec::with_capacity(FRAME_COUNT);
+
+    for frame_idx in 0..FRAME_COUNT {
+        let t_frame_start = Instant::now();
+
+        // Simulate a transport tick on the CPU (no GPU work): in a future
+        // iteration (P6.5.3) this will call TransportState::tick().
+        // crossfade_progress simulates a cue crossfade in progress.
+        let crossfade_progress = (frame_idx as f32 / FRAME_COUNT as f32).clamp(0.0, 1.0);
+        let _ = crossfade_progress; // suppress unused-variable warning
+
+        let t = frame_idx as f32 / 60.0;
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("transport_perf encoder"),
+        });
+
+        for (i, ls) in layers.iter_mut().enumerate() {
+            run_fx_layer(
+                device,
+                queue,
+                &fx_pipeline,
+                &mut encoder,
+                &ls.fx_view,
+                &ls.sdf_view,
+                i,
+                t,
+                false,
+                0.5,
+                ls.polygon.len() >= 3,
+            );
+            run_warp_layer(
+                device,
+                queue,
+                &ls.warp_pipeline,
+                &mut encoder,
+                &ls.warp_view,
+                &ls.fx_view,
+                &ls.sdf_view,
+                &ls.compositor_uniform,
+            );
+        }
+
+        let comp_inputs: Vec<_> = layers
+            .iter()
+            .map(|ls| CompositorInput {
+                view: &ls.warp_view,
+                blend_mode: 0,
+                opacity: 1.0f32,
+                uniform: &ls.compositor_uniform as &wgpu::Buffer,
+            })
+            .collect();
+
+        compositor.composite(
+            device,
+            queue,
+            &mut encoder,
+            wgpu::Color {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+            &warp_rt_view,
+            &comp_inputs,
+        );
+        queue.submit(std::iter::once(encoder.finish()));
+
+        for (out_idx, (_out_tex, out_view)) in output_targets.iter().enumerate() {
+            let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("transport_perf gamma encoder"),
+            });
+            gamma.render(device, queue, &mut enc, out_view, &warp_rt_view);
+            let edge_side = if out_idx == 0 { 0.0f32 } else { 1.0 };
+            edge_blend.render(
+                device,
+                queue,
+                &mut enc,
+                out_view,
+                OUT_W,
+                EDGE_BLEND_OVERLAP_PX,
+                edge_side,
+            );
+            queue.submit(std::iter::once(enc.finish()));
+        }
+
+        device.poll(wgpu::Maintain::Wait);
+        frame_times.push(t_frame_start.elapsed().as_secs_f64() * 1_000.0);
+    }
+
+    frame_times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let p99 = percentile(&frame_times, 99.0);
+    println!("perf_transport_cycle_within_budget: p99 = {p99:.2} ms");
+    assert!(
+        p99 < 100.0,
+        "transport-cycle p99 = {p99:.2} ms ≥ 100 ms budget — \
+         render-loop regression on top of transport overhead"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Percentile helper
 // ---------------------------------------------------------------------------
 
