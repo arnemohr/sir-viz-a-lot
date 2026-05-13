@@ -258,6 +258,57 @@ pub enum GlossaryTerm {
     /// values: RGB Direct copies pixel bytes; HSV Intensity Gate dims the
     /// fixture by the pixel's brightness; more strategies land in Phase 7.
     OutputStrategy,
+    // -----------------------------------------------------------------------
+    // P6.1.1 — Phase 6 show-control and timecode domain terms.
+    // -----------------------------------------------------------------------
+    /// P6.1.1 — a single entry in the cuelist: a saved scene snapshot plus
+    /// per-cue timing, fire mode, and optional timecode trigger fields.
+    Cue,
+    /// P6.1.1 — the ordered list of cues the operator steps through during
+    /// a live show.
+    Cuelist,
+    /// P6.1.1 — the next cue in the list, highlighted in the strip and ready
+    /// to fire on the next Space / MIDI Note 60 / OSC go command.
+    ArmedNext,
+    /// P6.1.1 — the cue currently playing or crossfading on the projector.
+    LiveCue,
+    /// P6.1.1 — a sequence of Follow-mode cues that fire automatically one
+    /// after another without operator input.
+    FollowChain,
+    /// P6.1.1 — a cue fire mode that waits for a Space / MIDI / OSC trigger
+    /// before advancing to the next cue.
+    GoOnTrigger,
+    /// P6.1.1 — a cue fire mode that fires the next cue automatically after
+    /// the current cue's hold time expires.
+    FollowMode,
+    /// P6.1.1 — the crossfade duration from the previous cue state into this
+    /// cue's scene snapshot (seconds).
+    InTime,
+    /// P6.1.1 — how long the cue stays fully live before the follow chain or
+    /// operator trigger can advance to the next cue (seconds or indefinite).
+    HoldTime,
+    /// P6.1.1 — the crossfade duration from this cue's scene out to the next
+    /// cue's in-time (seconds; usually 0 because `in_time` of the next cue
+    /// handles the blend).
+    OutTime,
+    /// P6.1.1 — fires a cue on the next 1 / 2 / 4 / 8-bar beat boundary
+    /// at the current BPM instead of immediately on the trigger event.
+    BpmQuantize,
+    /// P6.1.1 — fires a cue automatically when the incoming timecode signal
+    /// reaches a specific HH:MM:SS:FF position.
+    TimecodePosition,
+    /// P6.1.1 — persistent on-screen readout showing live BPM, tap source,
+    /// armed-cue name, and quantize selector.
+    TransportHud,
+    /// P6.1.1 — SMPTE Linear Timecode carried as an audio-rate signal; decoded
+    /// via the `ltc` cargo feature to drive automatic cue firing.
+    Ltc,
+    /// P6.1.1 — MIDI Timecode: quarter-frame messages (status 0xF1) that
+    /// assemble into HH:MM:SS:FF positions for cue triggering.
+    Mtc,
+    /// P6.1.1 — MIDI timing clock: 24 pulses per quarter note (status 0xF8)
+    /// used to derive a live BPM and optionally drive cue quantize.
+    MidiClock,
 }
 
 /// A single glossary entry: a short headline and a 1–2 sentence body.
@@ -944,6 +995,125 @@ pub fn entry(t: GlossaryTerm) -> GlossaryEntry {
                    reproduction, HSV Intensity Gate for brightness-following \
                    wash behaviour.  Additional strategies are planned for Phase 7.",
         },
+        // -------------------------------------------------------------------
+        // P6.1.1 — Phase 6 show-control and timecode domain terms.
+        // -------------------------------------------------------------------
+        GlossaryTerm::Cue => GlossaryEntry {
+            headline: "Cue",
+            body: "A single entry in the cuelist: a saved scene snapshot plus \
+                   per-cue timing (in-time, hold, out-time), fire mode (Follow \
+                   or Go-on-trigger), BPM-bar quantize, and an optional timecode \
+                   trigger position.",
+        },
+        GlossaryTerm::Cuelist => GlossaryEntry {
+            headline: "Cuelist",
+            body: "The ordered list of cues the operator steps through during a \
+                   live show.  Navigate with ←/→ to arm the next cue and Space \
+                   (or MIDI 60) to fire it.  Cues in Follow mode advance \
+                   automatically without operator input.",
+        },
+        GlossaryTerm::ArmedNext => GlossaryEntry {
+            headline: "Armed Next",
+            body: "The next cue in the cuelist, highlighted with an amber ring in \
+                   the cue strip and ready to fire on the next go command (Space / \
+                   MIDI Note 60 / OSC /rmap/cue/go).  Move the arm with ←/→ \
+                   without firing.",
+        },
+        GlossaryTerm::LiveCue => GlossaryEntry {
+            headline: "Live Cue",
+            body: "The cue currently playing or crossfading on the projector.  \
+                   Shown with a \"LIVE\" badge on its tile and a progress ring \
+                   during the in-time crossfade.  The live cue advances to the \
+                   next cue on a go command or automatically in Follow mode.",
+        },
+        GlossaryTerm::FollowChain => GlossaryEntry {
+            headline: "Follow Chain",
+            body: "A sequence of cues whose fire mode is set to Follow — they \
+                   advance automatically from one to the next after each cue's \
+                   hold time expires, without operator input.  The chain halts \
+                   at the first Go-on-trigger cue or when the list is exhausted.",
+        },
+        GlossaryTerm::GoOnTrigger => GlossaryEntry {
+            headline: "Go-on-trigger",
+            body: "A cue fire mode that pauses the follow chain and waits for an \
+                   explicit go command (Space / MIDI Note 60 / OSC /rmap/cue/go) \
+                   before advancing to the next cue.  Use this for cues that \
+                   require the operator to confirm timing live.",
+        },
+        GlossaryTerm::FollowMode => GlossaryEntry {
+            headline: "Follow (cue mode)",
+            body: "A cue fire mode that fires the next cue automatically after the \
+                   current cue's hold time expires, with no operator input required.  \
+                   Chain multiple Follow-mode cues to build an auto-advancing \
+                   sequence; the chain halts at the first Go-on-trigger cue.",
+        },
+        GlossaryTerm::InTime => GlossaryEntry {
+            headline: "In-time",
+            body: "The crossfade duration (seconds) from the previous cue's state \
+                   into this cue's scene snapshot.  0.0 snaps instantly; values up \
+                   to 60 s create a slow dissolve.  The progress ring on the live \
+                   cue tile shows in-time completion.",
+        },
+        GlossaryTerm::HoldTime => GlossaryEntry {
+            headline: "Hold time",
+            body: "How long the cue stays fully live after its in-time completes \
+                   before the transport can advance (seconds).  \"∞\" (no value) \
+                   means hold indefinitely until a go command or timecode trigger \
+                   fires.  Used with Follow mode to create timed auto-advance.",
+        },
+        GlossaryTerm::OutTime => GlossaryEntry {
+            headline: "Out-time",
+            body: "The crossfade duration (seconds) from this cue's scene as the \
+                   next cue's in-time begins.  In most workflows this is 0 because \
+                   the next cue's in-time handles the blend; set it non-zero when \
+                   you want the outgoing cue to fade before the next one fades in.",
+        },
+        GlossaryTerm::BpmQuantize => GlossaryEntry {
+            headline: "BPM Quantize",
+            body: "Defers a cue's fire to the next 1 / 2 / 4 / 8-bar boundary at \
+                   the current BPM instead of firing immediately on the go command.  \
+                   The armed cue ring stays visible during the wait so the operator \
+                   can see the pending fire.  Set to Off to fire on the exact \
+                   trigger moment.",
+        },
+        GlossaryTerm::TimecodePosition => GlossaryEntry {
+            headline: "Timecode Position",
+            body: "An HH:MM:SS:FF timestamp (hours, minutes, seconds, frames) used \
+                   as a cue trigger: when the incoming LTC or MTC timecode signal \
+                   reaches this position the transport fires the cue automatically.  \
+                   Requires a timecode source (LTC or MTC) to be active.",
+        },
+        GlossaryTerm::TransportHud => GlossaryEntry {
+            headline: "Transport HUD",
+            body: "The persistent on-screen panel showing live BPM value, the \
+                   current tap source (Space / MIDI / OSC / MIDI Clock), the \
+                   armed-next cue name and index, and a global BPM quantize \
+                   override selector.  Always visible during Editing and Go-live \
+                   states.",
+        },
+        GlossaryTerm::Ltc => GlossaryEntry {
+            headline: "LTC (Linear Timecode)",
+            body: "SMPTE 12M timecode carried as an audio-rate biphase-mark \
+                   signal on a standard audio cable.  rmap decodes it via the \
+                   `ltc` cargo feature (requires libltc) and uses the decoded \
+                   HH:MM:SS:FF position to fire timecode-triggered cues within \
+                   ±1 frame of the specified position.",
+        },
+        GlossaryTerm::Mtc => GlossaryEntry {
+            headline: "MTC (MIDI Timecode)",
+            body: "MIDI Timecode: eight quarter-frame MIDI messages (status 0xF1) \
+                   sent by a DAW or hardware sequencer that assemble into a full \
+                   HH:MM:SS:FF timecode position.  Decoded inside the MIDI bus \
+                   (no extra feature gate) and used to fire timecode-triggered \
+                   cues.",
+        },
+        GlossaryTerm::MidiClock => GlossaryEntry {
+            headline: "MIDI Clock",
+            body: "MIDI timing clock: 24 pulses per quarter note sent as status \
+                   0xF8 messages.  rmap derives a rolling BPM average from the \
+                   inter-pulse timing and uses it as an alternative tap source \
+                   alongside Space, MIDI Note 60, and OSC /rmap/tap.",
+        },
     }
 }
 
@@ -1063,6 +1233,23 @@ pub fn all_terms() -> &'static [GlossaryTerm] {
         GlossaryTerm::ColorStrategy,
         GlossaryTerm::LightingTap,
         GlossaryTerm::OutputStrategy,
+        // P6.1.1 — Phase 6 show-control and timecode domain terms.
+        GlossaryTerm::Cue,
+        GlossaryTerm::Cuelist,
+        GlossaryTerm::ArmedNext,
+        GlossaryTerm::LiveCue,
+        GlossaryTerm::FollowChain,
+        GlossaryTerm::GoOnTrigger,
+        GlossaryTerm::FollowMode,
+        GlossaryTerm::InTime,
+        GlossaryTerm::HoldTime,
+        GlossaryTerm::OutTime,
+        GlossaryTerm::BpmQuantize,
+        GlossaryTerm::TimecodePosition,
+        GlossaryTerm::TransportHud,
+        GlossaryTerm::Ltc,
+        GlossaryTerm::Mtc,
+        GlossaryTerm::MidiClock,
     ]
 }
 
@@ -1139,7 +1326,7 @@ mod tests {
     #[test]
     fn all_terms_covers_every_variant() {
         // Bump this when you add a new GlossaryTerm variant.
-        const EXPECTED_VARIANT_COUNT: usize = 96;
+        const EXPECTED_VARIANT_COUNT: usize = 112;
         assert_eq!(
             super::all_terms().len(),
             EXPECTED_VARIANT_COUNT,
