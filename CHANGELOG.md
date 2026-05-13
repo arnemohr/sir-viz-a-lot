@@ -86,45 +86,79 @@ environment. P6.11.x deferred. Brew install: `brew install libltc cmake`.
 ### Phase 7 — Professionalisation and interoperability
 
 rmap v1.0 closes the remaining defensible gaps to established media servers
-without replicating their bloat. Full release notes filled by W13.2.
+without replicating their bloat.
 
-**Syphon output**
-- Publish the composited projector output as a named Syphon source visible to
-  OBS, VDMX, Resolume Arena, and other Syphon-aware macOS applications.
-- Toggle in the Output panel; advertising name = "rmap – \<project filename\>".
-- Zero-copy IOSurface handoff via Syphon.framework (BSD, vendored in-tree).
+**What shipped in Phase 7:**
 
-**Bezier warp**
-- Cubic Bezier mesh warp replaces bilinear quad — curved columns, arches, organic shapes.
-- Anchor (corner) and tangent handle dragging; smooth / cusp mode for handle pairs.
-- Degenerate all-`None` handles render pixel-identical to the legacy bilinear mesh.
-- Schema migration v9 → v10 (BezierMesh).
+**Bezier warp (schema + CPU tessellation)**
+- `BezierMesh` schema: cubic Bezier patches (anchors + tangent handles) alongside
+  the legacy `WarpMesh` — both deserialize; schema v9 → v10 migration synthesises
+  a `BezierMesh` from the existing grid with all handles `None`.
+- CPU Coons patch tessellation at configurable subdivision (default 8×8 per cell).
+  Degenerate all-`None` handles use the existing homography path — pixel-identical
+  to the legacy bilinear mesh; verified by a CPU golden test.
+- `MoveBezierAnchor` and `SetBezierHandle` mutations with `ReverseStorage` (undo-safe).
+- `BezierHandleDir` enum (Horizontal / Vertical) for typed handle selection.
 
-**Inverse mask + luma key + chroma key**
-- Inverse mask: swap opaque / transparent regions of any mask polygon.
-- Luma key: threshold-based alpha derived from the rendered output's brightness.
-- Chroma key: hue-range alpha removal (green-screen + any colour).
-- All accessible from the Mask mode pill sub-row — no Advanced menu required.
-- Schema migration v10 → v11 (MaskGraph).
+**Mask graph schema**
+- `MaskGraph` + `MaskNode` schema (Polygon, Inverse, Union, Subtract, LumaKey, ChromaKey).
+- Schema v10 → v11 migration: `mask_polygon` + `mask_feather` → single-node `MaskGraph::Polygon`.
+- `SetLayerMaskGraph` mutation covering all node types with `ReverseStorage`.
 
-**Calibration file**
-- `.rmap-calibration.json` stores warp + mask + gamma + display identity per venue.
-- Load/save via File menu; same-directory auto-load offer on project open.
-- Surface-slot UUID binding; mismatch = audit warning + identity fallback (never hard-fail).
+**RGBW DMX output**
+- `ChannelRole::White` and `FixturePersonality::default_rgbw()` for 4-channel fixtures.
+- `RgbwConfig { enabled, w_channel_cct_k, w_scale }` on `FixtureGroup` (serde-defaulted).
+- `apply_rgbw()`: CCT-aware white-point subtraction using a 61-entry `CCT_TABLE` (2000–8000 K,
+  linear interpolation). `build_universe_frame` dispatches the W channel when enabled.
+- Backward-compatible: existing RGB-only groups render unchanged.
 
-**Calibration verify patterns**
-- Alignment cross, dot grid, colour bars, edge-blend gradient, focus chart, geometry grid.
-- Activated from the Output panel Verify section; do not modify the show file.
-
-**RGBW + colour-temperature mixing**
-- CCT-aware white-point subtraction for RGBW DMX fixture groups.
-- Per-fixture-group CCT dropdown (2700–6500 K) + W-scale slider.
-- Backward-compatible: existing RGB-only fixture groups render unchanged.
+**Calibration file schema**
+- `CalibrationFile` + `CalibrationSurface` schema with atomic save/load
+  (temp + rename; `CalibrationLoadError` typed errors).
+- `WarpOrBezier` union type supports both `BezierMesh` (v2+) and legacy `WarpMesh`.
+- `loaded_calibration: Option<CalibrationFile>` on `EditingState` (session-only;
+  show file never modified). UUID-then-index surface matching; mismatches emit
+  `AuditKind::CalibrationSurfaceUnmatched` (never hard-fail; identity fallback).
 
 **Scene packs**
-- Export selected layers + assets as a portable `.rmap-scene-pack.zip`.
-- Import via File > Import Scene Pack; templates appear in the Preset Browser.
-- Re-import of same pack ID replaces without duplication.
+- `ScenePackManifest` + `ScenePackTemplate` schema.
+- Atomic zip export (`manifest.json` + `assets/<idx>/<path>`) via `zip` 2.x.
+- Import extracts to `<dest>/<pack_id>/`; same-ID re-import replaces cleanly.
+
+**Syphon output (infrastructure only)**
+- `syphon-out` cargo feature gate (off by default).
+- `build.rs` emits `cargo:rustc-link-search=framework=vendor/frameworks` and
+  `cargo:rustc-link-lib=framework=Syphon` when `--features syphon-out` is active.
+- `vendor/frameworks/.gitkeep` placeholder; `make setup-syphon` explains how to
+  obtain the BSD-licensed Syphon.framework binary.
+- Default builds (`cargo build`) unaffected.
+
+**Audit additions (Phase 7)**
+- `AuditKind::CalibrationSurfaceUnmatched` — unmatched calibration surface (Warn).
+- `AuditKind::BezierMeshSchemaUpgraded` — informational upgrade notice (Info).
+- `AuditKind::RgbwConfigInvalid` — CCT out of valid 2000–8000 K range (Warn).
+- `AuditKind::SyphonFrameworkMissing` — syphon-out feature active but no framework (Warn).
+
+**Glossary additions (17 new terms)**
+- Syphon, SyphonOutput, CalibrationFile, SurfaceSlot, VenueCalibration, BezierWarp,
+  Anchor, TangentHandle, InverseMask, LumaKey, ChromaKey, Rgbw, ColourTemperature,
+  Cct, ScenePack, EdgeBlendGradient, CalibrationVerify.
+
+**Show-day checklist additions**
+- 4 new Phase 7 checks: Syphon output confirm, calibration load + alignment cross,
+  Bezier warp mode guard, RGBW CCT match.
+
+---
+
+**Planned post-v1.0 (not shipped — blocked on GPU render pipeline or interactive UI):**
+
+- Syphon ObjC wrapper + Metal HAL (`W2.2`–`W2.4`) — framework binary required.
+- Bezier handle overlay rendering + palette scaling UI (`W3.4`, `W3.5`).
+- MaskGraph SDF evaluation + inverse/luma/chroma key UI (`W4.2`, `W4.3`, `W5.2`, `W6.2`).
+- Calibration auto-load offer + File menu save/load (`W7.3`, `W7.4`).
+- Calibration verify patterns (alignment cross, dot grid, colour bars etc.) (`W8.1`–`W8.6`).
+- RGBW fixture group inspector UI (`W9.3`).
+- Scene pack export/import UI (`W10.2`, `W10.3`).
 
 ---
 
