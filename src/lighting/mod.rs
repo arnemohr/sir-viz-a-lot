@@ -23,6 +23,7 @@
 #![allow(dead_code)]
 
 pub mod chase;
+pub mod color;
 pub mod dmx_frame;
 pub mod error;
 pub mod fixture;
