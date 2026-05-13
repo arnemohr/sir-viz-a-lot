@@ -1502,6 +1502,7 @@ mod tests {
             muted: false,
             treatment: None,
             bezier_mesh: None,
+            mask_graph: None,
         }
     }
 
@@ -1569,6 +1570,7 @@ mod tests {
             muted: false,
             treatment: None,
             bezier_mesh: None,
+            mask_graph: None,
         };
         mutate_transform_effect(&mut layer, |t, _r, _sx, _sy| {
             *t = [0.25, 0.0];

@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 10;
+pub const CURRENT_SCHEMA_VERSION: u32 = 11;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Transform2D {
@@ -276,6 +276,14 @@ pub struct LayerConfig {
     /// set to `None` (backward-compatible bilinear fallback).
     #[serde(default)]
     pub bezier_mesh: Option<BezierMesh>,
+    /// P7.4.1 — optional composable mask graph (schema v11+). When `Some`,
+    /// supersedes `bezier_mesh.mask_polygon` / `bezier_mesh.mask_feather`
+    /// and `warp.mask_polygon` / `warp.mask_feather`. `None` for pre-v11
+    /// projects; populated by `migrate_v10_to_v11` from the layer's existing
+    /// mask data.  `MaskGraph::identity()` (empty polygon, full canvas) is
+    /// the neutral value that renders identical to "no mask".
+    #[serde(default)]
+    pub mask_graph: Option<MaskGraph>,
 }
 
 /// P3.2.1 — semantic role tag for a mask polygon, drawn from a closed
@@ -567,6 +575,96 @@ impl BezierMesh {
             zone_role: self.zone_role,
             unknown_zone_role_raw: None,
         })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// P7.4.1 — MaskGraph: composable mask representation (schema v11)
+// ---------------------------------------------------------------------------
+
+/// P7.4.1 — Stable identifier for a `MaskNode` within a `MaskGraph`.
+/// Integer index into `MaskGraph::nodes`; references must be validated
+/// before use (a stale `NodeId` is an audit warning, not a panic).
+pub type NodeId = usize;
+
+/// P7.4.1 — A single node in the mask composition graph.
+///
+/// Phase 7 ships four node kinds: `Polygon`, `Inverse`, `Union`, and `Subtract`.
+/// `Union` and `Subtract` are schema scaffolding only — they have no CPU
+/// evaluation path and no UI in Phase 7.  They exist so the schema is
+/// forward-compatible with a future composable mask editor.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind")]
+pub enum MaskNode {
+    /// A polygon mask (equivalent to the legacy `WarpMesh.mask_polygon`).
+    Polygon {
+        /// Polygon vertices in normalised [0..1] space.
+        points: Vec<[f32; 2]>,
+        /// Normalised feather fraction (0..0.5 useful).
+        feather: f32,
+    },
+    /// Inverts the SDF of a referenced node (inside ↔ outside).
+    ///
+    /// Phase 7 M8: accessible from the Mask mode pill sub-row.
+    Inverse {
+        /// NodeId of the node whose SDF is negated.
+        of: NodeId,
+    },
+    /// Union (min SDF) of two nodes.
+    /// **Schema scaffolding only** — no CPU evaluation or UI in Phase 7.
+    Union {
+        /// NodeId of the first operand.
+        a: NodeId,
+        /// NodeId of the second operand.
+        b: NodeId,
+    },
+    /// Subtraction (max negative SDF) of two nodes.
+    /// **Schema scaffolding only** — no CPU evaluation or UI in Phase 7.
+    Subtract {
+        /// NodeId of the base node.
+        base: NodeId,
+        /// NodeId of the node to subtract.
+        sub: NodeId,
+    },
+}
+
+/// P7.4.1 — Composable mask graph.
+///
+/// `nodes` is a flat list; references between nodes use `NodeId` (index into
+/// `nodes`).  The root node is always `nodes[0]` (when the list is non-empty).
+///
+/// ## Identity (no masking)
+/// `MaskGraph::identity()` returns a graph with a single `Polygon` node whose
+/// `points` is empty — which the SDF baker interprets as "full canvas, no mask",
+/// pixel-identical to `WarpMesh.mask_polygon = []`.
+///
+/// ## Migration from `BezierMesh.mask_polygon` (v10 → v11)
+/// Each layer's `bezier_mesh.mask_polygon` + `bezier_mesh.mask_feather` become
+/// a `MaskGraph` with one `Polygon` node.  The fields are then removed from
+/// `BezierMesh` (represented by the new `mask_graph` on `LayerConfig`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MaskGraph {
+    /// Ordered list of mask nodes; `nodes[0]` is the root (evaluated last).
+    pub nodes: Vec<MaskNode>,
+}
+
+#[allow(dead_code)] // Methods used progressively as W4.x tasks land.
+impl MaskGraph {
+    /// Full-canvas identity mask: single `Polygon` node with empty points.
+    pub fn identity() -> Self {
+        MaskGraph {
+            nodes: vec![MaskNode::Polygon {
+                points: Vec::new(),
+                feather: 0.02,
+            }],
+        }
+    }
+
+    /// Create a single-polygon mask from a polygon + feather (migration path).
+    pub fn from_polygon(points: Vec<[f32; 2]>, feather: f32) -> Self {
+        MaskGraph {
+            nodes: vec![MaskNode::Polygon { points, feather }],
+        }
     }
 }
 
@@ -1194,6 +1292,7 @@ pub fn layer_from_svg_path(id: impl Into<String>, svg_path: PathBuf) -> LayerCon
         muted: false,
         treatment: None,
         bezier_mesh: None,
+        mask_graph: None,
     }
 }
 
@@ -1227,6 +1326,7 @@ pub fn layer_from_video_path(id: impl Into<String>, path: PathBuf) -> LayerConfi
         muted: false,
         treatment: None,
         bezier_mesh: None,
+        mask_graph: None,
     }
 }
 
@@ -1262,6 +1362,7 @@ pub fn layer_from_fx_preset(
         muted: false,
         treatment: None,
         bezier_mesh: None,
+        mask_graph: None,
     }
 }
 
@@ -1289,6 +1390,7 @@ pub fn layer_from_image_path(id: impl Into<String>, path: PathBuf) -> LayerConfi
         muted: false,
         treatment: None,
         bezier_mesh: None,
+        mask_graph: None,
     }
 }
 

@@ -45,7 +45,7 @@ pub fn migrate(mut value: Value) -> Result<(Value, MigrationOutcome), ProjectErr
         // layer's new `warp` field. `Project.warps` is preserved during
         // T3.0a so the renderer + audit + mutations keep compiling; T3.0b
         // deletes it once the render graph reads per-layer warps.
-        0..=9 => {
+        0..=10 => {
             if version <= 2 {
                 migrate_v2_to_v3_layers(&mut value);
             }
@@ -105,6 +105,17 @@ pub fn migrate(mut value: Value) -> Result<(Value, MigrationOutcome), ProjectErr
             //     path once P7.3.2 wires it.
             if version <= 9 {
                 migrate_v9_to_v10_bezier_mesh(&mut value);
+            }
+            // v10 → v11 (P7.4.1):
+            //   • Adds `LayerConfig.mask_graph` by converting each layer's
+            //     `bezier_mesh.mask_polygon` + `bezier_mesh.mask_feather`
+            //     (or `warp.mask_polygon` + `warp.mask_feather` for layers
+            //     without a `bezier_mesh`) into a single-node `MaskGraph`.
+            //   • `bezier_mesh.mask_polygon` and `bezier_mesh.mask_feather`
+            //     are left in place for backward compat but are superseded
+            //     by `mask_graph` for rendering.
+            if version <= 10 {
+                migrate_v10_to_v11_mask_graph(&mut value);
             }
             value["schema_version"] = serde_json::json!(CURRENT_SCHEMA_VERSION);
             Ok((value, outcome))
@@ -196,6 +207,77 @@ fn migrate_v8_to_v9_scenes_to_cues(value: &mut Value) {
 // ---------------------------------------------------------------------------
 // P7.3.1 — v9 → v10: add `bezier_mesh` from existing `warp` grid.
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// P7.4.1 — v10 → v11: add `mask_graph` from existing mask_polygon fields.
+// ---------------------------------------------------------------------------
+
+/// P7.4.1 — For every layer, convert `bezier_mesh.mask_polygon` +
+/// `bezier_mesh.mask_feather` (or `warp.mask_polygon` + `warp.mask_feather`
+/// for layers without a `bezier_mesh`) into a single-node `MaskGraph`.
+///
+/// Idempotent: layers that already have a non-null `mask_graph` are skipped.
+///
+/// ## MaskGraph JSON layout
+/// ```json
+/// {
+///   "nodes": [
+///     { "kind": "Polygon", "points": <mask_polygon>, "feather": <mask_feather> }
+///   ]
+/// }
+/// ```
+fn migrate_v10_to_v11_mask_graph(value: &mut Value) {
+    let Some(obj) = value.as_object_mut() else {
+        return;
+    };
+    let Some(Value::Array(layers)) = obj.get_mut("layers") else {
+        return;
+    };
+    for layer in layers.iter_mut() {
+        let Some(layer_obj) = layer.as_object_mut() else {
+            continue;
+        };
+        // Skip layers that already have a mask_graph (idempotent).
+        if layer_obj.contains_key("mask_graph") && layer_obj["mask_graph"] != Value::Null {
+            continue;
+        }
+        // Prefer mask data from `bezier_mesh` (populated by v9→v10); fall
+        // back to `warp` for layers that somehow lack a `bezier_mesh`.
+        let (mask_polygon, mask_feather) =
+            if let Some(bm) = layer_obj.get("bezier_mesh").and_then(|v| v.as_object()) {
+                (
+                    bm.get("mask_polygon")
+                        .cloned()
+                        .unwrap_or(Value::Array(vec![])),
+                    bm.get("mask_feather")
+                        .cloned()
+                        .unwrap_or(serde_json::json!(0.02)),
+                )
+            } else if let Some(warp) = layer_obj.get("warp").and_then(|v| v.as_object()) {
+                (
+                    warp.get("mask_polygon")
+                        .cloned()
+                        .unwrap_or(Value::Array(vec![])),
+                    warp.get("mask_feather")
+                        .cloned()
+                        .unwrap_or(serde_json::json!(0.02)),
+                )
+            } else {
+                (Value::Array(vec![]), serde_json::json!(0.02))
+            };
+
+        let mask_graph = serde_json::json!({
+            "nodes": [
+                {
+                    "kind": "Polygon",
+                    "points": mask_polygon,
+                    "feather": mask_feather
+                }
+            ]
+        });
+        layer_obj.insert("mask_graph".to_string(), mask_graph);
+    }
+}
 
 /// P7.3.1 — For every layer that has a `warp` object but no `bezier_mesh`,
 /// synthesise a `BezierMesh` JSON value from the warp grid with all handles
@@ -1230,12 +1312,12 @@ mod tests {
 
     // --- P3.2.2 schema migration v7 → v8 tests ---
 
-    /// P7.3.1 — `CURRENT_SCHEMA_VERSION == 10` (bumped from 9 by P7.3.1).
+    /// P7.4.1 — `CURRENT_SCHEMA_VERSION == 11` (bumped from 10 by P7.4.1).
     #[test]
-    fn current_schema_version_is_10() {
+    fn current_schema_version_is_11() {
         assert_eq!(
-            CURRENT_SCHEMA_VERSION, 10,
-            "CURRENT_SCHEMA_VERSION must be 10 after P7.3.1"
+            CURRENT_SCHEMA_VERSION, 11,
+            "CURRENT_SCHEMA_VERSION must be 11 after P7.4.1"
         );
     }
 
@@ -1578,9 +1660,12 @@ mod tests {
             "output_targets": [{"fallback_index": 0, "rgb_matrix": [[1.0,0.0,0.0],[0.0,1.0,0.0],[0.0,0.0,1.0]]}]
         });
 
-        let (migrated, _) = migrate(v9_json).expect("migrate v9 → v10");
+        let (migrated, _) = migrate(v9_json).expect("migrate v9 → v11 (cascades through v10)");
 
-        assert_eq!(migrated["schema_version"], 10_u64, "must be v10");
+        assert_eq!(
+            migrated["schema_version"], CURRENT_SCHEMA_VERSION,
+            "must be CURRENT_SCHEMA_VERSION (v10 → v11)"
+        );
 
         let layer = &migrated["layers"][0];
         let bm = &layer["bezier_mesh"];
@@ -1637,5 +1722,90 @@ mod tests {
             warp_mesh.grid, recovered.grid,
             "from_warp_mesh → to_warp_mesh_lossless must be lossless for all-None handles"
         );
+    }
+
+    /// P7.4.1 — A v10 project with `bezier_mesh.mask_polygon` + `mask_feather`
+    /// migrates to v11 with `mask_graph: Some(...)` containing a single Polygon
+    /// node.  `mask_polygon` and `mask_feather` must be preserved in the Polygon
+    /// node.
+    #[test]
+    fn migrate_v10_to_v11_adds_mask_graph() {
+        use crate::project::schema::{MaskGraph, MaskNode, Project};
+
+        // Build a v10 project with a warp that has a non-empty mask_polygon.
+        let v10_json = serde_json::json!({
+            "schema_version": 10,
+            "layers": [
+                {
+                    "id": "layer-1",
+                    "kind": {"Svg": {"svg_path": "test.svg"}},
+                    "enabled": true,
+                    "transform": {"translate": [0.0, 0.0], "rotate_deg": 0.0, "scale": [1.0, 1.0], "anchor": [0.0, 0.0]},
+                    "effects": [],
+                    "blend_mode": "Normal",
+                    "opacity": 1.0,
+                    "warp": {
+                        "rows": 1,
+                        "cols": 1,
+                        "grid": [[[0.0, 0.0], [1.0, 0.0]], [[0.0, 1.0], [1.0, 1.0]]],
+                        "mask_polygon": [[0.1, 0.2], [0.9, 0.2], [0.9, 0.8], [0.1, 0.8]],
+                        "mask_feather": 0.03,
+                        "zone_role": null
+                    },
+                    "bezier_mesh": {
+                        "rows": 1,
+                        "cols": 1,
+                        "anchors": [[[0.0, 0.0], [1.0, 0.0]], [[0.0, 1.0], [1.0, 1.0]]],
+                        "handles_h": [[null, null], [null, null]],
+                        "handles_v": [[null, null], [null, null]],
+                        "mask_polygon": [[0.1, 0.2], [0.9, 0.2], [0.9, 0.8], [0.1, 0.8]],
+                        "mask_feather": 0.03,
+                        "zone_role": null
+                    }
+                }
+            ],
+            "output_targets": [{"fallback_index": 0, "rgb_matrix": [[1.0,0.0,0.0],[0.0,1.0,0.0],[0.0,0.0,1.0]]}]
+        });
+
+        let (migrated, _) = migrate(v10_json).expect("migrate v10 → v11");
+        assert_eq!(
+            migrated["schema_version"], CURRENT_SCHEMA_VERSION,
+            "must be CURRENT_SCHEMA_VERSION (v11)"
+        );
+
+        let layer = &migrated["layers"][0];
+        let mg = &layer["mask_graph"];
+        assert!(!mg.is_null(), "mask_graph must be present after migration");
+
+        let nodes = mg["nodes"].as_array().expect("nodes is array");
+        assert_eq!(nodes.len(), 1, "single-node MaskGraph after migration");
+        assert_eq!(nodes[0]["kind"], "Polygon", "node kind must be Polygon");
+        assert_eq!(
+            nodes[0]["points"],
+            serde_json::json!([[0.1, 0.2], [0.9, 0.2], [0.9, 0.8], [0.1, 0.8]])
+        );
+        assert!((nodes[0]["feather"].as_f64().unwrap() - 0.03).abs() < 1e-6);
+
+        // Full round-trip through typed struct.
+        let project: Project =
+            serde_json::from_value(migrated).expect("deserialize migrated v11 project");
+        let lc = &project.layers[0];
+        let mask_graph = lc.mask_graph.as_ref().expect("mask_graph must be Some");
+        assert_eq!(mask_graph.nodes.len(), 1);
+        if let MaskNode::Polygon { points, feather } = &mask_graph.nodes[0] {
+            assert_eq!(points.len(), 4, "four polygon vertices");
+            assert!((feather - 0.03).abs() < 1e-6);
+        } else {
+            panic!("expected Polygon node, got {:?}", mask_graph.nodes[0]);
+        }
+
+        // MaskGraph::from_polygon + identity check.
+        let identity = MaskGraph::identity();
+        assert_eq!(identity.nodes.len(), 1);
+        if let MaskNode::Polygon { points, .. } = &identity.nodes[0] {
+            assert!(points.is_empty(), "identity mask has empty polygon");
+        } else {
+            panic!("identity must have a Polygon node");
+        }
     }
 }

@@ -3156,6 +3156,7 @@ mod tests {
                 muted: false,
                 treatment: None,
                 bezier_mesh: None,
+                mask_graph: None,
             });
         }
         p
