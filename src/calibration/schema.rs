@@ -366,4 +366,74 @@ mod tests {
         );
         let _ = std::fs::remove_file(&tmp);
     }
+
+    // -----------------------------------------------------------------------
+    // P7.12.x — Proptest: CalibrationFile atomic save/load round-trip.
+    //
+    // Verifies that:
+    //   1. `calibration_id` is stable across a write + read cycle.
+    //   2. `venue_name` survives verbatim (arbitrary UTF-8 strings).
+    //   3. Surface count is preserved.
+    //
+    // Uses arbitrary venue-name strings and surface counts (0–4) to give
+    // coverage beyond the hand-crafted unit test above.
+    // -----------------------------------------------------------------------
+    mod proptest_calibration {
+        use super::*;
+        use crate::project::schema::OutputTarget;
+        use proptest::prelude::*;
+
+        proptest! {
+            /// P7.12 — CalibrationFile save/load round-trip over arbitrary
+            /// venue names (up to 64 chars) and 0–4 surfaces.
+            #[test]
+            fn calibration_file_save_load_round_trip(
+                venue_name in ".{0,64}",
+                surface_count in 0usize..=4,
+            ) {
+                let mut cal = CalibrationFile::new(venue_name.clone());
+                let original_id = cal.calibration_id.clone();
+                for i in 0..surface_count {
+                    cal.surfaces.push(CalibrationSurface::new(
+                        format!("Surface {i}"),
+                        OutputTarget::default(),
+                    ));
+                }
+
+                let tmp = std::env::temp_dir().join(format!(
+                    "rmap-proptest-calibration-{}-{}.rmap-calibration.json",
+                    std::process::id(),
+                    original_id
+                        .chars()
+                        .take(8)
+                        .collect::<String>(),
+                ));
+
+                cal.save(&tmp).expect("atomic save");
+                let loaded = CalibrationFile::load(&tmp).expect("load");
+                let _ = std::fs::remove_file(&tmp);
+
+                prop_assert_eq!(
+                    &loaded.calibration_id,
+                    &original_id,
+                    "calibration_id must survive save/load"
+                );
+                prop_assert_eq!(
+                    &loaded.venue_name,
+                    &venue_name,
+                    "venue_name must survive save/load"
+                );
+                prop_assert_eq!(
+                    loaded.surfaces.len(),
+                    surface_count,
+                    "surface count must survive save/load"
+                );
+                prop_assert_eq!(
+                    loaded.schema_version,
+                    CalibrationFile::CURRENT_VERSION,
+                    "schema_version must be current version"
+                );
+            }
+        }
+    }
 }
