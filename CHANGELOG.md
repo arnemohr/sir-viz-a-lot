@@ -4,19 +4,80 @@ All notable changes to rmap are documented here.
 
 ---
 
-## [Unreleased] — v0.7
+## [Unreleased] — v1.0 (Phase 6: Show Control)
 
 ### Cuelist + Transport
 
-<!-- P6.14.2 will fill this section -->
+rmap v1.0 adds a full show-control system: a cuelist with per-cue timing, a
+transport state machine, cue navigation, and a live transport HUD.
+
+**Cuelist**
+
+- `Cue` struct replaces `Scene` as the tile unit, adding per-cue fields:
+  `in_time_s`, `hold_time_s`, `out_time_s`, `fire_mode` (Follow / Go-on-trigger),
+  `bpm_quantize` (Off / 1/2/4/8 bars), and optional `timecode_trigger` (HH:MM:SS:FF).
+- Per-cue MIDI CC and OSC bindings for live-trimming timing fields (saved in
+  the project schema; survive save/reload/undo).
+- Cue detail panel: click any tile to expand timing spinners, fire mode picker,
+  BPM-quantize selector, and timecode trigger field. All edits are Cmd-Z reversible.
+- Schema migrated from v8 (scenes) → v9 (cues); old projects load without error.
+
+**Transport state machine**
+
+- `TransportState` holds current cue, armed-next cue, fade progress, and follow chain.
+  Session-only (not serialised).
+- Keyboard navigation: Space = go, ←/→ = arm next/prev, Backspace = back-cue.
+- Space dual role: tap tempo (always) + cue go (when a cue is armed).
+- Follow chain: Follow-mode cues auto-advance after their hold time expires.
+  GoOnTrigger cues halt the chain until the operator presses go.
+- BPM-quantize: `TransportState::go()` defers fire to the next n-bar boundary
+  at the current BPM. Per-cue and global override (HUD selector).
+- Timecode trigger: fires cues automatically when incoming MTC/LTC reaches a
+  specified HH:MM:SS:FF position.
+
+**Cue tile states**
+
+- Three-state tile renderer: Idle (default), ArmedNext (amber ring), Live (LIVE
+  badge + solid accent bottom bar).
+- Live tile shows crossfade progress ring during `in_time_s` fade.
+
+**Transport HUD**
+
+- Persistent top-chrome widget: live BPM, tap source indicator (Space/MIDI/OSC),
+  current live-cue name and index, armed-next cue in amber.
+- Global BPM-quantize override selector (Off/1/2/4/8 bars) — session-only, falls
+  back to per-cue settings when Off.
 
 ### Live Input Surface
 
-<!-- P6.14.2 will fill this section -->
+**OSC transport control**
+
+- New OSC addresses: `/rmap/cue/go`, `/rmap/cue/prev`, `/rmap/cue/next`,
+  `/rmap/cue/back`, `/rmap/cue/N` (N=1..=9, fires cue N). All addresses
+  documented in `src/controls/osc.rs`.
+
+**Audio bands strip**
+
+- Frequency-range labels (Sub/Bass/LMid/Mid/HMid/Pres/Bril/Air) below each bar.
+- Collapsible: chevron button toggles between 36 px (collapsed) and 80 px
+  (expanded) height. State is session-only.
 
 ### Timecode Sync
 
-<!-- P6.14.2 will fill this section -->
+**MTC decoder**
+
+- `src/sync/mtc.rs`: `MtcDecoder` assembles 8 MIDI quarter-frame messages (0xF1)
+  into `TimecodePosition`. Wired into MIDI bus. Position flows to `TransportState`
+  each frame for timecode-trigger dispatch.
+
+**MIDI-clock BPM tracking**
+
+- `src/sync/midi_clock.rs`: `MidiClockTracker` computes rolling BPM from 0xF8
+  pulses (24 per quarter note). When active, drives `Clock::set_bpm()` directly.
+  No new feature gate (part of `--features midi`).
+
+**LTC decoder** — blocked: `libltc` and `cmake` not available in the build
+environment. P6.11.x deferred. Brew install: `brew install libltc cmake`.
 
 ---
 

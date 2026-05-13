@@ -444,3 +444,73 @@ Phase 5 adds DMX light output via Art-Net. If your show does NOT use DMX fixture
 
 > **Note:** record pass/fail per step as a commit comment when this script is
 > run against the v0.9 release-candidate build.
+
+---
+
+## Phase 6 show-control verification (cuelist + transport)
+
+Run these checks after the Phase 5 steps above. Requires at least one cue saved.
+
+19. **MIDI controller binding — before going live**
+    - [ ] Right-click a parameter row (e.g. Blur radius) → "Learn next MIDI CC".
+    - [ ] Twist a CC knob on the controller.
+    - [ ] Verify the binding tag appears on the row (e.g. "MIDI CC 21 ch 1").
+    - [ ] Save the project. Reload it. Verify the binding tag is still present.
+    - [ ] Cmd-Z the binding. Verify it reverts to unbound. Cmd-Shift-Z: verify it returns.
+    - **Pass:** MIDI CC binding survives save/reload/undo.
+
+20. **Audio bands strip — active audio source**
+    - [ ] Start an audio input source (e.g. system microphone or loopback).
+    - [ ] Verify the audio bands strip appears above the show-day strip.
+    - [ ] Click the chevron (▸/▾) to toggle collapsed (36 px) / expanded (80 px).
+    - [ ] Verify 8 labelled bars (Sub through Air) animate with the audio input.
+    - **Pass:** strip visible, bands animate, collapse/expand works.
+
+21. **Cue strip dry-run (arm + fire each cue once)**
+    - [ ] Build a project with at least 3 cues.
+    - [ ] Press → to arm cue 2 (amber ring visible on tile 2).
+    - [ ] Press Space to fire cue 2 (LIVE badge appears on tile 2).
+    - [ ] Press → to arm cue 3. Press Space. Repeat through all cues.
+    - [ ] Press Backspace to back-step one cue. Verify it fires the previous cue.
+    - **Pass:** all cues fire on Space, back-step works, LIVE badge tracks correctly.
+
+22. **Cue timing and fire mode**
+    - [ ] Click a cue tile to open the detail panel.
+    - [ ] Set in-time = 2 s, hold = 3 s, fire mode = Follow.
+    - [ ] Fire the cue. Verify the LIVE tile shows a 2-second crossfade progress ring.
+    - [ ] After 3 seconds in hold, verify the next cue auto-fires (follow chain).
+    - **Pass:** fade animates for in-time duration; follow chain advances automatically.
+
+23. **BPM quantize**
+    - [ ] Set global quantize to 4 bars in the transport HUD.
+    - [ ] Press → to arm a cue. Press Space.
+    - [ ] Verify the cue does NOT fire immediately — the armed tile stays amber.
+    - [ ] After the 4-bar boundary, verify the cue fires automatically.
+    - **Pass:** cue defers to bar boundary; fires on the downbeat.
+
+24. **Timecode trigger — synthetic MTC**
+    - [ ] Connect a DAW (or MIDI test tool) sending MTC to a MIDI port rmap sees.
+    - [ ] Click a cue tile. Enable timecode trigger. Set a position 10 seconds ahead.
+    - [ ] Verify the cue fires when the DAW reaches that position.
+    - [ ] (Alternative) use a software MTC generator; any source of 0xF1 messages works.
+    - **Pass:** timecode trigger fires the cue at the specified position (±1 frame).
+
+25. **MIDI Clock BPM sync**
+    - [ ] Connect a DAW sending MIDI clock (0xF8) to a port rmap sees.
+    - [ ] Verify the BPM HUD updates to match the DAW's tempo within ~1 second.
+    - [ ] Change the DAW BPM. Verify the HUD tracks the change.
+    - **Pass:** BPM HUD follows MIDI Clock within ±1 BPM.
+
+### Recovery steps
+
+- **MIDI learn times out (30 s):** The binding is not applied. Right-click the row
+  again and choose "Learn next MIDI CC" to re-arm. Check that the controller is
+  connected and sending CC messages on the correct channel.
+- **LTC signal lost mid-show:** Timecode-triggered cues will stop firing automatically.
+  The operator must advance manually with Space until the LTC source is restored.
+  Add a back-up timecode trigger at the next cue's position in case of brief dropouts.
+- **Cue order confusion:** Press Backspace to step back one cue, or click the tile
+  directly to select it; then press Space to fire it manually.
+
+> **Note:** record pass/fail per step as a commit comment when this script is
+> run against the v1.0 release-candidate build.
