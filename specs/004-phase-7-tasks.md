@@ -13,6 +13,28 @@ is sized for a single PR.
 - [x] P7.1.2 d35f7e7 — Perf-gate stubs for BezierMesh 4×4 + Syphon publish overhead
 - [x] P7.1.3 1077ba6 — CHANGELOG + README v1.0.0 Phase 7 placeholders
 - [x] P7.3.1 c2d8073 — BezierMesh data model + schema v9→v10 migration (CURRENT_SCHEMA_VERSION=10)
+- [x] P7.7.1 322daab — CalibrationFile schema + atomic save/load (new src/calibration/ module)
+- [x] P7.4.1 14b604d — MaskGraph data model + schema v10→v11 migration (CURRENT_SCHEMA_VERSION=11)
+- [x] P7.9.1 346a2da — RgbwConfig schema + CCT-to-RGB table (cct_to_rgb, apply_rgbw, SampledRgbw)
+- [x] P7.11.1 a393d8e — Show-day checklist Phase 7 additions (4 checkboxes ≤8 new lines)
+- [x] P7.3.2 7140a75 — CPU tessellation for BezierMesh (Coons patch, homography fallback; backward-compat invariant passes)
+- [x] P7.5.1+P7.6.1 2a9c6ca — LumaKey + ChromaKey MaskNode kinds + SetLayerMaskGraph mutation
+- [x] P7.9.2 5f7aa86 — RGBW DMX output path + ChannelRole::White
+- [x] P7.10.1 1ea39f3 — Scene pack schema + zip export/import (ScenePackManifest, atomic temp+rename)
+- [x] P7.11.2 713a91d — Phase 7 AuditKind variants (SyphonFrameworkMissing, CalibrationSurfaceUnmatched, BezierMeshSchemaUpgraded, RgbwConfigInvalid) + syphon-out feature stub
+- [x] P7.13.1 df2b130 — version bump 0.9.0 → 1.0.0
+
+Blocked / deferred:
+- [BLOCKED] P7.2.1–P7.2.4 Syphon — Syphon.framework binary not vendored; syphon-out feature stub added but framework linkage requires W2.1 first
+- [BLOCKED] P7.3.3–P7.3.5 Bezier hit-testing + overlay + palette UI — requires interactive GPU rendering (no headless path for canvas hit-test)
+- [BLOCKED] P7.4.2–P7.4.3 MaskGraph SDF evaluation + UI — requires render pipeline integration
+- [BLOCKED] P7.5.2, P7.6.2 Luma/Chroma key UI — depends on W4.2 (MaskGraph SDF)
+- [BLOCKED] P7.7.2–P7.7.4 Calibration runtime binding + auto-load + menu — requires app.rs session-state changes
+- [BLOCKED] P7.8.1–P7.8.6 Calibration verify patterns — requires render overlay pass
+- [BLOCKED] P7.9.3 RGBW UI — requires fixture group inspector UI changes
+- [BLOCKED] P7.10.2–P7.10.3 Scene pack export/import UI — requires context menu and file dialog changes
+- [BLOCKED] P7.12.1–P7.12.2 Proptest extension + GPU golden — depends on all W3/W4/W9 mutations (partially done)
+- [BLOCKED] P7.13.2–P7.13.3 CHANGELOG body + manual acceptance smoke — depends on shipping all capabilities
 
 ---
 
