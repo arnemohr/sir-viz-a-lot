@@ -95,6 +95,81 @@ pub fn bake_polygon_sdf(poly: &[[f32; 2]], size: usize) -> Vec<f32> {
     out
 }
 
+// ---------------------------------------------------------------------------
+// P7.4.2 — MaskGraph CPU SDF evaluator
+// ---------------------------------------------------------------------------
+
+/// P7.4.2 — Evaluate a `MaskGraph` to a signed-distance field.
+///
+/// - A single `Polygon` node produces pixel-identical output to
+///   `bake_polygon_sdf` (backward-compatibility invariant).
+/// - An `Inverse` node wraps another node and negates its SDF values
+///   (inside ↔ outside).
+/// - `Union`, `Subtract` — schema-only in Phase 7; fall through to an
+///   all-positive SDF (full canvas, effectively no mask).
+/// - `LumaKey`, `ChromaKey` — require a rendered frame as input; return
+///   an all-negative SDF (fully opaque) as a safe fallback.
+///
+/// ## TODO(P7.4.2-gpu)
+/// Wire this evaluator into the render pipeline:
+/// - Replace the `bake_polygon_sdf(layer.warp.mask_polygon, …)` call site
+///   in `warp.rs` with `bake_mask_graph_sdf(layer.mask_graph, …)`.
+/// - LumaKey / ChromaKey evaluation requires the layer's rendered texture
+///   as input; defer until the render pipeline has that texture available.
+#[allow(dead_code)] // TODO(P7.4.2-gpu): wire to render pipeline
+pub fn bake_mask_graph_sdf(graph: &crate::project::schema::MaskGraph, size: usize) -> Vec<f32> {
+    if graph.nodes.is_empty() || size == 0 {
+        // Empty graph = full-canvas identity (no mask; all negative = inside).
+        return vec![-1.0; size * size];
+    }
+
+    // Evaluate node 0 (the root).
+    eval_node(&graph.nodes, 0, size)
+}
+
+/// Recursively evaluate the SDF of a single `MaskNode` by index.
+#[allow(dead_code)] // called from bake_mask_graph_sdf; both deferred until GPU wiring lands
+fn eval_node(nodes: &[crate::project::schema::MaskNode], idx: usize, size: usize) -> Vec<f32> {
+    use crate::project::schema::MaskNode;
+
+    let Some(node) = nodes.get(idx) else {
+        // Stale NodeId — fall back to full-canvas negative SDF.
+        return vec![-1.0; size * size];
+    };
+
+    match node {
+        MaskNode::Polygon { points, feather: _ } => {
+            // Single-node polygon path — pixel-identical to the legacy
+            // `bake_polygon_sdf` (backward-compat invariant, P7.4.2).
+            bake_polygon_sdf(points, size)
+        }
+
+        MaskNode::Inverse { of } => {
+            // Negate the SDF of the referenced node.
+            let inner_idx = *of;
+            let inner = eval_node(nodes, inner_idx, size);
+            inner.into_iter().map(|v| -v).collect()
+        }
+
+        MaskNode::Union { .. } | MaskNode::Subtract { .. } => {
+            // Schema scaffolding only in Phase 7 — no CPU evaluation path.
+            // Return full-canvas positive SDF (fully transparent = no mask).
+            vec![1.0; size * size]
+        }
+
+        MaskNode::LumaKey { .. } | MaskNode::ChromaKey { .. } => {
+            // TODO(P7.4.2-gpu): LumaKey and ChromaKey require the rendered
+            // frame as input (the luminance / hue of each pixel).  These
+            // cannot be evaluated purely from geometry; the CPU SDF baker
+            // does not have access to the rendered texture at this call site.
+            //
+            // For now, return a fully-opaque SDF (all negative = inside,
+            // no masking applied) as a safe-show-day fallback.
+            vec![-1.0; size * size]
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -340,6 +415,95 @@ mod tests {
             ZONE_TAG_WGSL.contains("zone_tag: u32"),
             "ZONE_TAG_WGSL missing zone_tag field in ZoneTagUniform"
         );
+    }
+
+    // --- P7.4.2 MaskGraph SDF evaluator tests ---
+
+    /// P7.4.2 — Single-node polygon `MaskGraph` produces pixel-identical output
+    /// to `bake_polygon_sdf` (backward-compat invariant).
+    #[test]
+    fn mask_graph_single_polygon_pixel_identical_to_bake_polygon_sdf() {
+        use crate::project::schema::{MaskGraph, MaskNode};
+
+        let poly = vec![[0.25, 0.25], [0.75, 0.25], [0.75, 0.75], [0.25, 0.75]];
+        let size = 64;
+
+        let direct = bake_polygon_sdf(&poly, size);
+        let graph = MaskGraph {
+            nodes: vec![MaskNode::Polygon {
+                points: poly.clone(),
+                feather: 0.0,
+            }],
+        };
+        let via_graph = bake_mask_graph_sdf(&graph, size);
+
+        assert_eq!(direct.len(), via_graph.len(), "SDF lengths must match");
+        for (i, (&a, &b)) in direct.iter().zip(via_graph.iter()).enumerate() {
+            assert!(
+                (a - b).abs() < 1e-6,
+                "Pixel {i}: direct={a}, graph={b} — must be pixel-identical"
+            );
+        }
+    }
+
+    /// P7.4.2 — `Inverse` node produces negated SDF (inside ↔ outside).
+    #[test]
+    fn mask_graph_inverse_node_negates_sdf() {
+        use crate::project::schema::{MaskGraph, MaskNode};
+
+        let poly = vec![[0.25, 0.25], [0.75, 0.25], [0.75, 0.75], [0.25, 0.75]];
+        let size = 64;
+
+        // Forward polygon SDF.
+        let forward_graph = MaskGraph {
+            nodes: vec![MaskNode::Polygon {
+                points: poly.clone(),
+                feather: 0.0,
+            }],
+        };
+        let forward = bake_mask_graph_sdf(&forward_graph, size);
+
+        // Inverse: node 0 = Polygon, node 1 = Inverse { of: 0 }; root is node 0
+        // but the Inverse node wraps it — we make the Inverse the root (index 0).
+        let inverse_graph = MaskGraph {
+            nodes: vec![
+                MaskNode::Inverse { of: 1 },
+                MaskNode::Polygon {
+                    points: poly,
+                    feather: 0.0,
+                },
+            ],
+        };
+        let inverse = bake_mask_graph_sdf(&inverse_graph, size);
+
+        assert_eq!(forward.len(), inverse.len());
+        for (i, (&f, &inv)) in forward.iter().zip(inverse.iter()).enumerate() {
+            assert!(
+                (f + inv).abs() < 1e-6,
+                "Pixel {i}: forward={f}, inverse={inv} — must be negated"
+            );
+        }
+
+        // Inside pixels (negative forward SDF) must be outside in inverse (positive).
+        let center_fwd = forward[32 * size + 32];
+        let center_inv = inverse[32 * size + 32];
+        assert!(center_fwd < 0.0, "Center must be inside polygon (fwd<0)");
+        assert!(
+            center_inv > 0.0,
+            "Center must be outside inverse polygon (inv>0)"
+        );
+    }
+
+    /// P7.4.2 — Empty `MaskGraph` returns full-canvas identity (all negative).
+    #[test]
+    fn mask_graph_empty_returns_all_negative() {
+        use crate::project::schema::MaskGraph;
+
+        let graph = MaskGraph { nodes: vec![] };
+        let sdf = bake_mask_graph_sdf(&graph, 16);
+        for &v in &sdf {
+            assert!(v < 0.0, "Empty graph must return all-inside SDF, got {v}");
+        }
     }
 
     /// P3.3.1 — `From<ZoneRole> for u32` mapping matches WGSL constant values.
