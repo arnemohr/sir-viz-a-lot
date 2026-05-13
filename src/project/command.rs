@@ -1326,21 +1326,21 @@ impl ReverseStorage for SetOutputRgbMatrix {
 #[derive(Debug, Clone)]
 pub struct SetProjectScenes {
     /// Replacement scenes Vec.
-    pub new: Vec<crate::project::schema::Scene>,
+    pub new: Vec<crate::project::schema::Cue>,
     /// Pre-mutation scenes Vec.
-    pub old: Vec<crate::project::schema::Scene>,
+    pub old: Vec<crate::project::schema::Cue>,
 }
 
 impl ReverseStorage for SetProjectScenes {
     fn apply(self, project: &mut Project) -> Self {
         debug_assert!(
-            project.scenes.len() == self.old.len(),
+            project.cues.len() == self.old.len(),
             "SetProjectScenes stale Reverse: scenes.len()={}, expected old.len()={}",
-            project.scenes.len(),
+            project.cues.len(),
             self.old.len()
         );
         let post = self.new;
-        project.scenes = post.clone();
+        project.cues = post.clone();
         SetProjectScenes {
             new: self.old,
             old: post,
@@ -1392,14 +1392,14 @@ impl ReverseStorage for ApplyProjectSnapshot {
     fn apply(self, project: &mut Project) -> Self {
         // Errors from restore_scene used to be silenced (`let _ = ...`),
         // which masked any malformed-snapshot failure. The defensive
-        // restore_scene fix preserves project.scenes across failure too,
+        // restore_scene fix preserves project.cues across failure too,
         // but log loudly here so a future occurrence is visible in
         // ~/Library/Logs/rmap/rmap.log instead of silent.
         if let Err(e) = crate::project::restore_scene(project, &self.new) {
             tracing::error!(
                 ?e,
                 "ApplyProjectSnapshot::apply: restore_scene failed; \
-                 project.scenes preserved by the defensive guard but other \
+                 project.cues preserved by the defensive guard but other \
                  fields may be in inconsistent state",
             );
         }
@@ -2698,10 +2698,10 @@ impl Project {
     }
 
     /// Build a `SetProjectScenes` mutation (whole-Vec Reverse). Captures the
-    /// current `project.scenes` as `old`; `new` is the replacement Vec to
+    /// current `project.cues` as `old`; `new` is the replacement Vec to
     /// install (e.g. after a slot save or placeholder extension). The Reverse
     /// restores the entire pre-save Vec byte-equally on undo.
-    pub fn set_project_scenes_mutation(&self, new: Vec<crate::project::schema::Scene>) -> Mutation {
+    pub fn set_project_scenes_mutation(&self, new: Vec<crate::project::schema::Cue>) -> Mutation {
         Mutation::SetProjectScenes(SetProjectScenes {
             new,
             old: self.scenes.clone(),
@@ -3678,8 +3678,8 @@ mod tests {
         let mut stack = UndoStack::new();
 
         // 1. Save current state to slot 0.
-        let mut new_scenes = p.scenes.clone();
-        new_scenes.push(crate::project::schema::Scene {
+        let mut new_scenes = p.cues.clone();
+        new_scenes.push(crate::project::schema::Cue {
             name: "scene1".into(),
             snapshot: crate::project::snapshot(&p),
             thumbnail: None,
@@ -3693,7 +3693,7 @@ mod tests {
         let pre_recall = serde_json::to_value(&p).unwrap();
 
         // 4. Recall slot 0 via ApplyProjectSnapshot { non_undoable: false }.
-        let target = p.scenes[0].snapshot.clone();
+        let target = p.cues[0].snapshot.clone();
         let cur = serde_json::to_value(&p).unwrap();
         let recall = Mutation::ApplyProjectSnapshot(ApplyProjectSnapshot {
             new: target,

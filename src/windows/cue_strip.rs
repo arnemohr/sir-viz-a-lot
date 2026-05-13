@@ -156,7 +156,7 @@ pub fn show(
     let mut out: Option<Command> = None;
 
     // --- Empty-state copy (T4.5) -----------------------------------------
-    if project.scenes.is_empty() {
+    if project.cues.is_empty() {
         ui.horizontal(|ui| {
             ui.add_space(8.0);
             ui.label(
@@ -186,7 +186,7 @@ pub fn show(
             ui.horizontal(|ui| {
                 ui.add_space(8.0);
 
-                for (idx, scene) in project.scenes.iter().enumerate() {
+                for (idx, scene) in project.cues.iter().enumerate() {
                     let tile_resp = scene_tile(
                         ui,
                         idx,
@@ -225,7 +225,7 @@ pub fn show(
 fn scene_tile(
     ui: &mut Ui,
     idx: usize,
-    scene: &crate::project::schema::Scene,
+    scene: &crate::project::schema::Cue,
     cache: &mut ThumbnailCache,
     crossfade_progress: Option<(usize, f32)>,
     #[cfg(feature = "v3")] pending_cue: Option<usize>,

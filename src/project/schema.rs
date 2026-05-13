@@ -517,14 +517,167 @@ pub struct ThumbnailRgba {
     pub data: Vec<u8>,
 }
 
+/// Legacy alias kept for backward source compatibility. New code should use
+/// [`Cue`] directly. The schema field is now `cues` (serde alias `scenes`).
+#[allow(dead_code)]
+pub type Scene = Cue;
+
+/// P6.2.1 — Fire mode for a cue: advance automatically after hold time
+/// (`Follow`) or wait for an explicit go command (`GoOnTrigger`).
+///
+/// `GoOnTrigger` is the default — preserves existing trigger semantics for
+/// scenes saved before Phase 6 (no hold time, operator controls every advance).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+pub enum CueFireMode {
+    /// Advance to the next cue automatically after hold time expires.
+    Follow,
+    /// Wait for an explicit go command (Space / MIDI Note 60 / OSC /rmap/cue/go).
+    #[default]
+    GoOnTrigger,
+}
+
+/// P6.2.1 — BPM-bar quantize setting for a cue. `Off` fires immediately on
+/// the go command; `Bars(n)` defers to the next n-bar beat boundary at the
+/// current BPM. Valid values for `n` are 1, 2, 4, 8.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+pub enum BpmQuantize {
+    /// Fire immediately on the go command (default).
+    #[default]
+    Off,
+    /// Fire on the next n-bar boundary at the current BPM.
+    Bars(u8),
+}
+
+/// P6.2.1 — A timecode position (HH:MM:SS:FF) used as an optional cue
+/// trigger. When set, the transport fires the cue automatically when incoming
+/// timecode (LTC or MTC) reaches this position.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct TimecodePosition {
+    pub hh: u8,
+    pub mm: u8,
+    pub ss: u8,
+    pub ff: u8,
+}
+
+/// P6.2.1 — A single cuelist entry. Extends the pre-Phase-6 `Scene` struct
+/// with per-cue timing fields, fire mode, BPM quantize, and optional
+/// timecode trigger.
+///
+/// All new fields carry serde defaults so pre-Phase-6 JSON (which has
+/// neither the timing fields nor `fire_mode`) loads cleanly with identity
+/// values that round-trip to the same behaviour as the old `Scene`.
+///
+/// `Scene` is now a type alias for `Cue` so old call sites continue to
+/// compile; migrate them to `Cue` over time.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Scene {
+pub struct Cue {
     pub name: String,
     pub snapshot: serde_json::Value,
     /// 003-T4.1 — optional thumbnail captured at save time. `None` for
-    /// scenes saved before T4.1 or when capture fails.
+    /// cues saved before T4.1 or when capture fails.
     #[serde(default)]
     pub thumbnail: Option<ThumbnailRgba>,
+    // --- Phase 6 additions (all #[serde(default)] for backward compat) ---
+    /// Crossfade duration from the previous cue state into this cue's scene
+    /// snapshot (seconds). 0.0 = instant snap (default, preserves old behaviour).
+    #[serde(default)]
+    pub in_time_s: f32,
+    /// How long the cue stays fully live before the follow chain or operator
+    /// trigger can advance (seconds). `None` = hold indefinitely (default).
+    #[serde(default)]
+    pub hold_time_s: Option<f32>,
+    /// Crossfade duration from this cue's scene out to the next cue (seconds).
+    /// 0.0 = instant snap (default). Usually 0 because `in_time_s` of the
+    /// next cue handles the blend.
+    #[serde(default)]
+    pub out_time_s: f32,
+    /// Fire mode: advance automatically (`Follow`) or wait for a go command
+    /// (`GoOnTrigger`, default — preserves existing operator-triggered behaviour).
+    #[serde(default)]
+    pub fire_mode: CueFireMode,
+    /// BPM quantize: fire immediately (`Off`, default) or snap to the next
+    /// n-bar boundary at the current BPM.
+    #[serde(default)]
+    pub bpm_quantize: BpmQuantize,
+    /// Optional timecode trigger. When `Some`, the transport fires this cue
+    /// automatically when incoming LTC/MTC reaches the specified position.
+    #[serde(default)]
+    pub timecode_trigger: Option<TimecodePosition>,
+    // --- Per-cue CC bindings (Option A from binding-storage-decision.md) ---
+    /// Optional MIDI CC binding for live-trim of in-time (channel, cc, scale, offset).
+    #[serde(default)]
+    pub in_time_binding: Option<CcBinding>,
+    /// Optional MIDI CC binding for live-trim of hold time.
+    #[serde(default)]
+    pub hold_binding: Option<CcBinding>,
+    /// Optional MIDI CC binding for live-trim of out-time.
+    #[serde(default)]
+    pub out_time_binding: Option<CcBinding>,
+    /// Optional OSC binding for live-trim of in-time.
+    #[serde(default)]
+    pub in_time_osc: Option<OscBinding>,
+    /// Optional OSC binding for live-trim of hold time.
+    #[serde(default)]
+    pub hold_osc: Option<OscBinding>,
+    /// Optional OSC binding for live-trim of out-time.
+    #[serde(default)]
+    pub out_time_osc: Option<OscBinding>,
+}
+
+impl Cue {
+    /// Construct a `Cue` with identity timing defaults (0.0 in/out, no hold
+    /// limit, GoOnTrigger fire mode, no quantize, no timecode trigger, no
+    /// bindings). Equivalent to the pre-Phase-6 `Scene` constructor.
+    pub fn new(
+        name: impl Into<String>,
+        snapshot: serde_json::Value,
+        thumbnail: Option<ThumbnailRgba>,
+    ) -> Self {
+        Cue {
+            name: name.into(),
+            snapshot,
+            thumbnail,
+            in_time_s: 0.0,
+            hold_time_s: None,
+            out_time_s: 0.0,
+            fire_mode: CueFireMode::GoOnTrigger,
+            bpm_quantize: BpmQuantize::Off,
+            timecode_trigger: None,
+            in_time_binding: None,
+            hold_binding: None,
+            out_time_binding: None,
+            in_time_osc: None,
+            hold_osc: None,
+            out_time_osc: None,
+        }
+    }
+}
+
+/// P6.2.1 — MIDI CC binding for a per-cue timing field (in-time, hold, out-time).
+/// Serialised alongside the `Cue` in the project schema (Option A from the
+/// binding-storage-decision.md decision doc).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CcBinding {
+    /// MIDI channel (0-based, 0–15).
+    pub channel: u8,
+    /// CC number (0–127).
+    pub cc: u8,
+    /// Scale factor applied to the normalised CC value (0.0..=1.0) before
+    /// adding `offset`. Default 1.0.
+    pub scale: f32,
+    /// Additive offset after scaling. Default 0.0.
+    pub offset: f32,
+}
+
+/// P6.2.1 — OSC address binding for a per-cue timing field.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OscBinding {
+    /// OSC address pattern (e.g. "/rmap/cue/1/in_time").
+    pub addr: String,
+    /// Scale factor applied to the normalised OSC value. Default 1.0.
+    pub scale: f32,
+    /// Additive offset after scaling. Default 0.0.
+    pub offset: f32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -532,8 +685,12 @@ pub struct Project {
     pub schema_version: u32,
     #[serde(default)]
     pub layers: Vec<LayerConfig>,
-    #[serde(default)]
-    pub scenes: Vec<Scene>,
+    /// P6.2.1 — renamed from `scenes`; `#[serde(alias = "scenes")]` keeps
+    /// pre-Phase-6 project files loading cleanly without a migration step.
+    /// The v8→v9 migration (P6.2.3) will write `cues` in saved files going
+    /// forward; the alias handles loading files saved by earlier versions.
+    #[serde(default, alias = "scenes")]
+    pub cues: Vec<Cue>,
     /// P0.7.1 (W7) — multi-projector output targets. v0.4 ships at most
     /// two entries (the second-projector edge-blend stub); Phase 7
     /// grows beyond two. **Invariant: always non-empty.** The
@@ -676,7 +833,7 @@ impl Default for Project {
         Self {
             schema_version: CURRENT_SCHEMA_VERSION,
             layers: Vec::new(),
-            scenes: Vec::new(),
+            cues: Vec::new(),
             output_targets: default_output_targets(),
             output_windowed: false,
             output_resolution: None,
@@ -1075,11 +1232,7 @@ mod tests {
             height: 108,
             data: data.clone(),
         };
-        let scene = Scene {
-            name: "intro".to_string(),
-            snapshot: serde_json::Value::Null,
-            thumbnail: Some(thumb.clone()),
-        };
+        let scene = Cue::new("intro", serde_json::Value::Null, Some(thumb.clone()));
 
         // Serialize → deserialize → assert byte-equal thumbnail.
         let json = serde_json::to_string(&scene).expect("serialize scene");

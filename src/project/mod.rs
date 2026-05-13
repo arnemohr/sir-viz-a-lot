@@ -253,7 +253,7 @@ pub fn restore(project: &mut Project, snap: &serde_json::Value) -> Result<(), se
     Ok(())
 }
 
-/// Restore a *scene* snapshot — same as [`restore`] except `project.scenes`
+/// Restore a *scene* snapshot — same as [`restore`] except `project.cues`
 /// and `project.crossfade_duration_s` are preserved.
 ///
 /// Why: [`snapshot`] captures the full Project including the scenes vec
@@ -272,7 +272,7 @@ pub fn restore_scene(
     project: &mut Project,
     snap: &serde_json::Value,
 ) -> Result<(), serde_json::Error> {
-    let saved_scenes = std::mem::take(&mut project.scenes);
+    let saved_scenes = std::mem::take(&mut project.cues);
     let saved_crossfade = project.crossfade_duration_s;
 
     // Operator UX rule: layers added AFTER a cue was saved persist across
@@ -301,7 +301,7 @@ pub fn restore_scene(
     // a bad recall. The caller still sees the underlying error.
     match restore(project, snap) {
         Ok(()) => {
-            project.scenes = saved_scenes;
+            project.cues = saved_scenes;
             project.crossfade_duration_s = saved_crossfade;
             // Append post-save additions at the end of the restored layer
             // order. Operator can reorder via the left-rail arrows if the
@@ -314,7 +314,7 @@ pub fn restore_scene(
             // since restore() didn't touch *project on the error path.
             project.layers = original_snapshot_layers;
             project.layers.extend(preserved_layers);
-            project.scenes = saved_scenes;
+            project.cues = saved_scenes;
             project.crossfade_duration_s = saved_crossfade;
             Err(e)
         }
@@ -419,7 +419,7 @@ pub fn snapshots_share_layer_topology(a: &serde_json::Value, b: &serde_json::Val
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::project::schema::{BlendMode, LayerConfig, LayerKind, Scene, WarpMesh};
+    use crate::project::schema::{BlendMode, Cue, LayerConfig, LayerKind, WarpMesh};
     use std::path::PathBuf;
 
     #[test]
@@ -473,11 +473,9 @@ mod tests {
             muted: false,
             treatment: None,
         });
-        original.scenes.push(Scene {
-            name: "intro".into(),
-            snapshot: serde_json::json!({"k": 1}),
-            thumbnail: None,
-        });
+        original
+            .cues
+            .push(Cue::new("intro", serde_json::json!({"k": 1}), None));
         original.gamma = 1.8;
         original.background_color = [0.1, 0.2, 0.3, 1.0];
 
@@ -516,11 +514,7 @@ mod tests {
             muted: false,
             treatment: None,
         });
-        p.scenes.push(Scene {
-            name: "slot1".into(),
-            snapshot: serde_json::json!({}),
-            thumbnail: None,
-        });
+        p.cues.push(Cue::new("slot1", serde_json::json!({}), None));
         p.gamma = 2.2;
         p.brightness = 0.1;
         p.contrast = 1.1;
@@ -567,26 +561,18 @@ mod tests {
             muted: false,
             treatment: None,
         });
-        p.scenes.push(Scene {
-            name: "1".into(),
-            snapshot: serde_json::json!({}),
-            thumbnail: None,
-        });
-        p.scenes[0].snapshot = snapshot(&p);
+        p.cues.push(Cue::new("1", serde_json::json!({}), None));
+        p.cues[0].snapshot = snapshot(&p);
 
         // Move
         if let Effect::Transform { translate, .. } = &mut p.layers[0].effects[0] {
             *translate = [0.5, 0.0];
         }
-        p.scenes.push(Scene {
-            name: "2".into(),
-            snapshot: serde_json::json!({}),
-            thumbnail: None,
-        });
-        p.scenes[1].snapshot = snapshot(&p);
+        p.cues.push(Cue::new("2", serde_json::json!({}), None));
+        p.cues[1].snapshot = snapshot(&p);
 
         // Recall scene 1
-        let target = p.scenes[0].snapshot.clone();
+        let target = p.cues[0].snapshot.clone();
         restore(&mut p, &target).expect("restore");
         match &p.layers[0].effects[0] {
             Effect::Transform { translate, .. } => assert_eq!(*translate, [0.1, 0.0]),
@@ -623,26 +609,18 @@ mod tests {
             treatment: None,
         });
         // Save slot 0
-        p.scenes.push(Scene {
-            name: "1".into(),
-            snapshot: serde_json::json!({}),
-            thumbnail: None,
-        });
-        p.scenes[0].snapshot = snapshot(&p);
+        p.cues.push(Cue::new("1", serde_json::json!({}), None));
+        p.cues[0].snapshot = snapshot(&p);
         // Modify + save slot 1
         if let Effect::Transform { translate, .. } = &mut p.layers[0].effects[0] {
             *translate = [0.5, 0.0];
         }
-        p.scenes.push(Scene {
-            name: "2".into(),
-            snapshot: serde_json::json!({}),
-            thumbnail: None,
-        });
-        p.scenes[1].snapshot = snapshot(&p);
-        let slot1_saved = p.scenes[1].snapshot.clone();
+        p.cues.push(Cue::new("2", serde_json::json!({}), None));
+        p.cues[1].snapshot = snapshot(&p);
+        let slot1_saved = p.cues[1].snapshot.clone();
 
         // Recall slot 0 via the same code path the UI uses.
-        let target = p.scenes[0].snapshot.clone();
+        let target = p.cues[0].snapshot.clone();
         restore_scene(&mut p, &target).expect("restore_scene");
 
         // Layer state restored.
@@ -654,7 +632,7 @@ mod tests {
         }
         // Slot 1 must still hold the snapshot we saved before the recall.
         assert_eq!(
-            p.scenes.get(1).map(|s| &s.snapshot),
+            p.cues.get(1).map(|s| &s.snapshot),
             Some(&slot1_saved),
             "recall destroyed slot 1's saved snapshot",
         );
@@ -689,30 +667,22 @@ mod tests {
 
         // Save cue 1 — exact mirror of Command::SceneSave in src/app.rs:1010.
         let snap1 = snapshot(&p);
-        let mut new_scenes = p.scenes.clone();
-        new_scenes.push(Scene {
-            name: "Cue 1".into(),
-            snapshot: snap1,
-            thumbnail: None,
-        });
-        let mut1 = p.set_project_scenes_mutation(new_scenes);
+        let mut new_cues = p.cues.clone();
+        new_cues.push(Cue::new("Cue 1", snap1, None));
+        let mut1 = p.set_project_scenes_mutation(new_cues);
         stack.push(mut1, &mut p);
-        assert_eq!(p.scenes.len(), 1, "after save cue 1");
+        assert_eq!(p.cues.len(), 1, "after save cue 1");
 
         // Save cue 2.
         let snap2 = snapshot(&p);
-        let mut new_scenes = p.scenes.clone();
-        new_scenes.push(Scene {
-            name: "Cue 2".into(),
-            snapshot: snap2,
-            thumbnail: None,
-        });
-        let mut2 = p.set_project_scenes_mutation(new_scenes);
+        let mut new_cues = p.cues.clone();
+        new_cues.push(Cue::new("Cue 2", snap2, None));
+        let mut2 = p.set_project_scenes_mutation(new_cues);
         stack.push(mut2, &mut p);
-        assert_eq!(p.scenes.len(), 2, "after save cue 2");
+        assert_eq!(p.cues.len(), 2, "after save cue 2");
 
         // Recall cue 1 — exact mirror of schedule_scene_recall's v3 arm.
-        let target = p.scenes[0].snapshot.clone();
+        let target = p.cues[0].snapshot.clone();
         let cur = snapshot(&p);
         let recall_mut = Mutation::ApplyProjectSnapshot(ApplyProjectSnapshot {
             new: target,
@@ -722,7 +692,7 @@ mod tests {
         stack.push(recall_mut, &mut p);
 
         assert_eq!(
-            p.scenes.len(),
+            p.cues.len(),
             2,
             "Recall via undo_stack.push wiped cue strip (operator-reported bug)",
         );
@@ -731,7 +701,7 @@ mod tests {
     /// Bug reproducer: clicking an already-created cue tile must not
     /// wipe the cue strip. Simulates the v3 cue-recall path end-to-end:
     /// save cue, save cue, recall cue 0 via `Mutation::ApplyProjectSnapshot`.
-    /// `project.scenes.len()` must remain 2 after the recall — the cue
+    /// `project.cues.len()` must remain 2 after the recall — the cue
     /// strip's visible tile count is bound to this length.
     #[cfg(feature = "v3")]
     #[test]
@@ -754,22 +724,14 @@ mod tests {
             treatment: None,
         });
         // Save cue 1 (scenes.len() goes 0 → 1).
-        p.scenes.push(Scene {
-            name: "1".into(),
-            snapshot: snapshot(&p),
-            thumbnail: None,
-        });
+        p.cues.push(Cue::new("1", snapshot(&p), None));
         // Save cue 2 (scenes.len() goes 1 → 2).
-        p.scenes.push(Scene {
-            name: "2".into(),
-            snapshot: snapshot(&p),
-            thumbnail: None,
-        });
-        assert_eq!(p.scenes.len(), 2);
+        p.cues.push(Cue::new("2", snapshot(&p), None));
+        assert_eq!(p.cues.len(), 2);
 
         // Recall cue 1 via the same Mutation::ApplyProjectSnapshot path
         // the v3 cue strip uses (see schedule_scene_recall in src/app.rs).
-        let target = p.scenes[0].snapshot.clone();
+        let target = p.cues[0].snapshot.clone();
         let cur = snapshot(&p);
         let mutation = ApplyProjectSnapshot {
             new: target,
@@ -779,7 +741,7 @@ mod tests {
         let _reverse = mutation.apply(&mut p);
 
         assert_eq!(
-            p.scenes.len(),
+            p.cues.len(),
             2,
             "recall via Mutation::ApplyProjectSnapshot wiped cue strip",
         );
@@ -891,21 +853,13 @@ mod tests {
 
     /// Defensive guard: when the snapshot fails to deserialize (malformed,
     /// cross-schema with a missing required field, etc.), restore_scene must
-    /// still preserve project.scenes — otherwise the operator's cue strip
+    /// still preserve project.cues — otherwise the operator's cue strip
     /// silently vanishes on a single bad recall.
     #[test]
     fn restore_scene_preserves_scenes_on_deserialize_error() {
         let mut p = Project::default();
-        p.scenes.push(Scene {
-            name: "alpha".into(),
-            snapshot: serde_json::json!({}),
-            thumbnail: None,
-        });
-        p.scenes.push(Scene {
-            name: "beta".into(),
-            snapshot: serde_json::json!({}),
-            thumbnail: None,
-        });
+        p.cues.push(Cue::new("alpha", serde_json::json!({}), None));
+        p.cues.push(Cue::new("beta", serde_json::json!({}), None));
 
         // A snapshot that does not deserialize as a Project (e.g. a bare
         // string or a missing required `schema_version` field).
@@ -914,12 +868,12 @@ mod tests {
         let res = restore_scene(&mut p, &bad);
         assert!(res.is_err(), "deliberately malformed snapshot must error");
         assert_eq!(
-            p.scenes.len(),
+            p.cues.len(),
             2,
             "restore_scene wiped scenes on deserialize error",
         );
-        assert_eq!(p.scenes[0].name, "alpha");
-        assert_eq!(p.scenes[1].name, "beta");
+        assert_eq!(p.cues[0].name, "alpha");
+        assert_eq!(p.cues[1].name, "beta");
     }
 
     /// `restore_scene` should also leave the live crossfade-duration
@@ -1146,7 +1100,7 @@ mod tests {
     #[test]
     fn canonical_first_session_mutations_round_trip() {
         use crate::project::command::Mutation;
-        use crate::project::schema::Scene;
+        use crate::project::schema::Cue;
         use crate::project::undo::UndoStack;
 
         let mut project = Project::default();
@@ -1180,20 +1134,20 @@ mod tests {
         // --- step 4: save current state to scene slot 0 ---
         {
             let snap = snapshot(&project);
-            let mut new_scenes = project.scenes.clone();
+            let mut new_scenes = project.cues.clone();
             while new_scenes.is_empty() {
-                new_scenes.push(Scene {
-                    name: format!("scene{}", new_scenes.len() + 1),
-                    snapshot: serde_json::json!({}),
-                    thumbnail: None,
-                });
+                new_scenes.push(Cue::new(
+                    format!("scene{}", new_scenes.len() + 1),
+                    serde_json::json!({}),
+                    None,
+                ));
             }
             new_scenes[0].snapshot = snap;
             let m = project.set_project_scenes_mutation(new_scenes);
             stack.push(m, &mut project);
         }
-        assert!(!project.scenes.is_empty(), "scene slot not saved");
-        let saved_snap = project.scenes[0].snapshot.clone();
+        assert!(!project.cues.is_empty(), "scene slot not saved");
+        let saved_snap = project.cues[0].snapshot.clone();
         assert!(
             saved_snap.get("layers").is_some(),
             "snapshot should contain layers",

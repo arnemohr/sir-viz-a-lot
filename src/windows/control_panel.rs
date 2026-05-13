@@ -22,7 +22,7 @@ use crate::project::schema::Project;
 #[cfg(not(feature = "v3"))]
 use crate::project::schema;
 #[cfg(not(feature = "v3"))]
-use crate::project::schema::{BlendMode, Scene};
+use crate::project::schema::BlendMode;
 // snapshot only needed in v2 Scenes tab.
 #[cfg(not(feature = "v3"))]
 use crate::project::snapshot;
@@ -1796,12 +1796,13 @@ fn show_scenes_tab(
                     // Build the post-save scenes Vec without writing to project,
                     // then push as a SetProjectScenes mutation so undo can
                     // restore the slot list (including any placeholder additions).
-                    let mut new = project.scenes.clone();
+                    let mut new = project.cues.clone();
                     while new.len() <= slot {
-                        new.push(Scene {
-                            name: format!("scene{}", new.len() + 1),
-                            snapshot: serde_json::json!({}),
-                        });
+                        new.push(crate::project::schema::Cue::new(
+                            format!("scene{}", new.len() + 1),
+                            serde_json::json!({}),
+                            None,
+                        ));
                     }
                     new[slot].snapshot = snapshot(project);
                     st.pending_mutations
@@ -1809,14 +1810,14 @@ fn show_scenes_tab(
                 }
                 #[cfg(not(feature = "v3"))]
                 {
-                    while project.scenes.len() <= slot {
-                        project.scenes.push(Scene {
-                            name: format!("scene{}", project.scenes.len() + 1),
-                            snapshot: serde_json::json!({}),
-                            thumbnail: None,
-                        });
+                    while project.cues.len() <= slot {
+                        project.cues.push(crate::project::schema::Cue::new(
+                            format!("scene{}", project.cues.len() + 1),
+                            serde_json::json!({}),
+                            None,
+                        ));
                     }
-                    project.scenes[slot].snapshot = snapshot(project);
+                    project.cues[slot].snapshot = snapshot(project);
                 }
             }
             // Tell apart "recall is no-op because the slot was never
@@ -1825,7 +1826,7 @@ fn show_scenes_tab(
             // pushed placeholder has `Object({})`. Empty placeholders
             // shouldn't be recallable.
             let has_data = project
-                .scenes
+                .cues
                 .get(slot)
                 .map(|s| match &s.snapshot {
                     serde_json::Value::Object(m) => !m.is_empty(),

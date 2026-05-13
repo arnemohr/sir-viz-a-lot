@@ -739,7 +739,7 @@ enum RecallOutcome {
 /// per the chosen path. Used by both the keyboard and UI recall callers
 /// so the policy lives in one place.
 fn schedule_scene_recall(state: &mut EditingState, slot: usize) -> RecallOutcome {
-    let target = match state.project.scenes.get(slot).map(|s| s.snapshot.clone()) {
+    let target = match state.project.cues.get(slot).map(|s| s.snapshot.clone()) {
         Some(t) => t,
         None => return RecallOutcome::NoSlot,
     };
@@ -1184,21 +1184,33 @@ fn apply_command(state: &mut EditingState, event: Command) -> SideEffect {
         #[cfg(feature = "v3")]
         Command::SceneSave => {
             let snapshot = crate::project::snapshot(&state.project);
-            let name = format!("Cue {}", state.project.scenes.len() + 1);
+            let name = format!("Cue {}", state.project.cues.len() + 1);
             let thumbnail = crate::windows::cue_strip::placeholder_thumbnail_for_name(&name);
-            let mut new_scenes = state.project.scenes.clone();
-            new_scenes.push(crate::project::schema::Scene {
+            let mut new_cues = state.project.cues.clone();
+            new_cues.push(crate::project::schema::Cue {
                 name,
                 snapshot,
                 thumbnail: Some(thumbnail),
+                in_time_s: 0.0,
+                hold_time_s: None,
+                out_time_s: 0.0,
+                fire_mode: crate::project::schema::CueFireMode::GoOnTrigger,
+                bpm_quantize: crate::project::schema::BpmQuantize::Off,
+                timecode_trigger: None,
+                in_time_binding: None,
+                hold_binding: None,
+                out_time_binding: None,
+                in_time_osc: None,
+                hold_osc: None,
+                out_time_osc: None,
             });
-            let mutation = state.project.set_project_scenes_mutation(new_scenes);
+            let mutation = state.project.set_project_scenes_mutation(new_cues);
             state.undo_stack.push(mutation, &mut state.project);
             state.dirty = true;
             tracing::info!(
                 target: "rmap::ux",
                 event = "scene_save",
-                slot = state.project.scenes.len().saturating_sub(1),
+                slot = state.project.cues.len().saturating_sub(1),
             );
             SideEffect::None
         }
