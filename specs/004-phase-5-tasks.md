@@ -3,18 +3,75 @@
 Companion task spec for [`004-phase-5.md`](004-phase-5.md). Each task
 below is sized for a single PR.
 
-## Implementation status (2026-05-12)
+## Implementation status (2026-05-13)
 
 - [x] P5.0.1 — DMX transport decision (`004-phase-5-dmx-transport-decision.md`)
 - [x] P5.0.2 — Fixture personality format decision (`004-phase-5-fixture-personality-decision.md`)
 - [x] P5.0.3 — Colour-space + readback decision (`004-phase-5-color-space-decision.md`)
 
-- [x] P5.1.4 5f3939c — `lighting` cargo feature gate skeleton (`artnet_protocol` dep, empty `src/lighting/mod.rs`, `#[cfg(feature = "lighting")]` in lib.rs + main.rs)
+### W1 — Setup + housekeeping (complete)
 - [x] P5.1.1 e5fe4f4 — glossary entries for 9 Phase 5 lighting domain terms
 - [x] P5.1.2 59c31ce — lighting frame-budget stub test in `src/lighting/mod.rs`
 - [x] P5.1.3 59c31ce — CHANGELOG v0.9.0 placeholder + README lighting section placeholder
+- [x] P5.1.4 5f3939c — `lighting` cargo feature gate skeleton (`artnet_protocol` dep, empty `src/lighting/mod.rs`, `#[cfg(feature = "lighting")]` in lib.rs + main.rs)
 
-All other tasks: not yet started.
+### W2 — Transport layer (complete)
+- [x] P5.2.1 ef38a57 — `DmxTransport` trait + `ArtNetTransport` impl + `NullTransport`
+- [x] P5.2.2 ef38a57 — `DmxUniverse` newtype + `UniverseId` + `UniverseFrame`
+- [x] P5.2.3 4480478 — `LightingThread` background loop at ~44 Hz
+- [x] P5.2.4 ab27a0a — `LightingThread` wired into `EditingState` / `GoLive` transitions
+
+### W3 — Fixture model (complete)
+- [x] P5.3.1 6a52217 — `ChannelRole`, `FixturePersonality`, `FixtureGroup` structs + schema field
+- [x] P5.3.2 6a52217 — `PixelMap` struct + `sample_uvs`
+- [x] P5.3.3 7dc9199 — `Mutation::AddFixtureGroup` + reverse (`RemoveFixtureGroup`)
+- [x] P5.3.4 7dc9199 — `Mutation::RemoveFixtureGroup` + reverse (`AddFixtureGroup`)
+- [x] P5.3.5 7dc9199 — `Mutation::SetFixtureGroupParams` + reverse
+- [x] P5.3.6 2585ba7 — DMX-frame builder (`build_universe_frame`)
+
+### W4 — Colour-from-pixel sampling
+- [ ] P5.4.1 — Lighting-tap texture + downsample render pass (64×36 `LightingTapPass`)
+- [ ] P5.4.2 — Staging buffer + readback in lighting thread
+- [ ] P5.4.3 — `LightingTapBuffer` + `sample_and_convert`
+- [ ] P5.4.4 — Per-fixture sample budget enforcement (max 256)
+- [ ] P5.4.5 — Lighting thread sampling + DMX-frame send loop
+
+### W5 — Subscriber list for Blackout / Go-live fan-out
+- [ ] P5.5.1 — `LightSubscriber` trait + subscriber list in `EditingState`
+- [ ] P5.5.2 — Wire `Command::Blackout` to fan-out subscribers
+- [ ] P5.5.3 — Wire `EnterGoLive` / `ExitGoLive` to fan-out subscribers
+
+### W6 — Zone-derived fixture binding
+- [ ] P5.6.1 — `FixtureSource::ZoneTag` variant + schema (already present as `String`; confirm/refactor)
+- [ ] P5.6.2 — Zone-activity → DMX intensity mapping
+
+### W7 — BPM-locked fixture chases (complete)
+- [x] P5.7.1 6a52217 — `FixtureChase` data model + schema
+- [x] P5.7.2 7dc9199 — `Mutation::AddFixtureChase` + reverse
+- [x] P5.7.3 7dc9199 — `Mutation::RemoveFixtureChase` + reverse
+- [x] P5.7.4 7dc9199 — `Mutation::SetFixtureChaseParams` + reverse
+- [x] P5.7.5 6a52217 — `ChaseTicker` + `Modulator::Bpm` integration
+
+### W8 — Output panel UI
+- [ ] P5.8.1 — Output panel "Lighting" section skeleton
+- [ ] P5.8.2 — Fixture-group list + add/remove in Output panel
+- [ ] P5.8.3 — Fixture personality editor in the group row
+- [ ] P5.8.4 — Canvas-region drag-to-assign in Output panel
+
+### W9 — Diagnostics
+- [ ] P5.9.1 — DMX universe activity LED in diagnostics chrome
+- [ ] P5.9.2 — Art-Net packet-rate badge in diagnostics chrome
+
+### W10 — Snapshot / proptest / packet-capture acceptance test
+- [ ] P5.10.1 — Snapshot integration: `LightCue` in project snapshot
+- [ ] P5.10.2 — Proptest extension: fixture-group Mutation round-trips
+- [ ] P5.10.3 — Packet-capture acceptance test (CI Art-Net listener)
+
+### W11 — Release housekeeping + acceptance smoke
+- [ ] P5.11.1 — Phase 5 acceptance smoke test (manual)
+- [ ] P5.11.2 — Version bump + CHANGELOG body for v0.9
+- [ ] P5.11.3 — README — Phase 5 lighting section
+- [ ] P5.11.4 — Show-day checklist: lighting pre-show checks
 
 ---
 
