@@ -281,6 +281,74 @@ mod tests {
         assert_eq!(ts.armed_cue, Some(1));
     }
 
+    // P6.5.2 — proptest: follow chain invariants.
+    #[cfg(test)]
+    mod proptest_follow_chain {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            #![proptest_config(proptest::test_runner::Config::with_cases(1024))]
+
+            /// P6.5.2 — follow chains always terminate (no infinite loop).
+            /// GoOnTrigger always halts the chain.
+            /// fade_progress is always in [0.0, 1.0] after any number of ticks.
+            #[test]
+            fn follow_chain_invariants(
+                modes in proptest::collection::vec(proptest::bool::ANY, 1..=8_usize),
+                hold_s in 0.01_f32..=1.0_f32,
+            ) {
+                let cues: Vec<Cue> = modes
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &follow)| {
+                        let mut c = Cue::new(format!("c{i}"), serde_json::json!({}), None);
+                        if follow {
+                            c.fire_mode = CueFireMode::Follow;
+                            c.hold_time_s = Some(hold_s);
+                        }
+                        c
+                    })
+                    .collect();
+
+                let mut ts = TransportState::default();
+                // Set up follow chain as all-indices after the first cue.
+                ts.follow_chain = (1..cues.len()).collect();
+                ts.fire_cue(0);
+
+                let max_ticks = cues.len() * 100;
+                let mut auto_fires = 0usize;
+                for _ in 0..max_ticks {
+                    let result = ts.tick(hold_s + 0.01, 120.0, &cues);
+                    if result.is_some() {
+                        auto_fires += 1;
+                    }
+                    prop_assert!(
+                        (0.0_f32..=1.0_f32).contains(&ts.fade_progress),
+                        "fade_progress out of [0,1]: {}",
+                        ts.fade_progress
+                    );
+                }
+
+                // Total auto-fires must be <= cues.len() - 1 (chain length).
+                prop_assert!(
+                    auto_fires <= cues.len().saturating_sub(1),
+                    "auto-fires {} exceeded chain length {}",
+                    auto_fires,
+                    cues.len()
+                );
+
+                // If the last cue is GoOnTrigger, the chain must have halted.
+                let last_is_got = cues.last().map(|c| c.fire_mode == CueFireMode::GoOnTrigger).unwrap_or(false);
+                if last_is_got && cues.len() > 1 {
+                    // After all Follow cues auto-fired, the GoOnTrigger cue must not auto-fire.
+                    let more_fires = (0..10).filter_map(|_| ts.tick(hold_s + 0.01, 120.0, &cues)).count();
+                    prop_assert_eq!(more_fires, 0, "GoOnTrigger cue fired automatically");
+                }
+            }
+        }
+    }
+
     /// P6.5.1 — fade_progress is always in [0.0, 1.0] after any number of ticks.
     #[test]
     fn fade_progress_clamped_to_unit_interval() {
