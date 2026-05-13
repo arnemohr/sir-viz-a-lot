@@ -45,7 +45,7 @@ pub fn migrate(mut value: Value) -> Result<(Value, MigrationOutcome), ProjectErr
         // layer's new `warp` field. `Project.warps` is preserved during
         // T3.0a so the renderer + audit + mutations keep compiling; T3.0b
         // deletes it once the render graph reads per-layer warps.
-        0..=8 => {
+        0..=9 => {
             if version <= 2 {
                 migrate_v2_to_v3_layers(&mut value);
             }
@@ -95,6 +95,16 @@ pub fn migrate(mut value: Value) -> Result<(Value, MigrationOutcome), ProjectErr
             //     the version where cuelist timing was first supported.
             if version <= 8 {
                 migrate_v8_to_v9_scenes_to_cues(&mut value);
+            }
+            // v9 → v10 (P7.3.1):
+            //   • Adds `LayerConfig.bezier_mesh` by converting each layer's
+            //     existing `warp` grid into a `BezierMesh` with all handles
+            //     `None` (bilinear-equivalent). Existing `warp` field is
+            //     preserved for backward-compat rendering; `bezier_mesh` is
+            //     `Some` for migrated projects and drives the Bezier render
+            //     path once P7.3.2 wires it.
+            if version <= 9 {
+                migrate_v9_to_v10_bezier_mesh(&mut value);
             }
             value["schema_version"] = serde_json::json!(CURRENT_SCHEMA_VERSION);
             Ok((value, outcome))
@@ -180,6 +190,86 @@ fn migrate_v8_to_v9_scenes_to_cues(value: &mut Value) {
             cue_obj.entry("hold_osc").or_insert(Value::Null);
             cue_obj.entry("out_time_osc").or_insert(Value::Null);
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// P7.3.1 — v9 → v10: add `bezier_mesh` from existing `warp` grid.
+// ---------------------------------------------------------------------------
+
+/// P7.3.1 — For every layer that has a `warp` object but no `bezier_mesh`,
+/// synthesise a `BezierMesh` JSON value from the warp grid with all handles
+/// `None`.  The existing `warp` field is preserved so the bilinear render path
+/// keeps working; `bezier_mesh` becomes `Some` and the Bezier render path
+/// (P7.3.2) dispatches on its presence.
+///
+/// ## BezierMesh JSON layout
+/// ```json
+/// {
+///   "rows": <same as warp.rows>,
+///   "cols": <same as warp.cols>,
+///   "anchors": <same as warp.grid>,
+///   "handles_h": <(rows+1) × (cols+1) nulls>,
+///   "handles_v": <(rows+1) × (cols+1) nulls>,
+///   "mask_polygon": <same as warp.mask_polygon>,
+///   "mask_feather": <same as warp.mask_feather>,
+///   "zone_role": <same as warp.zone_role>
+/// }
+/// ```
+fn migrate_v9_to_v10_bezier_mesh(value: &mut Value) {
+    let Some(obj) = value.as_object_mut() else {
+        return;
+    };
+    let Some(Value::Array(layers)) = obj.get_mut("layers") else {
+        return;
+    };
+    for layer in layers.iter_mut() {
+        let Some(layer_obj) = layer.as_object_mut() else {
+            continue;
+        };
+        // Skip layers that already have a bezier_mesh (idempotent).
+        if layer_obj.contains_key("bezier_mesh") && layer_obj["bezier_mesh"] != Value::Null {
+            continue;
+        }
+        // Only migrate layers that have a `warp` object.
+        let Some(warp) = layer_obj.get("warp").cloned() else {
+            continue;
+        };
+        let Some(warp_obj) = warp.as_object() else {
+            continue;
+        };
+
+        let rows = warp_obj.get("rows").and_then(|v| v.as_u64()).unwrap_or(1) as usize;
+        let cols = warp_obj.get("cols").and_then(|v| v.as_u64()).unwrap_or(1) as usize;
+        let grid = warp_obj
+            .get("grid")
+            .cloned()
+            .unwrap_or(Value::Array(vec![]));
+        let mask_polygon = warp_obj
+            .get("mask_polygon")
+            .cloned()
+            .unwrap_or(Value::Array(vec![]));
+        let mask_feather = warp_obj
+            .get("mask_feather")
+            .cloned()
+            .unwrap_or(serde_json::json!(0.02));
+        let zone_role = warp_obj.get("zone_role").cloned().unwrap_or(Value::Null);
+
+        // Build all-None handles: (rows+1) × (cols+1) nulls.
+        let null_row: Vec<Value> = vec![Value::Null; cols + 1];
+        let handles: Vec<Value> = vec![Value::Array(null_row); rows + 1];
+
+        let bezier_mesh = serde_json::json!({
+            "rows": rows,
+            "cols": cols,
+            "anchors": grid,
+            "handles_h": handles.clone(),
+            "handles_v": handles,
+            "mask_polygon": mask_polygon,
+            "mask_feather": mask_feather,
+            "zone_role": zone_role,
+        });
+        layer_obj.insert("bezier_mesh".to_string(), bezier_mesh);
     }
 }
 
@@ -1140,12 +1230,12 @@ mod tests {
 
     // --- P3.2.2 schema migration v7 → v8 tests ---
 
-    /// P3.2.2 — `CURRENT_SCHEMA_VERSION == 8` (now bumped to 9 by P6.2.3).
+    /// P7.3.1 — `CURRENT_SCHEMA_VERSION == 10` (bumped from 9 by P7.3.1).
     #[test]
-    fn current_schema_version_is_9() {
+    fn current_schema_version_is_10() {
         assert_eq!(
-            CURRENT_SCHEMA_VERSION, 9,
-            "CURRENT_SCHEMA_VERSION must be 9 after P6.2.3"
+            CURRENT_SCHEMA_VERSION, 10,
+            "CURRENT_SCHEMA_VERSION must be 10 after P7.3.1"
         );
     }
 
@@ -1230,12 +1320,12 @@ mod tests {
             "output_targets": [{"fallback_index": 0, "rgb_matrix": [[1.0,0.0,0.0],[0.0,1.0,0.0],[0.0,0.0,1.0]]}]
         });
 
-        // v8 projects are migrated to v9 (scenes renamed to cues + timing defaults).
-        let (migrated, _) = migrate(v8_json).expect("migrate v8 → v9");
-        assert_eq!(migrated["schema_version"], 9u32);
+        // v8 projects are migrated to v10 (cascading through v9 + v10 steps).
+        let (migrated, _) = migrate(v8_json).expect("migrate v8 → v10 (cascade)");
+        assert_eq!(migrated["schema_version"], CURRENT_SCHEMA_VERSION);
         assert_eq!(
             migrated["layers"][0]["warp"]["zone_role"], "window",
-            "zone_role must not be modified by the v8→v9 migration"
+            "zone_role must not be modified by the migration chain"
         );
     }
 
@@ -1359,10 +1449,13 @@ mod tests {
             "output_targets": [{"fallback_index": 0, "rgb_matrix": [[1.0,0.0,0.0],[0.0,1.0,0.0],[0.0,0.0,1.0]]}]
         });
 
-        let (migrated, _) = migrate(v8_json).expect("migrate v8 → v9");
+        let (migrated, _) = migrate(v8_json).expect("migrate v8 → v10 (cascading)");
 
-        // schema_version must be 9.
-        assert_eq!(migrated["schema_version"], 9_u64, "must be v9");
+        // schema_version must be CURRENT_SCHEMA_VERSION (10 after P7.3.1).
+        assert_eq!(
+            migrated["schema_version"], CURRENT_SCHEMA_VERSION,
+            "must be CURRENT_SCHEMA_VERSION"
+        );
 
         // `scenes` key must be absent; `cues` key must be present.
         assert!(
@@ -1450,5 +1543,99 @@ mod tests {
         );
         assert_eq!(restored.cues[0].fire_mode, CueFireMode::Follow);
         assert_eq!(restored.cues[0].bpm_quantize, BpmQuantize::Bars(4));
+    }
+
+    /// P7.3.1 — A v9 project with a per-layer `warp` field migrates to v10
+    /// with `bezier_mesh: Some(...)` present on each layer.  The `anchors`
+    /// array must equal the original `grid` verbatim.  All handles must be
+    /// `None`.  The `mask_polygon`, `mask_feather`, and `zone_role` are
+    /// preserved.
+    #[test]
+    fn migrate_v9_to_v10_adds_bezier_mesh() {
+        use crate::project::schema::Project;
+
+        let v9_json = serde_json::json!({
+            "schema_version": 9,
+            "layers": [
+                {
+                    "id": "layer-1",
+                    "kind": {"Svg": {"svg_path": "test.svg"}},
+                    "enabled": true,
+                    "transform": {"translate": [0.0, 0.0], "rotate_deg": 0.0, "scale": [1.0, 1.0], "anchor": [0.0, 0.0]},
+                    "effects": [],
+                    "blend_mode": "Normal",
+                    "opacity": 1.0,
+                    "warp": {
+                        "rows": 1,
+                        "cols": 1,
+                        "grid": [[[0.25, 0.25], [0.75, 0.25]], [[0.25, 0.75], [0.75, 0.75]]],
+                        "mask_polygon": [[0.1, 0.2], [0.8, 0.2], [0.8, 0.8]],
+                        "mask_feather": 0.05,
+                        "zone_role": "window"
+                    }
+                }
+            ],
+            "output_targets": [{"fallback_index": 0, "rgb_matrix": [[1.0,0.0,0.0],[0.0,1.0,0.0],[0.0,0.0,1.0]]}]
+        });
+
+        let (migrated, _) = migrate(v9_json).expect("migrate v9 → v10");
+
+        assert_eq!(migrated["schema_version"], 10_u64, "must be v10");
+
+        let layer = &migrated["layers"][0];
+        let bm = &layer["bezier_mesh"];
+        assert!(!bm.is_null(), "bezier_mesh must be present after migration");
+
+        // anchors == original grid
+        assert_eq!(
+            bm["anchors"], layer["warp"]["grid"],
+            "anchors must equal original grid verbatim"
+        );
+        // rows / cols preserved
+        assert_eq!(bm["rows"], 1_u64, "rows must be 1");
+        assert_eq!(bm["cols"], 1_u64, "cols must be 1");
+        // All handles_h are null (2×2 grid → 2×2 handle array)
+        let handles_h = bm["handles_h"].as_array().expect("handles_h is array");
+        assert_eq!(handles_h.len(), 2, "handles_h has rows+1 = 2 rows");
+        for row in handles_h {
+            for cell in row.as_array().expect("inner row is array") {
+                assert!(cell.is_null(), "every handle_h entry must be null");
+            }
+        }
+        // mask_polygon, mask_feather, zone_role preserved
+        assert_eq!(
+            bm["mask_polygon"],
+            serde_json::json!([[0.1, 0.2], [0.8, 0.2], [0.8, 0.8]])
+        );
+        assert!((bm["mask_feather"].as_f64().unwrap() - 0.05).abs() < 1e-6);
+        assert_eq!(bm["zone_role"], "window");
+
+        // Full round-trip through typed struct
+        let project: Project =
+            serde_json::from_value(migrated).expect("deserialize migrated v10 project");
+        let lc = &project.layers[0];
+        let mesh = lc.bezier_mesh.as_ref().expect("bezier_mesh must be Some");
+        assert_eq!(mesh.rows, 1);
+        assert_eq!(mesh.cols, 1);
+        assert_eq!(mesh.anchors.len(), 2); // rows+1
+        assert_eq!(mesh.anchors[0].len(), 2); // cols+1
+        assert!(
+            mesh.handles_h.iter().flatten().all(|h| h.is_none()),
+            "all handles_h must be None"
+        );
+        assert!(
+            mesh.handles_v.iter().flatten().all(|h| h.is_none()),
+            "all handles_v must be None"
+        );
+        // BezierMesh::from_warp_mesh / to_warp_mesh_lossless round-trip
+        let warp_mesh = lc.warp.clone();
+        let from_warp = crate::project::schema::BezierMesh::from_warp_mesh(&warp_mesh);
+        let recovered = from_warp
+            .to_warp_mesh_lossless()
+            .expect("lossless round-trip");
+        assert_eq!(
+            warp_mesh.grid, recovered.grid,
+            "from_warp_mesh → to_warp_mesh_lossless must be lossless for all-None handles"
+        );
     }
 }

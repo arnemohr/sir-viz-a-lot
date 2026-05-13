@@ -1501,6 +1501,7 @@ mod tests {
             warp: WarpMesh::identity(),
             muted: false,
             treatment: None,
+            bezier_mesh: None,
         }
     }
 
@@ -1567,6 +1568,7 @@ mod tests {
             warp: WarpMesh::identity(),
             muted: false,
             treatment: None,
+            bezier_mesh: None,
         };
         mutate_transform_effect(&mut layer, |t, _r, _sx, _sy| {
             *t = [0.25, 0.0];

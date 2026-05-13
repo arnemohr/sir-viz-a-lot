@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 9;
+pub const CURRENT_SCHEMA_VERSION: u32 = 10;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Transform2D {
@@ -269,6 +269,13 @@ pub struct LayerConfig {
     /// `treatment == None`.
     #[serde(default)]
     pub treatment: Option<Treatment>,
+    /// P7.3.1 — optional Bezier warp mesh (schema v10+). When `Some`, takes
+    /// precedence over the legacy `warp` field in the render graph. `None`
+    /// for projects that have not yet been migrated (pre-v10); populated by
+    /// `migrate_v9_to_v10` from the existing `warp` grid with all handles
+    /// set to `None` (backward-compatible bilinear fallback).
+    #[serde(default)]
+    pub bezier_mesh: Option<BezierMesh>,
 }
 
 /// P3.2.1 — semantic role tag for a mask polygon, drawn from a closed
@@ -410,6 +417,156 @@ impl WarpMesh {
             zone_role: None,
             unknown_zone_role_raw: None,
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// P7.3.1 — BezierMesh: cubic Bezier warp (schema v10)
+// ---------------------------------------------------------------------------
+
+/// P7.3.1 — A single Bezier tangent handle attached to an anchor point.
+///
+/// `None` = handle is unset (degenerate; edge is straight, bilinear-equivalent).
+/// When set, the pair `[x, y]` is in the same normalised projector-space as the
+/// `WarpMesh.grid` points (0..1 on each axis).
+pub type BezierHandle = Option<[f32; 2]>;
+
+/// P7.3.1 — Bezier warp mesh.  Replaces `WarpMesh` for projects saved at schema
+/// v10+.  `WarpMesh` remains deserializable (deprecated) but is migrated to
+/// `BezierMesh` on load via `migrate_v9_to_v10`.
+///
+/// ## Grid layout
+///
+/// `anchors[row][col]` is the anchor (corner) position for `(rows+1) × (cols+1)`
+/// control points, indexed row-major.  `handles_h[row][col]` is the *horizontal*
+/// (right-side) tangent handle for the anchor at `(row, col)`; `handles_v[row][col]`
+/// is the *vertical* (downward) tangent handle.  The opposing handle of a pair is
+/// the mirror of the same slot one column (or row) to the right (or below), providing
+/// C1 continuity across interior patch boundaries when both handles are set.
+///
+/// ## Degenerate invariant (backward-compatibility)
+///
+/// When every handle in both `handles_h` and `handles_v` is `None`, the Bezier
+/// mesh evaluates to an identical vertex buffer as the original bilinear `WarpMesh`
+/// with the same `anchors` grid.  Verified by the golden-image regression test in
+/// `P7.3.2`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BezierMesh {
+    /// Number of patch rows (= number of cells; anchors span rows+1).
+    pub rows: u32,
+    /// Number of patch columns (= number of cells; anchors span cols+1).
+    pub cols: u32,
+    /// Anchor (corner) positions — `(rows+1)` outer vecs, `(cols+1)` inner.
+    /// In normalised projector space [0..1 × 0..1].
+    pub anchors: Vec<Vec<[f32; 2]>>,
+    /// Horizontal (right-side) tangent handles — same dimensions as `anchors`.
+    /// `None` = straight edge (bilinear fallback).
+    pub handles_h: Vec<Vec<BezierHandle>>,
+    /// Vertical (downward) tangent handles — same dimensions as `anchors`.
+    /// `None` = straight edge (bilinear fallback).
+    pub handles_v: Vec<Vec<BezierHandle>>,
+    /// Mask polygon in normalised [0..1] space — same role as `WarpMesh.mask_polygon`.
+    #[serde(default)]
+    pub mask_polygon: Vec<[f32; 2]>,
+    /// Normalised feather fraction (0..0.5 useful) — same role as `WarpMesh.mask_feather`.
+    #[serde(default = "default_mask_feather")]
+    pub mask_feather: f32,
+    /// P3.2.1 semantic zone role (same as `WarpMesh.zone_role`).
+    #[serde(default)]
+    pub zone_role: Option<ZoneRole>,
+}
+
+fn default_mask_feather() -> f32 {
+    0.02
+}
+
+#[allow(dead_code)] // Methods used progressively as W3.x tasks land; clippy sees all at once.
+impl BezierMesh {
+    /// Identity mesh: `rows × cols` patches with all handles `None` and anchors on a
+    /// uniform grid — equivalent to a `WarpMesh::identity()` with the same dimensions.
+    pub fn identity(rows: u32, cols: u32) -> Self {
+        let anchor_rows = rows + 1;
+        let anchor_cols = cols + 1;
+        let anchors: Vec<Vec<[f32; 2]>> = (0..anchor_rows)
+            .map(|r| {
+                (0..anchor_cols)
+                    .map(|c| [c as f32 / cols as f32, r as f32 / rows as f32])
+                    .collect()
+            })
+            .collect();
+        let handles_h = vec![vec![None; anchor_cols as usize]; anchor_rows as usize];
+        let handles_v = vec![vec![None; anchor_cols as usize]; anchor_rows as usize];
+        BezierMesh {
+            rows,
+            cols,
+            anchors,
+            handles_h,
+            handles_v,
+            mask_polygon: Vec::new(),
+            mask_feather: 0.02,
+            zone_role: None,
+        }
+    }
+
+    /// Default placement: half-size centered mesh — equivalent to `WarpMesh::default_placement()`.
+    pub fn default_placement() -> Self {
+        let anchor_rows = 2u32;
+        let anchor_cols = 2u32;
+        let anchors = vec![
+            vec![[0.25f32, 0.25], [0.75, 0.25]],
+            vec![[0.25, 0.75], [0.75, 0.75]],
+        ];
+        let handles_h = vec![vec![None; anchor_cols as usize]; anchor_rows as usize];
+        let handles_v = vec![vec![None; anchor_cols as usize]; anchor_rows as usize];
+        BezierMesh {
+            rows: 1,
+            cols: 1,
+            anchors,
+            handles_h,
+            handles_v,
+            mask_polygon: Vec::new(),
+            mask_feather: 0.02,
+            zone_role: None,
+        }
+    }
+
+    /// Convert from a `WarpMesh` with all handles set to `None` (backward-compat migration).
+    /// The anchor grid is copied verbatim from `warp.grid`; handles are all `None`.
+    pub fn from_warp_mesh(warp: &WarpMesh) -> Self {
+        let anchor_rows = warp.rows + 1;
+        let anchor_cols = warp.cols + 1;
+        let handles_h = vec![vec![None; anchor_cols as usize]; anchor_rows as usize];
+        let handles_v = vec![vec![None; anchor_cols as usize]; anchor_rows as usize];
+        BezierMesh {
+            rows: warp.rows,
+            cols: warp.cols,
+            anchors: warp.grid.clone(),
+            handles_h,
+            handles_v,
+            mask_polygon: warp.mask_polygon.clone(),
+            mask_feather: warp.mask_feather,
+            zone_role: warp.zone_role,
+        }
+    }
+
+    /// Reconstruct a `WarpMesh` from this mesh (lossless when all handles are `None`).
+    /// Used for backward-compat tests.
+    pub fn to_warp_mesh_lossless(&self) -> Option<WarpMesh> {
+        // Only valid when all handles are None.
+        if self.handles_h.iter().flatten().any(|h| h.is_some())
+            || self.handles_v.iter().flatten().any(|h| h.is_some())
+        {
+            return None;
+        }
+        Some(WarpMesh {
+            rows: self.rows,
+            cols: self.cols,
+            grid: self.anchors.clone(),
+            mask_polygon: self.mask_polygon.clone(),
+            mask_feather: self.mask_feather,
+            zone_role: self.zone_role,
+            unknown_zone_role_raw: None,
+        })
     }
 }
 
@@ -1036,6 +1193,7 @@ pub fn layer_from_svg_path(id: impl Into<String>, svg_path: PathBuf) -> LayerCon
         warp: WarpMesh::default_placement(),
         muted: false,
         treatment: None,
+        bezier_mesh: None,
     }
 }
 
@@ -1068,6 +1226,7 @@ pub fn layer_from_video_path(id: impl Into<String>, path: PathBuf) -> LayerConfi
         warp: WarpMesh::default_placement(),
         muted: false,
         treatment: None,
+        bezier_mesh: None,
     }
 }
 
@@ -1102,6 +1261,7 @@ pub fn layer_from_fx_preset(
         warp,
         muted: false,
         treatment: None,
+        bezier_mesh: None,
     }
 }
 
@@ -1128,6 +1288,7 @@ pub fn layer_from_image_path(id: impl Into<String>, path: PathBuf) -> LayerConfi
         warp: WarpMesh::default_placement(),
         muted: false,
         treatment: None,
+        bezier_mesh: None,
     }
 }
 

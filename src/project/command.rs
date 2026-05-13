@@ -1150,6 +1150,48 @@ impl ReverseStorage for ResetLayerWarpMesh {
     }
 }
 
+/// P7.3.1 — Payload for [`Mutation::ResetLayerBezierMesh`].
+///
+/// Replaces the entire `BezierMesh` for the layer at `layer_idx`
+/// (rule 3 snapshot Reverse — whole-Option snapshot).
+#[derive(Debug, Clone)]
+pub struct ResetLayerBezierMesh {
+    /// Index into `Project.layers`; the layer's `bezier_mesh` is the target.
+    pub layer_idx: usize,
+    /// `BezierMesh` to install (Some) or clear (None).
+    pub new: Option<crate::project::schema::BezierMesh>,
+    /// Pre-mutation `bezier_mesh` snapshot.
+    pub old: Option<crate::project::schema::BezierMesh>,
+}
+
+impl ReverseStorage for ResetLayerBezierMesh {
+    fn apply(self, project: &mut Project) -> Self {
+        let layer = project
+            .layers
+            .get_mut(self.layer_idx)
+            .expect("ResetLayerBezierMesh: layer_idx out of range");
+        // Debug-assert structural match: compare rows/cols when both are Some.
+        if let (Some(current), Some(expected)) = (&layer.bezier_mesh, &self.old) {
+            debug_assert!(
+                current.rows == expected.rows && current.cols == expected.cols,
+                "ResetLayerBezierMesh stale Reverse: bezier_mesh dims=({}, {}), \
+                 expected old=({}, {})",
+                current.rows,
+                current.cols,
+                expected.rows,
+                expected.cols,
+            );
+        }
+        let post = self.new;
+        layer.bezier_mesh = post.clone();
+        ResetLayerBezierMesh {
+            layer_idx: self.layer_idx,
+            new: self.old,
+            old: post,
+        }
+    }
+}
+
 /// Payload for [`Mutation::SetLayerMaskPolygon`].
 ///
 /// Replaces `WarpMesh.mask_polygon` for the layer at `layer_idx`.
@@ -2048,6 +2090,8 @@ pub enum Mutation {
 
     /// Replace the entire `WarpMesh`. Delegates to [`ResetLayerWarpMesh`].
     ResetLayerWarpMesh(ResetLayerWarpMesh),
+    /// P7.3.1 — Replace the entire `BezierMesh` (or set to `None`). Delegates to [`ResetLayerBezierMesh`].
+    ResetLayerBezierMesh(ResetLayerBezierMesh),
     /// Replace `WarpMesh.mask_polygon`. Delegates to [`SetLayerMaskPolygon`].
     SetLayerMaskPolygon(SetLayerMaskPolygon),
 
@@ -2201,6 +2245,7 @@ impl Mutation {
             Mutation::SetOutputRgbMatrix(s) => Mutation::SetOutputRgbMatrix(s.apply(project)),
             Mutation::SetModulator(s) => Mutation::SetModulator(s.apply(project)),
             Mutation::ResetLayerWarpMesh(s) => Mutation::ResetLayerWarpMesh(s.apply(project)),
+            Mutation::ResetLayerBezierMesh(s) => Mutation::ResetLayerBezierMesh(s.apply(project)),
             Mutation::SetLayerMaskPolygon(s) => Mutation::SetLayerMaskPolygon(s.apply(project)),
             Mutation::SetLayerMaskVertex(s) => Mutation::SetLayerMaskVertex(s.apply(project)),
             Mutation::SetLayerWarpCorner(s) => Mutation::SetLayerWarpCorner(s.apply(project)),
@@ -2367,6 +2412,7 @@ impl Mutation {
             | Mutation::RemoveLayerMaskVertex { .. }
             | Mutation::SetLayerMaskVertex(_)
             | Mutation::ResetLayerWarpMesh(_)
+            | Mutation::ResetLayerBezierMesh(_)
             | Mutation::SetLayerMaskPolygon(_)
             | Mutation::SetLayerWarpCorner(_)
             | Mutation::SetProjectScenes(_)
@@ -2825,6 +2871,22 @@ impl Project {
         })
     }
 
+    /// P7.3.1 — Build a `ResetLayerBezierMesh` mutation. Captures the current
+    /// `bezier_mesh` as `old` (whole-Option snapshot Reverse — rule 3). Panics
+    /// if `layer_idx` is out of range.
+    pub fn set_reset_layer_bezier_mesh_mutation(
+        &self,
+        layer_idx: usize,
+        new: Option<crate::project::schema::BezierMesh>,
+    ) -> Mutation {
+        let old = self.layers[layer_idx].bezier_mesh.clone();
+        Mutation::ResetLayerBezierMesh(ResetLayerBezierMesh {
+            layer_idx,
+            new,
+            old,
+        })
+    }
+
     /// Build a `SetLayerMaskPolygon` mutation. Captures the current
     /// `mask_polygon` as `old` (whole-Vec Reverse). Panics if
     /// `layer_idx` is out of range.
@@ -3093,6 +3155,7 @@ mod tests {
                 warp: crate::project::schema::WarpMesh::default_placement(),
                 muted: false,
                 treatment: None,
+                bezier_mesh: None,
             });
         }
         p
@@ -4540,6 +4603,14 @@ mod tests {
             /// role; `Some(role_idx)` picks one of the seven roles by index
             /// modulo 7. Always targets layer 0 (always present in the fixture).
             SetMaskZoneRole(Option<u8>),
+            /// P7.3.1 — reset the bezier mesh to a synthetic identity mesh
+            /// (Some) or clear it (None). Targets layer 0 (always present).
+            ResetBezierMesh {
+                rows: u32,
+                cols: u32,
+                /// `true` = install `Some(BezierMesh)`, `false` = install `None`.
+                some: bool,
+            },
         }
 
         fn to_mutation(kind: &MutationKind, project: &Project) -> Mutation {
@@ -5011,6 +5082,18 @@ mod tests {
                     });
                     project.set_mask_zone_role_mutation(0, new_role)
                 }
+                // P7.3.1 — BezierMesh: reset to identity or clear.
+                MutationKind::ResetBezierMesh { rows, cols, some } => {
+                    if project.layers.is_empty() {
+                        return project.set_gamma_mutation(project.gamma);
+                    }
+                    let new = if *some {
+                        Some(crate::project::schema::BezierMesh::identity(*rows, *cols))
+                    } else {
+                        None
+                    };
+                    project.set_reset_layer_bezier_mesh_mutation(0, new)
+                }
             }
         }
 
@@ -5270,6 +5353,10 @@ mod tests {
                 // P3.6.1 — SetMaskZoneRole: None (clear) or Some(0..=6) (one
                 // of the seven ZoneRole variants; to_mutation mods by 7).
                 proptest::option::weighted(0.5, 0u8..=6u8).prop_map(MutationKind::SetMaskZoneRole),
+                // P7.3.1 — ResetBezierMesh: identity mesh (Some) or clear (None).
+                (1u32..=4, 1u32..=4, any::<bool>()).prop_map(|(rows, cols, some)| {
+                    MutationKind::ResetBezierMesh { rows, cols, some }
+                }),
             ]
         }
 

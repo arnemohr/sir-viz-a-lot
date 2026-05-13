@@ -472,6 +472,7 @@ mod tests {
             },
             muted: false,
             treatment: None,
+            bezier_mesh: None,
         });
         original
             .cues
@@ -513,6 +514,7 @@ mod tests {
             },
             muted: false,
             treatment: None,
+            bezier_mesh: None,
         });
         p.cues.push(Cue::new("slot1", serde_json::json!({}), None));
         p.gamma = 2.2;
@@ -560,6 +562,7 @@ mod tests {
             warp: WarpMesh::identity(),
             muted: false,
             treatment: None,
+            bezier_mesh: None,
         });
         p.cues.push(Cue::new("1", serde_json::json!({}), None));
         p.cues[0].snapshot = snapshot(&p);
@@ -607,6 +610,7 @@ mod tests {
             warp: WarpMesh::identity(),
             muted: false,
             treatment: None,
+            bezier_mesh: None,
         });
         // Save slot 0
         p.cues.push(Cue::new("1", serde_json::json!({}), None));
@@ -662,6 +666,7 @@ mod tests {
             warp: WarpMesh::identity(),
             muted: false,
             treatment: None,
+            bezier_mesh: None,
         });
         let mut stack = UndoStack::new();
 
@@ -722,6 +727,7 @@ mod tests {
             warp: WarpMesh::identity(),
             muted: false,
             treatment: None,
+            bezier_mesh: None,
         });
         // Save cue 1 (scenes.len() goes 0 → 1).
         p.cues.push(Cue::new("1", snapshot(&p), None));
@@ -767,6 +773,7 @@ mod tests {
             warp: WarpMesh::identity(),
             muted: false,
             treatment: None,
+            bezier_mesh: None,
         });
         // Save cue 0 with 1 layer.
         let cue0 = snapshot(&p);
@@ -785,6 +792,7 @@ mod tests {
             warp: WarpMesh::identity(),
             muted: false,
             treatment: None,
+            bezier_mesh: None,
         });
 
         // Recall cue 0 via restore_scene — the freshly added lyr_2 must
@@ -830,6 +838,7 @@ mod tests {
             warp: WarpMesh::identity(),
             muted: false,
             treatment: None,
+            bezier_mesh: None,
         });
         let a = snapshot(&p);
         // Modify a numeric float field so interpolate has something real to
@@ -993,6 +1002,7 @@ mod tests {
             warp: WarpMesh::identity(),
             muted: false,
             treatment: None,
+            bezier_mesh: None,
         });
 
         let project_path = dir.join("show.rmap.json");
@@ -1065,6 +1075,7 @@ mod tests {
             warp: WarpMesh::identity(),
             muted: false,
             treatment: None,
+            bezier_mesh: None,
         });
 
         let project_path = dir.join("show.rmap.json");
@@ -1277,6 +1288,7 @@ mod tests {
             warp: WarpMesh::identity(),
             muted: false,
             treatment: None,
+            bezier_mesh: None,
         });
         assert!(!p.has_absolute_asset_paths());
 
@@ -1296,6 +1308,7 @@ mod tests {
             warp: WarpMesh::identity(),
             muted: false,
             treatment: None,
+            bezier_mesh: None,
         });
         assert!(p.has_absolute_asset_paths());
     }
@@ -1320,6 +1333,7 @@ mod tests {
             warp: WarpMesh::identity(),
             muted: false,
             treatment: None,
+            bezier_mesh: None,
         });
         let snap = snapshot(&p);
         let mut q = Project::default();
@@ -1348,6 +1362,7 @@ mod tests {
             warp: WarpMesh::identity(),
             muted: false,
             treatment: None,
+            bezier_mesh: None,
         });
         let snap2 = snapshot(&p2);
         let mut q2 = Project::default();
@@ -1378,6 +1393,7 @@ mod tests {
             warp: WarpMesh::identity(),
             muted: false,
             treatment: None,
+            bezier_mesh: None,
         });
         let snap = snapshot(&p);
         // restore_scene: saves scenes, restores rest
@@ -1423,6 +1439,7 @@ mod tests {
             warp: WarpMesh::identity(),
             muted: false,
             treatment: None,
+            bezier_mesh: None,
         });
 
         p.save(&path).expect("save");

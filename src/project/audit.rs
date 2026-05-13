@@ -870,6 +870,7 @@ mod tests {
             warp: crate::project::schema::WarpMesh::identity(),
             muted: false,
             treatment: None,
+            bezier_mesh: None,
         });
         p
     }
@@ -922,6 +923,7 @@ mod tests {
             warp: crate::project::schema::WarpMesh::identity(),
             muted: false,
             treatment: None,
+            bezier_mesh: None,
         });
 
         let findings = ProjectAudit::run(&p, &AuditEnv::default());
