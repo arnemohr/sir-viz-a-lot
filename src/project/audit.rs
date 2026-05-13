@@ -193,6 +193,38 @@ pub enum AuditKind {
         /// The zone roles the template declared but the project lacks.
         zone_roles: Vec<crate::project::schema::ZoneRole>,
     },
+    // -----------------------------------------------------------------------
+    // P7 — Phase 7 audit kinds (terse — single-line messages only per P7.11.2).
+    // -----------------------------------------------------------------------
+    /// P7.2.4 — The Syphon.framework binary cannot be loaded at startup.
+    /// `Severity::Warn` — rmap renders normally; Syphon output is unavailable.
+    #[cfg(feature = "syphon-out")]
+    SyphonFrameworkMissing,
+    /// P7.7.2 — A loaded calibration file references a `surface_slot_id` that
+    /// does not match any `OutputTarget` in the current show file. Identity
+    /// warp/mask/gamma applied for that surface. `Severity::Warn`.
+    CalibrationSurfaceUnmatched {
+        /// The surface slot UUID in the calibration file that had no match.
+        slot_id: String,
+        /// Human-readable display name from the calibration surface.
+        display_name: String,
+    },
+    /// P7.3.1 — Informational: this project was saved at schema v9 or earlier
+    /// and its warp meshes have been automatically upgraded to BezierMesh
+    /// (all handles None, bilinear-equivalent). `Severity::Info`.
+    BezierMeshSchemaUpgraded {
+        /// Number of layers whose warp was upgraded.
+        layer_count: usize,
+    },
+    /// P7.9.1 — A fixture group has RGBW enabled but its `w_channel_cct_k`
+    /// is outside the 2000–8000 K valid range. Identity (RGB passthrough)
+    /// applied. `Severity::Warn`.
+    RgbwConfigInvalid {
+        /// The fixture group label.
+        group_label: String,
+        /// The out-of-range CCT value.
+        cct_k: u16,
+    },
 }
 
 /// One finding from a `ProjectAudit::run` walk. The `message` field is

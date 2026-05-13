@@ -208,3 +208,9 @@ v3 = []
 # colour-from-pixel sampling. Off by default; mirrors `audio` / `midi` / `osc`.
 # `cargo build --no-default-features` must succeed with this feature absent.
 lighting = ["dep:artnet_protocol"]
+
+# P7.2.1 — Syphon output: thin objc2 wrapper around the bundled Syphon.framework
+# (BSD-licensed, ~800 KB, vendored in vendor/frameworks/). Off by default until
+# the framework binary is vendor-committed (W2.1). macOS-only; also gate with
+# `#[cfg(target_os = "macos")]` at every use site.
+syphon-out = []
