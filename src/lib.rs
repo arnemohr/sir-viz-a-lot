@@ -15,6 +15,7 @@ pub mod macos;
 pub mod modulators;
 pub mod monitors;
 pub mod project;
+pub mod scene_pack;
 /// P6.12.1 — Timecode sync decoders (MTC; LTC planned).
 pub mod sync;
 /// P6.5.1 — Transport state machine (session-only; not serialised).
