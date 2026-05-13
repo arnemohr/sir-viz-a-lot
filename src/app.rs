@@ -507,6 +507,11 @@ struct EditingState {
     /// (non-blocking); dropped frames are silently ignored.
     #[cfg(feature = "lighting")]
     lighting_tx: Option<crossbeam_channel::Sender<crate::lighting::universe::UniverseFrame>>,
+    /// P5.5.1 — fan-out subscriber list for Blackout / Go-live events.
+    /// Each subscriber receives `on_blackout`, `on_go_live`, or `on_exit_live`
+    /// in the same frame as the corresponding visual state change.
+    #[cfg(feature = "lighting")]
+    light_subscribers: crate::lighting::subscriber::SubscriberList,
     /// One RAII `SleepAssertion` (IOPMAssertion) per active output window,
     /// index-aligned with `outputs`. Prevents display sleep on every
     /// connected projector during a session. The entry at index `k` is
@@ -973,6 +978,9 @@ fn apply_command(state: &mut EditingState, event: Command) -> SideEffect {
                 blackout = state.output_state.blackout,
                 "blackout via source"
             );
+            // P5.5.2 — fan-out Blackout to lighting subscribers in the same frame.
+            #[cfg(feature = "lighting")]
+            state.light_subscribers.blackout();
             SideEffect::None
         }
         Command::Freeze => {
@@ -2057,6 +2065,8 @@ fn assemble_editing_state(
         lighting_thread: None,
         #[cfg(feature = "lighting")]
         lighting_tx: None,
+        #[cfg(feature = "lighting")]
+        light_subscribers: crate::lighting::subscriber::SubscriberList::default(),
         _sleep_assertions: output.sleep_assertions,
         project_file_path,
         crossfade: None,
@@ -6018,6 +6028,9 @@ impl ApplicationHandler for App {
                                     }
                                 }
                             }
+                            // P5.5.3 — fan-out Go-live to lighting subscribers.
+                            #[cfg(feature = "lighting")]
+                            editing.light_subscribers.go_live();
                             self.state = AppState::GoLive(editing);
                         } else {
                             // Roll back any outputs that succeeded before the failure.
@@ -6047,6 +6060,9 @@ impl ApplicationHandler for App {
                             self.state = prev;
                             return;
                         };
+                        // P5.5.3 — fan-out ExitGoLive to lighting subscribers (sends zeros).
+                        #[cfg(feature = "lighting")]
+                        editing.light_subscribers.exit_live();
                         // P5.2.4 — stop the lighting thread before exiting Go-live.
                         // Drop sets the stop flag and joins the thread. Dropping
                         // lighting_tx first ensures the thread's channel read loop

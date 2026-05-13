@@ -27,6 +27,7 @@ pub mod color;
 pub mod dmx_frame;
 pub mod error;
 pub mod fixture;
+pub mod subscriber;
 pub mod thread;
 pub mod transport;
 pub mod universe;
