@@ -5,7 +5,12 @@ below is sized for a single PR.
 
 ## Implementation status
 
-*Not started. Phase 6 has not shipped.*
+- [x] P6.1.1 c6cf423 — Glossary entries for Phase 6 domain terms (16 terms)
+- [x] P6.1.2 64add7d — CHANGELOG + README Phase 6 placeholder section
+- [x] P6.1.3 bc0f429 — Perf-gate stub for 6-cue transport cycle fixture
+- [x] P6.2.1 09a38e3 — Cue struct + rename Project.scenes to Project.cues
+- [x] P6.2.2 46b2629 — Mutation variants for cue timing edits (SetCueName, SetCueTiming, SetProjectCues)
+- [x] P6.2.3 bd476ca — Schema v8 → v9 migration: scenes renamed to cues
 
 ---
 
