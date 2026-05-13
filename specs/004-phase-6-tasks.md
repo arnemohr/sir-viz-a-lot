@@ -18,6 +18,10 @@ below is sized for a single PR.
 - [x] P6.4.1 c043721 — Three-state tile renderer (idle / armed-next / live)
 - [x] P6.4.2 9c1eed6 — Keyboard + MIDI navigation (CueGo, CueArmNext, CueArmPrev, CueBackStep)
 - [x] P6.6.1-P6.6.2 a26377f — Transport HUD (BPM display, tap source, current cue, global quantize)
+- [x] P6.9.2 cd2e600 — OSC cue-fire addresses (/rmap/cue/go|prev|next|back|N)
+- [x] P6.10.1-P6.10.2 3e2b3b2 — Audio bands strip (frequency labels + collapse/expand toggle)
+- [x] P6.12.1 0a1c6d9 — MTC quarter-frame decoder in MIDI bus
+- [x] P6.12.2 b0de634 — MIDI-clock BPM tracking + Clock::set_bpm()
 - [BLOCKED] P6.11.1 — libltc not installed (brew install libltc + cmake required); skip for v0.7
 
 ---
