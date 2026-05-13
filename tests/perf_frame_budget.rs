@@ -2558,6 +2558,119 @@ fn perf_transport_cycle_within_budget() {
 }
 
 // ---------------------------------------------------------------------------
+// P7.1.2 — BezierMesh 4×4 perf-gate stub
+// ---------------------------------------------------------------------------
+
+/// P7.1.2 — Stub perf gate for BezierMesh tessellation overhead.
+///
+/// Uses an identity 4×4 `BezierMesh` placeholder (all handles `None`,
+/// degenerate to bilinear), so the test measures only the tessellation
+/// path overhead without requiring the full BezierMesh schema work (W3.1).
+///
+/// The real fixture is wired by P7.3.2 when `build_bezier_vertices` lands.
+///
+/// ## Baseline (Apple M-series, single core)
+/// Expected p99 ≤ 16.6 ms at 4×4 mesh, 8 subdivisions per cell.
+/// Current stub does no tessellation — p99 is effectively 0; this
+/// documents the invariant for when the real fixture is wired.
+#[test]
+fn perf_bezier_4x4_mesh_within_budget() {
+    // Skip when no GPU adapter is available (CI / non-GPU machines).
+    let _h = match Headless::new() {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("perf_bezier_4x4_mesh_within_budget: skipped — {e}");
+            return;
+        }
+    };
+
+    // Identity BezierMesh stub — 4×4 grid, all handles None, mirrors
+    // bilinear WarpMesh. Real tessellation wired in P7.3.2.
+    const ROWS: u32 = 4;
+    const COLS: u32 = 4;
+
+    let mut frame_times: Vec<f64> = Vec::with_capacity(FRAME_COUNT);
+    for _ in 0..FRAME_COUNT {
+        let t_frame_start = std::time::Instant::now();
+
+        // Stub: identity vertex pass — compute the expected bilinear
+        // positions without calling `build_bezier_vertices` (not yet
+        // available). This documents the benchmark fixture.
+        let mut _vertices: Vec<[f32; 2]> = Vec::with_capacity(((ROWS + 1) * (COLS + 1)) as usize);
+        for row in 0..=(ROWS) {
+            for col in 0..=(COLS) {
+                _vertices.push([col as f32 / COLS as f32, row as f32 / ROWS as f32]);
+            }
+        }
+
+        frame_times.push(t_frame_start.elapsed().as_secs_f64() * 1_000.0);
+    }
+
+    frame_times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let p99 = percentile(&frame_times, 99.0);
+    println!(
+        "perf_bezier_4x4_mesh_within_budget (stub): p99 = {p99:.2} ms \
+         [Apple M-series baseline: < 16.6 ms once real fixture wired in P7.3.2]"
+    );
+    // Loose assertion on stub (≥100× headroom); tightened to 16.6 ms in P7.3.2.
+    assert!(
+        p99 < 100.0,
+        "BezierMesh stub p99 = {p99:.2} ms ≥ 100 ms — unexpected regression"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// P7.1.2 — Syphon publish overhead perf-gate stub
+// ---------------------------------------------------------------------------
+
+/// P7.1.2 — Stub perf gate for Syphon frame publish overhead.
+///
+/// Uses a stub `publish_frame` call returning `Ok(())` without actually
+/// initialising the Syphon framework; the real fixture is wired by P7.2.3
+/// once `SyphonServer` is implemented.
+///
+/// ## Baseline (Apple M-series)
+/// The `SyphonMetalServer publishFrameTexture:` call is documented by
+/// upstream Syphon as ≤ 0.3 ms per frame (IOSurface swap; no copy).
+/// Expect p99 ≤ 16.6 ms with Syphon on.
+#[test]
+fn perf_syphon_publish_overhead_within_budget() {
+    // Skip when no GPU adapter is available.
+    let _h = match Headless::new() {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("perf_syphon_publish_overhead_within_budget: skipped — {e}");
+            return;
+        }
+    };
+
+    // Stub publish — returns Ok(()) without Syphon framework.
+    // Real fixture wired in P7.2.3.
+    let stub_publish_frame = || -> Result<(), ()> { Ok(()) };
+
+    let mut frame_times: Vec<f64> = Vec::with_capacity(FRAME_COUNT);
+    for _ in 0..FRAME_COUNT {
+        let t_frame_start = std::time::Instant::now();
+
+        stub_publish_frame().expect("stub publish never fails");
+
+        frame_times.push(t_frame_start.elapsed().as_secs_f64() * 1_000.0);
+    }
+
+    frame_times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let p99 = percentile(&frame_times, 99.0);
+    println!(
+        "perf_syphon_publish_overhead_within_budget (stub): p99 = {p99:.2} ms \
+         [Apple M-series baseline: < 16.6 ms once real fixture wired in P7.2.3]"
+    );
+    // Loose assertion on stub; tightened to 16.6 ms in P7.2.3.
+    assert!(
+        p99 < 100.0,
+        "Syphon stub p99 = {p99:.2} ms ≥ 100 ms — unexpected regression"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Percentile helper
 // ---------------------------------------------------------------------------
 
