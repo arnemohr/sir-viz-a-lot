@@ -144,6 +144,24 @@ pub enum Command {
         /// `range.start()`).
         offset: f32,
     },
+    // -------------------------------------------------------------------
+    // P6.4.2 — Cue navigation commands
+    // -------------------------------------------------------------------
+    /// P6.4.2 — Fire the armed cue (Space key, MIDI Note 60 when a cue is
+    /// armed). When no cue is armed, falls back to TapTempo (Note 60 dual
+    /// role — see the MIDI dispatcher for the conditional dispatch).
+    #[cfg(feature = "v3")]
+    CueGo,
+    /// P6.4.2 — Move the armed-next pointer one step forward (→ key).
+    #[cfg(feature = "v3")]
+    CueArmNext,
+    /// P6.4.2 — Move the armed-next pointer one step backward (← key).
+    #[cfg(feature = "v3")]
+    CueArmPrev,
+    /// P6.4.2 — Back-step: fire the previous cue and re-arm the current
+    /// one (Backspace key).
+    #[cfg(feature = "v3")]
+    CueBackStep,
 }
 
 /// A pluggable input. v1 ships [`KeyboardSource`] (T-M4-09); v0.4

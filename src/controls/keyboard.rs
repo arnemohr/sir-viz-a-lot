@@ -37,6 +37,8 @@ impl KeyboardSource {
     /// consumer can dedupe if it wants.
     pub fn push_winit_key(&mut self, physical_key: PhysicalKey) {
         let event = match physical_key {
+            // Space → TapTempo (always); CueGo is dispatched from apply_command
+            // when a cue is armed (Space has dual role: tap tempo + cue go).
             PhysicalKey::Code(KeyCode::Space) => Some(Command::TapTempo(TapSource::Keyboard)),
             PhysicalKey::Code(KeyCode::KeyB) => Some(Command::Blackout),
             PhysicalKey::Code(KeyCode::KeyF) => Some(Command::Freeze),
@@ -49,6 +51,17 @@ impl KeyboardSource {
             PhysicalKey::Code(KeyCode::Digit7) => Some(Command::SceneRecall(6)),
             PhysicalKey::Code(KeyCode::Digit8) => Some(Command::SceneRecall(7)),
             PhysicalKey::Code(KeyCode::Digit9) => Some(Command::SceneRecall(8)),
+            // P6.4.2 — cue navigation.
+            // CueGo: dispatched from the TapTempo handler in apply_command
+            // when a cue is armed (dual role). Dedicated CueGo variant emitted
+            // here is an alternative; the apply_command arm for TapTempo already
+            // checks transport.armed_cue and converts to CueGo when armed.
+            #[cfg(feature = "v3")]
+            PhysicalKey::Code(KeyCode::ArrowRight) => Some(Command::CueArmNext),
+            #[cfg(feature = "v3")]
+            PhysicalKey::Code(KeyCode::ArrowLeft) => Some(Command::CueArmPrev),
+            #[cfg(feature = "v3")]
+            PhysicalKey::Code(KeyCode::Backspace) => Some(Command::CueBackStep),
             _ => None,
         };
         if let Some(e) = event {

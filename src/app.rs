@@ -945,8 +945,54 @@ fn process_pending_cue(state: &mut EditingState) -> bool {
 fn apply_command(state: &mut EditingState, event: Command) -> SideEffect {
     match event {
         Command::TapTempo(source) => {
+            // P6.4.2 — Space / MIDI Note 60 dual role: TapTempo + CueGo.
+            // If a cue is armed in the transport, Space also fires CueGo.
+            // TapTempo fires regardless (the operator may tap tempo and go
+            // simultaneously; these are independent operations).
+            #[cfg(feature = "v3")]
+            {
+                if let Some(armed) = state.transport.armed_cue {
+                    // Fire the armed cue via the transport go() path.
+                    let bpm = state.clock.bpm();
+                    if let Some(fire_idx) = state.transport.go(armed, &state.project.cues, bpm) {
+                        schedule_scene_recall(state, fire_idx);
+                    }
+                }
+            }
             state.clock.tap(source);
             tracing::debug!(bpm = state.clock.bpm(), ?source, "tap tempo");
+            SideEffect::None
+        }
+        // P6.4.2 — explicit CueGo (e.g. from MIDI when logic in midi.rs
+        // emits it directly). Fires the armed cue with BPM quantize.
+        #[cfg(feature = "v3")]
+        Command::CueGo => {
+            if let Some(armed) = state.transport.armed_cue {
+                let bpm = state.clock.bpm();
+                if let Some(fire_idx) = state.transport.go(armed, &state.project.cues, bpm) {
+                    schedule_scene_recall(state, fire_idx);
+                }
+            }
+            SideEffect::None
+        }
+        // P6.4.2 — arm navigation (no scene fire; just pointer movement).
+        #[cfg(feature = "v3")]
+        Command::CueArmNext => {
+            state.transport.arm_next(state.project.cues.len());
+            SideEffect::None
+        }
+        #[cfg(feature = "v3")]
+        Command::CueArmPrev => {
+            state.transport.arm_prev();
+            SideEffect::None
+        }
+        #[cfg(feature = "v3")]
+        Command::CueBackStep => {
+            let cue_count = state.project.cues.len();
+            state.transport.back_step(cue_count);
+            if let Some(fire_idx) = state.transport.current_cue {
+                schedule_scene_recall(state, fire_idx);
+            }
             SideEffect::None
         }
         Command::SceneRecall(idx) => {
