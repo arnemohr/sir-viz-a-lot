@@ -6,12 +6,71 @@ All notable changes to rmap are documented here.
 
 ## [0.9.0] — unreleased
 
-<!-- P5.1.3 placeholder — filled in P5.11.2 once W2–W11 ship. -->
+### Lighting output (Phase 5)
 
-### Lighting output
+v0.9 closes the loop between projection and physical lights — every show-critical
+event (Blackout, Go-live, BPM tap) now fans out to both surfaces in the same frame.
 
-_Phase 5: Art-Net DMX light output, fixture groups, and colour-from-pixel
-canvas sampling. Details to follow._
+**Transport — Art-Net via `artnet_protocol`**
+
+- `DmxTransport` trait + `ArtNetTransport` implementation. UDP on the standard
+  Art-Net port 6454. Default destination: subnet broadcast (`255.255.255.255:6454`),
+  operator-configurable in the Output panel.
+- Background `LightingThread` sends at ~44 Hz without blocking the render thread.
+  Bounded crossbeam channel (capacity 4); render thread silently drops frames if full.
+- `NullTransport` for headless tests. `cargo build --no-default-features` compiles
+  without any lighting dependency.
+
+**Fixture model**
+
+- `FixtureGroup`: label, RGB personality (`Vec<ChannelRole>`), universe ID, base
+  channel (0-indexed DMX start address), fixture count, and colour source.
+- Three colour sources: `CanvasRegion` (sample a UV rectangle of the rendered
+  canvas), `ManualColor` (constant RGB), `ZoneTag` (intensity from a Phase 3 zone
+  role — `LightSource`, `Highlight`, etc.).
+- BPM-locked chases: `FixtureChase` with `ChaseTicker` advances step index in
+  lockstep with the existing `Modulator::Bpm` clock.
+- Full undo/redo via `Mutation::AddFixtureGroup`, `RemoveFixtureGroup`,
+  `SetFixtureGroupParams`, `AddFixtureChase`, `RemoveFixtureChase`,
+  `SetFixtureChaseParams`.
+
+**Colour-from-pixel sampling**
+
+- `LightingTapBuffer` (64×36 RGBA8Unorm) is the downsampled canvas readback target.
+- `sample_and_convert` applies `RgbDirect` or `HsvIntensityGate` colour strategy.
+- `budget_samples` averages a `PixelMap` grid of UV samples (capped at 256 per group).
+- `zone_activity_to_color` maps a zone's `[0, 1]` activity level to a white-wash
+  `SampledColor` for zone-derived fixtures.
+
+**Fan-out events**
+
+- `Command::Blackout` (`B`) fans out to all `LightSubscriber`s in the same frame as
+  the visual blackout. DMX zeros arrive within one 44 Hz tick (~23 ms).
+- `EnterGoLive` arms lighting output; `ExitGoLive` sends a courtesy zero-universe
+  packet and stops the background thread.
+
+**Output panel**
+
+- New collapsible "Lighting (Art-Net)" section: Art-Net destination field, fixture
+  group list with per-row label/universe/base channel/fixture count editors,
+  personality channel-role dropdowns, and canvas-region UV coordinate sub-panels.
+  All edits route through the undo stack.
+
+**Diagnostics**
+
+- DMX activity LED (green while packets are sent within 2 s, grey otherwise).
+- Art-Net packet-rate badge ("DMX: N pkt/s") in the Diagnostics section.
+
+**Snapshot integration**
+
+- `LightCueSnapshot` added to the project schema (`#[serde(default)]` for backward
+  compatibility). Per-scene fixture colour overrides survive `restore_scene`.
+
+**Tests**
+
+- Proptest round-trips for all fixture-group and chase Mutation variants.
+- Loopback packet-capture acceptance test in `tests/artnet_blackout.rs` verifies
+  `ArtDmx` opcode, payload, and sequence-number advancement — no hardware required.
 
 ---
 

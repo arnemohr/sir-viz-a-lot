@@ -298,10 +298,32 @@ list of all key bindings is in
 
 ## Lighting output
 
-<!-- P5.1.3 placeholder — filled in P5.11.3 once W2–W9 ship. -->
+v0.9 adds Art-Net DMX output so one scene drives both projection and physical
+lights. Enable with `--features lighting` (off by default to keep the show-day
+binary lean).
 
-_Phase 5 — Art-Net DMX light output, fixture groups, and colour-from-pixel
-canvas sampling. Planned for v0.9.0 (unreleased)._
+**Capability set (Phase 5)**
+
+- **Art-Net transport** — `ArtNetTransport` sends `ArtDmx` PDUs at ~44 Hz over UDP.
+  Default destination is subnet broadcast (`255.255.255.255:6454`); override in the
+  Output panel → Lighting section.
+- **Fixture groups** — Define named groups of RGB fixtures: personality
+  (`Vec<ChannelRole>`), universe ID, base DMX channel, and fixture count.
+- **Colour-from-pixel canvas sampling** — Each fixture group samples a UV-space
+  rectangle of the rendered canvas (64×36 downsample). The fixture output follows
+  the canvas colour in real time.
+- **Zone-derived fixtures** — Fixture intensity can follow a Phase 3 zone's
+  `LightSource` or `Highlight` activity level.
+- **BPM-locked chases** — `FixtureChase` drives a fixture group through colour
+  steps locked to the project BPM clock.
+- **Blackout fan-out** — `B` (Blackout) kills both projector and fixtures in the
+  same frame. Go-live arms all lighting output alongside the visual transition.
+- **Diagnostics** — DMX activity LED (green/grey) and packet-rate badge in the
+  Diagnostics section.
+
+**5-minute operator story:** open the Output panel → Lighting, add a fixture group,
+set the universe and base channel, assign a canvas region, Go-live, watch the
+fixture follow the canvas.
 
 ### Cargo features
 

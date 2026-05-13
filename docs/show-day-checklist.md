@@ -393,3 +393,54 @@ Traces to `specs/004-phase-3.md` acceptance criteria.
 
 > **Note:** record pass/fail per step as a commit comment when this script is
 > run against the v0.8 release-candidate build.
+
+---
+
+## Lighting output — Art-Net / DMX pre-show checks (v0.9)
+
+Phase 5 adds DMX light output via Art-Net. If your show does NOT use DMX fixtures, skip this section.
+
+14. **Art-Net destination reachable**
+    - [ ] Open the Output panel → Lighting section. Confirm the Art-Net destination
+          IP:port is set correctly (default `255.255.255.255:6454` for subnet broadcast).
+    - [ ] Using a network packet capture (e.g. Wireshark on UDP port 6454) or your
+          fixture controller's "DMX monitor", confirm Art-Net packets arrive when
+          rmap is in Go-live mode.
+    - [ ] Cap: Phase 5 supports up to **16 universes**. If you have more, verify
+          the first 16 are correct and the remainder are out of scope.
+    - **Pass:** Art-Net node / controller shows incoming DMX traffic.
+
+15. **DMX activity LED — green during Go-live**
+    - [ ] In the rmap control window, open the **Diagnostics** section (Advanced
+          disclosure panel).
+    - [ ] Press Go live. Confirm the DMX activity LED (small circle) is **green**.
+    - [ ] Press Exit GoLive. Within ~2 seconds, confirm the LED goes **grey**.
+    - **Pass:** LED tracks output activity correctly.
+
+16. **Blackout kills both projector and fixtures**
+    - [ ] While in Go-live with DMX active, press **B** (Blackout).
+    - [ ] Confirm the projector output goes black AND fixtures go dark in the
+          same frame (visible simultaneously on the network monitor).
+    - [ ] Press **B** again to release blackout; both surfaces should recover.
+    - **Pass:** visual blackout and DMX zeros arrive within 23 ms of each other
+      (one Art-Net tick; verified with Wireshark if precise).
+
+17. **Fixture colour follows canvas region**
+    - [ ] Open the Output panel → Lighting section. Select a fixture group with
+          a CanvasRegion source.
+    - [ ] Change the background colour or load a brightly coloured image. Observe
+          that fixture output colour tracks the canvas region.
+    - [ ] Operator target: from zero configuration to watching a fixture follow
+          the canvas within **5 minutes** on a fresh setup.
+    - **Pass:** fixture colour is visually correlated with the sampled canvas region.
+
+18. **Show-day frame budget — 16 universes active**
+    - [ ] With 16 DMX universes configured and active (or as many as your show
+          uses), open the Diagnostics section and check the fps badge.
+    - [ ] The diagnostics "DMX: N pkt/s" rate badge should show approximately
+          44 pkt/s per universe (44 Hz × number of universes).
+    - [ ] The render fps badge should remain at 60 Hz (vsync) with no frame drops.
+    - **Pass:** frame budget unchanged; fps steady at show pace.
+
+> **Note:** record pass/fail per step as a commit comment when this script is
+> run against the v0.9 release-candidate build.
