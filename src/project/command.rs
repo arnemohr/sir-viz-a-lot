@@ -1348,6 +1348,148 @@ impl ReverseStorage for SetProjectScenes {
     }
 }
 
+// ---------------------------------------------------------------------------
+// P6.2.2 — Per-cue timing mutations
+// ---------------------------------------------------------------------------
+
+/// P6.2.2 — Snapshot of all timing + binding fields on a single [`Cue`] for
+/// atomic undo/redo. Storing the whole snapshot prevents stale-Reverse
+/// corruption when future fields are added to `Cue`.
+///
+/// Follows Reverse-storage rule 2 (whole-struct snapshot, not per-field).
+#[derive(Debug, Clone)]
+pub struct CueTimingSnapshot {
+    pub in_time_s: f32,
+    pub hold_time_s: Option<f32>,
+    pub out_time_s: f32,
+    pub fire_mode: crate::project::schema::CueFireMode,
+    pub bpm_quantize: crate::project::schema::BpmQuantize,
+    pub timecode_trigger: Option<crate::project::schema::TimecodePosition>,
+    pub in_time_binding: Option<crate::project::schema::CcBinding>,
+    pub hold_binding: Option<crate::project::schema::CcBinding>,
+    pub out_time_binding: Option<crate::project::schema::CcBinding>,
+    pub in_time_osc: Option<crate::project::schema::OscBinding>,
+    pub hold_osc: Option<crate::project::schema::OscBinding>,
+    pub out_time_osc: Option<crate::project::schema::OscBinding>,
+}
+
+impl CueTimingSnapshot {
+    /// Capture all timing and binding fields from a cue.
+    pub fn from_cue(cue: &crate::project::schema::Cue) -> Self {
+        CueTimingSnapshot {
+            in_time_s: cue.in_time_s,
+            hold_time_s: cue.hold_time_s,
+            out_time_s: cue.out_time_s,
+            fire_mode: cue.fire_mode,
+            bpm_quantize: cue.bpm_quantize,
+            timecode_trigger: cue.timecode_trigger,
+            in_time_binding: cue.in_time_binding.clone(),
+            hold_binding: cue.hold_binding.clone(),
+            out_time_binding: cue.out_time_binding.clone(),
+            in_time_osc: cue.in_time_osc.clone(),
+            hold_osc: cue.hold_osc.clone(),
+            out_time_osc: cue.out_time_osc.clone(),
+        }
+    }
+
+    /// Apply all fields in this snapshot to the given cue.
+    pub fn apply_to_cue(&self, cue: &mut crate::project::schema::Cue) {
+        cue.in_time_s = self.in_time_s;
+        cue.hold_time_s = self.hold_time_s;
+        cue.out_time_s = self.out_time_s;
+        cue.fire_mode = self.fire_mode;
+        cue.bpm_quantize = self.bpm_quantize;
+        cue.timecode_trigger = self.timecode_trigger;
+        cue.in_time_binding = self.in_time_binding.clone();
+        cue.hold_binding = self.hold_binding.clone();
+        cue.out_time_binding = self.out_time_binding.clone();
+        cue.in_time_osc = self.in_time_osc.clone();
+        cue.hold_osc = self.hold_osc.clone();
+        cue.out_time_osc = self.out_time_osc.clone();
+    }
+}
+
+/// P6.2.2 — Payload for [`Mutation::SetCueName`]. Stores both old and new
+/// strings for symmetric undo per Reverse-storage rule 1.
+#[derive(Debug, Clone)]
+pub struct SetCueName {
+    pub cue_idx: usize,
+    pub new: String,
+    pub old: String,
+}
+
+impl ReverseStorage for SetCueName {
+    fn apply(self, project: &mut Project) -> Self {
+        debug_assert!(
+            project.cues.get(self.cue_idx).map(|c| &c.name) == Some(&self.old),
+            "SetCueName stale Reverse: cue[{}].name={:?}, expected old={:?}",
+            self.cue_idx,
+            project.cues.get(self.cue_idx).map(|c| &c.name),
+            self.old,
+        );
+        let post = self.new.clone();
+        project.cues[self.cue_idx].name = post.clone();
+        SetCueName {
+            cue_idx: self.cue_idx,
+            new: self.old,
+            old: post,
+        }
+    }
+}
+
+/// P6.2.2 — Payload for [`Mutation::SetCueTiming`]. Whole-struct snapshot
+/// Reverse (rule 2) so future additions to `Cue` don't silently corrupt undo.
+#[derive(Debug, Clone)]
+pub struct SetCueTiming {
+    pub cue_idx: usize,
+    pub new: CueTimingSnapshot,
+    pub old: CueTimingSnapshot,
+}
+
+impl ReverseStorage for SetCueTiming {
+    fn apply(self, project: &mut Project) -> Self {
+        debug_assert!(
+            project.cues.get(self.cue_idx).is_some(),
+            "SetCueTiming: cue_idx {} out of range (len={})",
+            self.cue_idx,
+            project.cues.len(),
+        );
+        let post = CueTimingSnapshot::from_cue(&project.cues[self.cue_idx]);
+        self.new.apply_to_cue(&mut project.cues[self.cue_idx]);
+        SetCueTiming {
+            cue_idx: self.cue_idx,
+            new: self.old,
+            old: post,
+        }
+    }
+}
+
+/// P6.2.2 — Payload for [`Mutation::SetProjectCues`]. Replaces `Project.cues`
+/// wholesale (whole-Vec snapshot Reverse, rule 3). Reorders / deletes / saves
+/// all go through this single variant.
+#[derive(Debug, Clone)]
+pub struct SetProjectCues {
+    pub new: Vec<crate::project::schema::Cue>,
+    pub old: Vec<crate::project::schema::Cue>,
+}
+
+impl ReverseStorage for SetProjectCues {
+    fn apply(self, project: &mut Project) -> Self {
+        debug_assert!(
+            project.cues.len() == self.old.len(),
+            "SetProjectCues stale Reverse: cues.len()={}, expected old.len()={}",
+            project.cues.len(),
+            self.old.len()
+        );
+        let post = self.new;
+        project.cues = post.clone();
+        SetProjectCues {
+            new: self.old,
+            old: post,
+        }
+    }
+}
+
 /// Payload for [`Mutation::SetOutputMonitorIndex`].
 #[derive(Debug, Clone)]
 pub struct SetOutputMonitorIndex {
@@ -1936,6 +2078,17 @@ pub enum Mutation {
     /// Replace `Project.scenes` wholesale. Delegates to [`SetProjectScenes`].
     SetProjectScenes(SetProjectScenes),
 
+    // -------------------------------------------------------------------
+    // P6.2.2 — Per-cue timing mutations
+    // -------------------------------------------------------------------
+    /// P6.2.2 — Rename a single cue. Delegates to [`SetCueName`].
+    SetCueName(SetCueName),
+    /// P6.2.2 — Replace all timing + binding fields on a single cue.
+    /// Delegates to [`SetCueTiming`].
+    SetCueTiming(SetCueTiming),
+    /// P6.2.2 — Replace `Project.cues` wholesale. Delegates to [`SetProjectCues`].
+    SetProjectCues(SetProjectCues),
+
     /// Replace `Project.output_monitor_index`. Delegates to [`SetOutputMonitorIndex`].
     SetOutputMonitorIndex(SetOutputMonitorIndex),
 
@@ -2048,6 +2201,9 @@ impl Mutation {
             Mutation::SetLayerMaskVertex(s) => Mutation::SetLayerMaskVertex(s.apply(project)),
             Mutation::SetLayerWarpCorner(s) => Mutation::SetLayerWarpCorner(s.apply(project)),
             Mutation::SetProjectScenes(s) => Mutation::SetProjectScenes(s.apply(project)),
+            Mutation::SetCueName(s) => Mutation::SetCueName(s.apply(project)),
+            Mutation::SetCueTiming(s) => Mutation::SetCueTiming(s.apply(project)),
+            Mutation::SetProjectCues(s) => Mutation::SetProjectCues(s.apply(project)),
             Mutation::SetOutputMonitorIndex(s) => Mutation::SetOutputMonitorIndex(s.apply(project)),
             Mutation::ApplyProjectSnapshot(s) => Mutation::ApplyProjectSnapshot(s.apply(project)),
 
@@ -2210,6 +2366,9 @@ impl Mutation {
             | Mutation::SetLayerMaskPolygon(_)
             | Mutation::SetLayerWarpCorner(_)
             | Mutation::SetProjectScenes(_)
+            | Mutation::SetCueName(_)
+            | Mutation::SetCueTiming(_)
+            | Mutation::SetProjectCues(_)
             | Mutation::SetOutputMonitorIndex(_)
             | Mutation::SetProjectGammaOverride(_)
             | Mutation::SetProjectBrightnessOverride(_)
@@ -2704,8 +2863,31 @@ impl Project {
     pub fn set_project_scenes_mutation(&self, new: Vec<crate::project::schema::Cue>) -> Mutation {
         Mutation::SetProjectScenes(SetProjectScenes {
             new,
-            old: self.scenes.clone(),
+            old: self.cues.clone(),
         })
+    }
+
+    /// P6.2.2 — Build a `SetProjectCues` mutation (whole-Vec Reverse, rule 3).
+    /// Captures the current `project.cues` as `old`; `new` is the replacement.
+    pub fn set_project_cues_mutation(&self, new: Vec<crate::project::schema::Cue>) -> Mutation {
+        Mutation::SetProjectCues(SetProjectCues {
+            new,
+            old: self.cues.clone(),
+        })
+    }
+
+    /// P6.2.2 — Build a `SetCueName` mutation. Captures the current name
+    /// as `old`. Panics if `cue_idx` is out of range.
+    pub fn set_cue_name_mutation(&self, cue_idx: usize, new: String) -> Mutation {
+        let old = self.cues[cue_idx].name.clone();
+        Mutation::SetCueName(SetCueName { cue_idx, new, old })
+    }
+
+    /// P6.2.2 — Build a `SetCueTiming` mutation. Captures the current timing
+    /// snapshot as `old`. Panics if `cue_idx` is out of range.
+    pub fn set_cue_timing_mutation(&self, cue_idx: usize, new: CueTimingSnapshot) -> Mutation {
+        let old = CueTimingSnapshot::from_cue(&self.cues[cue_idx]);
+        Mutation::SetCueTiming(SetCueTiming { cue_idx, new, old })
     }
 
     /// Build a `SetLayerEffects` mutation. Captures the current effect chain
@@ -3678,13 +3860,13 @@ mod tests {
         let mut stack = UndoStack::new();
 
         // 1. Save current state to slot 0.
-        let mut new_scenes = p.cues.clone();
-        new_scenes.push(crate::project::schema::Cue {
-            name: "scene1".into(),
-            snapshot: crate::project::snapshot(&p),
-            thumbnail: None,
-        });
-        stack.push(p.set_project_scenes_mutation(new_scenes), &mut p);
+        let mut new_cues = p.cues.clone();
+        new_cues.push(crate::project::schema::Cue::new(
+            "scene1",
+            crate::project::snapshot(&p),
+            None,
+        ));
+        stack.push(p.set_project_scenes_mutation(new_cues), &mut p);
 
         // 2. Modify project (gamma).
         stack.push(p.set_gamma_mutation(2.5), &mut p);
@@ -5195,6 +5377,94 @@ mod tests {
                 }
                 let after_redo = serde_json::to_value(&p).unwrap();
                 prop_assert_eq!(after_apply, after_redo);
+            }
+        }
+
+        // -------------------------------------------------------------------
+        // P6.2.2 — `SetCueTiming` and `SetProjectCues` proptest round-trips.
+        // -------------------------------------------------------------------
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(512))]
+
+            /// P6.2.2 — `SetCueTiming` apply→reverse restores the original
+            /// timing snapshot on a single cue. Exercises the whole-struct
+            /// Reverse rule (rule 2): all fields are captured atomically.
+            #[test]
+            fn set_cue_timing_round_trips(
+                in_time_s in 0.0_f32..=60.0_f32,
+                hold_time_s in proptest::option::of(0.0_f32..=300.0_f32),
+                out_time_s in 0.0_f32..=60.0_f32,
+                follow in proptest::bool::ANY,
+                bars in proptest::option::of(
+                    proptest::strategy::Just(1u8)
+                        .prop_union(proptest::strategy::Just(2))
+                        .or(proptest::strategy::Just(4))
+                        .or(proptest::strategy::Just(8))
+                ),
+            ) {
+                use crate::project::schema::{BpmQuantize, Cue, CueFireMode};
+
+                let mut p = fresh_project();
+                // Push a cue with default timing.
+                p.cues.push(Cue::new("test-cue", serde_json::json!({}), None));
+
+                let orig_snapshot = CueTimingSnapshot::from_cue(&p.cues[0]);
+
+                let new_snapshot = CueTimingSnapshot {
+                    in_time_s,
+                    hold_time_s,
+                    out_time_s,
+                    fire_mode: if follow { CueFireMode::Follow } else { CueFireMode::GoOnTrigger },
+                    bpm_quantize: match bars {
+                        Some(n) => BpmQuantize::Bars(n),
+                        None => BpmQuantize::Off,
+                    },
+                    timecode_trigger: None,
+                    in_time_binding: None,
+                    hold_binding: None,
+                    out_time_binding: None,
+                    in_time_osc: None,
+                    hold_osc: None,
+                    out_time_osc: None,
+                };
+
+                // Apply the mutation then immediately apply the returned reverse.
+                let m = p.set_cue_timing_mutation(0, new_snapshot);
+                let reverse = m.apply(&mut p);
+                let _ = reverse.apply(&mut p);
+
+                // Timing fields must be restored bit-exactly.
+                let restored = CueTimingSnapshot::from_cue(&p.cues[0]);
+                prop_assert_eq!(orig_snapshot.in_time_s.to_bits(), restored.in_time_s.to_bits());
+                prop_assert_eq!(orig_snapshot.out_time_s.to_bits(), restored.out_time_s.to_bits());
+                prop_assert_eq!(orig_snapshot.hold_time_s, restored.hold_time_s);
+                prop_assert_eq!(orig_snapshot.fire_mode, restored.fire_mode);
+                prop_assert_eq!(orig_snapshot.bpm_quantize, restored.bpm_quantize);
+            }
+
+            /// P6.2.2 — `SetProjectCues` apply→reverse restores the original
+            /// cue vec (whole-Vec Reverse, rule 3).
+            #[test]
+            fn set_project_cues_round_trips(
+                name_a in "[a-z]{1,8}",
+                name_b in "[a-z]{1,8}",
+            ) {
+                use crate::project::schema::Cue;
+
+                let mut p = fresh_project();
+                let orig_cues = p.cues.clone();
+
+                let new_cues = vec![
+                    Cue::new(name_a.as_str(), serde_json::json!({}), None),
+                    Cue::new(name_b.as_str(), serde_json::json!({}), None),
+                ];
+
+                let m = p.set_project_cues_mutation(new_cues);
+                let reverse = m.apply(&mut p);
+                prop_assert_eq!(p.cues.len(), 2, "apply installed 2 cues");
+                let _ = reverse.apply(&mut p);
+                prop_assert_eq!(p.cues.len(), orig_cues.len(), "reverse restored original len");
             }
         }
     }
