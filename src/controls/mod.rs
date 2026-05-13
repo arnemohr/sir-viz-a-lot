@@ -162,6 +162,15 @@ pub enum Command {
     /// one (Backspace key).
     #[cfg(feature = "v3")]
     CueBackStep,
+    /// P7.7.3 — Operator clicked "Load" on the calibration-offer toast.
+    /// The path was already resolved at toast-creation time (same-directory
+    /// discovery after project open).  The handler in `apply_command` loads
+    /// the calibration file from `path` and applies it to the session, emitting
+    /// a Warn toast for each unmatched surface.
+    #[cfg(feature = "v3")]
+    AcceptCalibrationOffer {
+        path: std::path::PathBuf,
+    },
 }
 
 /// A pluggable input. v1 ships [`KeyboardSource`] (T-M4-09); v0.4

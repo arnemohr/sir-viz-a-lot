@@ -1414,6 +1414,42 @@ fn apply_command(state: &mut EditingState, event: Command) -> SideEffect {
             );
             SideEffect::None
         }
+        // P7.7.3 — operator accepted the same-directory calibration offer.
+        #[cfg(feature = "v3")]
+        Command::AcceptCalibrationOffer { path } => {
+            match crate::calibration::CalibrationFile::load(&path) {
+                Ok(cal) => {
+                    let unmatched = state.apply_calibration(cal);
+                    for (slot_id, display_name) in unmatched {
+                        tracing::warn!(
+                            slot_id = %slot_id,
+                            display = %display_name,
+                            "CalibrationSurface unmatched during offer-accept — identity fallback",
+                        );
+                        state.toast_queue.push(crate::windows::toast::Toast::new(
+                            crate::windows::toast::ToastKind::Warn,
+                            format!(
+                                "Calibration surface \"{display_name}\" \
+                                 has no matching output — identity applied."
+                            ),
+                        ));
+                    }
+                    tracing::info!(
+                        target: "rmap::ux",
+                        event = "calibration_offer_accepted",
+                        path = %path.display(),
+                    );
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        ?err,
+                        path = %path.display(),
+                        "AcceptCalibrationOffer: load failed",
+                    );
+                }
+            }
+            SideEffect::None
+        }
     }
 }
 
@@ -6381,7 +6417,7 @@ impl ApplicationHandler for App {
                                 match crate::project::Project::load(&path) {
                                     Ok(project) => {
                                         state.project = project;
-                                        state.project_file_path = Some(path);
+                                        state.project_file_path = Some(path.clone());
                                         state.dirty = false;
                                         rebuild_layers_for_state(state);
                                         tracing::info!(
@@ -6393,6 +6429,32 @@ impl ApplicationHandler for App {
                                                 .map(|p| p.display().to_string())
                                                 .unwrap_or_default(),
                                         );
+                                        // P7.7.3 — same-directory calibration auto-offer.
+                                        // Check for <show-stem>.rmap-calibration.json next
+                                        // to the project file.  If found, push a non-blocking
+                                        // Info toast offering to load it.
+                                        if let Some(stem) =
+                                            path.file_stem().and_then(|s| s.to_str())
+                                        {
+                                            let cal_name = format!("{stem}.rmap-calibration.json");
+                                            let cal_path = path.parent().map(|d| d.join(&cal_name));
+                                            if let Some(cp) = cal_path.filter(|p| p.exists()) {
+                                                state.toast_queue.push(
+                                                    crate::windows::toast::Toast::new(
+                                                        crate::windows::toast::ToastKind::Info,
+                                                        "Venue calibration found — load?",
+                                                    )
+                                                    .with_action(
+                                                        crate::windows::toast::ToastAction {
+                                                            label: "Load".into(),
+                                                            command: crate::controls::Command::AcceptCalibrationOffer {
+                                                                path: cp,
+                                                            },
+                                                        },
+                                                    ),
+                                                );
+                                            }
+                                        }
                                     }
                                     Err(err) => {
                                         tracing::warn!(
