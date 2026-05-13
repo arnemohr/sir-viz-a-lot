@@ -616,6 +616,12 @@ pub struct Project {
     #[serde(default)]
     #[cfg(feature = "lighting")]
     pub fixture_chases: Vec<crate::lighting::chase::FixtureChase>,
+    /// P5.8.1 — Art-Net destination address (host:port string).
+    /// `None` defaults to `"255.255.255.255:6454"` (subnet broadcast).
+    /// Operator-configurable via the Output panel Lighting section.
+    #[serde(default)]
+    #[cfg(feature = "lighting")]
+    pub artnet_dest: Option<String>,
     /// Side-channel state surfaced by [`migrate::migrate_v3_to_v4`] to the
     /// audit pass (T3.0d). `previous_warp_count > 1` triggers a one-shot
     /// `MultipleWarpsConsolidated` finding so the operator knows the
@@ -662,6 +668,8 @@ impl Default for Project {
             fixture_groups: Vec::new(),
             #[cfg(feature = "lighting")]
             fixture_chases: Vec::new(),
+            #[cfg(feature = "lighting")]
+            artnet_dest: None,
             transient_audit_signals: Cell::new(TransientAuditSignals::default()),
         }
     }

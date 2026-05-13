@@ -38,6 +38,11 @@ use crate::windows::controls::show_rgb_matrix_editor;
 use crate::windows::glossary::{GlossaryTerm, glossary_label};
 use crate::windows::theme;
 
+#[cfg(feature = "lighting")]
+use crate::lighting::fixture::FixtureGroup;
+#[cfg(feature = "lighting")]
+use crate::project::command::Mutation;
+
 /// Render the Output panel body.
 ///
 /// Called from `advanced::show` when `project.output_targets.len() >= 2`,
@@ -176,5 +181,252 @@ pub fn show(
         ui.add_space(4.0);
     }
 
+    // -------------------------------------------------------------------------
+    // 3. Lighting section (P5.8.1 + P5.8.2 + P5.8.3) — behind `feature = "lighting"`
+    //
+    // A collapsible "Lighting" section docked at the bottom of the Output
+    // panel. Phase 5 scope:
+    //   - Art-Net destination IP + port text field.
+    //   - Fixture group list with per-row: label, universe, base channel,
+    //     fixture count, and delete button.
+    //   - "+ Add fixture group" button.
+    //   - Personality sub-section per row (channel count + role dropdowns).
+    //   - Canvas-region UV coordinate pair (P5.8.4 stub: text field, no drag UI).
+    // -------------------------------------------------------------------------
+    #[cfg(feature = "lighting")]
+    {
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(4.0);
+
+        ui.collapsing("Lighting (Art-Net)", |ui| {
+            show_lighting_section(ui, project, st);
+        });
+    }
+
     ControlPanelAction::None
+}
+
+/// P5.8.1-P5.8.4 — Render the Lighting sub-section of the Output panel.
+///
+/// Called inside a `CollapsingHeader`; gated on `feature = "lighting"`.
+#[cfg(feature = "lighting")]
+fn show_lighting_section(ui: &mut Ui, project: &mut Project, st: &mut ControlPanelState) {
+    // --- Art-Net destination ---
+    ui.horizontal(|ui| {
+        ui.label("Art-Net dest:");
+        let mut dest = project
+            .artnet_dest
+            .clone()
+            .unwrap_or_else(|| "255.255.255.255:6454".to_string());
+        let resp = ui.text_edit_singleline(&mut dest);
+        if resp.lost_focus() {
+            project.artnet_dest = Some(dest);
+        }
+    });
+
+    ui.add_space(4.0);
+
+    // --- Fixture group list ---
+    if project.fixture_groups.is_empty() {
+        ui.label(
+            egui::RichText::new("No fixture groups — add one below.")
+                .color(theme::TEXT_SECONDARY)
+                .italics(),
+        );
+    } else {
+        // Collect mutations to emit after the loop (avoid borrow conflict).
+        let mut pending: Vec<Mutation> = Vec::new();
+
+        // Iterate by index so we can reference project.fixture_groups[i]
+        // without keeping a reference across a mutable call.
+        let group_ids: Vec<_> = project.fixture_groups.iter().map(|g| g.id).collect();
+
+        for (i, group_id) in group_ids.iter().copied().enumerate() {
+            let group = &project.fixture_groups[i];
+
+            egui::Frame::group(ui.style())
+                .inner_margin(egui::Margin::same(6))
+                .show(ui, |ui| {
+                    // --- Label row ---
+                    ui.horizontal(|ui| {
+                        ui.label("Label:");
+                        let mut label = group.label.clone();
+                        if ui.text_edit_singleline(&mut label).lost_focus()
+                            && label != group.label
+                        {
+                            let mut params = crate::lighting::fixture::FixtureGroupParams::from_group(&project.fixture_groups[i]);
+                            params.label = label;
+                            pending.push(Mutation::SetFixtureGroupParams(
+                                crate::project::command::SetFixtureGroupParams::new(&project.fixture_groups[i], params),
+                            ));
+                        }
+
+                        // Delete button.
+                        if ui
+                            .button(egui::RichText::new("✕").color(egui::Color32::from_rgb(200, 60, 60)))
+                            .on_hover_text("Remove this fixture group")
+                            .clicked()
+                        {
+                            pending.push(Mutation::RemoveFixtureGroup { id: group_id });
+                        }
+                    });
+
+                    let group = &project.fixture_groups[i];
+
+                    // --- Universe / base channel / fixture count ---
+                    ui.horizontal(|ui| {
+                        ui.label("Universe:");
+                        let mut univ = group.universe_id.as_u16();
+                        if ui
+                            .add(egui::DragValue::new(&mut univ).range(0u16..=32767))
+                            .changed()
+                        {
+                            let mut params = crate::lighting::fixture::FixtureGroupParams::from_group(&project.fixture_groups[i]);
+                            params.universe_id = crate::lighting::universe::UniverseId(univ);
+                            pending.push(Mutation::SetFixtureGroupParams(
+                                crate::project::command::SetFixtureGroupParams::new(&project.fixture_groups[i], params),
+                            ));
+                        }
+
+                        ui.label("Base ch:");
+                        let mut base = group.base_channel;
+                        if ui
+                            .add(egui::DragValue::new(&mut base).range(0u8..=255))
+                            .changed()
+                        {
+                            let mut params = crate::lighting::fixture::FixtureGroupParams::from_group(&project.fixture_groups[i]);
+                            params.base_channel = base;
+                            pending.push(Mutation::SetFixtureGroupParams(
+                                crate::project::command::SetFixtureGroupParams::new(&project.fixture_groups[i], params),
+                            ));
+                        }
+
+                        ui.label("Fixtures:");
+                        let mut count = group.fixture_count;
+                        if ui
+                            .add(egui::DragValue::new(&mut count).range(1u8..=255))
+                            .changed()
+                        {
+                            let mut params = crate::lighting::fixture::FixtureGroupParams::from_group(&project.fixture_groups[i]);
+                            params.fixture_count = count;
+                            pending.push(Mutation::SetFixtureGroupParams(
+                                crate::project::command::SetFixtureGroupParams::new(&project.fixture_groups[i], params),
+                            ));
+                        }
+                    });
+
+                    let group = &project.fixture_groups[i];
+
+                    // --- P5.8.3 — Personality sub-section ---
+                    ui.collapsing(
+                        format!("Personality: {} ({}ch)", group.personality.label, group.personality.channel_count()),
+                        |ui| {
+                            use crate::lighting::fixture::ChannelRole;
+                            let group = &project.fixture_groups[i];
+                            for (ch_idx, role) in group.personality.channels.iter().enumerate() {
+                                ui.horizontal(|ui| {
+                                    ui.label(format!("Ch {}:", ch_idx + 1));
+                                    let mut sel = role.clone();
+                                    egui::ComboBox::from_id_salt(format!("ch_role_{}_{}", i, ch_idx))
+                                        .selected_text(channel_role_label(&sel))
+                                        .show_ui(ui, |ui| {
+                                            ui.selectable_value(&mut sel, ChannelRole::Red, "Red");
+                                            ui.selectable_value(&mut sel, ChannelRole::Green, "Green");
+                                            ui.selectable_value(&mut sel, ChannelRole::Blue, "Blue");
+                                        });
+                                    if sel != *role {
+                                        let mut params = crate::lighting::fixture::FixtureGroupParams::from_group(&project.fixture_groups[i]);
+                                        params.personality.channels[ch_idx] = sel;
+                                        pending.push(Mutation::SetFixtureGroupParams(
+                                            crate::project::command::SetFixtureGroupParams::new(&project.fixture_groups[i], params),
+                                        ));
+                                    }
+                                });
+                            }
+                        },
+                    );
+
+                    let group = &project.fixture_groups[i];
+
+                    // --- P5.8.4 — Canvas region (UV text fields; drag UI is a future enhancement) ---
+                    if let crate::lighting::fixture::FixtureSource::CanvasRegion { uv_min, uv_max } = &group.source {
+                        ui.collapsing("Canvas region", |ui| {
+                            let (uv_min, uv_max) = (*uv_min, *uv_max);
+                            ui.horizontal(|ui| {
+                                ui.label("UV min:");
+                                let mut u0 = uv_min.0;
+                                let mut v0 = uv_min.1;
+                                let changed_u = ui
+                                    .add(egui::DragValue::new(&mut u0).range(0.0f32..=1.0).speed(0.005))
+                                    .changed();
+                                let changed_v = ui
+                                    .add(egui::DragValue::new(&mut v0).range(0.0f32..=1.0).speed(0.005))
+                                    .changed();
+                                if changed_u || changed_v {
+                                    let mut params = crate::lighting::fixture::FixtureGroupParams::from_group(&project.fixture_groups[i]);
+                                    params.source = crate::lighting::fixture::FixtureSource::CanvasRegion {
+                                        uv_min: (u0, v0),
+                                        uv_max,
+                                    };
+                                    pending.push(Mutation::SetFixtureGroupParams(
+                                        crate::project::command::SetFixtureGroupParams::new(&project.fixture_groups[i], params),
+                                    ));
+                                }
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label("UV max:");
+                                let mut u1 = uv_max.0;
+                                let mut v1 = uv_max.1;
+                                let changed_u = ui
+                                    .add(egui::DragValue::new(&mut u1).range(0.0f32..=1.0).speed(0.005))
+                                    .changed();
+                                let changed_v = ui
+                                    .add(egui::DragValue::new(&mut v1).range(0.0f32..=1.0).speed(0.005))
+                                    .changed();
+                                if changed_u || changed_v {
+                                    let mut params = crate::lighting::fixture::FixtureGroupParams::from_group(&project.fixture_groups[i]);
+                                    params.source = crate::lighting::fixture::FixtureSource::CanvasRegion {
+                                        uv_min,
+                                        uv_max: (u1, v1),
+                                    };
+                                    pending.push(Mutation::SetFixtureGroupParams(
+                                        crate::project::command::SetFixtureGroupParams::new(&project.fixture_groups[i], params),
+                                    ));
+                                }
+                            });
+                        });
+                    }
+                });
+
+            ui.add_space(4.0);
+        }
+
+        // Emit accumulated mutations after the loop.
+        #[cfg(feature = "v3")]
+        st.pending_mutations.extend(pending);
+    }
+
+    ui.add_space(4.0);
+
+    // --- "+ Add fixture group" button ---
+    if ui.button("+ Add fixture group").clicked() {
+        let group = FixtureGroup::new_default();
+        #[cfg(feature = "v3")]
+        st.pending_mutations
+            .push(Mutation::AddFixtureGroup { group });
+    }
+}
+
+/// Short label for a `ChannelRole` for display in the personality editor.
+#[cfg(feature = "lighting")]
+fn channel_role_label(role: &crate::lighting::fixture::ChannelRole) -> &'static str {
+    use crate::lighting::fixture::ChannelRole;
+    match role {
+        ChannelRole::Red => "Red",
+        ChannelRole::Green => "Green",
+        ChannelRole::Blue => "Blue",
+        #[allow(unreachable_patterns)]
+        _ => "Other",
+    }
 }

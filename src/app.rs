@@ -500,7 +500,10 @@ struct EditingState {
     /// P5.2.4 — background DMX lighting thread. `None` until Go-live;
     /// started on `EnterGoLive`, stopped (via Drop) on `ExitGoLive`.
     /// Drop sets the stop flag and joins the thread — no thread leaks.
+    /// Value is used for Drop side-effects (stop flag + join); clippy's
+    /// "never read" is a false positive here.
     #[cfg(feature = "lighting")]
+    #[allow(dead_code)]
     lighting_thread: Option<crate::lighting::thread::LightingThread>,
     /// P5.2.4 — channel sender to the lighting thread. `None` when
     /// `lighting_thread` is `None`. The render thread calls `try_send`

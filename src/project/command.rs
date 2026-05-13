@@ -1674,6 +1674,21 @@ pub struct SetFixtureGroupParams {
 }
 
 #[cfg(feature = "lighting")]
+impl SetFixtureGroupParams {
+    /// Capture `old` from the current group state and set `new` to `params`.
+    pub fn new(
+        group: &crate::lighting::fixture::FixtureGroup,
+        new: crate::lighting::fixture::FixtureGroupParams,
+    ) -> Self {
+        Self {
+            id: group.id,
+            new,
+            old: crate::lighting::fixture::FixtureGroupParams::from_group(group),
+        }
+    }
+}
+
+#[cfg(feature = "lighting")]
 impl ReverseStorage for SetFixtureGroupParams {
     fn apply(self, project: &mut Project) -> Self {
         let group = project

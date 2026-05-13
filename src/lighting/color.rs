@@ -200,16 +200,14 @@ pub fn budget_samples(
     let total = uvs.len();
 
     // Enforce the per-frame sample budget.
-    if total > MAX_SAMPLES {
-        if !SAMPLE_BUDGET_WARN_EMITTED.swap(true, Ordering::Relaxed) {
-            tracing::warn!(
-                group_label = %group.label,
-                samples = total,
-                max = MAX_SAMPLES,
-                "fixture group PixelMap exceeds sample budget; clamping to {} samples",
-                MAX_SAMPLES,
-            );
-        }
+    if total > MAX_SAMPLES && !SAMPLE_BUDGET_WARN_EMITTED.swap(true, Ordering::Relaxed) {
+        tracing::warn!(
+            group_label = %group.label,
+            samples = total,
+            max = MAX_SAMPLES,
+            "fixture group PixelMap exceeds sample budget; clamping to {} samples",
+            MAX_SAMPLES,
+        );
     }
 
     let sample_count = total.min(MAX_SAMPLES);
@@ -266,7 +264,6 @@ pub fn zone_activity_to_color(activity: f32, strategy: ColorStrategy) -> Sampled
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lighting::dmx_frame::SampledColor;
     use crate::lighting::fixture::{
         FixtureGroup, FixturePersonality, FixtureSource, OutputStrategy,
     };
