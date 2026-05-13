@@ -309,6 +309,73 @@ pub enum GlossaryTerm {
     /// P6.1.1 — MIDI timing clock: 24 pulses per quarter note (status 0xF8)
     /// used to derive a live BPM and optionally drive cue quantize.
     MidiClock,
+    // -----------------------------------------------------------------------
+    // P7.1.1 — Phase 7 domain terms.
+    // -----------------------------------------------------------------------
+    /// P7.1.1 — macOS inter-application video sharing protocol that lets rmap
+    /// feed its output to OBS, VDMX, Resolume Arena, and other Syphon-aware
+    /// applications on the same machine without a capture card.
+    Syphon,
+    /// P7.1.1 — the rmap feature that publishes the composited projector output
+    /// as a named Syphon source visible to other macOS applications.
+    SyphonOutput,
+    /// P7.1.1 — a separate `.rmap-calibration.json` file that stores the warp,
+    /// mask, gamma, and monitor identity for a physical venue, independent of
+    /// any show file, so the same geometry can be reused across shows.
+    CalibrationFile,
+    /// P7.1.1 — a logical output slot in the calibration file identified by a
+    /// stable UUID, bound to a physical display by the show file's OutputTarget.
+    SurfaceSlot,
+    /// P7.1.1 — the per-venue calibration data (warp + mask + gamma + display
+    /// identity) that travels with a venue rather than with a show file, enabling
+    /// one geometry setup to serve many different shows.
+    VenueCalibration,
+    /// P7.1.1 — a warp mesh whose edges are defined by cubic Bezier curves,
+    /// allowing smooth curved surfaces (columns, arches, organic walls) that
+    /// bilinear quads cannot describe.
+    BezierWarp,
+    /// P7.1.1 — a corner point of a Bezier warp mesh that lies exactly on the
+    /// surface; dragging an anchor moves the point and its attached handles.
+    Anchor,
+    /// P7.1.1 — a control point attached to an anchor that adjusts the curvature
+    /// of the Bezier edge; dragging a handle bows the edge without moving the
+    /// anchor itself.
+    TangentHandle,
+    /// P7.1.1 — a mask mode that swaps the opaque and transparent regions of the
+    /// mask polygon: areas previously blocked become revealed, and vice versa.
+    InverseMask,
+    /// P7.1.1 — a mask mode that derives alpha from the brightness of the
+    /// rendered output: bright pixels become opaque, dark pixels become
+    /// transparent (or the inverse), driven by threshold and softness sliders.
+    LumaKey,
+    /// P7.1.1 — a mask mode that derives alpha from a hue range in the rendered
+    /// output: pixels whose hue, saturation, and value fall within the configured
+    /// range become transparent, enabling green-screen or colour-spill removal.
+    ChromaKey,
+    /// P7.1.1 — a four-channel DMX colour model (Red, Green, Blue, White) used
+    /// by warm-white architectural LED fixtures; the White channel carries the
+    /// dominant neutral component, reducing colour noise at high intensities.
+    Rgbw,
+    /// P7.1.1 — the perceived warmth or coolness of a light source, expressed in
+    /// Kelvin; lower values (2700 K) appear warm amber, higher values (6500 K)
+    /// appear cool blue-white.  rmap uses CCT to compute which fraction of the
+    /// sampled canvas colour should flow into an RGBW fixture's White channel.
+    ColourTemperature,
+    /// P7.1.1 — short for Correlated Colour Temperature; the Kelvin value that
+    /// characterises the white point of a light source or fixture group.
+    Cct,
+    /// P7.1.1 — a portable `.rmap-scene-pack.zip` archive that bundles one or
+    /// more scene templates with their referenced assets, enabling template
+    /// sharing across projects and between operators.
+    ScenePack,
+    /// P7.1.1 — a calibration verify pattern that fades from opaque to
+    /// transparent across one or more screen edges, used to set up and verify
+    /// edge-blend overlap zones between adjacent projectors.
+    EdgeBlendGradient,
+    /// P7.1.1 — a full-screen test pattern rendered on the projector output to
+    /// verify warp accuracy, colour balance, focus, or edge alignment; activated
+    /// from the Output panel without affecting the show file.
+    CalibrationVerify,
 }
 
 /// A single glossary entry: a short headline and a 1–2 sentence body.
@@ -1114,6 +1181,133 @@ pub fn entry(t: GlossaryTerm) -> GlossaryEntry {
                    inter-pulse timing and uses it as an alternative tap source \
                    alongside Space, MIDI Note 60, and OSC /rmap/tap.",
         },
+        // -------------------------------------------------------------------
+        // P7.1.1 — Phase 7 domain terms.
+        // -------------------------------------------------------------------
+        GlossaryTerm::Syphon => GlossaryEntry {
+            headline: "Syphon",
+            body: "macOS inter-application video sharing protocol.  A Syphon \
+                   server publishes a texture by name; any Syphon client on the \
+                   same machine — OBS, VDMX, Resolume Arena, Millumin — can \
+                   subscribe to it without a capture card or network hop.",
+        },
+        GlossaryTerm::SyphonOutput => GlossaryEntry {
+            headline: "Syphon Output",
+            body: "When enabled, rmap publishes its composited projector output \
+                   as a Syphon source named \"rmap – <project name>\".  Toggle \
+                   it in the Output panel; OBS or another Syphon client will see \
+                   it in its source picker immediately.",
+        },
+        GlossaryTerm::CalibrationFile => GlossaryEntry {
+            headline: "Calibration File",
+            body: "A `.rmap-calibration.json` file that stores the warp mesh, \
+                   mask polygon, gamma curve, and display identity for a physical \
+                   venue.  Saved once per venue; loaded alongside any show file so \
+                   the geometry is always correct without editing the show itself.",
+        },
+        GlossaryTerm::SurfaceSlot => GlossaryEntry {
+            headline: "Surface Slot",
+            body: "A logical projector output identified by a stable UUID inside \
+                   the calibration file.  The show file's OutputTarget binds to \
+                   a surface slot at load time; if the IDs don't match rmap falls \
+                   back to an identity warp and shows an audit warning.",
+        },
+        GlossaryTerm::VenueCalibration => GlossaryEntry {
+            headline: "Venue Calibration",
+            body: "The complete set of per-surface geometric and colour corrections \
+                   (warp, mask, gamma) for a physical installation.  Venue \
+                   calibration travels with the room, not the show: one calibration \
+                   file works with every show file designed for that venue.",
+        },
+        GlossaryTerm::BezierWarp => GlossaryEntry {
+            headline: "Bezier Warp",
+            body: "A warp mesh whose row and column edges are cubic Bezier curves \
+                   rather than straight lines.  Pull the tangent handles on any \
+                   anchor point to bow a single edge, enabling smooth wrapping on \
+                   columns, arches, and organic architectural shapes.",
+        },
+        GlossaryTerm::Anchor => GlossaryEntry {
+            headline: "Anchor",
+            body: "A corner point of the Bezier warp mesh that lies exactly on the \
+                   projection surface.  Drag an anchor in Anchor mode to reposition \
+                   it and its attached tangent handles together; the corner point \
+                   itself is always on the surface.",
+        },
+        GlossaryTerm::TangentHandle => GlossaryEntry {
+            headline: "Tangent Handle",
+            body: "A control point connected to an anchor by a thin line.  Dragging \
+                   the handle bows the adjacent Bezier edge without moving the \
+                   anchor.  In Tangent mode the two handles of a smooth pair mirror \
+                   each other; hold Shift to break symmetry for a cusp corner.",
+        },
+        GlossaryTerm::InverseMask => GlossaryEntry {
+            headline: "Inverse Mask",
+            body: "Flips the mask so the region that was blocked becomes revealed \
+                   and the region that was visible becomes blocked.  Toggle \
+                   \"Inverse\" in the Mask sub-row; undo restores the previous \
+                   state.",
+        },
+        GlossaryTerm::LumaKey => GlossaryEntry {
+            headline: "Luma Key",
+            body: "Derives the mask alpha from the brightness of the rendered \
+                   output: pixels above the threshold become opaque; pixels below \
+                   become transparent (or the reverse when Inverse is also active).  \
+                   Adjust the Threshold and Softness sliders in the Mask panel.",
+        },
+        GlossaryTerm::ChromaKey => GlossaryEntry {
+            headline: "Chroma Key",
+            body: "Removes a specific hue range from the rendered output by setting \
+                   those pixels to transparent — the classic green-screen technique.  \
+                   Set the Hue Centre, Hue Range, Saturation Threshold, and Softness \
+                   in the Mask panel; works on any colour, not just green.",
+        },
+        GlossaryTerm::Rgbw => GlossaryEntry {
+            headline: "RGBW",
+            body: "A four-channel DMX colour model (Red, Green, Blue, White) \
+                   used by warm-white architectural LED fixtures.  rmap extracts \
+                   the white component from the sampled canvas colour using the \
+                   fixture group's CCT, reducing colour noise at high intensities \
+                   compared with driving the white channel from raw pixel data.",
+        },
+        GlossaryTerm::ColourTemperature => GlossaryEntry {
+            headline: "Colour Temperature",
+            body: "The Kelvin value describing the warmth or coolness of a light \
+                   source.  2700 K is warm amber (like an incandescent lamp); \
+                   6500 K is cool blue-white (like daylight).  Set the colour \
+                   temperature of an RGBW fixture group to match the physical \
+                   fixture spec so the White channel renders correctly.",
+        },
+        GlossaryTerm::Cct => GlossaryEntry {
+            headline: "CCT (Correlated Colour Temperature)",
+            body: "Short for Correlated Colour Temperature: the Kelvin value that \
+                   best describes the white point of a light source.  rmap uses the \
+                   CCT setting on an RGBW fixture group to compute how much of the \
+                   sampled canvas colour flows into the White DMX channel versus \
+                   the Red, Green, and Blue channels.",
+        },
+        GlossaryTerm::ScenePack => GlossaryEntry {
+            headline: "Scene Pack",
+            body: "A portable `.rmap-scene-pack.zip` archive containing one or more \
+                   scene templates and their referenced assets (images, SVGs, FX \
+                   presets).  Export a scene pack from the layer context menu; \
+                   import it via File > Import Scene Pack to make its templates \
+                   available in the Preset Browser.",
+        },
+        GlossaryTerm::EdgeBlendGradient => GlossaryEntry {
+            headline: "Edge-Blend Gradient",
+            body: "A calibration verify pattern that fades from fully opaque to \
+                   transparent across a configurable screen edge and blend width.  \
+                   Used to set up and verify the overlap zone between two adjacent \
+                   projectors; deactivate when the show is running.",
+        },
+        GlossaryTerm::CalibrationVerify => GlossaryEntry {
+            headline: "Calibration Verify",
+            body: "A full-screen test pattern (alignment cross, dot grid, colour \
+                   bars, edge-blend gradient, focus chart, or geometry grid) \
+                   rendered over the projector output to verify warp accuracy, \
+                   colour, and focus.  Select a pattern in the Output panel's \
+                   Verify section; deactivate to return to the show.",
+        },
     }
 }
 
@@ -1250,6 +1444,24 @@ pub fn all_terms() -> &'static [GlossaryTerm] {
         GlossaryTerm::Ltc,
         GlossaryTerm::Mtc,
         GlossaryTerm::MidiClock,
+        // P7.1.1 — Phase 7 domain terms.
+        GlossaryTerm::Syphon,
+        GlossaryTerm::SyphonOutput,
+        GlossaryTerm::CalibrationFile,
+        GlossaryTerm::SurfaceSlot,
+        GlossaryTerm::VenueCalibration,
+        GlossaryTerm::BezierWarp,
+        GlossaryTerm::Anchor,
+        GlossaryTerm::TangentHandle,
+        GlossaryTerm::InverseMask,
+        GlossaryTerm::LumaKey,
+        GlossaryTerm::ChromaKey,
+        GlossaryTerm::Rgbw,
+        GlossaryTerm::ColourTemperature,
+        GlossaryTerm::Cct,
+        GlossaryTerm::ScenePack,
+        GlossaryTerm::EdgeBlendGradient,
+        GlossaryTerm::CalibrationVerify,
     ]
 }
 
@@ -1326,7 +1538,7 @@ mod tests {
     #[test]
     fn all_terms_covers_every_variant() {
         // Bump this when you add a new GlossaryTerm variant.
-        const EXPECTED_VARIANT_COUNT: usize = 112;
+        const EXPECTED_VARIANT_COUNT: usize = 129;
         assert_eq!(
             super::all_terms().len(),
             EXPECTED_VARIANT_COUNT,
