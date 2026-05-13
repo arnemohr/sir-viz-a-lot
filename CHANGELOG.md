@@ -81,6 +81,53 @@ environment. P6.11.x deferred. Brew install: `brew install libltc cmake`.
 
 ---
 
+## [1.0.0] — unreleased
+
+### Phase 7 — Professionalisation and interoperability
+
+rmap v1.0 closes the remaining defensible gaps to established media servers
+without replicating their bloat. Full release notes filled by W13.2.
+
+**Syphon output**
+- Publish the composited projector output as a named Syphon source visible to
+  OBS, VDMX, Resolume Arena, and other Syphon-aware macOS applications.
+- Toggle in the Output panel; advertising name = "rmap – \<project filename\>".
+- Zero-copy IOSurface handoff via Syphon.framework (BSD, vendored in-tree).
+
+**Bezier warp**
+- Cubic Bezier mesh warp replaces bilinear quad — curved columns, arches, organic shapes.
+- Anchor (corner) and tangent handle dragging; smooth / cusp mode for handle pairs.
+- Degenerate all-`None` handles render pixel-identical to the legacy bilinear mesh.
+- Schema migration v9 → v10 (BezierMesh).
+
+**Inverse mask + luma key + chroma key**
+- Inverse mask: swap opaque / transparent regions of any mask polygon.
+- Luma key: threshold-based alpha derived from the rendered output's brightness.
+- Chroma key: hue-range alpha removal (green-screen + any colour).
+- All accessible from the Mask mode pill sub-row — no Advanced menu required.
+- Schema migration v10 → v11 (MaskGraph).
+
+**Calibration file**
+- `.rmap-calibration.json` stores warp + mask + gamma + display identity per venue.
+- Load/save via File menu; same-directory auto-load offer on project open.
+- Surface-slot UUID binding; mismatch = audit warning + identity fallback (never hard-fail).
+
+**Calibration verify patterns**
+- Alignment cross, dot grid, colour bars, edge-blend gradient, focus chart, geometry grid.
+- Activated from the Output panel Verify section; do not modify the show file.
+
+**RGBW + colour-temperature mixing**
+- CCT-aware white-point subtraction for RGBW DMX fixture groups.
+- Per-fixture-group CCT dropdown (2700–6500 K) + W-scale slider.
+- Backward-compatible: existing RGB-only fixture groups render unchanged.
+
+**Scene packs**
+- Export selected layers + assets as a portable `.rmap-scene-pack.zip`.
+- Import via File > Import Scene Pack; templates appear in the Preset Browser.
+- Re-import of same pack ID replaces without duplication.
+
+---
+
 ## [0.9.0] — unreleased
 
 ### Lighting output (Phase 5)

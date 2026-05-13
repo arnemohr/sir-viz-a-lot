@@ -364,3 +364,26 @@ make bundle         # macOS .app via cargo-bundle
 
 Logs land in `~/Library/Logs/rmap/rmap.log` (daily rolling); override with
 `RUST_LOG`.
+
+---
+
+## Coming in v1.0
+
+rmap v1.0 closes the remaining gaps to professional media servers while staying
+focused on clarity and show-day reliability. Capabilities in active development:
+
+- **Syphon output** — publish the projector canvas as a Syphon source for OBS,
+  VDMX, Resolume Arena, and other macOS applications (no capture card required).
+- **Bezier warp** — cubic Bezier mesh warp for curved columns, arches, and
+  organic surfaces; degenerate handles render pixel-identical to the existing
+  bilinear mesh.
+- **Inverse mask + luma key + chroma key** — accessible from the Mask mode pill
+  sub-row, not buried in Advanced.
+- **Calibration file** — save venue warp + mask + gamma as a separate
+  `.rmap-calibration.json`, reusable across show files.
+- **Calibration verify patterns** — alignment cross, dot grid, colour bars,
+  edge-blend gradient, focus chart, geometry grid (Output panel).
+- **RGBW + colour-temperature mixing** — CCT-aware white channel extraction for
+  warm-white LED fixtures, per-fixture-group setting.
+- **Scene packs** — export and import portable `.rmap-scene-pack.zip` archives
+  for sharing scene templates across projects.
