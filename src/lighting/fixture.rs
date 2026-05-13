@@ -209,6 +209,10 @@ pub struct FixtureGroup {
     pub output_strategy: OutputStrategy,
     /// The colour source for this group (canvas region, manual, or zone tag).
     pub source: FixtureSource,
+    /// P7.9.1 — RGBW + colour-temperature configuration.
+    /// `enabled: false` (default) preserves the existing RGB-only output path.
+    #[serde(default)]
+    pub rgbw_config: crate::lighting::rgbw::RgbwConfig,
 }
 
 impl FixtureGroup {
@@ -224,6 +228,7 @@ impl FixtureGroup {
             fixture_count: 1,
             output_strategy: OutputStrategy::RgbDirect,
             source: FixtureSource::default(),
+            rgbw_config: crate::lighting::rgbw::RgbwConfig::default(),
         }
     }
 }
@@ -243,6 +248,9 @@ pub struct FixtureGroupParams {
     pub fixture_count: u8,
     pub output_strategy: OutputStrategy,
     pub source: FixtureSource,
+    /// P7.9.1 — RGBW + colour-temperature configuration.
+    #[serde(default)]
+    pub rgbw_config: crate::lighting::rgbw::RgbwConfig,
 }
 
 impl FixtureGroupParams {
@@ -256,6 +264,7 @@ impl FixtureGroupParams {
             fixture_count: g.fixture_count,
             output_strategy: g.output_strategy.clone(),
             source: g.source.clone(),
+            rgbw_config: g.rgbw_config.clone(),
         }
     }
 
@@ -268,6 +277,7 @@ impl FixtureGroupParams {
         g.fixture_count = self.fixture_count;
         g.output_strategy = self.output_strategy.clone();
         g.source = self.source.clone();
+        g.rgbw_config = self.rgbw_config.clone();
     }
 }
 

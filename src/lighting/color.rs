@@ -291,6 +291,7 @@ mod tests {
             fixture_count: 1,
             output_strategy: OutputStrategy::RgbDirect,
             source: FixtureSource::CanvasRegion { uv_min, uv_max },
+            rgbw_config: crate::lighting::rgbw::RgbwConfig::default(),
         }
     }
 

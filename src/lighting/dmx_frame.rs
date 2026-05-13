@@ -110,6 +110,7 @@ mod tests {
             fixture_count,
             output_strategy: OutputStrategy::RgbDirect,
             source: FixtureSource::default(),
+            rgbw_config: crate::lighting::rgbw::RgbwConfig::default(),
         }
     }
 

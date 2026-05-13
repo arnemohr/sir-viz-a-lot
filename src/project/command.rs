@@ -5909,6 +5909,7 @@ mod tests {
                 fixture_count: 2,
                 output_strategy: OutputStrategy::RgbDirect,
                 source: FixtureSource::default(),
+                rgbw_config: crate::lighting::rgbw::RgbwConfig::default(),
             }
         }
 
@@ -6077,6 +6078,7 @@ mod tests {
                         fixture_count: count,
                         output_strategy: OutputStrategy::RgbDirect,
                         source: FixtureSource::default(),
+                        rgbw_config: crate::lighting::rgbw::RgbwConfig::default(),
                     },
                 )
             }

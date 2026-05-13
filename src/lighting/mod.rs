@@ -27,6 +27,8 @@ pub mod color;
 pub mod dmx_frame;
 pub mod error;
 pub mod fixture;
+/// P7.9.1 — RGBW + colour-temperature mixing.
+pub mod rgbw;
 pub mod subscriber;
 pub mod thread;
 pub mod transport;
