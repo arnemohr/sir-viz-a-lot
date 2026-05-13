@@ -9,6 +9,10 @@ is sized for a single PR.
 - [x] P7.0.2 8c2bfd5 — Bezier mesh warp decision (cubic Coons patches, CPU tessellation)
 - [x] P7.0.3 8c2bfd5 — Calibration file schema decision (separate .rmap-calibration.json)
 - [x] P7.0.4 8c2bfd5 — RGBW + CCT mixing decision (CCT-aware white-point subtraction)
+- [x] P7.1.1 091b010 — Glossary entries for Phase 7 domain terms (17 terms, EXPECTED_VARIANT_COUNT 112→129)
+- [x] P7.1.2 d35f7e7 — Perf-gate stubs for BezierMesh 4×4 + Syphon publish overhead
+- [x] P7.1.3 1077ba6 — CHANGELOG + README v1.0.0 Phase 7 placeholders
+- [x] P7.3.1 c2d8073 — BezierMesh data model + schema v9→v10 migration (CURRENT_SCHEMA_VERSION=10)
 
 ---
 
