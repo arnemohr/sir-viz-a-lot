@@ -349,6 +349,79 @@ fn show_lighting_section(ui: &mut Ui, project: &mut Project, st: &mut ControlPan
 
                     let group = &project.fixture_groups[i];
 
+                    // --- P7.9.3 — RGBW + CCT inspector ---
+                    {
+                        use crate::lighting::rgbw::RgbwConfig;
+                        let mut enabled = group.rgbw_config.enabled;
+                        let mut cct = group.rgbw_config.w_channel_cct_k;
+                        let mut w_scale = group.rgbw_config.w_scale;
+
+                        ui.horizontal(|ui| {
+                            if ui.checkbox(&mut enabled, "RGBW").changed() {
+                                let mut params = crate::lighting::fixture::FixtureGroupParams::from_group(&project.fixture_groups[i]);
+                                params.rgbw_config.enabled = enabled;
+                                pending.push(Mutation::SetFixtureGroupParams(
+                                    crate::project::command::SetFixtureGroupParams::new(&project.fixture_groups[i], params),
+                                ));
+                            }
+                            if enabled {
+                                // CCT dropdown (common presets + Custom placeholder).
+                                // Glossary term: hover to see the CCT definition.
+                                glossary_label(ui, GlossaryTerm::Cct);
+                                let cct_presets: &[(u16, &str)] = &[
+                                    (2700, "2700 K (warm white)"),
+                                    (3000, "3000 K"),
+                                    (3200, "3200 K (studio)"),
+                                    (4000, "4000 K"),
+                                    (5600, "5600 K (daylight)"),
+                                    (6500, "6500 K (neutral)"),
+                                ];
+                                let label = cct_presets
+                                    .iter()
+                                    .find(|&&(k, _)| k == cct)
+                                    .map(|(_, l)| *l)
+                                    .unwrap_or("Custom");
+                                egui::ComboBox::from_id_salt(format!("cct_{}_{}", i, group_id.0))
+                                    .selected_text(label)
+                                    .show_ui(ui, |ui| {
+                                        for &(k, l) in cct_presets {
+                                            ui.selectable_value(&mut cct, k, l);
+                                        }
+                                    });
+                                if cct != group.rgbw_config.w_channel_cct_k {
+                                    let mut params = crate::lighting::fixture::FixtureGroupParams::from_group(&project.fixture_groups[i]);
+                                    params.rgbw_config.w_channel_cct_k = cct;
+                                    pending.push(Mutation::SetFixtureGroupParams(
+                                        crate::project::command::SetFixtureGroupParams::new(&project.fixture_groups[i], params),
+                                    ));
+                                }
+                            }
+                        });
+
+                        if enabled {
+                            ui.horizontal(|ui| {
+                                ui.label("W scale:");
+                                if ui
+                                    .add(
+                                        egui::DragValue::new(&mut w_scale)
+                                            .range(0.0f32..=2.0)
+                                            .speed(0.01),
+                                    )
+                                    .on_hover_text("White-channel extraction scale (1.0 = normal, >1.0 boosts W)")
+                                    .changed()
+                                {
+                                    let mut params = crate::lighting::fixture::FixtureGroupParams::from_group(&project.fixture_groups[i]);
+                                    params.rgbw_config = RgbwConfig { enabled, w_channel_cct_k: cct, w_scale };
+                                    pending.push(Mutation::SetFixtureGroupParams(
+                                        crate::project::command::SetFixtureGroupParams::new(&project.fixture_groups[i], params),
+                                    ));
+                                }
+                            });
+                        }
+                    }
+
+                    let group = &project.fixture_groups[i];
+
                     // --- P5.8.4 — Canvas region (UV text fields; drag UI is a future enhancement) ---
                     if let crate::lighting::fixture::FixtureSource::CanvasRegion { uv_min, uv_max } = &group.source {
                         ui.collapsing("Canvas region", |ui| {
