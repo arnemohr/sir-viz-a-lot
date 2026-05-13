@@ -17,6 +17,12 @@
 # Optional rustup pin if a contributor prefers rustup over mise (see mise.toml)
 rust-toolchain.toml
 
+# P7.2.1 — Syphon.framework is NOT committed (BSD-licensed, ~800 KB binary).
+# Fetch from https://github.com/Syphon/Syphon-Framework/releases and place at
+# vendor/frameworks/Syphon.framework/.  The .gitkeep placeholder keeps the
+# vendor/frameworks/ directory tracked so `make setup-syphon` finds the right place.
+vendor/frameworks/Syphon.framework/
+
 # User-saved projects (rarely belong in the repo). The literal `~/` dir
 # is what gets created when the operator types `~/foo` into the save-
 # path field — that field doesn't shell-expand.

@@ -3,7 +3,7 @@
 # `make help` walks this file's `## ` markers; keep them on the same line as
 # the target declaration.
 
-.PHONY: help setup hooks build build-release build-show run watch test test-cargo test-gpu \
+.PHONY: help setup hooks setup-syphon build build-release build-show run watch test test-cargo test-gpu \
         lint fmt fmt-check check ci bundle clean
 
 help: ## Show available targets
@@ -15,6 +15,30 @@ setup: hooks ## Install Rust + cargo subcommand tools via mise; enable git hooks
 
 hooks: ## Point git at .githooks/ (idempotent; called by `setup`)
 	git config core.hooksPath .githooks
+
+# P7.2.1 — Syphon.framework vendor check.
+# The binary is not committed; fetch it from:
+#   https://github.com/Syphon/Syphon-Framework/releases
+# and unpack as vendor/frameworks/Syphon.framework/.
+SYPHON_MARKER := vendor/frameworks/Syphon.framework/Syphon
+
+setup-syphon: ## Verify Syphon.framework is in vendor/frameworks/ (P7.2.1)
+	@if [ -f "$(SYPHON_MARKER)" ]; then \
+	  echo "  [ok] Syphon.framework found at vendor/frameworks/Syphon.framework/"; \
+	else \
+	  echo ""; \
+	  echo "  [missing] vendor/frameworks/Syphon.framework/ not found."; \
+	  echo ""; \
+	  echo "  To enable Syphon output (--features syphon-out):"; \
+	  echo "  1. Download the latest release from:"; \
+	  echo "     https://github.com/Syphon/Syphon-Framework/releases"; \
+	  echo "  2. Unpack and place as: vendor/frameworks/Syphon.framework/"; \
+	  echo "  3. Run: make setup-syphon   (to verify)"; \
+	  echo "  4. Build: cargo build --features syphon-out"; \
+	  echo ""; \
+	  echo "  Default builds (no --features syphon-out) succeed without the framework."; \
+	  echo ""; \
+	fi
 
 build: ## Compile the debug binary
 	cargo build

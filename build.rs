@@ -36,6 +36,29 @@ const SDF_CONSUMERS: &[&str] = &[
 const ZONE_CONSUMERS: &[&str] = &["fx_zone_"];
 
 fn main() {
+    // P7.2.1 — Syphon.framework linkage scaffold.
+    //
+    // When `--features syphon-out` is passed, emit the linker search path and
+    // framework name so the ObjC wrapper (future W2.2) can call Syphon symbols.
+    //
+    // The framework binary is NOT checked in (it is ~800 KB; it ships from
+    // https://github.com/Syphon/Syphon-Framework/releases).  Place the unpacked
+    // framework at:
+    //
+    //     vendor/frameworks/Syphon.framework/
+    //
+    // Then rebuild.  The directory is gitignored by extension (vendor/frameworks/
+    // contains only the .gitkeep placeholder in the repo).
+    //
+    // `cargo build --no-default-features` must remain successful; this block is
+    // gated on the feature flag, which is off by default.
+    #[cfg(feature = "syphon-out")]
+    {
+        println!("cargo:rerun-if-changed=vendor/frameworks/Syphon.framework");
+        println!("cargo:rustc-link-search=framework=vendor/frameworks");
+        println!("cargo:rustc-link-lib=framework=Syphon");
+    }
+
     let shader_dir = Path::new("src/render/shaders");
     println!("cargo:rerun-if-changed=src/render/shaders");
 
