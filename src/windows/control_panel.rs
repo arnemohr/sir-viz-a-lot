@@ -315,6 +315,10 @@ pub struct ControlPanelState {
     /// becomes visible immediately.
     #[cfg(feature = "v3")]
     pub selected_cue: Option<usize>,
+    /// P6.10.2 — whether the audio bands strip is expanded (80 px) or
+    /// collapsed (36 px icon bar). Toggled by the chevron button. Session-only.
+    #[cfg(feature = "v3")]
+    pub audio_bands_expanded: bool,
 }
 
 pub enum ControlPanelAction {
@@ -711,21 +715,51 @@ pub fn show(
     //
     // The TopBottomPanel is only claimed when is_audio_active() is true so
     // no vertical space is wasted when audio is inactive (choice A per spec).
+    // P6.10.2 — collapsed (36px) or expanded (80px) audio bands strip.
+    // The strip is visible when the audio feature is active and a provider
+    // is installed. A chevron button toggles collapse/expand.
     #[cfg(all(feature = "v3", feature = "audio"))]
     if crate::modulators::audio::is_audio_active() {
+        let panel_h: f32 = if st.audio_bands_expanded { 80.0 } else { 36.0 };
         egui::TopBottomPanel::bottom("rmap_audio_bands_strip")
             .resizable(false)
-            .exact_size(crate::windows::audio_bands_strip::STRIP_HEIGHT)
+            .exact_size(panel_h)
             .show_inside(ui, |ui| {
-                if let Some(band_idx) = crate::windows::audio_bands_strip::show(ui) {
-                    // V31.9.2: drag-source emit. No target accepts the drop in
-                    // v3.1 — the parameter-binding picker ships in v0.4.
-                    tracing::info!(
-                        target: "rmap::ux",
-                        event = "audio_band_drag_started",
-                        band = band_idx,
-                    );
-                }
+                ui.horizontal(|ui| {
+                    // Chevron toggle button.
+                    let chevron = if st.audio_bands_expanded {
+                        "▾"
+                    } else {
+                        "▸"
+                    };
+                    if ui
+                        .small_button(chevron)
+                        .on_hover_text(if st.audio_bands_expanded {
+                            "Collapse audio bands"
+                        } else {
+                            "Expand audio bands"
+                        })
+                        .clicked()
+                    {
+                        st.audio_bands_expanded = !st.audio_bands_expanded;
+                    }
+                    if st.audio_bands_expanded {
+                        if let Some(band_idx) = crate::windows::audio_bands_strip::show(ui) {
+                            tracing::info!(
+                                target: "rmap::ux",
+                                event = "audio_band_drag_started",
+                                band = band_idx,
+                            );
+                        }
+                    } else {
+                        // Collapsed: show just the "Audio" label.
+                        ui.label(
+                            egui::RichText::new("Audio ♫")
+                                .small()
+                                .color(crate::windows::theme::TEXT_SECONDARY),
+                        );
+                    }
+                });
             });
     }
 

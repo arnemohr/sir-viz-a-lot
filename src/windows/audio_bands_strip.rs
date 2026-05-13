@@ -62,38 +62,56 @@ pub fn show(ui: &mut Ui) -> Option<u8> {
     ui.add_space(gutter); // top margin
     ui.horizontal(|ui| {
         ui.add_space(gutter);
+        // P6.10.1 — Frequency-range labels for the 8 FFT bands.
+        // Approximate ranges at 44.1 kHz with 8 log-spaced bins.
+        const BAND_LABELS: [&str; 8] =
+            ["Sub", "Bass", "LMid", "Mid", "HMid", "Pres", "Bril", "Air"];
+
         for (idx, &mag) in bands.iter().enumerate() {
-            let (rect, resp) =
-                ui.allocate_exact_size(egui::vec2(bar_w, bar_h), egui::Sense::click_and_drag());
-
-            // Bar background (full height, slightly lighter than panel).
-            let bg = theme::BG_PANEL.linear_multiply(1.8);
-            ui.painter().rect_filled(rect, CornerRadius::same(2), bg);
-
-            // Filled foreground grows from the bottom up.
-            let clamped = mag.clamp(0.0, 1.0);
-            let fill_h = (rect.height() * clamped).round();
-            if fill_h > 0.5 {
-                let fill_rect =
-                    egui::Rect::from_min_max(egui::pos2(rect.min.x, rect.max.y - fill_h), rect.max);
-                ui.painter()
-                    .rect_filled(fill_rect, CornerRadius::same(2), theme::ACCENT);
-            }
-
-            if resp.drag_started() {
-                drag_event = Some(idx as u8);
-            }
-
-            // Hover: brighten border, change cursor to communicate drag affordance.
-            if resp.hovered() {
-                ui.painter().rect_stroke(
-                    rect,
-                    CornerRadius::same(2),
-                    Stroke::new(1.0, theme::ACCENT),
-                    StrokeKind::Inside,
+            ui.vertical(|ui| {
+                let (rect, resp) = ui.allocate_exact_size(
+                    egui::vec2(bar_w, bar_h - 12.0),
+                    egui::Sense::click_and_drag(),
                 );
-            }
-            resp.on_hover_cursor(egui::CursorIcon::Grab);
+
+                // Bar background (full height, slightly lighter than panel).
+                let bg = theme::BG_PANEL.linear_multiply(1.8);
+                ui.painter().rect_filled(rect, CornerRadius::same(2), bg);
+
+                // Filled foreground grows from the bottom up.
+                let clamped = mag.clamp(0.0, 1.0);
+                let fill_h = (rect.height() * clamped).round();
+                if fill_h > 0.5 {
+                    let fill_rect = egui::Rect::from_min_max(
+                        egui::pos2(rect.min.x, rect.max.y - fill_h),
+                        rect.max,
+                    );
+                    ui.painter()
+                        .rect_filled(fill_rect, CornerRadius::same(2), theme::ACCENT);
+                }
+
+                if resp.drag_started() {
+                    drag_event = Some(idx as u8);
+                }
+
+                // Hover: brighten border, change cursor to communicate drag affordance.
+                if resp.hovered() {
+                    ui.painter().rect_stroke(
+                        rect,
+                        CornerRadius::same(2),
+                        Stroke::new(1.0, theme::ACCENT),
+                        StrokeKind::Inside,
+                    );
+                }
+                resp.on_hover_cursor(egui::CursorIcon::Grab);
+
+                // Frequency label below the bar.
+                ui.label(
+                    egui::RichText::new(BAND_LABELS[idx])
+                        .small()
+                        .color(theme::TEXT_SECONDARY),
+                );
+            });
 
             // Gutter between bars.
             if idx + 1 < bands.len() {
