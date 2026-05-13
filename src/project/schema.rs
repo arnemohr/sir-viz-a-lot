@@ -622,6 +622,13 @@ pub struct Project {
     #[serde(default)]
     #[cfg(feature = "lighting")]
     pub artnet_dest: Option<String>,
+    /// P5.10.1 — per-scene fixture colour overrides for the active light cue.
+    /// `None` when no light cue is authored for this scene; `Some(cue)` when
+    /// the operator has set manual colour overrides for specific fixture groups.
+    /// `#[serde(default)]` keeps pre-Phase-5 projects loading cleanly.
+    #[serde(default)]
+    #[cfg(feature = "lighting")]
+    pub light_cue: Option<crate::project::schema::LightCueSnapshot>,
     /// Side-channel state surfaced by [`migrate::migrate_v3_to_v4`] to the
     /// audit pass (T3.0d). `previous_warp_count > 1` triggers a one-shot
     /// `MultipleWarpsConsolidated` finding so the operator knows the
@@ -629,6 +636,27 @@ pub struct Project {
     /// `Cell` lets the audit consume + clear without `&mut Project`.
     #[serde(skip, default)]
     pub transient_audit_signals: Cell<TransientAuditSignals>,
+}
+
+// ---------------------------------------------------------------------------
+// P5.10.1 — LightCueSnapshot
+// ---------------------------------------------------------------------------
+
+/// A per-scene lighting cue: manual colour overrides for specific fixture groups.
+///
+/// Stored as `Project.light_cue: Option<LightCueSnapshot>`. When a scene is
+/// recalled via `restore_scene`, the light cue is restored alongside the layer
+/// state so lighting output follows the recalled scene automatically.
+///
+/// `#[serde(default)]` on the containing field ensures pre-Phase-5 projects
+/// load cleanly without this data.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg(feature = "lighting")]
+pub struct LightCueSnapshot {
+    /// Manual colour overrides for specific fixture groups.
+    /// Each entry is `(group_id, (r, g, b))` — the group's colour is forced to
+    /// this value for the duration of the scene, overriding canvas sampling.
+    pub fixture_group_overrides: Vec<(crate::lighting::fixture::FixtureGroupId, (u8, u8, u8))>,
 }
 
 /// Per-load signals from `migrate` to `audit`. The audit calls
@@ -670,6 +698,8 @@ impl Default for Project {
             fixture_chases: Vec::new(),
             #[cfg(feature = "lighting")]
             artnet_dest: None,
+            #[cfg(feature = "lighting")]
+            light_cue: None,
             transient_audit_signals: Cell::new(TransientAuditSignals::default()),
         }
     }

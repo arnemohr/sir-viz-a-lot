@@ -5688,5 +5688,132 @@ mod tests {
             let _ = reverse.apply(&mut p);
             assert_eq!(p.fixture_chases[0].beat_divisor, old_params.beat_divisor);
         }
+
+        // P5.10.2 — proptest extension: fixture-group Mutation round-trips.
+        //
+        // Uses proptest's property-based strategy to generate random fixture
+        // labels, universe IDs, base channels, etc. and verify that
+        // Apply → Reverse is a no-op (1000 cases each).
+        mod proptest_lighting {
+            use super::*;
+            use proptest::prelude::*;
+
+            // Strategy: generate a random label string.
+            fn arb_label() -> impl Strategy<Value = String> {
+                "[a-z][a-z0-9_-]{0,15}".prop_map(|s| s)
+            }
+
+            // Strategy: generate a random FixtureGroup with a given id.
+            fn arb_fixture_group(id: u64) -> impl Strategy<Value = FixtureGroup> {
+                (arb_label(), 0u16..=32767u16, 0u8..=240, 1u8..=16).prop_map(
+                    move |(label, univ, base_ch, count)| FixtureGroup {
+                        id: FixtureGroupId(id),
+                        label,
+                        personality: FixturePersonality::default_rgb(),
+                        universe_id: UniverseId(univ),
+                        base_channel: base_ch,
+                        fixture_count: count,
+                        output_strategy: OutputStrategy::RgbDirect,
+                        source: FixtureSource::default(),
+                    },
+                )
+            }
+
+            proptest! {
+                /// P5.10.2 — AddFixtureGroup → RemoveFixtureGroup (reverse) is a no-op.
+                #[test]
+                fn proptest_add_remove_fixture_group_is_noop(
+                    group in arb_fixture_group(100),
+                ) {
+                    let mut p = empty_project_with_lighting();
+                    let initial_len = p.fixture_groups.len();
+
+                    let reverse = Mutation::AddFixtureGroup { group }.apply(&mut p);
+                    prop_assert_eq!(p.fixture_groups.len(), initial_len + 1);
+
+                    let _ = reverse.apply(&mut p);
+                    prop_assert_eq!(p.fixture_groups.len(), initial_len);
+                }
+
+                /// P5.10.2 — SetFixtureGroupParams → undo → original label restored.
+                #[test]
+                fn proptest_set_fixture_group_params_undo_restores_label(
+                    group in arb_fixture_group(200),
+                    new_label in arb_label(),
+                ) {
+                    let mut p = empty_project_with_lighting();
+                    let original_label = group.label.clone();
+                    p.fixture_groups.push(group);
+
+                    let old_params = FixtureGroupParams::from_group(&p.fixture_groups[0]);
+                    let mut new_params = old_params.clone();
+                    new_params.label = new_label;
+
+                    let reverse = Mutation::SetFixtureGroupParams(SetFixtureGroupParams {
+                        id: FixtureGroupId(200),
+                        new: new_params,
+                        old: old_params,
+                    }).apply(&mut p);
+
+                    // Undo: label must return to original.
+                    let _ = reverse.apply(&mut p);
+                    prop_assert_eq!(&p.fixture_groups[0].label, &original_label);
+                }
+
+                /// P5.10.2 — SetFixtureGroupParams universe_id → undo → original.
+                #[test]
+                fn proptest_set_fixture_group_params_undo_restores_universe(
+                    group in arb_fixture_group(201),
+                    new_univ in 0u16..=32767u16,
+                ) {
+                    let mut p = empty_project_with_lighting();
+                    let original_univ = group.universe_id;
+                    p.fixture_groups.push(group);
+
+                    let old_params = FixtureGroupParams::from_group(&p.fixture_groups[0]);
+                    let mut new_params = old_params.clone();
+                    new_params.universe_id = UniverseId(new_univ);
+
+                    let reverse = Mutation::SetFixtureGroupParams(SetFixtureGroupParams {
+                        id: FixtureGroupId(201),
+                        new: new_params,
+                        old: old_params,
+                    }).apply(&mut p);
+
+                    let _ = reverse.apply(&mut p);
+                    prop_assert_eq!(p.fixture_groups[0].universe_id, original_univ);
+                }
+
+                /// P5.10.2 — SetFixtureChaseParams beat_divisor → undo → original.
+                #[test]
+                fn proptest_set_fixture_chase_params_undo_restores_beat_divisor(
+                    orig_divisor in 1u8..=8u8,
+                    new_divisor in 1u8..=8u8,
+                ) {
+                    let mut p = empty_project_with_lighting();
+                    let chase = FixtureChase {
+                        id: FixtureChaseid(300),
+                        label: "prop-chase".to_string(),
+                        group_id: FixtureGroupId(1),
+                        steps: vec![ChaseStep { color: (255, 0, 0), hold_beats: 1 }],
+                        beat_divisor: orig_divisor,
+                    };
+                    p.fixture_chases.push(chase);
+
+                    let old_params = FixtureChaseParams::from_chase(&p.fixture_chases[0]);
+                    let mut new_params = old_params.clone();
+                    new_params.beat_divisor = new_divisor;
+
+                    let reverse = Mutation::SetFixtureChaseParams(SetFixtureChaseParams {
+                        id: FixtureChaseid(300),
+                        new: new_params,
+                        old: old_params,
+                    }).apply(&mut p);
+
+                    let _ = reverse.apply(&mut p);
+                    prop_assert_eq!(p.fixture_chases[0].beat_divisor, orig_divisor);
+                }
+            }
+        }
     }
 }
