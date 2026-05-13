@@ -1192,6 +1192,146 @@ impl ReverseStorage for ResetLayerBezierMesh {
     }
 }
 
+/// P7.3.3 — Payload for [`Mutation::MoveBezierAnchor`].
+///
+/// Moves a single anchor in `BezierMesh.anchors[row][col]` for the layer at
+/// `layer_idx` and propagates its handles rigidly (the handle offsets relative to
+/// the anchor are preserved so the curve shape doesn't change during drag).
+///
+/// Uses a per-field `[f32; 2]` Reverse — symmetric because the anchor position
+/// is a leaf value, not a whole-enum or effects-vec situation.
+#[derive(Debug, Clone)]
+pub struct MoveBezierAnchor {
+    /// Index into `Project.layers`.
+    pub layer_idx: usize,
+    /// Row of the anchor in `BezierMesh.anchors` (0..=rows).
+    pub anchor_row: usize,
+    /// Column of the anchor in `BezierMesh.anchors` (0..=cols).
+    pub anchor_col: usize,
+    /// New position to install `[x, y]` in normalised projector-space.
+    pub new_pos: [f32; 2],
+    /// Pre-mutation position snapshot — restored on undo.
+    pub old_pos: [f32; 2],
+}
+
+impl ReverseStorage for MoveBezierAnchor {
+    fn apply(self, project: &mut Project) -> Self {
+        let layer = project
+            .layers
+            .get_mut(self.layer_idx)
+            .expect("MoveBezierAnchor: layer_idx out of range");
+        let bm = layer
+            .bezier_mesh
+            .as_mut()
+            .expect("MoveBezierAnchor: layer has no bezier_mesh");
+        let anchor = bm
+            .anchors
+            .get_mut(self.anchor_row)
+            .and_then(|row| row.get_mut(self.anchor_col))
+            .expect("MoveBezierAnchor: anchor_row/col out of range");
+        debug_assert_eq!(
+            *anchor, self.old_pos,
+            "MoveBezierAnchor stale Reverse: anchor=({}, {}), \
+             current={:?}, expected old={:?}",
+            self.anchor_row, self.anchor_col, anchor, self.old_pos,
+        );
+        // Compute delta and apply rigidly to both handles of this anchor.
+        let delta = [
+            self.new_pos[0] - self.old_pos[0],
+            self.new_pos[1] - self.old_pos[1],
+        ];
+        *anchor = self.new_pos;
+        // Propagate delta to handles_h and handles_v if set.
+        if let Some(Some(pos)) = bm
+            .handles_h
+            .get_mut(self.anchor_row)
+            .and_then(|row| row.get_mut(self.anchor_col))
+        {
+            pos[0] += delta[0];
+            pos[1] += delta[1];
+        }
+        if let Some(Some(pos)) = bm
+            .handles_v
+            .get_mut(self.anchor_row)
+            .and_then(|row| row.get_mut(self.anchor_col))
+        {
+            pos[0] += delta[0];
+            pos[1] += delta[1];
+        }
+        MoveBezierAnchor {
+            layer_idx: self.layer_idx,
+            anchor_row: self.anchor_row,
+            anchor_col: self.anchor_col,
+            new_pos: self.old_pos,
+            old_pos: self.new_pos,
+        }
+    }
+}
+
+/// P7.3.3 — Payload for [`Mutation::SetBezierHandle`].
+///
+/// Sets (or clears) a single tangent handle at `BezierMesh.handles_h[row][col]`
+/// or `handles_v[row][col]` for the layer at `layer_idx`.
+///
+/// Per-field `Option<[f32; 2]>` Reverse — symmetric because a handle is a leaf
+/// optional value; no enum-of-structs or effects-vec concern applies.
+#[derive(Debug, Clone)]
+pub struct SetBezierHandle {
+    /// Index into `Project.layers`.
+    pub layer_idx: usize,
+    /// Row of the target anchor (0..=rows).
+    pub anchor_row: usize,
+    /// Column of the target anchor (0..=cols).
+    pub anchor_col: usize,
+    /// Which tangent slot to update.
+    pub direction: crate::project::schema::BezierHandleDir,
+    /// New handle position (`None` = clear to degenerate/straight).
+    pub new_pos: crate::project::schema::BezierHandle,
+    /// Pre-mutation handle snapshot.
+    pub old_pos: crate::project::schema::BezierHandle,
+}
+
+impl ReverseStorage for SetBezierHandle {
+    fn apply(self, project: &mut Project) -> Self {
+        use crate::project::schema::BezierHandleDir;
+        let layer = project
+            .layers
+            .get_mut(self.layer_idx)
+            .expect("SetBezierHandle: layer_idx out of range");
+        let bm = layer
+            .bezier_mesh
+            .as_mut()
+            .expect("SetBezierHandle: layer has no bezier_mesh");
+        let handle = match self.direction {
+            BezierHandleDir::Horizontal => bm
+                .handles_h
+                .get_mut(self.anchor_row)
+                .and_then(|row| row.get_mut(self.anchor_col))
+                .expect("SetBezierHandle: anchor_row/col out of range for handles_h"),
+            BezierHandleDir::Vertical => bm
+                .handles_v
+                .get_mut(self.anchor_row)
+                .and_then(|row| row.get_mut(self.anchor_col))
+                .expect("SetBezierHandle: anchor_row/col out of range for handles_v"),
+        };
+        debug_assert_eq!(
+            *handle, self.old_pos,
+            "SetBezierHandle stale Reverse: handle dir={:?} ({}, {}), \
+             current={:?}, expected old={:?}",
+            self.direction, self.anchor_row, self.anchor_col, handle, self.old_pos,
+        );
+        *handle = self.new_pos;
+        SetBezierHandle {
+            layer_idx: self.layer_idx,
+            anchor_row: self.anchor_row,
+            anchor_col: self.anchor_col,
+            direction: self.direction,
+            new_pos: self.old_pos,
+            old_pos: self.new_pos,
+        }
+    }
+}
+
 /// P7.5.1 / P7.6.1 — Payload for [`Mutation::SetLayerMaskGraph`].
 ///
 /// Replaces the entire `MaskGraph` on `LayerConfig.mask_graph` for the
@@ -2123,6 +2263,10 @@ pub enum Mutation {
     ResetLayerWarpMesh(ResetLayerWarpMesh),
     /// P7.3.1 — Replace the entire `BezierMesh` (or set to `None`). Delegates to [`ResetLayerBezierMesh`].
     ResetLayerBezierMesh(ResetLayerBezierMesh),
+    /// P7.3.3 — Move a single Bezier anchor and propagate handles rigidly. Delegates to [`MoveBezierAnchor`].
+    MoveBezierAnchor(MoveBezierAnchor),
+    /// P7.3.3 — Set (or clear) a single Bezier tangent handle. Delegates to [`SetBezierHandle`].
+    SetBezierHandle(SetBezierHandle),
     /// P7.5.1/P7.6.1 — Replace the entire `MaskGraph` on a layer (or set to `None`). Delegates to [`SetLayerMaskGraph`].
     SetLayerMaskGraph(SetLayerMaskGraph),
     /// Replace `WarpMesh.mask_polygon`. Delegates to [`SetLayerMaskPolygon`].
@@ -2279,6 +2423,8 @@ impl Mutation {
             Mutation::SetModulator(s) => Mutation::SetModulator(s.apply(project)),
             Mutation::ResetLayerWarpMesh(s) => Mutation::ResetLayerWarpMesh(s.apply(project)),
             Mutation::ResetLayerBezierMesh(s) => Mutation::ResetLayerBezierMesh(s.apply(project)),
+            Mutation::MoveBezierAnchor(s) => Mutation::MoveBezierAnchor(s.apply(project)),
+            Mutation::SetBezierHandle(s) => Mutation::SetBezierHandle(s.apply(project)),
             Mutation::SetLayerMaskGraph(s) => Mutation::SetLayerMaskGraph(s.apply(project)),
             Mutation::SetLayerMaskPolygon(s) => Mutation::SetLayerMaskPolygon(s.apply(project)),
             Mutation::SetLayerMaskVertex(s) => Mutation::SetLayerMaskVertex(s.apply(project)),
@@ -2447,6 +2593,8 @@ impl Mutation {
             | Mutation::SetLayerMaskVertex(_)
             | Mutation::ResetLayerWarpMesh(_)
             | Mutation::ResetLayerBezierMesh(_)
+            | Mutation::MoveBezierAnchor(_)
+            | Mutation::SetBezierHandle(_)
             | Mutation::SetLayerMaskGraph(_)
             | Mutation::SetLayerMaskPolygon(_)
             | Mutation::SetLayerWarpCorner(_)
@@ -2935,6 +3083,60 @@ impl Project {
             layer_idx,
             new,
             old,
+        })
+    }
+
+    /// P7.3.3 — Build a `MoveBezierAnchor` mutation. Captures the current anchor
+    /// position as `old`. Panics if `layer_idx`, `anchor_row`, or `anchor_col`
+    /// are out of range, or if the layer has no `bezier_mesh`.
+    pub fn move_bezier_anchor_mutation(
+        &self,
+        layer_idx: usize,
+        anchor_row: usize,
+        anchor_col: usize,
+        new_pos: [f32; 2],
+    ) -> Mutation {
+        let bm = self.layers[layer_idx]
+            .bezier_mesh
+            .as_ref()
+            .expect("move_bezier_anchor_mutation: layer has no bezier_mesh");
+        let old_pos = bm.anchors[anchor_row][anchor_col];
+        Mutation::MoveBezierAnchor(MoveBezierAnchor {
+            layer_idx,
+            anchor_row,
+            anchor_col,
+            new_pos,
+            old_pos,
+        })
+    }
+
+    /// P7.3.3 — Build a `SetBezierHandle` mutation. Captures the current handle
+    /// value as `old`. Panics if `layer_idx`, `anchor_row`, or `anchor_col` are
+    /// out of range, or if the layer has no `bezier_mesh`.
+    pub fn set_bezier_handle_mutation(
+        &self,
+        layer_idx: usize,
+        anchor_row: usize,
+        anchor_col: usize,
+        direction: crate::project::schema::BezierHandleDir,
+        new_pos: crate::project::schema::BezierHandle,
+    ) -> Mutation {
+        use crate::project::schema::BezierHandleDir;
+        let bm = self.layers[layer_idx]
+            .bezier_mesh
+            .as_ref()
+            .expect("set_bezier_handle_mutation: layer has no bezier_mesh");
+        let old_pos = match direction {
+            BezierHandleDir::Horizontal => bm.handles_h[anchor_row][anchor_col],
+            BezierHandleDir::Vertical => bm.handles_v[anchor_row][anchor_col],
+        };
+        Mutation::SetBezierHandle(SetBezierHandle {
+            layer_idx,
+            anchor_row,
+            anchor_col,
+            direction,
+            new_pos,
+            old_pos,
         })
     }
 
@@ -4663,6 +4865,18 @@ mod tests {
                 /// `true` = install `Some(BezierMesh)`, `false` = install `None`.
                 some: bool,
             },
+            /// P7.3.3 — move anchor (0,0) of layer 0's bezier mesh.
+            /// Precondition: always first sets a 2×2 identity mesh so the anchor exists.
+            MoveBezierAnchor {
+                new_x: f32,
+                new_y: f32,
+            },
+            /// P7.3.3 — set handle (horizontal or vertical) at anchor (0,0) of
+            /// layer 0's bezier mesh. `None` clears it.
+            SetBezierHandle {
+                dir_h: bool,
+                pos: Option<[f32; 2]>,
+            },
             /// P7.5.1/P7.6.1 — set the MaskGraph to an identity mask (Some)
             /// or clear it (None). Targets layer 0 (always present).
             SetMaskGraph(bool),
@@ -5149,6 +5363,30 @@ mod tests {
                     };
                     project.set_reset_layer_bezier_mesh_mutation(0, new)
                 }
+                // P7.3.3 — MoveBezierAnchor: move anchor (0,0) to (new_x, new_y).
+                // Falls back to a no-op gamma if the layer has no bezier_mesh yet
+                // (a preceding ResetBezierMesh { some: true } installs one first;
+                // the proptest harness applies mutations sequentially so the sequence
+                // becomes valid when ordered correctly).
+                MutationKind::MoveBezierAnchor { new_x, new_y } => {
+                    if project.layers.is_empty() || project.layers[0].bezier_mesh.is_none() {
+                        return project.set_gamma_mutation(project.gamma);
+                    }
+                    project.move_bezier_anchor_mutation(0, 0, 0, [*new_x, *new_y])
+                }
+                // P7.3.3 — SetBezierHandle: set or clear a handle at anchor (0,0).
+                // Falls back to a no-op gamma if no bezier_mesh is present.
+                MutationKind::SetBezierHandle { dir_h, pos } => {
+                    if project.layers.is_empty() || project.layers[0].bezier_mesh.is_none() {
+                        return project.set_gamma_mutation(project.gamma);
+                    }
+                    let dir = if *dir_h {
+                        crate::project::schema::BezierHandleDir::Horizontal
+                    } else {
+                        crate::project::schema::BezierHandleDir::Vertical
+                    };
+                    project.set_bezier_handle_mutation(0, 0, 0, dir, *pos)
+                }
                 // P7.5.1/P7.6.1 — MaskGraph: identity mask (Some) or clear (None).
                 MutationKind::SetMaskGraph(some) => {
                     if project.layers.is_empty() {
@@ -5424,6 +5662,18 @@ mod tests {
                 (1u32..=4, 1u32..=4, any::<bool>()).prop_map(|(rows, cols, some)| {
                     MutationKind::ResetBezierMesh { rows, cols, some }
                 }),
+                // P7.3.3 — MoveBezierAnchor: move anchor (0,0) to a random position.
+                (0.0_f32..=1.0_f32, 0.0_f32..=1.0_f32)
+                    .prop_map(|(new_x, new_y)| { MutationKind::MoveBezierAnchor { new_x, new_y } }),
+                // P7.3.3 — SetBezierHandle: set or clear a handle at anchor (0,0).
+                (
+                    any::<bool>(),
+                    proptest::option::weighted(
+                        0.7,
+                        (0.0_f32..=1.0_f32, 0.0_f32..=1.0_f32).prop_map(|(x, y)| [x, y]),
+                    ),
+                )
+                    .prop_map(|(dir_h, pos)| MutationKind::SetBezierHandle { dir_h, pos }),
                 // P7.5.1/P7.6.1 — SetMaskGraph: identity MaskGraph or clear.
                 any::<bool>().prop_map(MutationKind::SetMaskGraph),
             ]

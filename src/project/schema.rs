@@ -439,6 +439,19 @@ impl WarpMesh {
 /// `WarpMesh.grid` points (0..1 on each axis).
 pub type BezierHandle = Option<[f32; 2]>;
 
+/// P7.3.3 — Which tangent-handle slot is targeted by a `SetBezierHandle` mutation.
+///
+/// Each anchor `(row, col)` has two handles: `Horizontal` (right/east tangent,
+/// stored in `BezierMesh.handles_h`) and `Vertical` (downward/south tangent,
+/// stored in `BezierMesh.handles_v`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum BezierHandleDir {
+    /// Right-side (east) tangent handle — `handles_h[row][col]`.
+    Horizontal,
+    /// Downward (south) tangent handle — `handles_v[row][col]`.
+    Vertical,
+}
+
 /// P7.3.1 — Bezier warp mesh.  Replaces `WarpMesh` for projects saved at schema
 /// v10+.  `WarpMesh` remains deserializable (deprecated) but is migrated to
 /// `BezierMesh` on load via `migrate_v9_to_v10`.
