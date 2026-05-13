@@ -45,7 +45,7 @@ pub fn migrate(mut value: Value) -> Result<(Value, MigrationOutcome), ProjectErr
         // layer's new `warp` field. `Project.warps` is preserved during
         // T3.0a so the renderer + audit + mutations keep compiling; T3.0b
         // deletes it once the render graph reads per-layer warps.
-        0..=7 => {
+        0..=8 => {
             if version <= 2 {
                 migrate_v2_to_v3_layers(&mut value);
             }
@@ -82,6 +82,20 @@ pub fn migrate(mut value: Value) -> Result<(Value, MigrationOutcome), ProjectErr
             if version <= 7 {
                 migrate_v7_to_v8_zone_role(&mut value);
             }
+            // v8 → v9 (P6.2.3):
+            //   • Renames `scenes` → `cues` in the JSON object.
+            //   • Injects identity defaults for all new Cue timing fields:
+            //     `in_time_s: 0.0`, `hold_time_s: null`, `out_time_s: 0.0`,
+            //     `fire_mode: "GoOnTrigger"`, `bpm_quantize: "Off"`,
+            //     `timecode_trigger: null`, and all binding fields: null.
+            //   • Projects saved with v9's `cues` key load correctly via
+            //     the `#[serde(alias = "scenes")]` attribute without this
+            //     migration; the step is present so saved files are written
+            //     with `cues` going forward and future tooling can detect
+            //     the version where cuelist timing was first supported.
+            if version <= 8 {
+                migrate_v8_to_v9_scenes_to_cues(&mut value);
+            }
             value["schema_version"] = serde_json::json!(CURRENT_SCHEMA_VERSION);
             Ok((value, outcome))
         }
@@ -117,6 +131,54 @@ fn normalize_video_loop_mode(value: &mut Value) {
             video
                 .entry("loop_mode")
                 .or_insert(Value::String(variant.into()));
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// P6.2.3 — v8 → v9: rename `scenes` → `cues`, inject timing defaults.
+// ---------------------------------------------------------------------------
+
+/// P6.2.3 — Rename the `scenes` key to `cues` in the JSON object and
+/// inject identity defaults for all Phase 6 timing fields that are absent.
+///
+/// The `#[serde(alias = "scenes")]` on `Project.cues` means old files still
+/// load without this migration — the migration step ensures files saved after
+/// v9 use `cues` and lets future tooling detect the version boundary.
+fn migrate_v8_to_v9_scenes_to_cues(value: &mut Value) {
+    let Some(obj) = value.as_object_mut() else {
+        return;
+    };
+    // Rename `scenes` → `cues` if present.
+    if let Some(scenes_val) = obj.remove("scenes") {
+        obj.insert("cues".to_string(), scenes_val);
+    }
+    // Inject identity timing defaults into each cue entry.
+    if let Some(Value::Array(cues)) = obj.get_mut("cues") {
+        for cue in cues.iter_mut() {
+            let Some(cue_obj) = cue.as_object_mut() else {
+                continue;
+            };
+            cue_obj
+                .entry("in_time_s")
+                .or_insert(Value::Number(serde_json::Number::from_f64(0.0).unwrap()));
+            cue_obj.entry("hold_time_s").or_insert(Value::Null);
+            cue_obj
+                .entry("out_time_s")
+                .or_insert(Value::Number(serde_json::Number::from_f64(0.0).unwrap()));
+            cue_obj
+                .entry("fire_mode")
+                .or_insert(Value::String("GoOnTrigger".into()));
+            cue_obj
+                .entry("bpm_quantize")
+                .or_insert(Value::String("Off".into()));
+            cue_obj.entry("timecode_trigger").or_insert(Value::Null);
+            cue_obj.entry("in_time_binding").or_insert(Value::Null);
+            cue_obj.entry("hold_binding").or_insert(Value::Null);
+            cue_obj.entry("out_time_binding").or_insert(Value::Null);
+            cue_obj.entry("in_time_osc").or_insert(Value::Null);
+            cue_obj.entry("hold_osc").or_insert(Value::Null);
+            cue_obj.entry("out_time_osc").or_insert(Value::Null);
         }
     }
 }
@@ -1078,12 +1140,12 @@ mod tests {
 
     // --- P3.2.2 schema migration v7 → v8 tests ---
 
-    /// P3.2.2 — `CURRENT_SCHEMA_VERSION == 8`.
+    /// P3.2.2 — `CURRENT_SCHEMA_VERSION == 8` (now bumped to 9 by P6.2.3).
     #[test]
-    fn current_schema_version_is_8() {
+    fn current_schema_version_is_9() {
         assert_eq!(
-            CURRENT_SCHEMA_VERSION, 8,
-            "CURRENT_SCHEMA_VERSION must be 8 after P3.2.2"
+            CURRENT_SCHEMA_VERSION, 9,
+            "CURRENT_SCHEMA_VERSION must be 9 after P6.2.3"
         );
     }
 
@@ -1127,10 +1189,10 @@ mod tests {
             "output_targets": [{"fallback_index": 0, "rgb_matrix": [[1.0,0.0,0.0],[0.0,1.0,0.0],[0.0,0.0,1.0]]}]
         });
 
-        let (migrated, _) = migrate(v7_json).expect("migrate v7 → v8");
+        let (migrated, _) = migrate(v7_json).expect("migrate v7 → v9");
 
-        // schema_version must be 8.
-        assert_eq!(migrated["schema_version"], 8u32);
+        // schema_version must be CURRENT_SCHEMA_VERSION (9).
+        assert_eq!(migrated["schema_version"], CURRENT_SCHEMA_VERSION);
 
         // Every warp must have zone_role: null.
         for layer in migrated["layers"].as_array().unwrap() {
@@ -1168,11 +1230,12 @@ mod tests {
             "output_targets": [{"fallback_index": 0, "rgb_matrix": [[1.0,0.0,0.0],[0.0,1.0,0.0],[0.0,0.0,1.0]]}]
         });
 
-        let (migrated, _) = migrate(v8_json).expect("migrate v8 is no-op");
-        assert_eq!(migrated["schema_version"], 8u32);
+        // v8 projects are migrated to v9 (scenes renamed to cues + timing defaults).
+        let (migrated, _) = migrate(v8_json).expect("migrate v8 → v9");
+        assert_eq!(migrated["schema_version"], 9u32);
         assert_eq!(
             migrated["layers"][0]["warp"]["zone_role"], "window",
-            "zone_role must not be modified by the v8 no-op migration"
+            "zone_role must not be modified by the v8→v9 migration"
         );
     }
 
@@ -1225,10 +1288,10 @@ mod tests {
             "output_targets": [{"fallback_index": 0, "rgb_matrix": [[1.0,0.0,0.0],[0.0,1.0,0.0],[0.0,0.0,1.0]]}]
         });
 
-        // Migrate the v7 project to v8.
-        let (migrated, _) = migrate(v7_json).expect("migrate v7 → v8");
+        // Migrate the v7 project to v9 (passes through v8 and v9 migration steps).
+        let (migrated, _) = migrate(v7_json).expect("migrate v7 → v9");
 
-        // Assertion 1: schema_version == 8.
+        // Assertion 1: schema_version == CURRENT_SCHEMA_VERSION (9).
         assert_eq!(
             migrated["schema_version"], CURRENT_SCHEMA_VERSION,
             "migrated project must have schema_version == {CURRENT_SCHEMA_VERSION}"
@@ -1268,5 +1331,124 @@ mod tests {
             zone_findings.is_empty(),
             "v7 project with non-zone-consuming preset must produce no zone findings; got: {zone_findings:?}"
         );
+    }
+
+    // ---------------------------------------------------------------------------
+    // P6.2.3 — v8 → v9 migration tests
+    // ---------------------------------------------------------------------------
+
+    /// P6.2.3 — A v8 project saved with a `scenes` key migrates correctly:
+    /// - `scenes` key is renamed to `cues`
+    /// - Cue name and snapshot are preserved
+    /// - Timing fields default correctly (in_time_s = 0.0, hold_time_s = null,
+    ///   out_time_s = 0.0, fire_mode = GoOnTrigger, bpm_quantize = Off)
+    #[test]
+    fn migrate_v8_to_v9_scenes_renamed_to_cues() {
+        use crate::project::schema::{BpmQuantize, CueFireMode, Project};
+
+        let v8_json = serde_json::json!({
+            "schema_version": 8,
+            "layers": [],
+            "scenes": [
+                {
+                    "name": "my intro scene",
+                    "snapshot": {"layers": []},
+                    "thumbnail": null
+                }
+            ],
+            "output_targets": [{"fallback_index": 0, "rgb_matrix": [[1.0,0.0,0.0],[0.0,1.0,0.0],[0.0,0.0,1.0]]}]
+        });
+
+        let (migrated, _) = migrate(v8_json).expect("migrate v8 → v9");
+
+        // schema_version must be 9.
+        assert_eq!(migrated["schema_version"], 9_u64, "must be v9");
+
+        // `scenes` key must be absent; `cues` key must be present.
+        assert!(
+            migrated.get("scenes").is_none(),
+            "migrated output must not have `scenes` key"
+        );
+        assert!(
+            migrated.get("cues").is_some(),
+            "migrated output must have `cues` key"
+        );
+
+        // Deserialize and verify typed struct.
+        let project: Project =
+            serde_json::from_value(migrated).expect("deserialize migrated v9 project");
+
+        assert_eq!(project.cues.len(), 1, "one cue must be present");
+        assert_eq!(
+            project.cues[0].name, "my intro scene",
+            "cue name must be preserved"
+        );
+        // Timing fields must have identity defaults.
+        assert_eq!(
+            project.cues[0].in_time_s, 0.0,
+            "in_time_s must default to 0.0"
+        );
+        assert_eq!(
+            project.cues[0].hold_time_s, None,
+            "hold_time_s must default to None"
+        );
+        assert_eq!(
+            project.cues[0].out_time_s, 0.0,
+            "out_time_s must default to 0.0"
+        );
+        assert_eq!(
+            project.cues[0].fire_mode,
+            CueFireMode::GoOnTrigger,
+            "fire_mode must default to GoOnTrigger"
+        );
+        assert_eq!(
+            project.cues[0].bpm_quantize,
+            BpmQuantize::Off,
+            "bpm_quantize must default to Off"
+        );
+        assert_eq!(
+            project.cues[0].timecode_trigger, None,
+            "timecode_trigger must default to None"
+        );
+        assert_eq!(
+            project.cues[0].in_time_binding, None,
+            "in_time_binding must default to None"
+        );
+    }
+
+    /// P6.2.3 — A v9 project (native `cues` key) survives a save/reload
+    /// round-trip with timing fields preserved.
+    #[test]
+    fn migrate_v9_cues_round_trip() {
+        use crate::project::schema::{BpmQuantize, Cue, CueFireMode, Project};
+
+        // Build a v9 project with non-default timing.
+        let mut project = Project::default();
+        let mut cue = Cue::new("cue-alpha", serde_json::json!({"layers": []}), None);
+        cue.in_time_s = 2.5;
+        cue.hold_time_s = Some(10.0);
+        cue.out_time_s = 1.0;
+        cue.fire_mode = CueFireMode::Follow;
+        cue.bpm_quantize = BpmQuantize::Bars(4);
+        project.cues.push(cue);
+
+        // Serialize → migrate (should be a no-op for v9) → deserialize.
+        let json_value = serde_json::to_value(&project).expect("serialize v9 project");
+        let (migrated, _) = migrate(json_value).expect("migrate v9 project");
+        let restored: Project = serde_json::from_value(migrated).expect("deserialize v9 project");
+
+        assert_eq!(restored.cues.len(), 1, "one cue must survive round-trip");
+        assert_eq!(restored.cues[0].name, "cue-alpha");
+        assert!(
+            (restored.cues[0].in_time_s - 2.5).abs() < 1e-6,
+            "in_time_s must survive round-trip"
+        );
+        assert_eq!(restored.cues[0].hold_time_s, Some(10.0));
+        assert!(
+            (restored.cues[0].out_time_s - 1.0).abs() < 1e-6,
+            "out_time_s must survive round-trip"
+        );
+        assert_eq!(restored.cues[0].fire_mode, CueFireMode::Follow);
+        assert_eq!(restored.cues[0].bpm_quantize, BpmQuantize::Bars(4));
     }
 }

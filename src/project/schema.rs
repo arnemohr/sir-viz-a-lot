@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 8;
+pub const CURRENT_SCHEMA_VERSION: u32 = 9;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Transform2D {
