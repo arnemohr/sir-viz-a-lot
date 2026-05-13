@@ -309,6 +309,12 @@ pub struct ControlPanelState {
     /// P2.8.1 — floating preset library browser modal.
     #[cfg(feature = "v3")]
     pub preset_browser: crate::windows::preset_browser::PresetBrowserWindow,
+    /// P6.3.1 — which cue tile is selected for detail editing.
+    /// `None` when no cue has been clicked this session. Clicking a tile
+    /// (via `SceneRecall`) also sets this index so the detail panel
+    /// becomes visible immediately.
+    #[cfg(feature = "v3")]
+    pub selected_cue: Option<usize>,
 }
 
 pub enum ControlPanelAction {
@@ -731,9 +737,30 @@ pub fn show(
                 #[cfg(feature = "v3")]
                 inputs.pending_cue,
             ) {
+                // P6.3.1 — clicking a cue tile also selects it for the
+                // detail panel. The detail panel appears above the cue strip.
+                #[cfg(feature = "v3")]
+                if let crate::controls::Command::SceneRecall(idx) = cmd {
+                    st.selected_cue = Some(idx);
+                }
                 action = ControlPanelAction::EmitCommand(cmd);
             }
         });
+
+    // P6.3.1-P6.3.4 — Cue detail panel: timing spinners, fire mode, BPM quantize,
+    // timecode trigger. Shown above the cue strip when a cue is selected.
+    #[cfg(feature = "v3")]
+    if let Some(cue_idx) = st.selected_cue {
+        if let Some(cue) = project.cues.get(cue_idx).cloned() {
+            let panel_height = 110.0_f32;
+            egui::TopBottomPanel::bottom("rmap_cue_detail_panel")
+                .resizable(false)
+                .exact_size(panel_height)
+                .show_inside(ui, |ui| {
+                    show_cue_detail_panel(ui, project, st, cue_idx, &cue);
+                });
+        }
+    }
 
     egui::CentralPanel::default().show_inside(ui, |ui| {
         // 003-T3.1: under v3 the canvas is always the central surface.
@@ -836,6 +863,207 @@ pub fn show(
     show_glossary_window(ui.ctx(), &mut st.glossary_open);
 
     action
+}
+
+// ---------------------------------------------------------------------------
+// P6.3.1-P6.3.4 — Cue detail panel
+// ---------------------------------------------------------------------------
+
+/// P6.3.1-P6.3.4 — Cue detail panel: timing spinners (in-time, hold, out-time),
+/// fire mode picker (Follow / GoOnTrigger), BPM-quantize selector, and
+/// optional timecode trigger field.
+///
+/// Called when a cue tile is selected. Dispatches `SetCueTiming` mutations
+/// through `st.pending_mutations` on drag-release (same pattern as
+/// `command_dragvalue_f32` — no undo-stack flood during drag).
+#[cfg(feature = "v3")]
+fn show_cue_detail_panel(
+    ui: &mut egui::Ui,
+    project: &Project,
+    st: &mut ControlPanelState,
+    cue_idx: usize,
+    cue: &crate::project::schema::Cue,
+) {
+    use crate::project::command::CueTimingSnapshot;
+    use crate::project::schema::{BpmQuantize, CueFireMode, TimecodePosition};
+    use crate::windows::glossary::GlossaryTerm;
+
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.strong(format!("Cue {} — {}", cue_idx + 1, cue.name));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui.small_button("✕").clicked() {
+                st.selected_cue = None;
+            }
+        });
+    });
+    ui.separator();
+
+    egui::Grid::new(("rmap_cue_detail_grid", cue_idx))
+        .num_columns(2)
+        .spacing([8.0, 4.0])
+        .show(ui, |ui| {
+            // --- P6.3.1: In-time spinner ---
+            crate::windows::glossary::glossary_label(ui, GlossaryTerm::InTime);
+            if let Some(new_in_time) = command_dragvalue_f32(
+                ui,
+                &format!("cue_in_time_{cue_idx}"),
+                cue.in_time_s,
+                0.0..=60.0,
+                " s",
+            ) {
+                let old = CueTimingSnapshot::from_cue(cue);
+                let mut new_snap = old.clone();
+                new_snap.in_time_s = new_in_time;
+                st.pending_mutations
+                    .push(project.set_cue_timing_mutation(cue_idx, new_snap));
+            }
+            ui.end_row();
+
+            // --- P6.3.1: Hold-time spinner ---
+            crate::windows::glossary::glossary_label(ui, GlossaryTerm::HoldTime);
+            ui.horizontal(|ui| {
+                // Checkbox for "∞" (indefinite hold = None).
+                let mut infinite = cue.hold_time_s.is_none();
+                if ui.checkbox(&mut infinite, "∞").changed() {
+                    let old = CueTimingSnapshot::from_cue(cue);
+                    let mut new_snap = old.clone();
+                    new_snap.hold_time_s = if infinite { None } else { Some(0.0) };
+                    st.pending_mutations
+                        .push(project.set_cue_timing_mutation(cue_idx, new_snap));
+                }
+                if !infinite {
+                    let hold_s = cue.hold_time_s.unwrap_or(0.0);
+                    if let Some(new_hold) = command_dragvalue_f32(
+                        ui,
+                        &format!("cue_hold_{cue_idx}"),
+                        hold_s,
+                        0.0..=300.0,
+                        " s",
+                    ) {
+                        let old = CueTimingSnapshot::from_cue(cue);
+                        let mut new_snap = old.clone();
+                        new_snap.hold_time_s = Some(new_hold);
+                        st.pending_mutations
+                            .push(project.set_cue_timing_mutation(cue_idx, new_snap));
+                    }
+                }
+            });
+            ui.end_row();
+
+            // --- P6.3.1: Out-time spinner ---
+            crate::windows::glossary::glossary_label(ui, GlossaryTerm::OutTime);
+            if let Some(new_out_time) = command_dragvalue_f32(
+                ui,
+                &format!("cue_out_time_{cue_idx}"),
+                cue.out_time_s,
+                0.0..=60.0,
+                " s",
+            ) {
+                let old = CueTimingSnapshot::from_cue(cue);
+                let mut new_snap = old.clone();
+                new_snap.out_time_s = new_out_time;
+                st.pending_mutations
+                    .push(project.set_cue_timing_mutation(cue_idx, new_snap));
+            }
+            ui.end_row();
+
+            // --- P6.3.2: Fire mode picker ---
+            crate::windows::glossary::glossary_label(ui, GlossaryTerm::FollowMode);
+            ui.horizontal(|ui| {
+                let mut fire_mode = cue.fire_mode;
+                let changed = ui
+                    .radio_value(&mut fire_mode, CueFireMode::GoOnTrigger, "Go-on-trigger")
+                    .changed()
+                    || ui
+                        .radio_value(&mut fire_mode, CueFireMode::Follow, "Follow")
+                        .changed();
+                if changed {
+                    let old = CueTimingSnapshot::from_cue(cue);
+                    let mut new_snap = old.clone();
+                    new_snap.fire_mode = fire_mode;
+                    st.pending_mutations
+                        .push(project.set_cue_timing_mutation(cue_idx, new_snap));
+                }
+            });
+            ui.end_row();
+
+            // --- P6.3.3: BPM quantize selector ---
+            crate::windows::glossary::glossary_label(ui, GlossaryTerm::BpmQuantize);
+            ui.horizontal(|ui| {
+                let current_bars = match cue.bpm_quantize {
+                    BpmQuantize::Off => 0u8,
+                    BpmQuantize::Bars(n) => n,
+                };
+                let options: &[(u8, &str)] = &[
+                    (0, "Off"),
+                    (1, "1 bar"),
+                    (2, "2 bars"),
+                    (4, "4 bars"),
+                    (8, "8 bars"),
+                ];
+                let mut selected = current_bars;
+                let mut changed = false;
+                for &(bars, label) in options {
+                    changed |= ui.radio_value(&mut selected, bars, label).changed();
+                }
+                if changed {
+                    let old = CueTimingSnapshot::from_cue(cue);
+                    let mut new_snap = old.clone();
+                    new_snap.bpm_quantize = if selected == 0 {
+                        BpmQuantize::Off
+                    } else {
+                        BpmQuantize::Bars(selected)
+                    };
+                    st.pending_mutations
+                        .push(project.set_cue_timing_mutation(cue_idx, new_snap));
+                }
+            });
+            ui.end_row();
+
+            // --- P6.3.4: Timecode trigger field ---
+            crate::windows::glossary::glossary_label(ui, GlossaryTerm::TimecodePosition);
+            ui.horizontal(|ui| {
+                let mut enabled = cue.timecode_trigger.is_some();
+                let pos = cue.timecode_trigger.unwrap_or(TimecodePosition {
+                    hh: 0,
+                    mm: 0,
+                    ss: 0,
+                    ff: 0,
+                });
+                if ui.checkbox(&mut enabled, "").changed() {
+                    let old = CueTimingSnapshot::from_cue(cue);
+                    let mut new_snap = old.clone();
+                    new_snap.timecode_trigger = if enabled { Some(pos) } else { None };
+                    st.pending_mutations
+                        .push(project.set_cue_timing_mutation(cue_idx, new_snap));
+                }
+                ui.add_enabled_ui(enabled, |ui| {
+                    // HH:MM:SS:FF spinners.
+                    let mut hh = pos.hh;
+                    let mut mm = pos.mm;
+                    let mut ss = pos.ss;
+                    let mut ff = pos.ff;
+                    let hh_resp = ui.add(egui::DragValue::new(&mut hh).range(0..=23u8).suffix("h"));
+                    let mm_resp = ui.add(egui::DragValue::new(&mut mm).range(0..=59u8).suffix("m"));
+                    let ss_resp = ui.add(egui::DragValue::new(&mut ss).range(0..=59u8).suffix("s"));
+                    let ff_resp = ui.add(egui::DragValue::new(&mut ff).range(0..=29u8).suffix("f"));
+                    let any_stopped = hh_resp.drag_stopped()
+                        || mm_resp.drag_stopped()
+                        || ss_resp.drag_stopped()
+                        || ff_resp.drag_stopped();
+                    if any_stopped && enabled {
+                        let new_pos = TimecodePosition { hh, mm, ss, ff };
+                        let old = CueTimingSnapshot::from_cue(cue);
+                        let mut new_snap = old.clone();
+                        new_snap.timecode_trigger = Some(new_pos);
+                        st.pending_mutations
+                            .push(project.set_cue_timing_mutation(cue_idx, new_snap));
+                    }
+                });
+            });
+            ui.end_row();
+        });
 }
 
 /// Show the live scene preview + handle direct-manipulation input
