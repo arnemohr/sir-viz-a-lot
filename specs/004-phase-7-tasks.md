@@ -3,6 +3,15 @@
 Companion task spec for [`004-phase-7.md`](004-phase-7.md). Each task below
 is sized for a single PR.
 
+## Implementation status
+
+- [x] P7.0.1 8c2bfd5 — Syphon integration decision (objc2 wrapper, bundled Syphon.framework)
+- [x] P7.0.2 8c2bfd5 — Bezier mesh warp decision (cubic Coons patches, CPU tessellation)
+- [x] P7.0.3 8c2bfd5 — Calibration file schema decision (separate .rmap-calibration.json)
+- [x] P7.0.4 8c2bfd5 — RGBW + CCT mixing decision (CCT-aware white-point subtraction)
+
+---
+
 ## Operating model
 
 - **Model:** Sonnet implements; Opus reviews. Same read-the-spec-first rule as
