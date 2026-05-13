@@ -197,6 +197,81 @@ pub fn show(
             }
         }
 
+        // --- P6.6.1: Transport HUD — current cue name + index ---
+        #[cfg(feature = "v3")]
+        if let Some(transport) = inputs.transport.as_ref() {
+            ui.add_space(12.0);
+            ui.separator();
+            ui.add_space(8.0);
+
+            // Tap source indicator.
+            let tap_src = inputs
+                .bpm_telemetry
+                .last_tap_source
+                .map(|s| s.label())
+                .unwrap_or("—");
+            ui.weak(format!("via {tap_src}"));
+
+            ui.add_space(8.0);
+
+            // Current cue name.
+            let cue_label = match transport.current_cue {
+                Some(idx) => {
+                    let name = project
+                        .cues
+                        .get(idx)
+                        .map(|c| c.name.as_str())
+                        .unwrap_or("—");
+                    format!("Live: {} / {} — {}", idx + 1, project.cues.len(), name)
+                }
+                None => "Live: —".to_string(),
+            };
+            ui.label(cue_label)
+                .on_hover_text("Current live cue. Use Space to go, ←/→ to arm next/prev.");
+
+            // Armed-next cue indicator.
+            if let Some(armed) = transport.armed_cue {
+                let armed_name = project
+                    .cues
+                    .get(armed)
+                    .map(|c| c.name.as_str())
+                    .unwrap_or("?");
+                ui.colored_label(
+                    egui::Color32::from_rgb(0xd4, 0x9a, 0x00),
+                    format!("Armed: {} — {}", armed + 1, armed_name),
+                );
+            }
+
+            // P6.6.2 — global quantize override selector.
+            // When set, overrides per-cue BpmQuantize for this session.
+            ui.add_space(8.0);
+            crate::windows::glossary::glossary_label(
+                ui,
+                crate::windows::glossary::GlossaryTerm::BpmQuantize,
+            );
+            let global_q = transport.global_quantize_override;
+            let quantize_opts: &[(Option<crate::project::schema::BpmQuantize>, &str)] = &[
+                (None, "Off"),
+                (Some(crate::project::schema::BpmQuantize::Bars(1)), "1"),
+                (Some(crate::project::schema::BpmQuantize::Bars(2)), "2"),
+                (Some(crate::project::schema::BpmQuantize::Bars(4)), "4"),
+                (Some(crate::project::schema::BpmQuantize::Bars(8)), "8"),
+            ];
+            for &(opt, label) in quantize_opts {
+                let is_active = global_q == opt;
+                let btn = egui::Button::new(label).fill(if is_active {
+                    crate::windows::theme::ACCENT.linear_multiply(0.25)
+                } else {
+                    egui::Color32::TRANSPARENT
+                });
+                if ui.add(btn).clicked() && !is_active {
+                    action = Some(
+                        crate::windows::control_panel::ControlPanelAction::SetGlobalQuantize(opt),
+                    );
+                }
+            }
+        }
+
         // --- Right side --- push remaining widgets to the right edge
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             // 004-V31.8.2: projector-output thumbnail — rightmost widget.

@@ -376,6 +376,11 @@ pub enum ControlPanelAction {
     /// App transitions `Editing → SceneWizard` via `enter_scene_wizard`.
     #[cfg(feature = "v3")]
     RequestEnterSceneWizard,
+    /// P6.6.2 — operator changed the global BPM-quantize override in the
+    /// transport HUD. App writes directly to `EditingState.transport`.
+    /// `None` = fall back to per-cue settings; `Some(q)` = override all cues.
+    #[cfg(feature = "v3")]
+    SetGlobalQuantize(Option<crate::project::schema::BpmQuantize>),
 }
 
 /// Per-frame inputs from the App into the control panel render. Bundled so the

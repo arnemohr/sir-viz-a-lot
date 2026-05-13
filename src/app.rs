@@ -5121,6 +5121,11 @@ fn handle_editing_window_event(
                         tracing::info!(target: "rmap::ux", event = "new_scene_from_template_clicked");
                         editing_transition = Some(EditingTransition::EnterSceneWizard);
                     }
+                    // P6.6.2 — session-only global quantize override in transport HUD.
+                    #[cfg(feature = "v3")]
+                    ControlPanelAction::SetGlobalQuantize(q) => {
+                        state.transport.global_quantize_override = q;
+                    }
                 }
             }
             _ => {}
