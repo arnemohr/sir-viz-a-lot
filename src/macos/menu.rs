@@ -95,6 +95,10 @@ pub enum MenuAction {
     Redo,
     OpenHelp,
     ShowAbout,
+    /// P7.7.4 — File > Load Calibration…
+    LoadCalibration,
+    /// P7.7.4 — File > Save Calibration…
+    SaveCalibration,
 }
 
 /// Process-wide pending-action queue.
@@ -177,6 +181,16 @@ define_class!(
         #[unsafe(method(aboutAction:))]
         fn about_action(&self, _sender: *mut AnyObject) {
             push(MenuAction::ShowAbout);
+        }
+
+        #[unsafe(method(loadCalibrationAction:))]
+        fn load_calibration_action(&self, _sender: *mut AnyObject) {
+            push(MenuAction::LoadCalibration);
+        }
+
+        #[unsafe(method(saveCalibrationAction:))]
+        fn save_calibration_action(&self, _sender: *mut AnyObject) {
+            push(MenuAction::SaveCalibration);
         }
     }
 );
@@ -334,6 +348,31 @@ pub fn install_main_menu(mtm: MainThreadMarker) {
             unsafe {
                 item.setTarget(Some(target));
                 item.setAction(Some(sel!(openAction:)));
+            }
+            file_submenu.addItem(&item);
+        }
+
+        // P7.7.4 — Calibration section separator + Load / Save Calibration items.
+        file_submenu.addItem(&NSMenuItem::separatorItem(mtm));
+
+        // Load Calibration… — no key equivalent (infrequent operator action)
+        {
+            let item = NSMenuItem::new(mtm);
+            item.setTitle(&NSString::from_str("Load Calibration\u{2026}"));
+            unsafe {
+                item.setTarget(Some(target));
+                item.setAction(Some(sel!(loadCalibrationAction:)));
+            }
+            file_submenu.addItem(&item);
+        }
+
+        // Save Calibration… — no key equivalent
+        {
+            let item = NSMenuItem::new(mtm);
+            item.setTitle(&NSString::from_str("Save Calibration\u{2026}"));
+            unsafe {
+                item.setTarget(Some(target));
+                item.setAction(Some(sel!(saveCalibrationAction:)));
             }
             file_submenu.addItem(&item);
         }

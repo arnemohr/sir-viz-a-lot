@@ -6447,6 +6447,100 @@ impl ApplicationHandler for App {
                             crate::macos::menu::show_about_panel(mtm);
                         }
                     }
+                    // P7.7.4 — Load Calibration… picker.
+                    MenuAction::LoadCalibration => {
+                        if let Some(state) = self.state.editing_mut() {
+                            if let Some(path) =
+                                crate::windows::file_dialogs::pick_load_calibration()
+                            {
+                                match crate::calibration::CalibrationFile::load(&path) {
+                                    Ok(cal) => {
+                                        let unmatched = state.apply_calibration(cal);
+                                        #[cfg(feature = "v3")]
+                                        for (slot_id, display_name) in unmatched {
+                                            tracing::warn!(
+                                                slot_id = %slot_id,
+                                                display = %display_name,
+                                                "Calibration surface unmatched — identity fallback",
+                                            );
+                                            state.toast_queue.push(
+                                                crate::windows::toast::Toast::new(
+                                                    crate::windows::toast::ToastKind::Warn,
+                                                    format!(
+                                                        "Calibration surface \"{display_name}\" \
+                                                         has no matching output — identity applied."
+                                                    ),
+                                                ),
+                                            );
+                                        }
+                                        tracing::info!(
+                                            target: "rmap::ux",
+                                            event = "menu_load_calibration",
+                                            path = %path.display(),
+                                        );
+                                    }
+                                    Err(err) => {
+                                        tracing::warn!(
+                                            ?err,
+                                            path = %path.display(),
+                                            "Load Calibration: file load failed",
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // P7.7.4 — Save Calibration… picker.
+                    MenuAction::SaveCalibration => {
+                        if let Some(state) = self.state.editing_mut() {
+                            let venue_name = state
+                                .loaded_calibration
+                                .as_ref()
+                                .map(|c| c.venue_name.clone())
+                                .unwrap_or_else(|| "venue".to_string());
+                            let default_name = format!("{}.rmap-calibration.json", venue_name);
+                            if let Some(path) =
+                                crate::windows::file_dialogs::pick_save_calibration(&default_name)
+                            {
+                                // Build a CalibrationFile from the current session state.
+                                // If a calibration is already loaded, preserve its id.
+                                let mut cal =
+                                    state.loaded_calibration.clone().unwrap_or_else(|| {
+                                        crate::calibration::CalibrationFile::new(&venue_name)
+                                    });
+                                // Refresh the surfaces from the current output targets.
+                                cal.surfaces = state
+                                    .project
+                                    .output_targets
+                                    .iter()
+                                    .map(|target| {
+                                        crate::calibration::CalibrationSurface::new(
+                                            target.uuid.clone().unwrap_or_else(|| {
+                                                format!("output-{}", target.fallback_index)
+                                            }),
+                                            target.clone(),
+                                        )
+                                    })
+                                    .collect();
+                                match cal.save(&path) {
+                                    Ok(()) => {
+                                        tracing::info!(
+                                            target: "rmap::ux",
+                                            event = "menu_save_calibration",
+                                            path = %path.display(),
+                                        );
+                                    }
+                                    Err(err) => {
+                                        tracing::warn!(
+                                            ?err,
+                                            path = %path.display(),
+                                            "Save Calibration: write failed",
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }

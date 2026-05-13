@@ -120,6 +120,53 @@ pub fn pick_relink_replacement(missing_path: &Path, project_dir: Option<&Path>) 
     dialog.pick_file()
 }
 
+/// P7.7.4 — pick a `.rmap-calibration.json` file to load.
+///
+/// Returns `None` on cancel.
+#[allow(dead_code)] // Wired by P7.7.4 (Load Calibration… menu action).
+pub fn pick_load_calibration() -> Option<PathBuf> {
+    FileDialog::new()
+        .set_title("Load Calibration\u{2026}")
+        .add_filter(
+            "rmap calibration (.rmap-calibration.json)",
+            &["rmap-calibration.json"],
+        )
+        .pick_file()
+}
+
+/// P7.7.4 — pick a save destination for a `.rmap-calibration.json` file.
+///
+/// `default_name` should be the venue name (e.g. `"my-venue"`); the helper
+/// appends `.rmap-calibration.json` if absent.  Returns `None` on cancel.
+#[allow(dead_code)] // Wired by P7.7.4 (Save Calibration… menu action).
+pub fn pick_save_calibration(default_name: &str) -> Option<PathBuf> {
+    let path = FileDialog::new()
+        .set_title("Save Calibration\u{2026}")
+        .add_filter(
+            "rmap calibration (.rmap-calibration.json)",
+            &["rmap-calibration.json"],
+        )
+        .set_file_name(default_name)
+        .save_file()?;
+    Some(ensure_calibration_extension(path))
+}
+
+/// Append `.rmap-calibration.json` to `path` unless it already ends with
+/// that suffix. Consistent with `ensure_rmap_extension`.
+fn ensure_calibration_extension(path: PathBuf) -> PathBuf {
+    const SUFFIX: &str = ".rmap-calibration.json";
+    if path
+        .to_str()
+        .is_some_and(|s| s.to_ascii_lowercase().ends_with(SUFFIX))
+    {
+        path
+    } else {
+        let mut s = path.into_os_string();
+        s.push(SUFFIX);
+        PathBuf::from(s)
+    }
+}
+
 /// Append `.rmap.json` to `path` unless it already ends in that
 /// suffix. Pulled out so the suffix policy stays consistent across
 /// callers and is unit-testable without an OS dialog.
