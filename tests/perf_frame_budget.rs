@@ -2477,16 +2477,46 @@ fn perf_transport_cycle_within_budget() {
         })
         .collect();
 
+    // P6.5.3 — set up real TransportState with a follow-chain:
+    // cue 0 (Follow, 2s hold) → cue 1 (Follow, 2s hold) → cue 2 (GoOnTrigger).
+    use rmap::project::schema::{BpmQuantize, Cue, CueFireMode};
+    use rmap::transport::TransportState;
+    let mut transport_cues = vec![
+        {
+            let mut c = Cue::new("perf-cue-0", serde_json::json!({}), None);
+            c.in_time_s = 2.0;
+            c.fire_mode = CueFireMode::Follow;
+            c.hold_time_s = Some(2.0);
+            c
+        },
+        {
+            let mut c = Cue::new("perf-cue-1", serde_json::json!({}), None);
+            c.in_time_s = 1.0;
+            c.fire_mode = CueFireMode::Follow;
+            c.hold_time_s = Some(1.0);
+            c
+        },
+        {
+            let mut c = Cue::new("perf-cue-2", serde_json::json!({}), None);
+            c.bpm_quantize = BpmQuantize::Off;
+            c
+        },
+    ];
+    let mut transport = TransportState::default();
+    transport.follow_chain = vec![1, 2];
+    transport.fire_cue(0);
+    let bpm = 120.0_f32;
+    let delta_s = 1.0_f32 / 60.0;
+
     let mut frame_times: Vec<f64> = Vec::with_capacity(FRAME_COUNT);
 
     for frame_idx in 0..FRAME_COUNT {
         let t_frame_start = Instant::now();
 
-        // Simulate a transport tick on the CPU (no GPU work): in a future
-        // iteration (P6.5.3) this will call TransportState::tick().
-        // crossfade_progress simulates a cue crossfade in progress.
-        let crossfade_progress = (frame_idx as f32 / FRAME_COUNT as f32).clamp(0.0, 1.0);
-        let _ = crossfade_progress; // suppress unused-variable warning
+        // P6.5.3 — real transport tick with crossfade in progress,
+        // follow chain active, and BPM-quantize timer running.
+        let auto_fire = transport.tick(delta_s, bpm, &transport_cues);
+        let _ = auto_fire; // In production this would dispatch SceneRecall.
 
         let t = frame_idx as f32 / 60.0;
 

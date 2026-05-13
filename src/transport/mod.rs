@@ -79,20 +79,37 @@ impl Default for TransportState {
 }
 
 impl TransportState {
-    /// P6.5.1 — Advance the transport by `delta_s` seconds.
+    /// P6.5.1/P6.5.3 — Advance the transport by `delta_s` seconds.
     ///
     /// Updates `fade_progress` for the current cue's `in_time_s`, then
     /// checks whether the hold period has expired and the follow chain
-    /// should auto-fire (P6.5.2).
+    /// should auto-fire (P6.5.2). Also checks BPM-quantize pending cues
+    /// and timecode-trigger cues (P6.5.3).
     ///
-    /// Returns `Some(cue_idx)` when a follow-chain auto-fire occurs
-    /// (i.e. the caller should apply `Command::SceneRecall(cue_idx)` on
-    /// the same frame). `None` when no auto-fire occurred this tick.
+    /// Returns `Some(cue_idx)` when an auto-fire occurs so the caller can
+    /// dispatch `Command::SceneRecall(cue_idx)`. Returns `None` otherwise.
     pub fn tick(&mut self, delta_s: f32, bpm: f32, cues: &[Cue]) -> Option<usize> {
+        // Advance beat clock unconditionally (used for BPM-quantize boundary check).
+        self.beat_elapsed_s += delta_s;
+
+        // --- P6.5.3: BPM quantize pending cue check ---
+        if let Some(pending_idx) = self.quantize_pending_cue {
+            if let Some(fire_idx) = self.check_quantize_boundary(pending_idx, bpm, cues) {
+                self.quantize_pending_cue = None;
+                self.fire_cue(fire_idx);
+                return Some(fire_idx);
+            }
+        }
+
+        // --- P6.5.3: timecode trigger check ---
+        if let Some(pos) = self.last_timecode_position {
+            if let Some(fire_idx) = self.check_timecode_triggers(pos, cues) {
+                self.fire_cue(fire_idx);
+                return Some(fire_idx);
+            }
+        }
+
         let Some(cur_idx) = self.current_cue else {
-            // No cue live — advance beat clock for quantize purposes but no
-            // scene-recall side effect.
-            self.beat_elapsed_s += delta_s;
             return None;
         };
         let Some(cue) = cues.get(cur_idx) else {
@@ -101,9 +118,6 @@ impl TransportState {
             self.fade_progress = 1.0;
             return None;
         };
-
-        // Advance beat clock.
-        self.beat_elapsed_s += delta_s;
 
         // --- In-time crossfade progress ---
         if cue.in_time_s > 0.0 {
@@ -138,6 +152,84 @@ impl TransportState {
             // GoOnTrigger: hold_elapsed_s does not advance (operator controls).
         }
 
+        None
+    }
+
+    /// P6.5.3 — Arm a cue for firing, applying BPM-quantize if configured.
+    ///
+    /// If the effective quantize setting is `Off`, fires immediately and returns
+    /// `Some(cue_idx)`. If `Bars(n)`, arms the cue for the next n-bar boundary
+    /// and returns `None` (the caller should not fire yet; `tick` will fire it).
+    ///
+    /// Effective quantize priority: global override > per-cue setting.
+    pub fn go(&mut self, cue_idx: usize, cues: &[Cue], _bpm: f32) -> Option<usize> {
+        let effective_quantize = match self.global_quantize_override {
+            Some(gq) => gq,
+            None => cues
+                .get(cue_idx)
+                .map(|c| c.bpm_quantize)
+                .unwrap_or(BpmQuantize::Off),
+        };
+
+        match effective_quantize {
+            BpmQuantize::Off => {
+                // Fire immediately.
+                self.quantize_pending_cue = None;
+                self.fire_cue(cue_idx);
+                Some(cue_idx)
+            }
+            BpmQuantize::Bars(_) => {
+                // Arm for the next bar boundary.
+                self.quantize_pending_cue = Some(cue_idx);
+                None
+            }
+        }
+    }
+
+    /// P6.5.3 — Check whether the BPM-quantize boundary has been crossed for
+    /// the pending cue. Returns `Some(cue_idx)` when it's time to fire.
+    fn check_quantize_boundary(&self, pending_idx: usize, bpm: f32, cues: &[Cue]) -> Option<usize> {
+        if bpm <= 0.0 {
+            return None;
+        }
+        let bars = match self.global_quantize_override {
+            Some(BpmQuantize::Bars(n)) => n,
+            None => match cues.get(pending_idx).map(|c| c.bpm_quantize) {
+                Some(BpmQuantize::Bars(n)) => n,
+                _ => return None, // Off — shouldn't be in quantize_pending_cue
+            },
+            _ => return None,
+        };
+        if bars == 0 {
+            return Some(pending_idx);
+        }
+        // A bar is 4 beats. Bar period = 4 * (60 / bpm) seconds.
+        // n-bar period = bars * 4 * (60 / bpm) seconds.
+        let bar_period_s = 4.0 * 60.0 / bpm;
+        let n_bar_period_s = bar_period_s * bars as f32;
+        if n_bar_period_s <= 0.0 {
+            return None;
+        }
+        // Fire when beat_elapsed_s is within one frame of an n-bar boundary.
+        let phase = self.beat_elapsed_s % n_bar_period_s;
+        let frame_budget_s = 1.0 / 60.0;
+        if phase < frame_budget_s {
+            Some(pending_idx)
+        } else {
+            None
+        }
+    }
+
+    /// P6.5.3 — Check all cues with timecode triggers against the current
+    /// timecode position. Returns the first matching cue index.
+    fn check_timecode_triggers(&self, pos: TimecodePosition, cues: &[Cue]) -> Option<usize> {
+        for (idx, cue) in cues.iter().enumerate() {
+            if let Some(trigger) = cue.timecode_trigger {
+                if trigger == pos {
+                    return Some(idx);
+                }
+            }
+        }
         None
     }
 
@@ -367,5 +459,77 @@ mod tests {
                 ts.fade_progress
             );
         }
+    }
+
+    // --- P6.5.3 tests ---
+
+    /// P6.5.3 — BPM-quantize off fires immediately.
+    #[test]
+    fn bpm_quantize_off_fires_immediately() {
+        let cues = vec![snap_cue("c0"), snap_cue("c1")];
+        let mut ts = TransportState::default();
+        ts.fire_cue(0);
+        let result = ts.go(1, &cues, 120.0);
+        assert_eq!(result, Some(1), "BpmQuantize::Off should fire immediately");
+        assert_eq!(ts.current_cue, Some(1));
+    }
+
+    /// P6.5.3 — BPM-quantize Bars(4) arms the cue and fires on the next boundary.
+    #[test]
+    fn bpm_quantize_bars_defers_fire() {
+        let mut cue1 = snap_cue("c1");
+        cue1.bpm_quantize = BpmQuantize::Bars(4);
+        let cues = vec![snap_cue("c0"), cue1];
+        let mut ts = TransportState::default();
+        ts.fire_cue(0);
+        // arm for 4-bar quantize
+        let result = ts.go(1, &cues, 120.0);
+        assert_eq!(result, None, "Bars(4) should defer the fire");
+        assert_eq!(ts.quantize_pending_cue, Some(1), "cue should be pending");
+
+        // Advance beat_elapsed_s to just before a 4-bar boundary.
+        // At 120 BPM, 4 bars = 4 * (4 * 0.5s) = 8s. A 4-bar period = 8s.
+        // If beat_elapsed_s = 8.0 - 1/60 ≈ 7.983, phase ≈ 1/60 → within boundary.
+        ts.beat_elapsed_s = 0.0; // Reset so we control it
+        // Tick well before boundary → no fire
+        let fire_before = ts.tick(7.9, 120.0, &cues);
+        assert_eq!(fire_before, None, "should not fire before boundary");
+        // Tick to just after boundary (beat_elapsed_s > 8s)
+        // At beat_elapsed_s = 8s + epsilon, phase = epsilon < 1/60 → fires
+        ts.beat_elapsed_s = 8.0 + 1e-4; // Just past the 8s boundary
+        let fire_at = ts.tick(0.0, 120.0, &cues); // zero delta_s to not advance
+        assert_eq!(fire_at, Some(1), "should fire at 4-bar boundary");
+    }
+
+    /// P6.5.3 — timecode trigger fires the matching cue.
+    #[test]
+    fn timecode_trigger_fires_matching_cue() {
+        use crate::project::schema::TimecodePosition;
+        let target_pos = TimecodePosition {
+            hh: 0,
+            mm: 0,
+            ss: 10,
+            ff: 0,
+        };
+        let mut cue1 = snap_cue("c1");
+        cue1.timecode_trigger = Some(target_pos);
+        let cues = vec![snap_cue("c0"), cue1];
+        let mut ts = TransportState::default();
+        ts.fire_cue(0);
+        // Inject timecode at a non-matching position — no fire.
+        ts.last_timecode_position = Some(TimecodePosition {
+            hh: 0,
+            mm: 0,
+            ss: 5,
+            ff: 0,
+        });
+        let no_fire = ts.tick(0.016, 120.0, &cues);
+        assert_eq!(no_fire, None, "non-matching timecode should not fire");
+
+        // Inject timecode at the matching position — should fire cue 1.
+        ts.last_timecode_position = Some(target_pos);
+        let fired = ts.tick(0.016, 120.0, &cues);
+        assert_eq!(fired, Some(1), "matching timecode should fire cue 1");
+        assert_eq!(ts.current_cue, Some(1));
     }
 }
