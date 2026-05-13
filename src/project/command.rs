@@ -6495,7 +6495,70 @@ mod tests {
                     let _ = reverse.apply(&mut p);
                     prop_assert_eq!(p.fixture_chases[0].beat_divisor, orig_divisor);
                 }
+
+                /// P7.12.1 — `SetFixtureGroupParams` with RGBW config change →
+                /// undo → original `RgbwConfig` restored.
+                ///
+                /// `RgbwConfig` is part of `FixtureGroupParams` (whole-struct
+                /// Reverse — rule 1).  A dedicated `SetRgbwConfig` Mutation is
+                /// not needed; RGBW edits flow through `SetFixtureGroupParams`.
+                /// This test exercises both enable and CCT round-trip.
+                #[test]
+                fn proptest_set_fixture_group_params_undo_restores_rgbw_config(
+                    group in arb_fixture_group(202),
+                    new_cct in 2000u16..=8000u16,
+                    new_w_scale in 0.0_f32..=2.0_f32,
+                    enabled in any::<bool>(),
+                ) {
+                    let mut p = empty_project_with_lighting();
+                    let original_rgbw = group.rgbw_config.clone();
+                    p.fixture_groups.push(group);
+
+                    let old_params = FixtureGroupParams::from_group(&p.fixture_groups[0]);
+                    let mut new_params = old_params.clone();
+                    new_params.rgbw_config = crate::lighting::rgbw::RgbwConfig {
+                        enabled,
+                        w_channel_cct_k: new_cct,
+                        w_scale: new_w_scale,
+                    };
+
+                    let reverse = Mutation::SetFixtureGroupParams(SetFixtureGroupParams {
+                        id: FixtureGroupId(202),
+                        new: new_params,
+                        old: old_params,
+                    })
+                    .apply(&mut p);
+
+                    // Undo: RgbwConfig must return to original.
+                    let _ = reverse.apply(&mut p);
+                    prop_assert_eq!(
+                        &p.fixture_groups[0].rgbw_config,
+                        &original_rgbw,
+                        "undo must restore RgbwConfig exactly"
+                    );
+                }
             }
         }
+
+        // P7.12.1 — Phase 7 Mutation coverage note.
+        //
+        // The proptest round-trip harness (`apply_then_undo_round_trips` and
+        // `apply_then_undo_redo_round_trips`) already covers all new Phase 7
+        // mutations added to `arb_mutation_kind()`:
+        //
+        //   • `ResetBezierMesh`  — W3.1 (P7.3.1)
+        //   • `MoveBezierAnchor` — W3.3 (P7.3.3)
+        //   • `SetBezierHandle`  — W3.3 (P7.3.3)
+        //   • `SetMaskGraph`     — W5/W6 (P7.5.1 + P7.6.1); umbrella mutation
+        //                          covering Polygon, Inverse, LumaKey, ChromaKey
+        //                          node replacements via `SetLayerMaskGraph`.
+        //
+        // Dedicated `SetMaskInverse`, `SetLumaKey`, and `SetChromaKey` mutations
+        // are NOT defined — the spec intended a single `SetLayerMaskGraph`
+        // mutation that replaces the whole graph.  This is the documented design
+        // choice (whole-enum Reverse rule 1 — simpler than per-node mutations).
+        //
+        // `SetRgbwConfig` is covered via `SetFixtureGroupParams` (see
+        // `proptest_set_fixture_group_params_undo_restores_rgbw_config` above).
     }
 }
