@@ -5,6 +5,7 @@
 //! `cargo test --doc` can resolve crate items (e.g.
 //! `rmap::project::command::ReverseStorage`) used in `compile_fail` doctests.
 
+pub mod calibration;
 pub mod clock;
 pub mod effects;
 #[cfg(feature = "lighting")]
