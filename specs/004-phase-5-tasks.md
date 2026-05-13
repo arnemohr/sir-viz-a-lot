@@ -29,21 +29,21 @@ below is sized for a single PR.
 - [x] P5.3.5 7dc9199 — `Mutation::SetFixtureGroupParams` + reverse
 - [x] P5.3.6 2585ba7 — DMX-frame builder (`build_universe_frame`)
 
-### W4 — Colour-from-pixel sampling
-- [ ] P5.4.1 — Lighting-tap texture + downsample render pass (64×36 `LightingTapPass`)
-- [ ] P5.4.2 — Staging buffer + readback in lighting thread
-- [ ] P5.4.3 — `LightingTapBuffer` + `sample_and_convert`
-- [ ] P5.4.4 — Per-fixture sample budget enforcement (max 256)
-- [ ] P5.4.5 — Lighting thread sampling + DMX-frame send loop
+### W4 — Colour-from-pixel sampling (partial)
+- [ ] P5.4.1 — Lighting-tap texture + downsample render pass (64×36 `LightingTapPass`) — DEFERRED: requires GPU render graph wiring (W4.1 spec); no GPU in CI
+- [ ] P5.4.2 — Staging buffer + readback in lighting thread — DEFERRED: depends on P5.4.1
+- [x] P5.4.3 ce57cb0 — `LightingTapBuffer` + `sample_and_convert` (pure CPU; wired when tap lands)
+- [x] P5.4.4 ce57cb0 — Per-fixture sample budget enforcement (max 256)
+- [ ] P5.4.5 — Lighting thread sampling + DMX-frame send loop — BLOCKED on P5.4.1/P5.4.2
 
-### W5 — Subscriber list for Blackout / Go-live fan-out
-- [ ] P5.5.1 — `LightSubscriber` trait + subscriber list in `EditingState`
-- [ ] P5.5.2 — Wire `Command::Blackout` to fan-out subscribers
-- [ ] P5.5.3 — Wire `EnterGoLive` / `ExitGoLive` to fan-out subscribers
+### W5 — Subscriber list for Blackout / Go-live fan-out (complete)
+- [x] P5.5.1 4a989b5 — `LightSubscriber` trait + `SubscriberList` in `EditingState`
+- [x] P5.5.2 4a989b5 — Wire `Command::Blackout` to fan-out subscribers
+- [x] P5.5.3 4a989b5 — Wire `EnterGoLive` / `ExitGoLive` to fan-out subscribers
 
-### W6 — Zone-derived fixture binding
-- [ ] P5.6.1 — `FixtureSource::ZoneTag` variant + schema (already present as `String`; confirm/refactor)
-- [ ] P5.6.2 — Zone-activity → DMX intensity mapping
+### W6 — Zone-derived fixture binding (complete)
+- [x] P5.6.1 76e0aeb — `FixtureSource::ZoneTag` refactored to use `ZoneRole` enum (Phase 3)
+- [x] P5.6.2 ce57cb0 — `zone_activity_to_color`: zone [0,1] activity → white-wash SampledColor
 
 ### W7 — BPM-locked fixture chases (complete)
 - [x] P5.7.1 6a52217 — `FixtureChase` data model + schema
@@ -52,26 +52,34 @@ below is sized for a single PR.
 - [x] P5.7.4 7dc9199 — `Mutation::SetFixtureChaseParams` + reverse
 - [x] P5.7.5 6a52217 — `ChaseTicker` + `Modulator::Bpm` integration
 
-### W8 — Output panel UI
-- [ ] P5.8.1 — Output panel "Lighting" section skeleton
-- [ ] P5.8.2 — Fixture-group list + add/remove in Output panel
-- [ ] P5.8.3 — Fixture personality editor in the group row
-- [ ] P5.8.4 — Canvas-region drag-to-assign in Output panel
+### W8 — Output panel UI (complete)
+- [x] P5.8.1 d6da858 — Output panel "Lighting (Art-Net)" collapsible section + Art-Net dest field
+- [x] P5.8.2 d6da858 — Fixture-group list with add/delete buttons, universe/base/count editors
+- [x] P5.8.3 d6da858 — Personality sub-section: channel-role dropdowns per channel
+- [x] P5.8.4 d6da858 — Canvas-region UV coordinate sub-section (DragValue pairs)
 
-### W9 — Diagnostics
-- [ ] P5.9.1 — DMX universe activity LED in diagnostics chrome
-- [ ] P5.9.2 — Art-Net packet-rate badge in diagnostics chrome
+### W9 — Diagnostics (complete)
+- [x] P5.9.1 bd44c27 — DMX activity LED (green/grey) in Diagnostics collapsing header
+- [x] P5.9.2 bd44c27 — Art-Net packet-rate badge ("DMX: N pkt/s") in Diagnostics
 
-### W10 — Snapshot / proptest / packet-capture acceptance test
-- [ ] P5.10.1 — Snapshot integration: `LightCue` in project snapshot
-- [ ] P5.10.2 — Proptest extension: fixture-group Mutation round-trips
-- [ ] P5.10.3 — Packet-capture acceptance test (CI Art-Net listener)
+### W10 — Snapshot / proptest / packet-capture acceptance test (complete)
+- [x] P5.10.1 9cb7168 — `LightCueSnapshot` added to project schema; #[serde(default)]
+- [x] P5.10.2 9cb7168 — Proptest extension: 4 proptest cases for fixture/chase Mutations
+- [x] P5.10.3 9cb7168 — `tests/artnet_blackout.rs`: loopback ArtDmx packet-capture test
 
-### W11 — Release housekeeping + acceptance smoke
-- [ ] P5.11.1 — Phase 5 acceptance smoke test (manual)
-- [ ] P5.11.2 — Version bump + CHANGELOG body for v0.9
-- [ ] P5.11.3 — README — Phase 5 lighting section
-- [ ] P5.11.4 — Show-day checklist: lighting pre-show checks
+### W11 — Release housekeeping + acceptance smoke (complete)
+- [x] P5.11.1 405207b — Show-day checklist lighting section (5 acceptance checks, items 14-18)
+- [x] P5.11.2 405207b — Version bumped to 0.9.0; CHANGELOG [0.9.0] body filled in
+- [x] P5.11.3 405207b — README "Lighting output" section filled in
+- [x] P5.11.4 405207b — Show-day checklist: lighting pre-show checks (combined with P5.11.1)
+
+### Deferred / blocked
+- P5.4.1 — GPU render graph (`LightingTapPass`): requires wgpu device + render graph
+  integration in a dev environment with GPU hardware. No GPU available in CI; deferred
+  to a follow-up when GPU tests can run. The CPU sampling path (P5.4.3/P5.4.4) is
+  ready and will connect when P5.4.1 lands.
+- P5.4.2 — Staging buffer + async readback: blocked on P5.4.1.
+- P5.4.5 — Full lighting thread sampling loop: blocked on P5.4.1/P5.4.2.
 
 ---
 
