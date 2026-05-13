@@ -61,6 +61,11 @@ pub fn build_universe_frame(
             continue;
         }
 
+        // P7.9.2 — Apply RGBW white-point subtraction when enabled.
+        // When disabled, r/g/b pass through unchanged and w = 0.
+        let (r_out, g_out, b_out, w_out) =
+            crate::lighting::rgbw::apply_rgbw(color.r, color.g, color.b, &group.rgbw_config);
+
         let universe = universes.entry(group.universe_id).or_default();
 
         for fixture_idx in 0..usize::from(group.fixture_count) {
@@ -72,17 +77,15 @@ pub fn build_universe_frame(
                     // Out of universe range — skip (tracing in the caller).
                     break;
                 }
-                // `#[allow(unreachable_patterns)]` is intentional: Phase 7 adds
-                // new `ChannelRole` variants (White, ColorTemp, etc.) to this crate.
-                // The wildcard arm exists so this match stays correct after Phase 7
-                // without any modification; it's currently unreachable because all
-                // Phase 5 variants are explicitly handled above.
-                #[allow(unreachable_patterns)]
+                // Note: `#[non_exhaustive]` on `ChannelRole` means external crates
+                // must use `_ => {}`, but within the same crate all variants must be
+                // explicitly handled to avoid unused-patterns warnings.
                 let byte = match role {
-                    ChannelRole::Red => color.r,
-                    ChannelRole::Green => color.g,
-                    ChannelRole::Blue => color.b,
-                    _ => 0, // Phase 7: White, ColorTemp, Intensity, etc. map here.
+                    ChannelRole::Red => r_out,
+                    ChannelRole::Green => g_out,
+                    ChannelRole::Blue => b_out,
+                    // P7.9.2 — White channel: receives the CCT-aware extracted W byte.
+                    ChannelRole::White => w_out,
                 };
                 *universe.channel_mut(dmx_addr) = byte;
             }
@@ -201,5 +204,84 @@ mod tests {
         assert_eq!(universe.channel(0), 0);
         assert_eq!(universe.channel(1), 0);
         assert_eq!(universe.channel(2), 0);
+    }
+
+    /// P7.9.2 — RGBW enabled: neutral grey at 6500K produces significant W,
+    /// near-zero residual RGB channels.
+    #[test]
+    fn rgbw_enabled_neutral_grey_high_w() {
+        use crate::lighting::fixture::ChannelRole;
+        use crate::lighting::rgbw::RgbwConfig;
+
+        let mut group = FixtureGroup {
+            id: FixtureGroupId(1),
+            label: "rgbw-group".to_string(),
+            personality: FixturePersonality::default_rgbw(),
+            universe_id: UniverseId(1),
+            base_channel: 0,
+            fixture_count: 1,
+            output_strategy: OutputStrategy::RgbDirect,
+            source: FixtureSource::default(),
+            rgbw_config: RgbwConfig {
+                enabled: true,
+                w_channel_cct_k: 6500,
+                w_scale: 1.0,
+            },
+        };
+        // Verify the personality has W as the 4th channel.
+        assert_eq!(group.personality.channels[3], ChannelRole::White);
+
+        let color = SampledColor {
+            r: 128,
+            g: 128,
+            b: 128,
+        };
+        let result = build_universe_frame(&[group.clone()], &[(FixtureGroupId(1), color)]);
+        let universe = result.get(&UniverseId(1)).expect("universe 1");
+        let r = universe.channel(0);
+        let g = universe.channel(1);
+        let b = universe.channel(2);
+        let w = universe.channel(3);
+        assert!(
+            r < 20,
+            "R should be low for neutral grey RGBW at 6500K, got {r}"
+        );
+        assert!(
+            g < 20,
+            "G should be low for neutral grey RGBW at 6500K, got {g}"
+        );
+        assert!(
+            b < 20,
+            "B should be low for neutral grey RGBW at 6500K, got {b}"
+        );
+        assert!(
+            w > 100,
+            "W should be high for neutral grey RGBW at 6500K, got {w}"
+        );
+
+        // P7.9.2 — enabled: false → existing RGB output unchanged, W = 0.
+        group.rgbw_config.enabled = false;
+        let result_rgb = build_universe_frame(&[group], &[(FixtureGroupId(1), color)]);
+        let universe_rgb = result_rgb.get(&UniverseId(1)).expect("universe 1 (rgb)");
+        assert_eq!(
+            universe_rgb.channel(0),
+            128,
+            "R should pass through when RGBW disabled"
+        );
+        assert_eq!(
+            universe_rgb.channel(1),
+            128,
+            "G should pass through when RGBW disabled"
+        );
+        assert_eq!(
+            universe_rgb.channel(2),
+            128,
+            "B should pass through when RGBW disabled"
+        );
+        assert_eq!(
+            universe_rgb.channel(3),
+            0,
+            "W should be 0 when RGBW disabled"
+        );
     }
 }

@@ -68,7 +68,12 @@ pub enum ChannelRole {
     Green,
     /// The blue colour channel.
     Blue,
-    // Phase 7: White, ColorTemp, Intensity, Pan, Tilt, Generic(String)
+    /// P7.9.2 — White channel for RGBW fixtures; receives the extracted white
+    /// component computed by `apply_rgbw` when `RgbwConfig::enabled` is `true`.
+    /// Writes zero when RGBW is disabled (backward-compatible: existing RGB
+    /// personalities have no `White` in their channel map).
+    White,
+    // Phase 7 follow-on: ColorTemp, Intensity, Pan, Tilt, Generic(String)
 }
 
 // ---------------------------------------------------------------------------
@@ -97,6 +102,20 @@ impl FixturePersonality {
         Self {
             channels: vec![ChannelRole::Red, ChannelRole::Green, ChannelRole::Blue],
             label: "RGB (3ch)".to_string(),
+        }
+    }
+
+    /// P7.9.2 — Convenience constructor for a 4-channel RGBW personality.
+    #[allow(dead_code)]
+    pub fn default_rgbw() -> Self {
+        Self {
+            channels: vec![
+                ChannelRole::Red,
+                ChannelRole::Green,
+                ChannelRole::Blue,
+                ChannelRole::White,
+            ],
+            label: "RGBW (4ch)".to_string(),
         }
     }
 
