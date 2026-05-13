@@ -222,6 +222,20 @@ A small loop-mode glyph (∞ / → / ⇆) and in/out markers appear on the
 video layer's thumbnail in the left rail so the operator can read
 playback state at a glance without opening Advanced.
 
+## Show Control (v0.7)
+
+<!-- Stub — P6.14.2 will fill this section with release copy. -->
+
+rmap v0.7 adds a full show-control system on top of the projection engine:
+a cuelist with per-cue timing, a transport state machine, a live transport
+HUD, audio-band parameter binding, and timecode sync (LTC, MTC, MIDI Clock).
+
+<!-- Cuelist + Transport placeholder -->
+
+<!-- Live Input Surface placeholder -->
+
+<!-- Timecode Sync placeholder -->
+
 ## Docs
 
 - [Show-day operator checklist](docs/show-day-checklist.md) — macOS-focused

@@ -4,6 +4,22 @@ All notable changes to rmap are documented here.
 
 ---
 
+## [Unreleased] — v0.7
+
+### Cuelist + Transport
+
+<!-- P6.14.2 will fill this section -->
+
+### Live Input Surface
+
+<!-- P6.14.2 will fill this section -->
+
+### Timecode Sync
+
+<!-- P6.14.2 will fill this section -->
+
+---
+
 ## [0.9.0] — unreleased
 
 ### Lighting output (Phase 5)
