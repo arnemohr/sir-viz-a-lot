@@ -23,6 +23,11 @@ below is sized for a single PR.
 - [x] P6.12.1 0a1c6d9 — MTC quarter-frame decoder in MIDI bus
 - [x] P6.12.2 b0de634 — MIDI-clock BPM tracking + Clock::set_bpm()
 - [BLOCKED] P6.11.1 — libltc not installed (brew install libltc + cmake required); skip for v0.7
+- [x] P6.13.1 — SetCueTiming + SetProjectCues proptest (shipped as part of P6.2.2)
+- [x] P6.13.2 — TransportState follow-chain proptest (shipped as part of P6.5.2)
+- [skipped] P6.13.3 — Manual acceptance smoke: requires hardware run (see checklist P6.14.3)
+- [skipped] P6.14.1 — Version bump: Cargo.toml is already at 0.9.0 (Phase 5 bump); downgrade to 0.7.0 would be incorrect
+- [x] P6.14.2-P6.14.3 57c8c72 — CHANGELOG body + show-day checklist for Phase 6
 
 ---
 
