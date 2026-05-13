@@ -76,6 +76,12 @@ pub struct MidiSource {
     // Read at Drop only.
     #[allow(dead_code)]
     connections: Vec<MidiInputConnection<()>>,
+    /// P6.12.1 — shared MTC decoder position slot. `None` when no MTC
+    /// signal has been received yet. Read by the transport tick via
+    /// `EditingState.mtc_position`.
+    #[cfg(feature = "v3")]
+    pub mtc_position:
+        std::sync::Arc<std::sync::Mutex<Option<crate::project::schema::TimecodePosition>>>,
 }
 
 impl MidiSource {
@@ -95,6 +101,16 @@ impl MidiSource {
         let registry_arc: Arc<RwLock<[[f32; NUM_CCS]; NUM_CHANNELS]>> = registry.values.clone();
         crate::modulators::midi::install(Arc::new(registry));
 
+        // P6.12.1 — MTC decoder. Shared with each port callback via Arc.
+        #[cfg(feature = "v3")]
+        let mtc_decoder = {
+            let dec = crate::sync::mtc::MtcDecoder::new();
+            let pos = dec.position();
+            (std::sync::Arc::new(std::sync::Mutex::new(dec)), pos)
+        };
+        #[cfg(feature = "v3")]
+        let (mtc_decoder_arc, mtc_position) = mtc_decoder;
+
         // First pass to enumerate; each `connect` consumes its `MidiInput`,
         // so allocate one per port.
         let port_descriptors: Vec<_> = {
@@ -107,10 +123,23 @@ impl MidiSource {
             let port_name = midi.port_name(&port).unwrap_or_else(|_| "<unnamed>".into());
             let tx_for_callback = tx.clone();
             let registry_for_callback = registry_arc.clone();
+            // P6.12.1 — clone the MTC decoder Arc for this port's callback.
+            #[cfg(feature = "v3")]
+            let mtc_for_callback = mtc_decoder_arc.clone();
             match midi.connect(
                 &port,
                 "rmap-input",
                 move |_stamp_us, message, _state| {
+                    // P6.12.1 — MTC quarter-frame messages (status 0xF1).
+                    // Handle before the Note-On decode so they don't fall
+                    // through to the generic handler.
+                    #[cfg(feature = "v3")]
+                    if message.len() >= 2 && message[0] == 0xF1 {
+                        if let Ok(mut dec) = mtc_for_callback.lock() {
+                            dec.push_quarter_frame(message[1]);
+                        }
+                        return;
+                    }
                     // Note-On commands take precedence over the CC
                     // value-table write (a single message can't be
                     // both, but the early-return keeps the hot path
@@ -161,7 +190,12 @@ impl MidiSource {
             }
         }
 
-        Ok(Self { rx, connections })
+        Ok(Self {
+            rx,
+            connections,
+            #[cfg(feature = "v3")]
+            mtc_position,
+        })
     }
 }
 

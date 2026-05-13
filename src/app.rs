@@ -493,6 +493,12 @@ struct EditingState {
     /// keyboard. Drop stops all `midir` subscriptions.
     #[cfg(feature = "midi")]
     midi: Option<crate::controls::midi::MidiSource>,
+    /// P6.12.1 — shared MTC position slot from the MIDI decoder. `None`
+    /// when MIDI is not active or no MTC signal has been received.
+    /// Read each frame to update `transport.last_timecode_position`.
+    #[cfg(all(feature = "midi", feature = "v3"))]
+    mtc_position:
+        Option<std::sync::Arc<std::sync::Mutex<Option<crate::project::schema::TimecodePosition>>>>,
     /// Optional OSC UDP listener (T-M7-06). Polled per frame; drop joins
     /// the receive thread.
     #[cfg(feature = "osc")]
@@ -2121,6 +2127,9 @@ fn assemble_editing_state(
         external_registry: ExternalRegistry::new(),
         #[cfg(feature = "audio")]
         _audio_capture: inputs.audio_capture,
+        // P6.12.1 — extract the MTC position slot before moving midi into EditingState.
+        #[cfg(all(feature = "midi", feature = "v3"))]
+        mtc_position: inputs.midi.as_ref().map(|m| m.mtc_position.clone()),
         #[cfg(feature = "midi")]
         midi: inputs.midi,
         #[cfg(feature = "osc")]
@@ -5309,6 +5318,14 @@ fn handle_editing_window_event(
             // SideEffect pattern in apply_command). The transport tick
             // advances fade_progress and may fire a follow-chain auto-cue.
             {
+                // P6.12.1 — update timecode position from MTC decoder (if active).
+                #[cfg(all(feature = "midi", feature = "v3"))]
+                if let Some(slot) = state.mtc_position.as_ref() {
+                    if let Ok(guard) = slot.lock() {
+                        state.transport.last_timecode_position = *guard;
+                    }
+                }
+
                 let delta_s = {
                     // Use a reasonable per-frame delta; the exact value isn't
                     // critical for the transport (crossfade precision uses
@@ -5318,7 +5335,7 @@ fn handle_editing_window_event(
                 let bpm = state.clock.bpm();
                 let cues = state.project.cues.clone();
                 if let Some(auto_fire_idx) = state.transport.tick(delta_s, bpm, &cues) {
-                    // Follow-chain auto-fired a cue — restore it.
+                    // Follow-chain or timecode-trigger auto-fired a cue.
                     schedule_scene_recall(state, auto_fire_idx);
                     rebuild_layers_for_state(state);
                 }

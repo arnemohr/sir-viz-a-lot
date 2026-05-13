@@ -19,6 +19,8 @@ mod project;
 mod render;
 mod show_day;
 mod svg_layer;
+/// P6.12.1 — Timecode sync decoders.
+mod sync;
 #[cfg(feature = "v3")]
 mod telemetry;
 mod test_patterns;
