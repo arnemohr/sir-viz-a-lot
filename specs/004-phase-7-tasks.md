@@ -23,18 +23,22 @@ is sized for a single PR.
 - [x] P7.10.1 1ea39f3 — Scene pack schema + zip export/import (ScenePackManifest, atomic temp+rename)
 - [x] P7.11.2 713a91d — Phase 7 AuditKind variants (SyphonFrameworkMissing, CalibrationSurfaceUnmatched, BezierMeshSchemaUpgraded, RgbwConfigInvalid) + syphon-out feature stub
 - [x] P7.13.1 df2b130 — version bump 0.9.0 → 1.0.0
+- [x] P7.2.1 7e73893 — Syphon.framework build.rs linkage scaffold + vendor/frameworks/.gitkeep + make setup-syphon hint
+- [x] P7.3.3 f5f3c1a — MoveBezierAnchor + SetBezierHandle mutations + ReverseStorage + proptest coverage (BezierHandleDir added to schema)
+- [PARTIAL] P7.7.2 ae69380 — CalibrationFile runtime binding: loaded_calibration field on EditingState, calibration_find_unmatched pure fn (UUID-then-index), 4 unit tests; warp/mask/gamma application to GPU state DEFERRED (render-pipeline integration not landed yet — acceptance items 1 + 3 partially met; items 2 + 4 met)
+- [x] P7.13.2 a35e19f — CHANGELOG v1.0.0 body: accurate per-workstream Phase 7 bullets + explicit "Planned post-v1.0" section for GPU-blocked items
 
 Blocked / deferred:
-- [BLOCKED] P7.2.1–P7.2.4 Syphon — Syphon.framework binary not vendored; syphon-out feature stub added but framework linkage requires W2.1 first
-- [BLOCKED] P7.3.3–P7.3.5 Bezier hit-testing + overlay + palette UI — requires interactive GPU rendering (no headless path for canvas hit-test)
+- [BLOCKED] P7.2.2–P7.2.4 Syphon ObjC wrapper + Metal HAL — Syphon.framework binary not vendored (W2.1 scaffold landed); wrapper code requires framework binary + Metal surface integration
+- [BLOCKED] P7.3.4–P7.3.5 Bezier handle overlay rendering + palette scaling UI — requires interactive GPU canvas rendering (no headless path)
 - [BLOCKED] P7.4.2–P7.4.3 MaskGraph SDF evaluation + UI — requires render pipeline integration
 - [BLOCKED] P7.5.2, P7.6.2 Luma/Chroma key UI — depends on W4.2 (MaskGraph SDF)
-- [BLOCKED] P7.7.2–P7.7.4 Calibration runtime binding + auto-load + menu — requires app.rs session-state changes
+- [BLOCKED] P7.7.2 (GPU application) + P7.7.3–P7.7.4 Calibration GPU warp override + auto-load offer + File menu — requires per-surface render-time warp override (plumbing deferred W7.4+)
 - [BLOCKED] P7.8.1–P7.8.6 Calibration verify patterns — requires render overlay pass
 - [BLOCKED] P7.9.3 RGBW UI — requires fixture group inspector UI changes
 - [BLOCKED] P7.10.2–P7.10.3 Scene pack export/import UI — requires context menu and file dialog changes
-- [BLOCKED] P7.12.1–P7.12.2 Proptest extension + GPU golden — depends on all W3/W4/W9 mutations (partially done)
-- [BLOCKED] P7.13.2–P7.13.3 CHANGELOG body + manual acceptance smoke — depends on shipping all capabilities
+- [BLOCKED] P7.12.1–P7.12.2 Proptest extension + GPU golden — depends on all W3/W4/W9 mutations (W3.3 landed; W4/W9 partially done)
+- [BLOCKED] P7.13.3 Manual acceptance smoke — depends on shipping interactive capabilities
 
 ---
 
