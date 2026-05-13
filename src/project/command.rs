@@ -1358,6 +1358,7 @@ impl ReverseStorage for SetProjectScenes {
 ///
 /// Follows Reverse-storage rule 2 (whole-struct snapshot, not per-field).
 #[derive(Debug, Clone)]
+#[allow(missing_docs)] // Fields mirror Cue struct; see schema.rs for field docs.
 pub struct CueTimingSnapshot {
     pub in_time_s: f32,
     pub hold_time_s: Option<f32>,
@@ -1412,6 +1413,7 @@ impl CueTimingSnapshot {
 /// P6.2.2 — Payload for [`Mutation::SetCueName`]. Stores both old and new
 /// strings for symmetric undo per Reverse-storage rule 1.
 #[derive(Debug, Clone)]
+#[allow(missing_docs)]
 pub struct SetCueName {
     pub cue_idx: usize,
     pub new: String,
@@ -1440,6 +1442,7 @@ impl ReverseStorage for SetCueName {
 /// P6.2.2 — Payload for [`Mutation::SetCueTiming`]. Whole-struct snapshot
 /// Reverse (rule 2) so future additions to `Cue` don't silently corrupt undo.
 #[derive(Debug, Clone)]
+#[allow(missing_docs)]
 pub struct SetCueTiming {
     pub cue_idx: usize,
     pub new: CueTimingSnapshot,
@@ -1468,6 +1471,7 @@ impl ReverseStorage for SetCueTiming {
 /// wholesale (whole-Vec snapshot Reverse, rule 3). Reorders / deletes / saves
 /// all go through this single variant.
 #[derive(Debug, Clone)]
+#[allow(missing_docs)]
 pub struct SetProjectCues {
     pub new: Vec<crate::project::schema::Cue>,
     pub old: Vec<crate::project::schema::Cue>,

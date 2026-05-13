@@ -163,10 +163,9 @@ pub fn show(
     cache: &mut ThumbnailCache,
     crossfade_progress: Option<(usize, f32)>,
     #[cfg(feature = "v3")] pending_cue: Option<usize>,
-    /// P6.4.1 — optional transport state for 3-state tile rendering.
-    /// When `None`, falls back to the pre-P6.4 crossfade-only visual.
-    #[cfg(feature = "v3")]
-    transport: Option<&crate::transport::TransportState>,
+    // P6.4.1 — optional transport state for 3-state tile rendering.
+    // When `None`, falls back to the pre-P6.4 crossfade-only visual.
+    #[cfg(feature = "v3")] transport: Option<&crate::transport::TransportState>,
 ) -> Option<Command> {
     let mut out: Option<Command> = None;
 

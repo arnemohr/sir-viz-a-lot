@@ -109,9 +109,7 @@ impl TransportState {
             }
         }
 
-        let Some(cur_idx) = self.current_cue else {
-            return None;
-        };
+        let cur_idx = self.current_cue?;
         let Some(cue) = cues.get(cur_idx) else {
             // Cue removed from list mid-session — clear state and bail.
             self.current_cue = None;
@@ -126,31 +124,28 @@ impl TransportState {
             self.fade_progress = 1.0;
         }
 
-        // Once the in-time fade is complete, count hold time.
-        if self.fade_progress >= 1.0 {
-            if cue.fire_mode == CueFireMode::Follow {
-                let hold_limit = cue.hold_time_s.unwrap_or(f32::INFINITY);
-                self.hold_elapsed_s += delta_s;
+        // Once the in-time fade is complete and fire_mode is Follow, count hold time.
+        if self.fade_progress >= 1.0 && cue.fire_mode == CueFireMode::Follow {
+            let hold_limit = cue.hold_time_s.unwrap_or(f32::INFINITY);
+            self.hold_elapsed_s += delta_s;
 
-                if self.hold_elapsed_s >= hold_limit {
-                    // Follow chain: fire the next cue automatically.
-                    if let Some(next_idx) = self.follow_chain.first().copied() {
-                        self.follow_chain.remove(0);
-                        self.fire_cue(next_idx);
-                        return Some(next_idx);
-                    } else {
-                        // Chain exhausted — check for armed cue.
-                        if let Some(armed) = self.armed_cue {
-                            let next = armed;
-                            self.armed_cue = None;
-                            self.fire_cue(next);
-                            return Some(next);
-                        }
-                    }
+            if self.hold_elapsed_s >= hold_limit {
+                // Follow chain: fire the next cue automatically.
+                if let Some(next_idx) = self.follow_chain.first().copied() {
+                    self.follow_chain.remove(0);
+                    self.fire_cue(next_idx);
+                    return Some(next_idx);
+                }
+                // Chain exhausted — check for armed cue.
+                if let Some(armed) = self.armed_cue {
+                    let next = armed;
+                    self.armed_cue = None;
+                    self.fire_cue(next);
+                    return Some(next);
                 }
             }
-            // GoOnTrigger: hold_elapsed_s does not advance (operator controls).
         }
+        // GoOnTrigger: hold_elapsed_s does not advance (operator controls).
 
         None
     }
@@ -273,6 +268,7 @@ impl TransportState {
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
+#[allow(clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
     use crate::project::schema::Cue;

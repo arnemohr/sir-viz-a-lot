@@ -628,6 +628,7 @@ impl Cue {
     /// Construct a `Cue` with identity timing defaults (0.0 in/out, no hold
     /// limit, GoOnTrigger fire mode, no quantize, no timecode trigger, no
     /// bindings). Equivalent to the pre-Phase-6 `Scene` constructor.
+    #[allow(dead_code)]
     pub fn new(
         name: impl Into<String>,
         snapshot: serde_json::Value,

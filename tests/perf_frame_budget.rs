@@ -2453,19 +2453,21 @@ fn perf_transport_cycle_within_budget() {
             let warp_pipeline = WarpPipeline::new(device, FORMAT);
             warp_pipeline.init_buffers(queue, poly.len() >= 3);
             LayerGpu {
+                _fx_tex,
                 fx_view,
+                _warp_tex,
                 warp_view,
+                _sdf_tex,
                 sdf_view,
                 compositor_uniform,
-                polygon: poly,
                 warp_pipeline,
             }
         })
         .collect();
 
-    let (_warp_rt, warp_rt_view) =
+    let (_warp_rt_tex, warp_rt_view) =
         make_render_texture(device, OUT_W, OUT_H, FORMAT, "transport_perf warp_rt");
-    let output_targets: Vec<_> = (0..OUTPUT_COUNT)
+    let output_targets: Vec<(wgpu::Texture, wgpu::TextureView)> = (0..OUTPUT_COUNT)
         .map(|i| {
             make_render_texture(
                 device,
@@ -2481,7 +2483,7 @@ fn perf_transport_cycle_within_budget() {
     // cue 0 (Follow, 2s hold) → cue 1 (Follow, 2s hold) → cue 2 (GoOnTrigger).
     use rmap::project::schema::{BpmQuantize, Cue, CueFireMode};
     use rmap::transport::TransportState;
-    let mut transport_cues = vec![
+    let transport_cues = vec![
         {
             let mut c = Cue::new("perf-cue-0", serde_json::json!({}), None);
             c.in_time_s = 2.0;
@@ -2502,13 +2504,17 @@ fn perf_transport_cycle_within_budget() {
             c
         },
     ];
-    let mut transport = TransportState::default();
-    transport.follow_chain = vec![1, 2];
+    let mut transport = TransportState {
+        follow_chain: vec![1, 2],
+        ..Default::default()
+    };
     transport.fire_cue(0);
     let bpm = 120.0_f32;
     let delta_s = 1.0_f32 / 60.0;
 
     let mut frame_times: Vec<f64> = Vec::with_capacity(FRAME_COUNT);
+
+    let start_time = Instant::now();
 
     for frame_idx in 0..FRAME_COUNT {
         let t_frame_start = Instant::now();
@@ -2518,82 +2524,26 @@ fn perf_transport_cycle_within_budget() {
         let auto_fire = transport.tick(delta_s, bpm, &transport_cues);
         let _ = auto_fire; // In production this would dispatch SceneRecall.
 
-        let t = frame_idx as f32 / 60.0;
+        let clock_secs = start_time.elapsed().as_secs_f32();
 
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("transport_perf encoder"),
-        });
-
-        for (i, ls) in layers.iter_mut().enumerate() {
-            run_fx_layer(
-                device,
-                queue,
-                &fx_pipeline,
-                &mut encoder,
-                &ls.fx_view,
-                &ls.sdf_view,
-                i,
-                t,
-                false,
-                0.5,
-                ls.polygon.len() >= 3,
-            );
-            run_warp_layer(
-                device,
-                queue,
-                &ls.warp_pipeline,
-                &mut encoder,
-                &ls.warp_view,
-                &ls.fx_view,
-                &ls.sdf_view,
-                &ls.compositor_uniform,
-            );
-        }
-
-        let comp_inputs: Vec<_> = layers
-            .iter()
-            .map(|ls| CompositorInput {
-                view: &ls.warp_view,
-                blend_mode: 0,
-                opacity: 1.0f32,
-                uniform: &ls.compositor_uniform as &wgpu::Buffer,
-            })
-            .collect();
-
-        compositor.composite(
+        // Reuse the shared render_frame helper (same GPU work as perf_frame_budget).
+        render_frame(
             device,
             queue,
-            &mut encoder,
-            wgpu::Color {
-                r: 0.0,
-                g: 0.0,
-                b: 0.0,
-                a: 1.0,
-            },
+            &fx_pipeline,
+            &compositor,
+            &gamma,
+            &edge_blend,
+            &mut layers,
+            &output_targets,
             &warp_rt_view,
-            &comp_inputs,
+            clock_secs,
         );
-        queue.submit(std::iter::once(encoder.finish()));
 
-        for (out_idx, (_out_tex, out_view)) in output_targets.iter().enumerate() {
-            let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("transport_perf gamma encoder"),
-            });
-            gamma.render(device, queue, &mut enc, out_view, &warp_rt_view);
-            let edge_side = if out_idx == 0 { 0.0f32 } else { 1.0 };
-            edge_blend.render(
-                device,
-                queue,
-                &mut enc,
-                out_view,
-                OUT_W,
-                EDGE_BLEND_OVERLAP_PX,
-                edge_side,
-            );
-            queue.submit(std::iter::once(enc.finish()));
-        }
-
-        device.poll(wgpu::Maintain::Wait);
+        device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("device.poll failed");
+        let _ = frame_idx;
         frame_times.push(t_frame_start.elapsed().as_secs_f64() * 1_000.0);
     }
 
