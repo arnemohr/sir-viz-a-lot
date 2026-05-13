@@ -367,23 +367,43 @@ Logs land in `~/Library/Logs/rmap/rmap.log` (daily rolling); override with
 
 ---
 
-## Coming in v1.0
+## What's in v1.0
 
 rmap v1.0 closes the remaining gaps to professional media servers while staying
-focused on clarity and show-day reliability. Capabilities in active development:
+focused on clarity and show-day reliability. See `CHANGELOG.md` for the full
+per-workstream history.
 
-- **Syphon output** — publish the projector canvas as a Syphon source for OBS,
-  VDMX, Resolume Arena, and other macOS applications (no capture card required).
-- **Bezier warp** — cubic Bezier mesh warp for curved columns, arches, and
-  organic surfaces; degenerate handles render pixel-identical to the existing
-  bilinear mesh.
-- **Inverse mask + luma key + chroma key** — accessible from the Mask mode pill
-  sub-row, not buried in Advanced.
+### Shipped in v1.0
+
 - **Calibration file** — save venue warp + mask + gamma as a separate
-  `.rmap-calibration.json`, reusable across show files.
+  `.rmap-calibration.json` (File > Save Calibration…), reusable across show
+  files (File > Load Calibration…). Same-directory files are offered
+  automatically after project open.
+- **Bezier warp schema** — cubic Bezier mesh data model (v10 schema), CPU
+  tessellation via Coons patches, `MoveBezierAnchor` + `SetBezierHandle`
+  mutations with undo. Bilinear-equivalent for all-None handles; GPU render
+  pipeline integration is planned post-v1.0.
+- **Inverse mask + luma key + chroma key** — `MaskGraph` schema (v11),
+  CPU SDF evaluator for Polygon + Inverse; LumaKey + ChromaKey node kinds
+  defined. GPU render pipeline integration is planned post-v1.0.
+- **RGBW + colour-temperature mixing** — CCT-aware white-channel extraction
+  for warm-white LED fixtures; per-fixture-group CCT dropdown + W scale;
+  DMX output path for four-channel RGBW fixtures.
+- **Scene packs** — export and import portable `.rmap-scene-pack.zip`
+  archives for sharing scene templates across projects.
+- **Phase 7 audit kinds** — `SyphonFrameworkMissing`,
+  `CalibrationSurfaceUnmatched`, `BezierMeshSchemaUpgraded`,
+  `RgbwConfigInvalid` — each surfaces as a single-line operator toast.
+
+### Planned post-v1.0
+
+- **Syphon output** — Syphon.framework linkage scaffold is in place
+  (`syphon-out` feature); the ObjC Metal wrapper requires the vendored
+  framework binary and is deferred.
+- **Bezier handle overlay + palette UI** — requires interactive GPU canvas
+  rendering (overlay pipeline pass).
+- **Mask key UIs** — luma/chroma key sliders in the Mask mode sub-row require
+  MaskGraph GPU render pipeline integration.
 - **Calibration verify patterns** — alignment cross, dot grid, colour bars,
-  edge-blend gradient, focus chart, geometry grid (Output panel).
-- **RGBW + colour-temperature mixing** — CCT-aware white channel extraction for
-  warm-white LED fixtures, per-fixture-group setting.
-- **Scene packs** — export and import portable `.rmap-scene-pack.zip` archives
-  for sharing scene templates across projects.
+  edge-blend gradient, focus chart, geometry grid require a projector
+  OverlayPipeline pass.
