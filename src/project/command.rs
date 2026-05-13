@@ -1192,6 +1192,37 @@ impl ReverseStorage for ResetLayerBezierMesh {
     }
 }
 
+/// P7.5.1 / P7.6.1 — Payload for [`Mutation::SetLayerMaskGraph`].
+///
+/// Replaces the entire `MaskGraph` on `LayerConfig.mask_graph` for the
+/// layer at `layer_idx` (whole-Option snapshot Reverse — rule 3).
+/// Used for inverse mask, luma key, and chroma key toggling.
+#[derive(Debug, Clone)]
+pub struct SetLayerMaskGraph {
+    /// Index into `Project.layers`; `layer.mask_graph` is the target.
+    pub layer_idx: usize,
+    /// New `MaskGraph` to install (`Some`) or clear (`None`).
+    pub new: Option<crate::project::schema::MaskGraph>,
+    /// Pre-mutation snapshot.
+    pub old: Option<crate::project::schema::MaskGraph>,
+}
+
+impl ReverseStorage for SetLayerMaskGraph {
+    fn apply(self, project: &mut Project) -> Self {
+        let layer = project
+            .layers
+            .get_mut(self.layer_idx)
+            .expect("SetLayerMaskGraph: layer_idx out of range");
+        let post = self.new;
+        layer.mask_graph = post.clone();
+        SetLayerMaskGraph {
+            layer_idx: self.layer_idx,
+            new: self.old,
+            old: post,
+        }
+    }
+}
+
 /// Payload for [`Mutation::SetLayerMaskPolygon`].
 ///
 /// Replaces `WarpMesh.mask_polygon` for the layer at `layer_idx`.
@@ -2092,6 +2123,8 @@ pub enum Mutation {
     ResetLayerWarpMesh(ResetLayerWarpMesh),
     /// P7.3.1 — Replace the entire `BezierMesh` (or set to `None`). Delegates to [`ResetLayerBezierMesh`].
     ResetLayerBezierMesh(ResetLayerBezierMesh),
+    /// P7.5.1/P7.6.1 — Replace the entire `MaskGraph` on a layer (or set to `None`). Delegates to [`SetLayerMaskGraph`].
+    SetLayerMaskGraph(SetLayerMaskGraph),
     /// Replace `WarpMesh.mask_polygon`. Delegates to [`SetLayerMaskPolygon`].
     SetLayerMaskPolygon(SetLayerMaskPolygon),
 
@@ -2246,6 +2279,7 @@ impl Mutation {
             Mutation::SetModulator(s) => Mutation::SetModulator(s.apply(project)),
             Mutation::ResetLayerWarpMesh(s) => Mutation::ResetLayerWarpMesh(s.apply(project)),
             Mutation::ResetLayerBezierMesh(s) => Mutation::ResetLayerBezierMesh(s.apply(project)),
+            Mutation::SetLayerMaskGraph(s) => Mutation::SetLayerMaskGraph(s.apply(project)),
             Mutation::SetLayerMaskPolygon(s) => Mutation::SetLayerMaskPolygon(s.apply(project)),
             Mutation::SetLayerMaskVertex(s) => Mutation::SetLayerMaskVertex(s.apply(project)),
             Mutation::SetLayerWarpCorner(s) => Mutation::SetLayerWarpCorner(s.apply(project)),
@@ -2413,6 +2447,7 @@ impl Mutation {
             | Mutation::SetLayerMaskVertex(_)
             | Mutation::ResetLayerWarpMesh(_)
             | Mutation::ResetLayerBezierMesh(_)
+            | Mutation::SetLayerMaskGraph(_)
             | Mutation::SetLayerMaskPolygon(_)
             | Mutation::SetLayerWarpCorner(_)
             | Mutation::SetProjectScenes(_)
@@ -2865,6 +2900,22 @@ impl Project {
     ) -> Mutation {
         let old = self.layers[layer_idx].warp.clone();
         Mutation::ResetLayerWarpMesh(ResetLayerWarpMesh {
+            layer_idx,
+            new,
+            old,
+        })
+    }
+
+    /// P7.5.1/P7.6.1 — Build a `SetLayerMaskGraph` mutation. Captures the current
+    /// `mask_graph` as `old` (whole-Option snapshot Reverse — rule 3). Panics
+    /// if `layer_idx` is out of range.
+    pub fn set_layer_mask_graph_mutation(
+        &self,
+        layer_idx: usize,
+        new: Option<crate::project::schema::MaskGraph>,
+    ) -> Mutation {
+        let old = self.layers[layer_idx].mask_graph.clone();
+        Mutation::SetLayerMaskGraph(SetLayerMaskGraph {
             layer_idx,
             new,
             old,
@@ -4612,6 +4663,9 @@ mod tests {
                 /// `true` = install `Some(BezierMesh)`, `false` = install `None`.
                 some: bool,
             },
+            /// P7.5.1/P7.6.1 — set the MaskGraph to an identity mask (Some)
+            /// or clear it (None). Targets layer 0 (always present).
+            SetMaskGraph(bool),
         }
 
         fn to_mutation(kind: &MutationKind, project: &Project) -> Mutation {
@@ -5095,6 +5149,18 @@ mod tests {
                     };
                     project.set_reset_layer_bezier_mesh_mutation(0, new)
                 }
+                // P7.5.1/P7.6.1 — MaskGraph: identity mask (Some) or clear (None).
+                MutationKind::SetMaskGraph(some) => {
+                    if project.layers.is_empty() {
+                        return project.set_gamma_mutation(project.gamma);
+                    }
+                    let new = if *some {
+                        Some(crate::project::schema::MaskGraph::identity())
+                    } else {
+                        None
+                    };
+                    project.set_layer_mask_graph_mutation(0, new)
+                }
             }
         }
 
@@ -5358,6 +5424,8 @@ mod tests {
                 (1u32..=4, 1u32..=4, any::<bool>()).prop_map(|(rows, cols, some)| {
                     MutationKind::ResetBezierMesh { rows, cols, some }
                 }),
+                // P7.5.1/P7.6.1 — SetMaskGraph: identity MaskGraph or clear.
+                any::<bool>().prop_map(MutationKind::SetMaskGraph),
             ]
         }
 

@@ -626,6 +626,34 @@ pub enum MaskNode {
         /// NodeId of the node to subtract.
         sub: NodeId,
     },
+    /// P7.5.1 — Luma key: alpha derived from the brightness of the rendered output.
+    ///
+    /// Pixels whose luminance (max-channel approximation) exceeds `threshold`
+    /// become opaque; pixels below become transparent.  `softness` widens
+    /// the transition band (0 = hard, 1 = full soft).
+    /// Accessible from the Mask mode pill sub-row (M8 follow-on).
+    LumaKey {
+        /// Luminance threshold in [0, 1]. Pixels above become opaque.
+        threshold: f32,
+        /// Transition softness in [0, 1].
+        softness: f32,
+    },
+    /// P7.6.1 — Chroma key: alpha derived from a hue range in the rendered output.
+    ///
+    /// Pixels whose hue falls within `hue_center_deg ± hue_range_deg` and whose
+    /// saturation exceeds `saturation_threshold` become transparent (alpha → 0).
+    /// Default hue center 120° = green-screen.
+    /// Accessible from the Mask mode pill sub-row (M8 follow-on).
+    ChromaKey {
+        /// Centre hue in degrees [0, 360). Default 120° (green).
+        hue_center_deg: f32,
+        /// Half-width of the hue range in degrees [0, 180].
+        hue_range_deg: f32,
+        /// Minimum saturation (HSV S) for pixels to be keyed [0, 1].
+        saturation_threshold: f32,
+        /// Transition softness in [0, 1].
+        softness: f32,
+    },
 }
 
 /// P7.4.1 — Composable mask graph.
