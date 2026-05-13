@@ -499,6 +499,11 @@ struct EditingState {
     #[cfg(all(feature = "midi", feature = "v3"))]
     mtc_position:
         Option<std::sync::Arc<std::sync::Mutex<Option<crate::project::schema::TimecodePosition>>>>,
+    /// P6.12.2 — shared MIDI-clock BPM slot from the MIDI tracker. `None`
+    /// when MIDI is not active or no 0xF8 pulses have been received.
+    /// Read each frame to update `state.clock` when MIDI Clock is active.
+    #[cfg(all(feature = "midi", feature = "v3"))]
+    midi_clock_bpm: Option<std::sync::Arc<std::sync::RwLock<Option<f32>>>>,
     /// Optional OSC UDP listener (T-M7-06). Polled per frame; drop joins
     /// the receive thread.
     #[cfg(feature = "osc")]
@@ -2130,6 +2135,9 @@ fn assemble_editing_state(
         // P6.12.1 — extract the MTC position slot before moving midi into EditingState.
         #[cfg(all(feature = "midi", feature = "v3"))]
         mtc_position: inputs.midi.as_ref().map(|m| m.mtc_position.clone()),
+        // P6.12.2 — extract the MIDI-clock BPM slot before moving midi.
+        #[cfg(all(feature = "midi", feature = "v3"))]
+        midi_clock_bpm: inputs.midi.as_ref().map(|m| m.midi_clock_bpm.clone()),
         #[cfg(feature = "midi")]
         midi: inputs.midi,
         #[cfg(feature = "osc")]
@@ -5323,6 +5331,20 @@ fn handle_editing_window_event(
                 if let Some(slot) = state.mtc_position.as_ref() {
                     if let Ok(guard) = slot.lock() {
                         state.transport.last_timecode_position = *guard;
+                    }
+                }
+                // P6.12.2 — update BPM clock from MIDI-clock tracker (if active).
+                // When MIDI Clock 0xF8 pulses are received, they drive the BPM
+                // directly rather than through individual tap events. Only apply
+                // when the deviation exceeds 0.1 BPM to avoid thrashing.
+                #[cfg(all(feature = "midi", feature = "v3"))]
+                if let Some(slot) = state.midi_clock_bpm.as_ref() {
+                    if let Ok(guard) = slot.read() {
+                        if let Some(midi_bpm) = *guard {
+                            if (state.clock.bpm() - midi_bpm).abs() > 0.1 {
+                                state.clock.set_bpm(midi_bpm);
+                            }
+                        }
                     }
                 }
 

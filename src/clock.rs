@@ -61,6 +61,13 @@ impl Clock {
         self.bpm
     }
 
+    /// P6.12.2 — Directly set the BPM (used by MIDI-clock source to drive
+    /// the clock without tap events). The last-tap source is unchanged
+    /// so the UI can distinguish MIDI-clock-driven BPM from tap-tempo.
+    pub fn set_bpm(&mut self, bpm: f32) {
+        self.bpm = bpm.clamp(20.0, 400.0);
+    }
+
     /// Record a tap-tempo press. Two consecutive taps are sufficient to
     /// derive a BPM; subsequent taps update the running estimate.
     pub fn tap(&mut self, source: TapSource) {

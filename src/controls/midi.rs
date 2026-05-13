@@ -82,6 +82,11 @@ pub struct MidiSource {
     #[cfg(feature = "v3")]
     pub mtc_position:
         std::sync::Arc<std::sync::Mutex<Option<crate::project::schema::TimecodePosition>>>,
+    /// P6.12.2 — shared MIDI-clock BPM slot. `None` when no 0xF8 pulses have
+    /// been received yet. Read by the transport tick to update the BPM clock
+    /// and display "MIDI Clock" as the tap source in the transport HUD.
+    #[cfg(feature = "v3")]
+    pub midi_clock_bpm: std::sync::Arc<std::sync::RwLock<Option<f32>>>,
 }
 
 impl MidiSource {
@@ -111,6 +116,16 @@ impl MidiSource {
         #[cfg(feature = "v3")]
         let (mtc_decoder_arc, mtc_position) = mtc_decoder;
 
+        // P6.12.2 — MIDI-clock BPM tracker. Shared with each port callback.
+        #[cfg(feature = "v3")]
+        let midi_clock_tracker = {
+            let tracker = crate::sync::midi_clock::MidiClockTracker::new();
+            let bpm = tracker.bpm();
+            (std::sync::Arc::new(std::sync::Mutex::new(tracker)), bpm)
+        };
+        #[cfg(feature = "v3")]
+        let (midi_clock_arc, midi_clock_bpm) = midi_clock_tracker;
+
         // First pass to enumerate; each `connect` consumes its `MidiInput`,
         // so allocate one per port.
         let port_descriptors: Vec<_> = {
@@ -126,6 +141,9 @@ impl MidiSource {
             // P6.12.1 — clone the MTC decoder Arc for this port's callback.
             #[cfg(feature = "v3")]
             let mtc_for_callback = mtc_decoder_arc.clone();
+            // P6.12.2 — clone the MIDI-clock tracker Arc.
+            #[cfg(feature = "v3")]
+            let midi_clock_for_callback = midi_clock_arc.clone();
             match midi.connect(
                 &port,
                 "rmap-input",
@@ -137,6 +155,14 @@ impl MidiSource {
                     if message.len() >= 2 && message[0] == 0xF1 {
                         if let Ok(mut dec) = mtc_for_callback.lock() {
                             dec.push_quarter_frame(message[1]);
+                        }
+                        return;
+                    }
+                    // P6.12.2 — MIDI clock pulse (status 0xF8, no data bytes).
+                    #[cfg(feature = "v3")]
+                    if !message.is_empty() && message[0] == 0xF8 {
+                        if let Ok(mut tracker) = midi_clock_for_callback.lock() {
+                            tracker.push_pulse();
                         }
                         return;
                     }
@@ -195,6 +221,8 @@ impl MidiSource {
             connections,
             #[cfg(feature = "v3")]
             mtc_position,
+            #[cfg(feature = "v3")]
+            midi_clock_bpm,
         })
     }
 }
