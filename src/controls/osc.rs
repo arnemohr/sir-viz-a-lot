@@ -12,6 +12,14 @@
 //! - `/rmap/blackout`         → `Blackout`
 //! - `/rmap/freeze`           → `Freeze`
 //!
+//! P6.9.2 transport control addresses:
+//!
+//! - `/rmap/cue/go`           → `CueGo`
+//! - `/rmap/cue/prev`         → `CueArmPrev`
+//! - `/rmap/cue/next`         → `CueArmNext`
+//! - `/rmap/cue/back`         → `CueBackStep`
+//! - `/rmap/cue/N`            → `SceneRecall(N - 1)` for N in 1..=9
+//!
 //! Unknown addresses are dropped silently. v0.4 W2.1 maintains a
 //! process-wide OSC value registry keyed by address (analogous to
 //! `audio::PROVIDER`) that the new `Modulator::OscBound { addr }`
@@ -142,6 +150,25 @@ fn decode_message(msg: &OscMessage) -> Option<Command> {
                 .filter(|n| (1..=9).contains(n))
                 .map(|n| Command::SceneRecall(n - 1))
         }
+        // P6.9.2 — transport control addresses.
+        #[cfg(feature = "v3")]
+        "/rmap/cue/go" => Some(Command::CueGo),
+        #[cfg(feature = "v3")]
+        "/rmap/cue/prev" => Some(Command::CueArmPrev),
+        #[cfg(feature = "v3")]
+        "/rmap/cue/next" => Some(Command::CueArmNext),
+        #[cfg(feature = "v3")]
+        "/rmap/cue/back" => Some(Command::CueBackStep),
+        #[cfg(feature = "v3")]
+        a if a.starts_with("/rmap/cue/") => {
+            // /rmap/cue/N (N = 1..=9) → SceneRecall(N-1) (fire cue N).
+            let suffix = &a["/rmap/cue/".len()..];
+            suffix
+                .parse::<usize>()
+                .ok()
+                .filter(|n| (1..=9).contains(n))
+                .map(|n| Command::SceneRecall(n - 1))
+        }
         _ => None,
     }
 }
@@ -217,5 +244,52 @@ mod tests {
             decode_message(&msg("/RMAP/Tap")),
             Some(Command::TapTempo(TapSource::Osc))
         ));
+    }
+
+    // P6.9.2 — transport control address tests.
+    #[cfg(feature = "v3")]
+    #[test]
+    fn decode_cue_go() {
+        assert!(matches!(
+            decode_message(&msg("/rmap/cue/go")),
+            Some(Command::CueGo)
+        ));
+    }
+
+    #[cfg(feature = "v3")]
+    #[test]
+    fn decode_cue_navigation() {
+        assert!(matches!(
+            decode_message(&msg("/rmap/cue/prev")),
+            Some(Command::CueArmPrev)
+        ));
+        assert!(matches!(
+            decode_message(&msg("/rmap/cue/next")),
+            Some(Command::CueArmNext)
+        ));
+        assert!(matches!(
+            decode_message(&msg("/rmap/cue/back")),
+            Some(Command::CueBackStep)
+        ));
+    }
+
+    #[cfg(feature = "v3")]
+    #[test]
+    fn decode_cue_fire_by_number() {
+        match decode_message(&msg("/rmap/cue/1")) {
+            Some(Command::SceneRecall(idx)) => assert_eq!(idx, 0),
+            other => panic!("got {other:?}"),
+        }
+        match decode_message(&msg("/rmap/cue/9")) {
+            Some(Command::SceneRecall(idx)) => assert_eq!(idx, 8),
+            other => panic!("got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "v3")]
+    #[test]
+    fn decode_cue_out_of_range_is_none() {
+        assert!(decode_message(&msg("/rmap/cue/0")).is_none());
+        assert!(decode_message(&msg("/rmap/cue/10")).is_none());
     }
 }
