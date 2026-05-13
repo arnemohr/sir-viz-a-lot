@@ -18,9 +18,9 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Sender, TryRecvError, bounded};
 
@@ -46,6 +46,14 @@ const CHANNEL_CAPACITY: usize = 4;
 pub struct LightingThread {
     stop: Arc<AtomicBool>,
     handle: Option<thread::JoinHandle<()>>,
+    /// P5.9.1 — `true` while packets are being sent (within ~2 s).
+    /// Set by the lighting thread on each successful `send_universe`; read by
+    /// the diagnostics renderer to display the DMX activity LED.
+    pub dmx_active: Arc<AtomicBool>,
+    /// P5.9.2 — rolling per-second packet count.
+    /// Incremented by the lighting thread on each `send_universe`; read by the
+    /// diagnostics renderer and reset every second by the lighting thread itself.
+    pub packet_count_per_sec: Arc<AtomicU64>,
 }
 
 impl LightingThread {
@@ -62,6 +70,10 @@ impl LightingThread {
         let (tx, rx) = bounded::<UniverseFrame>(CHANNEL_CAPACITY);
         let stop = Arc::new(AtomicBool::new(false));
         let stop_for_thread = stop.clone();
+        let dmx_active = Arc::new(AtomicBool::new(false));
+        let dmx_active_thread = dmx_active.clone();
+        let packet_count = Arc::new(AtomicU64::new(0));
+        let packet_count_thread = packet_count.clone();
 
         let handle = thread::Builder::new()
             .name("rmap-lighting".into())
@@ -71,6 +83,11 @@ impl LightingThread {
                 // frames between lighting ticks (at 60 fps vs 44 Hz) — all but
                 // the last are superseded and discarded.
                 let mut latest: HashMap<UniverseId, [u8; 512]> = HashMap::new();
+                // P5.9.2 — packet-rate tracking.
+                let mut rate_window_start = Instant::now();
+                let mut rate_count: u64 = 0;
+                // P5.9.1 — activity LED: set to false after 2 s of no sends.
+                let mut last_send_at: Option<Instant> = None;
 
                 loop {
                     if stop_for_thread.load(Ordering::Relaxed) {
@@ -92,10 +109,31 @@ impl LightingThread {
                     }
 
                     // Send all queued universes.
+                    let sent_this_tick = !latest.is_empty();
                     for (id, data) in &latest {
                         if let Err(e) = transport.send_universe(id.as_u16(), data) {
                             tracing::warn!(universe = id.as_u16(), ?e, "lighting send error");
+                        } else {
+                            rate_count += 1;
                         }
+                    }
+
+                    // P5.9.1 — update activity flag.
+                    if sent_this_tick {
+                        last_send_at = Some(Instant::now());
+                        dmx_active_thread.store(true, Ordering::Relaxed);
+                    } else if let Some(t) = last_send_at {
+                        if t.elapsed() > Duration::from_secs(2) {
+                            dmx_active_thread.store(false, Ordering::Relaxed);
+                            last_send_at = None;
+                        }
+                    }
+
+                    // P5.9.2 — update packet-rate counter every second.
+                    if rate_window_start.elapsed() >= Duration::from_secs(1) {
+                        packet_count_thread.store(rate_count, Ordering::Relaxed);
+                        rate_count = 0;
+                        rate_window_start = Instant::now();
                     }
 
                     thread::sleep(TICK_INTERVAL);
@@ -107,6 +145,8 @@ impl LightingThread {
             Self {
                 stop,
                 handle: Some(handle),
+                dmx_active,
+                packet_count_per_sec: packet_count,
             },
             tx,
         )

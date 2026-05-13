@@ -451,6 +451,14 @@ pub struct ControlPanelInputs {
     /// P0.3.2's deferred wiring (the video worker is now a real producer).
     #[cfg(feature = "v3")]
     pub texture_upload_dropped: u64,
+    /// P5.9.1 — `true` when the DMX lighting thread sent packets within the
+    /// last ~2 s. Drives the DMX activity LED in the diagnostics strip.
+    #[cfg(feature = "lighting")]
+    pub dmx_active: bool,
+    /// P5.9.2 — Art-Net packets sent per second by the lighting thread.
+    /// Displayed as "DMX: N pkt/s" next to the activity LED.
+    #[cfg(feature = "lighting")]
+    pub dmx_packet_rate: u64,
 }
 
 /// Render the control panel. Mutates `project` in place.
@@ -567,6 +575,10 @@ pub fn show(
                     scene,
                     &inputs.monitor_names,
                     inputs.texture_upload_dropped,
+                    #[cfg(feature = "lighting")]
+                    inputs.dmx_active,
+                    #[cfg(feature = "lighting")]
+                    inputs.dmx_packet_rate,
                 );
                 match act {
                     ControlPanelAction::None => {}

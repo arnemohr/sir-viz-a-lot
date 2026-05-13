@@ -4634,6 +4634,22 @@ fn handle_editing_window_event(
                     // wiring (video producer landed in P0.4.2b).
                     #[cfg(feature = "v3")]
                     texture_upload_dropped: state.texture_upload_queue.dropped_count(),
+                    // P5.9.1 / P5.9.2 — lighting diagnostics.
+                    #[cfg(feature = "lighting")]
+                    dmx_active: state
+                        .lighting_thread
+                        .as_ref()
+                        .map(|t| t.dmx_active.load(std::sync::atomic::Ordering::Relaxed))
+                        .unwrap_or(false),
+                    #[cfg(feature = "lighting")]
+                    dmx_packet_rate: state
+                        .lighting_thread
+                        .as_ref()
+                        .map(|t| {
+                            t.packet_count_per_sec
+                                .load(std::sync::atomic::Ordering::Relaxed)
+                        })
+                        .unwrap_or(0),
                 };
                 // 003-T1.42 follow-up: drain expired toasts once per frame
                 // before render. Sticky Error toasts survive; auto-expiring

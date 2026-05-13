@@ -88,6 +88,7 @@ fn section_header(label: &str) -> egui::RichText {
 /// Returns a `ControlPanelAction` (usually `None`; `RebuildLayers` if a
 /// layer add/remove happens, which currently can't originate here but the
 /// return type is kept consistent with the rest of the panel API).
+#[allow(clippy::too_many_arguments)]
 pub fn show(
     ui: &mut Ui,
     project: &mut Project,
@@ -95,6 +96,8 @@ pub fn show(
     scene: &SceneEditorState,
     monitor_names: &[String],
     texture_upload_dropped: u64,
+    #[cfg(feature = "lighting")] dmx_active: bool,
+    #[cfg(feature = "lighting")] dmx_packet_rate: u64,
 ) -> ControlPanelAction {
     // Sync st.selected_layer from scene.selected so the migrated
     // effects-tab code that reads st.selected_layer stays correct.
@@ -689,6 +692,30 @@ pub fn show(
                             ));
                         }
                     });
+
+                    // P5.9.1 — DMX activity LED.
+                    // P5.9.2 — Art-Net packet-rate badge.
+                    #[cfg(feature = "lighting")]
+                    {
+                        ui.horizontal(|ui| {
+                            // Activity LED: green when active, grey otherwise.
+                            let led_color = if dmx_active {
+                                egui::Color32::from_rgb(0x40, 0xc0, 0x40) // green
+                            } else {
+                                egui::Color32::from_rgb(0x60, 0x60, 0x60) // grey
+                            };
+                            // Small circle LED.
+                            let (rect, _) = ui
+                                .allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
+                            ui.painter().circle_filled(rect.center(), 4.0, led_color);
+                            let rate_text = format!("DMX: {} pkt/s", dmx_packet_rate);
+                            ui.label(&rate_text).on_hover_text(if dmx_active {
+                                "DMX Art-Net output active"
+                            } else {
+                                "DMX Art-Net output inactive"
+                            });
+                        });
+                    }
                 });
         });
 
