@@ -14,6 +14,11 @@ below is sized for a single PR.
 - [x] P6.5.1 6b94e2c — TransportState struct + tick integration
 - [x] P6.5.2 e1dedcc — Follow chain execution (proptest invariants)
 - [x] P6.5.3 3e668e0 — BPM quantize + timecode-trigger dispatch
+- [x] P6.3.1-P6.3.4 646e3d3 — Cue detail panel (timing spinners, fire mode, BPM quantize, timecode trigger)
+- [x] P6.4.1 c043721 — Three-state tile renderer (idle / armed-next / live)
+- [x] P6.4.2 9c1eed6 — Keyboard + MIDI navigation (CueGo, CueArmNext, CueArmPrev, CueBackStep)
+- [x] P6.6.1-P6.6.2 a26377f — Transport HUD (BPM display, tap source, current cue, global quantize)
+- [BLOCKED] P6.11.1 — libltc not installed (brew install libltc + cmake required); skip for v0.7
 
 ---
 
