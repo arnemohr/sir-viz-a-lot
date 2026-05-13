@@ -11,6 +11,9 @@ below is sized for a single PR.
 - [x] P6.2.1 09a38e3 — Cue struct + rename Project.scenes to Project.cues
 - [x] P6.2.2 46b2629 — Mutation variants for cue timing edits (SetCueName, SetCueTiming, SetProjectCues)
 - [x] P6.2.3 bd476ca — Schema v8 → v9 migration: scenes renamed to cues
+- [x] P6.5.1 6b94e2c — TransportState struct + tick integration
+- [x] P6.5.2 e1dedcc — Follow chain execution (proptest invariants)
+- [x] P6.5.3 3e668e0 — BPM quantize + timecode-trigger dispatch
 
 ---
 
