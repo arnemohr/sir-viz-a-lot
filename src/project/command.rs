@@ -1655,6 +1655,93 @@ impl ReverseStorage for SetVideoClipRange {
     }
 }
 
+// ---------------------------------------------------------------------------
+// P5.3.3–P5.3.5 — Fixture-group mutations (behind `feature = "lighting"`)
+// ---------------------------------------------------------------------------
+
+/// P5.3.5 — replace all mutable fields of a `FixtureGroup` identified by `id`.
+///
+/// Whole-param Reverse: old `FixtureGroupParams` is stored in `old`.
+#[cfg(feature = "lighting")]
+#[derive(Debug, Clone)]
+pub struct SetFixtureGroupParams {
+    /// The ID of the group to mutate.
+    pub id: crate::lighting::fixture::FixtureGroupId,
+    /// New params to apply.
+    pub new: crate::lighting::fixture::FixtureGroupParams,
+    /// Old params captured before the mutation (for Reverse).
+    pub old: crate::lighting::fixture::FixtureGroupParams,
+}
+
+#[cfg(feature = "lighting")]
+impl ReverseStorage for SetFixtureGroupParams {
+    fn apply(self, project: &mut Project) -> Self {
+        let group = project
+            .fixture_groups
+            .iter_mut()
+            .find(|g| g.id == self.id)
+            .unwrap_or_else(|| {
+                panic!(
+                    "SetFixtureGroupParams: fixture group {:?} not found",
+                    self.id
+                )
+            });
+        debug_assert!(
+            group.label == self.old.label,
+            "SetFixtureGroupParams stale Reverse: label={:?} expected={:?}",
+            group.label,
+            self.old.label,
+        );
+        let before = crate::lighting::fixture::FixtureGroupParams::from_group(group);
+        self.new.apply_to(group);
+        SetFixtureGroupParams {
+            id: self.id,
+            new: before,
+            old: self.new,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// P5.7.2–P5.7.4 — Fixture-chase mutations (behind `feature = "lighting"`)
+// ---------------------------------------------------------------------------
+
+/// P5.7.4 — replace all mutable fields of a `FixtureChase` identified by `id`.
+#[cfg(feature = "lighting")]
+#[derive(Debug, Clone)]
+pub struct SetFixtureChaseParams {
+    /// The ID of the chase to mutate.
+    pub id: crate::lighting::chase::FixtureChaseid,
+    /// New params to apply.
+    pub new: crate::lighting::chase::FixtureChaseParams,
+    /// Old params captured before the mutation (for Reverse).
+    pub old: crate::lighting::chase::FixtureChaseParams,
+}
+
+#[cfg(feature = "lighting")]
+impl ReverseStorage for SetFixtureChaseParams {
+    fn apply(self, project: &mut Project) -> Self {
+        let chase = project
+            .fixture_chases
+            .iter_mut()
+            .find(|c| c.id == self.id)
+            .unwrap_or_else(|| panic!("SetFixtureChaseParams: chase {:?} not found", self.id));
+        debug_assert!(
+            chase.label == self.old.label,
+            "SetFixtureChaseParams stale Reverse: label={:?} expected={:?}",
+            chase.label,
+            self.old.label,
+        );
+        let before = crate::lighting::chase::FixtureChaseParams::from_chase(chase);
+        self.new.apply_to(chase);
+        SetFixtureChaseParams {
+            id: self.id,
+            new: before,
+            old: self.new,
+        }
+    }
+}
+
 /// 003-T1.14 — typed project mutations.
 ///
 /// Each variant carries the previous value of every field it
@@ -1839,6 +1926,55 @@ pub enum Mutation {
 
     /// Replace the entire project from a serde_json snapshot. Delegates to [`ApplyProjectSnapshot`].
     ApplyProjectSnapshot(ApplyProjectSnapshot),
+
+    // -------------------------------------------------------------------
+    // P5 — Fixture-group mutations (behind `feature = "lighting"`)
+    // -------------------------------------------------------------------
+    /// P5.3.3 — insert a `FixtureGroup` into `project.fixture_groups`.
+    ///
+    /// **Asymmetric variant** — kept as inline match arm because its Reverse
+    /// is `RemoveFixtureGroup`. Mirrors the `AddLayer`/`RemoveLayer` pattern.
+    #[cfg(feature = "lighting")]
+    AddFixtureGroup {
+        /// The group to insert.
+        group: crate::lighting::fixture::FixtureGroup,
+    },
+    /// P5.3.4 — remove a `FixtureGroup` from `project.fixture_groups`.
+    ///
+    /// **Asymmetric variant** — kept as inline match arm; Reverse is `AddFixtureGroup`.
+    #[cfg(feature = "lighting")]
+    RemoveFixtureGroup {
+        /// ID of the group to remove.
+        id: crate::lighting::fixture::FixtureGroupId,
+    },
+    /// P5.3.5 — replace all mutable fields of a `FixtureGroup`. Delegates
+    /// to [`SetFixtureGroupParams`] which implements [`ReverseStorage`].
+    #[cfg(feature = "lighting")]
+    SetFixtureGroupParams(SetFixtureGroupParams),
+
+    // -------------------------------------------------------------------
+    // P5 — Fixture-chase mutations (behind `feature = "lighting"`)
+    // -------------------------------------------------------------------
+    /// P5.7.2 — insert a `FixtureChase` into `project.fixture_chases`.
+    ///
+    /// **Asymmetric variant** — Reverse is `RemoveFixtureChase`.
+    #[cfg(feature = "lighting")]
+    AddFixtureChase {
+        /// The chase to insert.
+        chase: crate::lighting::chase::FixtureChase,
+    },
+    /// P5.7.3 — remove a `FixtureChase` from `project.fixture_chases`.
+    ///
+    /// **Asymmetric variant** — Reverse is `AddFixtureChase`.
+    #[cfg(feature = "lighting")]
+    RemoveFixtureChase {
+        /// ID of the chase to remove.
+        id: crate::lighting::chase::FixtureChaseid,
+    },
+    /// P5.7.4 — replace all mutable fields of a `FixtureChase`. Delegates
+    /// to [`SetFixtureChaseParams`].
+    #[cfg(feature = "lighting")]
+    SetFixtureChaseParams(SetFixtureChaseParams),
 }
 
 #[allow(dead_code)] // T-003-T1.18+ wires call sites.
@@ -1899,6 +2035,12 @@ impl Mutation {
             Mutation::SetProjectScenes(s) => Mutation::SetProjectScenes(s.apply(project)),
             Mutation::SetOutputMonitorIndex(s) => Mutation::SetOutputMonitorIndex(s.apply(project)),
             Mutation::ApplyProjectSnapshot(s) => Mutation::ApplyProjectSnapshot(s.apply(project)),
+
+            // --- P5 symmetric variants (lighting feature) ---
+            #[cfg(feature = "lighting")]
+            Mutation::SetFixtureGroupParams(s) => Mutation::SetFixtureGroupParams(s.apply(project)),
+            #[cfg(feature = "lighting")]
+            Mutation::SetFixtureChaseParams(s) => Mutation::SetFixtureChaseParams(s.apply(project)),
 
             // --- Asymmetric variants: kept as inline arms ---
             //
@@ -1976,6 +2118,48 @@ impl Mutation {
                     point,
                 }
             }
+
+            // --- P5.3.3 — AddFixtureGroup (asymmetric) ---
+            #[cfg(feature = "lighting")]
+            Mutation::AddFixtureGroup { group } => {
+                project.fixture_groups.push(group);
+                Mutation::RemoveFixtureGroup {
+                    id: project.fixture_groups.last().unwrap().id,
+                }
+            }
+
+            // --- P5.3.4 — RemoveFixtureGroup (asymmetric) ---
+            #[cfg(feature = "lighting")]
+            Mutation::RemoveFixtureGroup { id } => {
+                let pos = project
+                    .fixture_groups
+                    .iter()
+                    .position(|g| g.id == id)
+                    .unwrap_or_else(|| panic!("RemoveFixtureGroup: id {:?} not found", id));
+                let group = project.fixture_groups.remove(pos);
+                Mutation::AddFixtureGroup { group }
+            }
+
+            // --- P5.7.2 — AddFixtureChase (asymmetric) ---
+            #[cfg(feature = "lighting")]
+            Mutation::AddFixtureChase { chase } => {
+                project.fixture_chases.push(chase);
+                Mutation::RemoveFixtureChase {
+                    id: project.fixture_chases.last().unwrap().id,
+                }
+            }
+
+            // --- P5.7.3 — RemoveFixtureChase (asymmetric) ---
+            #[cfg(feature = "lighting")]
+            Mutation::RemoveFixtureChase { id } => {
+                let pos = project
+                    .fixture_chases
+                    .iter()
+                    .position(|c| c.id == id)
+                    .unwrap_or_else(|| panic!("RemoveFixtureChase: id {:?} not found", id));
+                let chase = project.fixture_chases.remove(pos);
+                Mutation::AddFixtureChase { chase }
+            }
         }
     }
 
@@ -2028,6 +2212,14 @@ impl Mutation {
             | Mutation::SetVideoBpmLock(_)
             | Mutation::SetLayerFocal(_) => false,
             Mutation::ApplyProjectSnapshot(s) => s.non_undoable,
+            // P5 lighting mutations are always undoable.
+            #[cfg(feature = "lighting")]
+            Mutation::AddFixtureGroup { .. }
+            | Mutation::RemoveFixtureGroup { .. }
+            | Mutation::SetFixtureGroupParams(_)
+            | Mutation::AddFixtureChase { .. }
+            | Mutation::RemoveFixtureChase { .. }
+            | Mutation::SetFixtureChaseParams(_) => false,
         }
     }
 
@@ -5306,5 +5498,180 @@ mod tests {
             !commit2.is_non_undoable(),
             "wizard commit ApplyProjectSnapshot must have non_undoable = false"
         );
+    }
+
+    // ---------------------------------------------------------------------------
+    // P5.3.3–P5.3.5 + P5.7.2–P5.7.4 — Fixture mutation round-trips
+    // ---------------------------------------------------------------------------
+
+    #[cfg(feature = "lighting")]
+    mod lighting_mutations {
+        use super::*;
+        use crate::lighting::chase::{ChaseStep, FixtureChase, FixtureChaseParams, FixtureChaseid};
+        use crate::lighting::fixture::{
+            FixtureGroup, FixtureGroupId, FixtureGroupParams, FixturePersonality, FixtureSource,
+            OutputStrategy,
+        };
+        use crate::lighting::universe::UniverseId;
+
+        fn empty_project_with_lighting() -> Project {
+            Project {
+                fixture_groups: Vec::new(),
+                fixture_chases: Vec::new(),
+                ..Project::default()
+            }
+        }
+
+        fn make_group(id: u64) -> FixtureGroup {
+            FixtureGroup {
+                id: FixtureGroupId(id),
+                label: format!("group-{id}"),
+                personality: FixturePersonality::default_rgb(),
+                universe_id: UniverseId::default(),
+                base_channel: 0,
+                fixture_count: 2,
+                output_strategy: OutputStrategy::RgbDirect,
+                source: FixtureSource::default(),
+            }
+        }
+
+        fn make_chase(id: u64, group_id: u64) -> FixtureChase {
+            FixtureChase {
+                id: FixtureChaseid(id),
+                label: format!("chase-{id}"),
+                group_id: FixtureGroupId(group_id),
+                steps: vec![
+                    ChaseStep {
+                        color: (255, 0, 0),
+                        hold_beats: 1,
+                    },
+                    ChaseStep {
+                        color: (0, 0, 255),
+                        hold_beats: 1,
+                    },
+                ],
+                beat_divisor: 2,
+            }
+        }
+
+        /// P5.3.3 — AddFixtureGroup → undo (RemoveFixtureGroup) → groups unchanged.
+        #[test]
+        fn add_fixture_group_undo_round_trip() {
+            let mut p = empty_project_with_lighting();
+            let group = make_group(1);
+            let id = group.id;
+
+            // Apply: group is added.
+            let reverse = Mutation::AddFixtureGroup { group }.apply(&mut p);
+            assert_eq!(p.fixture_groups.len(), 1, "group should be added");
+            assert_eq!(p.fixture_groups[0].id, id);
+
+            // Reverse (RemoveFixtureGroup): group is removed.
+            let _ = reverse.apply(&mut p);
+            assert!(
+                p.fixture_groups.is_empty(),
+                "group should be removed on undo"
+            );
+        }
+
+        /// P5.3.4 — RemoveFixtureGroup → undo (AddFixtureGroup) → group is back at same index.
+        #[test]
+        fn remove_fixture_group_undo_round_trip() {
+            let mut p = empty_project_with_lighting();
+            let group = make_group(2);
+            p.fixture_groups.push(group);
+
+            // Apply: group is removed.
+            let reverse = Mutation::RemoveFixtureGroup {
+                id: FixtureGroupId(2),
+            }
+            .apply(&mut p);
+            assert!(p.fixture_groups.is_empty());
+
+            // Reverse (AddFixtureGroup): group is back.
+            let _ = reverse.apply(&mut p);
+            assert_eq!(p.fixture_groups.len(), 1);
+            assert_eq!(p.fixture_groups[0].id, FixtureGroupId(2));
+        }
+
+        /// P5.3.5 — SetFixtureGroupParams → undo → original label.
+        #[test]
+        fn set_fixture_group_params_undo_restores_label() {
+            let mut p = empty_project_with_lighting();
+            let group = make_group(3);
+            p.fixture_groups.push(group);
+
+            let old_params = FixtureGroupParams::from_group(&p.fixture_groups[0]);
+            let mut new_params = old_params.clone();
+            new_params.label = "mutated-label".to_string();
+
+            let mutation = Mutation::SetFixtureGroupParams(SetFixtureGroupParams {
+                id: FixtureGroupId(3),
+                new: new_params.clone(),
+                old: old_params.clone(),
+            });
+            let reverse = mutation.apply(&mut p);
+            assert_eq!(p.fixture_groups[0].label, "mutated-label");
+
+            // Undo restores the original label.
+            let _ = reverse.apply(&mut p);
+            assert_eq!(p.fixture_groups[0].label, old_params.label);
+        }
+
+        /// P5.7.2 — AddFixtureChase → undo → chases unchanged.
+        #[test]
+        fn add_fixture_chase_undo_round_trip() {
+            let mut p = empty_project_with_lighting();
+            let chase = make_chase(10, 1);
+            let id = chase.id;
+
+            let reverse = Mutation::AddFixtureChase { chase }.apply(&mut p);
+            assert_eq!(p.fixture_chases.len(), 1);
+            assert_eq!(p.fixture_chases[0].id, id);
+
+            let _ = reverse.apply(&mut p);
+            assert!(p.fixture_chases.is_empty());
+        }
+
+        /// P5.7.3 — RemoveFixtureChase → undo → chase back at same index.
+        #[test]
+        fn remove_fixture_chase_undo_round_trip() {
+            let mut p = empty_project_with_lighting();
+            let chase = make_chase(11, 1);
+            p.fixture_chases.push(chase);
+
+            let reverse = Mutation::RemoveFixtureChase {
+                id: FixtureChaseid(11),
+            }
+            .apply(&mut p);
+            assert!(p.fixture_chases.is_empty());
+
+            let _ = reverse.apply(&mut p);
+            assert_eq!(p.fixture_chases.len(), 1);
+            assert_eq!(p.fixture_chases[0].id, FixtureChaseid(11));
+        }
+
+        /// P5.7.4 — SetFixtureChaseParams → undo → original beat_divisor.
+        #[test]
+        fn set_fixture_chase_params_undo_restores_beat_divisor() {
+            let mut p = empty_project_with_lighting();
+            let chase = make_chase(12, 1);
+            p.fixture_chases.push(chase);
+
+            let old_params = FixtureChaseParams::from_chase(&p.fixture_chases[0]);
+            let mut new_params = old_params.clone();
+            new_params.beat_divisor = 4;
+
+            let mutation = Mutation::SetFixtureChaseParams(SetFixtureChaseParams {
+                id: FixtureChaseid(12),
+                new: new_params,
+                old: old_params.clone(),
+            });
+            let reverse = mutation.apply(&mut p);
+            assert_eq!(p.fixture_chases[0].beat_divisor, 4);
+
+            let _ = reverse.apply(&mut p);
+            assert_eq!(p.fixture_chases[0].beat_divisor, old_params.beat_divisor);
+        }
     }
 }
