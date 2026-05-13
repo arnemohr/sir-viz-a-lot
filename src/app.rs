@@ -634,6 +634,9 @@ struct EditingState {
     /// Initialised to 0 at session start.
     #[cfg(feature = "v3")]
     prior_bar_idx: u64,
+    /// P6.5.1 — Transport state machine: current cue, armed-next cue,
+    /// fade progress, and follow chain. Session-only; not serialised.
+    transport: crate::transport::TransportState,
     /// P0.4.2 — shared texture-upload queue for all video workers (and
     /// future NDI receivers). Allocated once per session in
     /// `assemble_editing_state`; each video worker receives a clone of
@@ -2118,6 +2121,7 @@ fn assemble_editing_state(
         pending_cue: None,
         #[cfg(feature = "v3")]
         prior_bar_idx: 0,
+        transport: crate::transport::TransportState::default(),
         // P0.4.2 — move the upload queue from the render graph into
         // EditingState so the per-frame drain can access it.
         texture_upload_queue: graph.upload_queue,
@@ -5245,6 +5249,25 @@ fn handle_editing_window_event(
             #[cfg(feature = "v3")]
             if process_pending_cue(state) {
                 rebuild_layers_for_state(state);
+            }
+            // P6.5.1 — tick the transport state machine each frame.
+            // Called outside the mutable-borrow of UI state (mirrors the
+            // SideEffect pattern in apply_command). The transport tick
+            // advances fade_progress and may fire a follow-chain auto-cue.
+            {
+                let delta_s = {
+                    // Use a reasonable per-frame delta; the exact value isn't
+                    // critical for the transport (crossfade precision uses
+                    // started_at.elapsed() in the render path).
+                    1.0_f32 / 60.0
+                };
+                let bpm = state.clock.bpm();
+                let cues = state.project.cues.clone();
+                if let Some(auto_fire_idx) = state.transport.tick(delta_s, bpm, &cues) {
+                    // Follow-chain auto-fired a cue — restore it.
+                    schedule_scene_recall(state, auto_fire_idx);
+                    rebuild_layers_for_state(state);
+                }
             }
             // Drain every registered source through one common dispatcher.
             // Order doesn't matter for v1 — each event is independent.

@@ -22,6 +22,8 @@ mod svg_layer;
 #[cfg(feature = "v3")]
 mod telemetry;
 mod test_patterns;
+/// P6.5.1 — Transport state machine.
+mod transport;
 mod video_layer;
 mod windows;
 

@@ -14,6 +14,8 @@ pub mod macos;
 pub mod modulators;
 pub mod monitors;
 pub mod project;
+/// P6.5.1 — Transport state machine (session-only; not serialised).
+pub mod transport;
 /// Partial render module stub for the library crate. Exposes the
 /// CPU-only, GPU-free sub-modules (`sdf`, `fx_presets`, `treatments`)
 /// so that `project::audit` (v3-gated) can call registry lookups
