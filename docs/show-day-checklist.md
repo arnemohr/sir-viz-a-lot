@@ -501,6 +501,20 @@ Run these checks after the Phase 5 steps above. Requires at least one cue saved.
     - [ ] Change the DAW BPM. Verify the HUD tracks the change.
     - **Pass:** BPM HUD follows MIDI Clock within ±1 BPM.
 
+### Phase 7 capability checks
+
+26. **Syphon output** *(requires OBS + Syphon plugin)*
+    - [ ] Enable Syphon out in the Output panel; confirm OBS sees the source.
+
+27. **Venue calibration** *(requires a saved `.rmap-calibration.json`)*
+    - [ ] Load venue calibration; verify alignment cross on surface.
+
+28. **Bezier warp** *(if using Bezier mesh layers)*
+    - [ ] Confirm Bezier handles are not accidentally engaged (warp mode = Anchor).
+
+29. **RGBW fixtures** *(if using RGBW fixture groups)*
+    - [ ] Fixture group CCT setting matches physical fixture spec.
+
 ### Recovery steps
 
 - **MIDI learn times out (30 s):** The binding is not applied. Right-click the row
