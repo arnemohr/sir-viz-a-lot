@@ -27,18 +27,23 @@ is sized for a single PR.
 - [x] P7.3.3 f5f3c1a — MoveBezierAnchor + SetBezierHandle mutations + ReverseStorage + proptest coverage (BezierHandleDir added to schema)
 - [PARTIAL] P7.7.2 ae69380 — CalibrationFile runtime binding: loaded_calibration field on EditingState, calibration_find_unmatched pure fn (UUID-then-index), 4 unit tests; warp/mask/gamma application to GPU state DEFERRED (render-pipeline integration not landed yet — acceptance items 1 + 3 partially met; items 2 + 4 met)
 - [x] P7.13.2 a35e19f — CHANGELOG v1.0.0 body: accurate per-workstream Phase 7 bullets + explicit "Planned post-v1.0" section for GPU-blocked items
+- [x] P7.9.3 4b78525 — RGBW fixture group inspector UI (toggle + CCT dropdown + W scale DragValue)
+- [x] P7.7.4 09d7c6e — File > Load/Save Calibration… menu actions (MenuAction variants, ObjC selectors, file dialog helpers, app.rs dispatcher); acceptance criterion 1 end-to-end reachable without GPU wiring
+- [x] P7.7.3 7efd91a — Same-directory calibration auto-load offer toast: pushes Info toast with "Load" action (Command::AcceptCalibrationOffer) after MenuAction::Open succeeds
+- [x] P7.12.2 1411c08 — proptest: CalibrationFile atomic save/load round-trip (arbitrary venue names + surface counts 0–4; 506 tests pass)
+- [x] P7.13.3 b52fa66 — README v1.0 prose: "What's in v1.0" with Shipped / Planned post-v1.0 subsections; matches CHANGELOG accuracy
+- [CONFIRMED] W11 diagnostics audit: Diagnostics panel unchanged by Phase 7 (stub label + dropped-frames counter + DMX LED only; Phase 7 AuditKind variants render as single-line toast messages, not new sub-panels; acceptance criterion 6 met)
 
-Blocked / deferred:
-- [BLOCKED] P7.2.2–P7.2.4 Syphon ObjC wrapper + Metal HAL — Syphon.framework binary not vendored (W2.1 scaffold landed); wrapper code requires framework binary + Metal surface integration
-- [BLOCKED] P7.3.4–P7.3.5 Bezier handle overlay rendering + palette scaling UI — requires interactive GPU canvas rendering (no headless path)
-- [BLOCKED] P7.4.2–P7.4.3 MaskGraph SDF evaluation + UI — requires render pipeline integration
-- [BLOCKED] P7.5.2, P7.6.2 Luma/Chroma key UI — depends on W4.2 (MaskGraph SDF)
-- [BLOCKED] P7.7.2 (GPU application) + P7.7.3–P7.7.4 Calibration GPU warp override + auto-load offer + File menu — requires per-surface render-time warp override (plumbing deferred W7.4+)
-- [BLOCKED] P7.8.1–P7.8.6 Calibration verify patterns — requires render overlay pass
-- [BLOCKED] P7.9.3 RGBW UI — requires fixture group inspector UI changes
-- [BLOCKED] P7.10.2–P7.10.3 Scene pack export/import UI — requires context menu and file dialog changes
-- [BLOCKED] P7.12.1–P7.12.2 Proptest extension + GPU golden — depends on all W3/W4/W9 mutations (W3.3 landed; W4/W9 partially done)
-- [BLOCKED] P7.13.3 Manual acceptance smoke — depends on shipping interactive capabilities
+Blocked / deferred (GPU or Syphon.framework required):
+- [BLOCKED-SYPHON] P7.2.2–P7.2.4 Syphon ObjC wrapper + Metal HAL — Syphon.framework binary not vendored (W2.1 scaffold landed); wrapper code requires framework binary + Metal surface integration
+- [BLOCKED-GPU] P7.3.4–P7.3.5 Bezier handle overlay rendering + palette scaling UI — requires interactive GPU canvas rendering (overlay pipeline pass)
+- [BLOCKED-GPU] P7.4.2 (GPU) + P7.4.3 MaskGraph GPU SDF + inverse mask UI — CPU SDF evaluator shipped (P7.4.2 CPU); GPU render pipeline integration deferred
+- [BLOCKED-GPU] P7.5.2, P7.6.2 Luma/Chroma key UI — depends on MaskGraph GPU pipeline
+- [BLOCKED-GPU] P7.7.2 GPU application — warp/mask/gamma override at render time deferred (apply_calibration session wiring done; GPU state override not plumbed)
+- [BLOCKED-GPU] P7.8.1–P7.8.6 Calibration verify patterns — require projector OverlayPipeline pass; CPU rasterisation would produce a control-panel preview, not projector overlay (acceptance criterion not met without GPU)
+- [BLOCKED-GPU] P7.10.2–P7.10.3 Scene pack export/import UI — context menu + file dialog changes deferred
+- [BLOCKED-GPU] P7.12.3 GPU golden (Syphon frame fidelity) — depends on P7.2.3 (Syphon render integration)
+- [BLOCKED] P7.13.4 Manual acceptance smoke — acceptance criteria 2/3/4 require GPU-blocked items
 
 ---
 
