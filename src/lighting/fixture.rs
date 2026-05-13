@@ -158,9 +158,16 @@ pub enum FixtureSource {
     ManualColor { r: u8, g: u8, b: u8 },
     /// P5.6.1 — derive colour from the activity level of a semantic zone.
     ///
-    /// `tag` is the string name of the zone role whose light-source /
-    /// highlight activity drives the fixture intensity.
-    ZoneTag { tag: String },
+    /// `role` is the Zone role whose light-source / highlight activity
+    /// drives the fixture intensity. Phase 3's `ZoneRole` enum (in
+    /// `src/project/schema.rs`) covers `Window`, `Portal`, `Void`,
+    /// `Spill`, `Edge`, `Highlight`, and `LightSource`.
+    ///
+    /// The sampling path in `src/lighting/color.rs` calls
+    /// `zone_activity_to_color` for this variant.
+    ZoneTag {
+        role: crate::project::schema::ZoneRole,
+    },
 }
 
 impl Default for FixtureSource {
@@ -426,5 +433,22 @@ mod tests {
         assert_eq!(uvs.len(), 1);
         assert!((uvs[0].0 - 0.5).abs() < 1e-5, "u should be centre 0.5");
         assert!((uvs[0].1 - 0.5).abs() < 1e-5, "v should be centre 0.5");
+    }
+
+    /// P5.6.1 — ZoneTag source roundtrips with ZoneRole enum.
+    #[test]
+    fn zone_tag_source_roundtrip() {
+        use crate::project::schema::ZoneRole;
+        let src = FixtureSource::ZoneTag {
+            role: ZoneRole::LightSource,
+        };
+        let json = serde_json::to_string(&src).expect("serialize");
+        let back: FixtureSource = serde_json::from_str(&json).expect("deserialize");
+        match back {
+            FixtureSource::ZoneTag { role } => {
+                assert_eq!(role, ZoneRole::LightSource);
+            }
+            _ => panic!("wrong variant"),
+        }
     }
 }
