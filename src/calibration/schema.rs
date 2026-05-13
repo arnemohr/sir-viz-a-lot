@@ -1,4 +1,9 @@
 //! P7.7.1 — `CalibrationFile` schema + atomic save / load.
+//!
+//! These items are public library API; the binary crate includes this module
+//! but has not yet wired every item to a call site.  The allow is module-
+//! scoped so the binary's dead-code lint does not reject legit public API.
+#![allow(dead_code)]
 
 use std::path::Path;
 

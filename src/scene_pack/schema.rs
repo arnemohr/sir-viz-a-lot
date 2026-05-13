@@ -1,4 +1,9 @@
 //! P7.10.1 — `ScenePackManifest`, `ScenePackTemplate`, export, and import.
+//!
+//! These items are public library API; the binary crate includes this module
+//! but has not yet wired every item to a call site.  The allow is module-
+//! scoped so the binary's dead-code lint does not reject legit public API.
+#![allow(dead_code)]
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};

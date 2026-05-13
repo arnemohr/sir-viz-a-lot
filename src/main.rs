@@ -4,6 +4,8 @@
 //! wiring lives in `app::App`.
 
 mod app;
+/// P7.7.1 — Venue calibration file schema + save/load.
+mod calibration;
 mod clock;
 mod controls;
 mod effects;
@@ -17,6 +19,8 @@ mod modulators;
 mod monitors;
 mod project;
 mod render;
+/// P7.10.1 — Scene pack export/import (.rmap-scene-pack.zip).
+mod scene_pack;
 mod show_day;
 mod svg_layer;
 /// P6.12.1 — Timecode sync decoders.

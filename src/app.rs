@@ -661,6 +661,47 @@ struct EditingState {
     /// per session in `assemble_editing_state`; consulted by the layer-
     /// init path when constructing Image layers.
     image_texture_cache: crate::image_layer::ImageTextureCache,
+    /// P7.7.2 — currently loaded venue calibration (session-only; not written
+    /// to the show file). `None` until the operator loads a
+    /// `.rmap-calibration.json` file. When `Some`, the calibration's
+    /// warp/mask/gamma overrides the show file's values at render time;
+    /// the show file itself is never modified by a calibration load.
+    loaded_calibration: Option<crate::calibration::CalibrationFile>,
+}
+
+/// P7.7.2 — Pure-function core of calibration surface matching.
+///
+/// Given a slice of [`crate::calibration::CalibrationSurface`] and the show
+/// file's `output_targets`, returns the `(slot_id, display_name)` pairs for
+/// surfaces that had **no** matching `OutputTarget`.
+///
+/// Matching uses UUID-then-index resolution:
+/// - When both sides carry a `Some` UUID, the UUID must match.
+/// - Otherwise, `fallback_index` is used.
+///
+/// Extracted as a free function so it can be called from unit tests without
+/// constructing `EditingState` (which owns GPU resources).
+fn calibration_find_unmatched(
+    surfaces: &[crate::calibration::CalibrationSurface],
+    output_targets: &[crate::project::schema::OutputTarget],
+) -> Vec<(String, String)> {
+    surfaces
+        .iter()
+        .filter(|surface| {
+            !output_targets
+                .iter()
+                .any(|ot| match (&surface.output_target.uuid, &ot.uuid) {
+                    (Some(cal_uuid), Some(proj_uuid)) => cal_uuid == proj_uuid,
+                    _ => surface.output_target.fallback_index == ot.fallback_index,
+                })
+        })
+        .map(|surface| {
+            (
+                surface.surface_slot_id.clone(),
+                surface.display_name.clone(),
+            )
+        })
+        .collect()
 }
 
 impl EditingState {
@@ -697,6 +738,38 @@ impl EditingState {
             "EditingState.outputs invariant violated: vec is empty"
         );
         self.outputs.first_mut().expect("outputs is non-empty")
+    }
+
+    /// P7.7.2 — Load a [`crate::calibration::CalibrationFile`] into the session.
+    ///
+    /// For each surface in the calibration, find the matching `OutputTarget` in
+    /// the show file using UUID-then-index resolution (mirrors the monitor-match
+    /// logic the project loader already uses for `output_targets`).  Returns a
+    /// list of unmatched surfaces so the caller can emit
+    /// [`crate::project::audit::AuditKind::CalibrationSurfaceUnmatched`] findings.
+    ///
+    /// The show file (`self.project`) is **never modified** — the calibration is
+    /// session-scoped only.  Any future per-surface warp override would be applied
+    /// to the GPU state rather than to `project.layers`; that plumbing (W7.4+) is
+    /// deferred until the inspector UI lands in a later task.
+    ///
+    /// Returns a `Vec` of `(slot_id, display_name)` pairs for surfaces that could
+    /// not be matched to any `OutputTarget`.
+    #[allow(dead_code)]
+    fn apply_calibration(
+        &mut self,
+        cal: crate::calibration::CalibrationFile,
+    ) -> Vec<(String, String)> {
+        let unmatched = calibration_find_unmatched(&cal.surfaces, &self.project.output_targets);
+        for (slot_id, display_name) in &unmatched {
+            tracing::warn!(
+                slot_id = slot_id,
+                display = display_name,
+                "CalibrationSurface has no matching OutputTarget — identity warp applied"
+            );
+        }
+        self.loaded_calibration = Some(cal);
+        unmatched
     }
 }
 
@@ -2193,6 +2266,10 @@ fn assemble_editing_state(
         // entries from the initial `rebuild_layers` pass; rebuilds and
         // hot-reloads thereafter reuse those entries.
         image_texture_cache: graph.image_texture_cache,
+        // P7.7.2 — no calibration loaded at session start; operator loads
+        // explicitly via "Load Calibration" (W7.4) or via the auto-load
+        // offer (W7.3).
+        loaded_calibration: None,
     }
 }
 
@@ -7500,6 +7577,80 @@ mod tests {
                     "{path} should not be accepted",
                 );
             }
+        }
+    }
+
+    /// P7.7.2 — `calibration_find_unmatched` unit tests.
+    mod calibration_binding {
+        use super::calibration_find_unmatched;
+        use crate::calibration::{CalibrationSurface, schema::new_calibration_id};
+        use crate::project::schema::OutputTarget;
+
+        /// Matched by UUID: no unmatched surfaces.
+        #[test]
+        fn uuid_match_returns_empty() {
+            let uuid = "test-uuid-1234".to_string();
+            let ot = OutputTarget {
+                uuid: Some(uuid.clone()),
+                fallback_index: 0,
+                rgb_matrix: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            };
+            let surface = CalibrationSurface::new("Left", ot.clone());
+            // Manually set uuid on the calibration surface's output_target.
+            let mut surface = surface;
+            surface.output_target.uuid = Some(uuid);
+            let unmatched = calibration_find_unmatched(&[surface], &[ot]);
+            assert!(
+                unmatched.is_empty(),
+                "UUID match should produce no unmatched"
+            );
+        }
+
+        /// Matched by fallback_index when both UUIDs are None.
+        #[test]
+        fn fallback_index_match_returns_empty() {
+            let ot = OutputTarget {
+                uuid: None,
+                fallback_index: 2,
+                rgb_matrix: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            };
+            let surface = CalibrationSurface::new("Right", ot.clone());
+            let unmatched = calibration_find_unmatched(&[surface], &[ot]);
+            assert!(
+                unmatched.is_empty(),
+                "fallback_index match should produce no unmatched"
+            );
+        }
+
+        /// Unmatched: surface UUID does not appear in any OutputTarget.
+        #[test]
+        fn missing_uuid_returns_unmatched() {
+            let ot = OutputTarget {
+                uuid: Some("proj-uuid".to_string()),
+                fallback_index: 0,
+                rgb_matrix: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            };
+            let cal_ot = OutputTarget {
+                uuid: Some("different-uuid".to_string()),
+                fallback_index: 99,
+                rgb_matrix: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            };
+            let mut surface = CalibrationSurface::new("Orphan", cal_ot);
+            surface.surface_slot_id = new_calibration_id();
+            let unmatched = calibration_find_unmatched(&[surface], &[ot]);
+            assert_eq!(
+                unmatched.len(),
+                1,
+                "mismatched UUIDs must produce one unmatched"
+            );
+        }
+
+        /// No calibration surfaces → no unmatched (identity = no audit warnings).
+        #[test]
+        fn empty_surfaces_returns_empty() {
+            let ot = OutputTarget::default();
+            let unmatched = calibration_find_unmatched(&[], &[ot]);
+            assert!(unmatched.is_empty(), "no surfaces = no unmatched");
         }
     }
 }

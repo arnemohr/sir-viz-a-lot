@@ -10,4 +10,8 @@
 
 pub mod schema;
 
+// These items are public library API (used by the lib crate and future
+// operator UI code).  The binary crate declares this module but has not
+// yet wired every item to a call site; suppress the false-positive lints.
+#[allow(unused_imports)]
 pub use schema::{CalibrationFile, CalibrationLoadError, CalibrationSurface, new_calibration_id};
