@@ -193,9 +193,12 @@ pub struct PresetBrowserWindow {
 
     // P2.8.2 — filter state
     pub filter_query: String,
-    /// Three family filter toggles: [Wave/Fragment, ComputeParticle, ComputeFluid].
-    /// All on by default so the full registry is shown immediately.
-    pub family_filters: [bool; 3],
+    /// Four family filter toggles: [Wave/Fragment, ComputeParticle,
+    /// ComputeFluid, SourceModifier]. All on by default so the full registry
+    /// is shown immediately. The SourceModifier slot (index 3) is reserved by
+    /// PCleanup.1.1; its filter chip is added by PCleanup.2.12 once enough
+    /// SourceModifier presets ship to warrant grouping in the UI.
+    pub family_filters: [bool; 4],
 
     // P2.8.3 — star state
     stars: Option<PresetStars>,
@@ -217,8 +220,9 @@ impl Default for PresetBrowserWindow {
             target_layer_idx: None,
             filter_query: String::new(),
             // P2.8.2 — all family filters on by default so the full grid is
-            // visible without any extra setup from the operator.
-            family_filters: [true; 3],
+            // visible without any extra setup from the operator. Index 3
+            // (SourceModifier) added by PCleanup.1.1; chip UI by PCleanup.2.12.
+            family_filters: [true; 4],
             stars: None,
             user_presets: Vec::new(),
             save_dialog: SaveDialog::default(),
@@ -276,6 +280,9 @@ impl PresetBrowserWindow {
             Some(FxFamily::Fragment) => self.family_filters[0],
             Some(FxFamily::ComputeParticle) => self.family_filters[1],
             Some(FxFamily::ComputeFluid) => self.family_filters[2],
+            // PCleanup.1.1 — SourceModifier presets share the family-filter
+            // surface; chip UI lands in PCleanup.2.12.
+            Some(FxFamily::SourceModifier) => self.family_filters[3],
         }
     }
 

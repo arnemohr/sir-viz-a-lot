@@ -66,13 +66,21 @@ use crate::render::fx_fluid::FxFluidPipeline;
 use crate::render::sdf::{SDF_HELPER_WGSL, ZONE_TAG_WGSL};
 
 /// Internal pipeline-shape tag; not user-visible. Drives dispatch routing in
-/// `fx_presets::dispatch` once P2.2.3 lands.
+/// `fx_presets::dispatch` and family-filter UI in `preset_browser`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)] // wired by P2.2.4 audit + P2.8.1 browser
 pub enum FxFamily {
     Fragment,
     ComputeParticle,
     ComputeFluid,
+    /// PCleanup.1.1 — preset that reads the underlying layer source texture
+    /// (`FxShaderInputs::source`) and writes a modified version to `dst`,
+    /// rather than overlaying generative pixels on top. First implementation
+    /// is `fluid_warp` (PCleanup.1.2). Shares the per-frame `FxShaderInputs`
+    /// bind-group contract with `Fragment`; the only structural difference is
+    /// that SourceModifier shaders bind slot 4 (`source`) where Fragment
+    /// shaders leave it `None`.
+    SourceModifier,
 }
 
 /// Static descriptor for a single FX preset entry in the registry.
@@ -2079,6 +2087,39 @@ impl FxParamsUniform {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ----- PCleanup.1.1 — FxFamily::SourceModifier variant -----------------
+
+    /// PCleanup.1.1 — the `SourceModifier` variant exists, is `Copy`/`Eq`-able
+    /// alongside the other variants, and is distinct from every existing
+    /// family. Guards against accidental aliasing (e.g. a future PR that
+    /// removes the variant and re-routes through `Fragment`).
+    #[test]
+    fn source_modifier_variant_is_distinct() {
+        let sm = FxFamily::SourceModifier;
+        assert_ne!(sm, FxFamily::Fragment);
+        assert_ne!(sm, FxFamily::ComputeParticle);
+        assert_ne!(sm, FxFamily::ComputeFluid);
+        // Round-trip through Copy preserves identity.
+        let sm_copy: FxFamily = sm;
+        assert_eq!(sm, sm_copy);
+    }
+
+    /// PCleanup.1.1 — no SourceModifier preset is registered yet (that lands
+    /// in PCleanup.1.2 with `fluid_warp`). This guard catches accidental
+    /// premature registration before the bind-group + dispatch logic ships.
+    #[test]
+    fn no_source_modifier_presets_yet_registered() {
+        let count = fx_registry()
+            .iter()
+            .filter(|e| e.family == FxFamily::SourceModifier)
+            .count();
+        assert_eq!(
+            count, 0,
+            "expected zero SourceModifier presets in the registry until \
+             PCleanup.1.2 lands fluid_warp; found {count}"
+        );
+    }
 
     /// P0.5.3 acceptance: FxParamsUniform::for_ripple_wash returns documented
     /// defaults when the params map is empty.
