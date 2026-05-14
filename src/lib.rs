@@ -22,14 +22,22 @@ pub mod sync;
 pub mod transport;
 /// Partial render module stub for the library crate. Exposes the
 /// CPU-only, GPU-free sub-modules (`sdf`, `fx_presets`, `treatments`)
-/// so that `project::audit` (v3-gated) can call registry lookups
-/// without depending on the full `render/mod.rs` (which references
-/// `crate::windows` and `crate::show_day`, both binary-only).
+/// so that `project::audit` (v3-gated) can call registry lookups, and
+/// `effects::Effect::Treatment` (PCleanup.1.3, unconditional) can name
+/// `TreatmentPipeline` / `TreatmentInputs`, without depending on the
+/// full `render/mod.rs` (which references `crate::windows` and
+/// `crate::show_day`, both binary-only).
 ///
 /// The binary crate (`main.rs`) declares `mod render;` normally,
 /// loading the full `render/mod.rs`. Both module trees compile the
 /// same underlying `.rs` files; the binary just gets more of them.
-#[cfg(feature = "v3")]
+///
+/// PCleanup.1.3 — gate removed. The render sub-modules compile without
+/// `--features v3`; the previous gate was there because the only
+/// library-side consumer (`project::audit`) is itself v3-gated. Now
+/// that `effects::Effect::Treatment` (unconditional) names types from
+/// `render::treatments`, the gate would force `Effect::Treatment` to
+/// be v3-only, breaking schema deserialisation on non-v3 builds.
 pub mod render {
     pub mod fx_compute;
     pub mod fx_fluid;

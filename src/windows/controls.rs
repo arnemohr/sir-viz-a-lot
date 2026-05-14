@@ -1904,6 +1904,12 @@ fn collect_osc_bindings_in_effect(
             // External effects opaque to this walk — their params are
             // a JSON blob, not a Modulator chain.
         }
+        Effect::Treatment { .. } => {
+            // PCleanup.1.3 — Treatment params are a HashMap<String, f32>
+            // (static scalars), not Modulators. Per-treatment slider UX
+            // sources its descriptors from
+            // `treatments::param_descriptors(id)` instead of this walk.
+        }
     }
     out
 }
@@ -1916,6 +1922,8 @@ fn effect_kind_label(effect: &crate::effects::Effect) -> &'static str {
         Effect::Blur { .. } => "Blur",
         Effect::Transform { .. } => "Transform",
         Effect::External { .. } => "External",
+        // PCleanup.1.3 — per-layer treatment dispatch.
+        Effect::Treatment { .. } => "Treatment",
     }
 }
 

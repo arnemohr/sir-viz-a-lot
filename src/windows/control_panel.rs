@@ -2127,6 +2127,8 @@ pub(super) fn effect_label(e: &Effect) -> &'static str {
         Effect::Blur { .. } => "Blur",
         Effect::Transform { .. } => "Transform",
         Effect::External { .. } => "External",
+        // PCleanup.1.3 — per-layer treatment dispatch.
+        Effect::Treatment { .. } => "Treatment",
     }
 }
 
@@ -2387,6 +2389,43 @@ pub(super) fn show_effect(
                     );
                 } else {
                     ui.label("This effect is configured in the project file.");
+                }
+            }
+        }
+        Effect::Treatment { id, params } => {
+            // PCleanup.1.3 — per-layer treatment dispatch. Inline editor
+            // is read-only in this first cut; PCleanup.1.3.2 will add the
+            // treatment-picker dropdown + per-param sliders sourced from
+            // `treatments::param_descriptors(id)`. Until that lands, the
+            // operator authors the effect by JSON-editing the project
+            // file (same workflow as `Effect::External`).
+            if id.is_empty() {
+                ui.label(
+                    "Treatment id not set \u{2014} pick a preset from \
+                     `treatments::registry()` in the project file.",
+                );
+            } else {
+                ui.label(format!("id: {id}"));
+                if inside_advanced {
+                    if params.is_empty() {
+                        ui.label("params: (defaults from descriptor)");
+                    } else {
+                        ui.label("params (key \u{2192} value):");
+                        // Stable display order (sort by key) so the operator
+                        // sees a consistent UI between frames.
+                        let mut keys: Vec<&String> = params.keys().collect();
+                        keys.sort();
+                        for k in keys {
+                            if let Some(v) = params.get(k) {
+                                ui.label(format!("  {k} = {v}"));
+                            }
+                        }
+                    }
+                } else {
+                    ui.label(
+                        "This treatment is configured in the project file \
+                         (slider UI coming in PCleanup.1.3.2).",
+                    );
                 }
             }
         }

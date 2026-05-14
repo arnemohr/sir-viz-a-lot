@@ -4373,6 +4373,10 @@ fn render_m5_pipeline(
                         transform_uniform: &ls.transform_uniform,
                         tint_uniform: &ls.tint_uniform,
                         external_registry,
+                        // PCleanup.1.3 — per-layer Effect::Treatment dispatch
+                        // reuses the same TreatmentPipeline as the global pass.
+                        treatment_pipeline,
+                        fit_uniform: &ls.fit_uniform,
                     };
                     if effect.render(&mut ctx, clock) {
                         ls.effect_pipeline.flip();

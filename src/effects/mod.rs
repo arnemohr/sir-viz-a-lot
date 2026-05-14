@@ -7,6 +7,8 @@ pub mod registry;
 pub mod tint;
 pub mod transform;
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::modulators::Modulator;
@@ -45,6 +47,29 @@ pub enum Effect {
         id: String,
         params: serde_json::Value,
     },
+    /// PCleanup.1.3 — runs a [`crate::render::treatments::TreatmentPipeline`]
+    /// preset (`tone_map`, `luminance_reveal`, `palette_extract`, …) as a
+    /// per-layer effect, instead of as a global post-composition pass.
+    /// Operators can grade or warp one layer hard while the rest of the
+    /// scene stays untouched.
+    ///
+    /// `id` is the preset ID from `treatments::registry()`. Unknown IDs
+    /// warn-and-skip (matching `Effect::External` policy) so a project
+    /// authored against a newer build loads on an older binary without
+    /// losing the rest of its chain.
+    ///
+    /// `params` mirrors `Treatment.params` (the global-tier counterpart).
+    /// Each preset documents its own keys via `treatments::param_descriptors`.
+    ///
+    /// SourceModifier semantics — `fluid_warp` and the W2 sibling presets —
+    /// land here per the source-modifier-placement decision doc, NOT in
+    /// the FX preset registry. See
+    /// `specs/004-phase-cleanup-source-modifier-placement-decision.md`.
+    Treatment {
+        id: String,
+        #[serde(default)]
+        params: HashMap<String, f32>,
+    },
 }
 
 /// Bundle of references needed to dispatch a single effect pass.
@@ -79,6 +104,15 @@ pub struct RenderCtx<'a> {
     /// Extension-pass lookup, consulted by [`Effect::External`] (T-M7-07).
     /// Empty by default; v1 ships no built-in External passes.
     pub external_registry: &'a registry::ExternalRegistry,
+    /// PCleanup.1.3 — Treatment pipeline, used by [`Effect::Treatment`].
+    /// Same instance the global treatment pass already uses; per-layer
+    /// invocation reuses the existing shaders.
+    pub treatment_pipeline: &'a crate::render::treatments::TreatmentPipeline,
+    /// PCleanup.1.3 — per-layer fit uniform required by every treatment
+    /// (16 bytes: `[fit_mode, aspect, focal_x, focal_y]`). Already lives
+    /// on `LayerState`; threaded here so per-layer treatments see the
+    /// same fit metadata as the global treatment pass does.
+    pub fit_uniform: &'a wgpu::Buffer,
 }
 
 impl Effect {
@@ -204,6 +238,46 @@ impl Effect {
                     }
                 }
             }
+            Effect::Treatment { id, params } => {
+                // PCleanup.1.3 — per-layer treatment dispatch. Reuses the
+                // shared TreatmentPipeline (the same instance the global
+                // post-composition treatment pass uses).
+                //
+                // SDF view is NOT plumbed in this initial cut, so the
+                // SDF-requiring treatments (`blur_mask`,
+                // `displacement_ripple`, `refraction`) gracefully return
+                // false from `dispatch` and the ping-pong stays where it
+                // was — i.e. the effect is a no-op. The trivial
+                // treatments (identity, tone_map, luminance_reveal,
+                // palette_extract, texture_overlay, collage) work
+                // immediately. SDF plumbing is a follow-up.
+                let inputs = crate::render::treatments::TreatmentInputs {
+                    source: ctx.source_view,
+                    fit_uniform: ctx.fit_uniform,
+                    params,
+                    clock_secs: clock.elapsed().as_secs_f32(),
+                    overlay: None,
+                    collage: &[],
+                    sdf: None,
+                    intermediate: Some(ctx.intermediate_view),
+                };
+                let rendered = ctx.treatment_pipeline.dispatch(
+                    ctx.device,
+                    ctx.queue,
+                    ctx.encoder,
+                    ctx.dst_view,
+                    &inputs,
+                    id,
+                );
+                if !rendered {
+                    tracing::debug!(
+                        id,
+                        "Effect::Treatment: dispatch returned false (unknown id, or \
+                         missing inputs for an SDF-requiring preset); skipping"
+                    );
+                }
+                rendered
+            }
         }
     }
 }
@@ -254,6 +328,73 @@ mod tests {
                 assert_eq!(mode, tint::TintMode::Multiply, "missing mode → Multiply");
             }
             other => panic!("expected Effect::Tint, got {other:?}"),
+        }
+    }
+
+    // ----- PCleanup.1.3 — Effect::Treatment(id, params) ------------------
+
+    /// PCleanup.1.3 — the Treatment variant exists, is constructable, and
+    /// `effects::mod`'s exhaustive match in `Effect::render` covers it
+    /// (compile-time guarantee; this test just exercises construction).
+    #[test]
+    fn effect_treatment_variant_constructs() {
+        let mut params = HashMap::new();
+        params.insert("exposure".to_string(), 0.25);
+        let e = Effect::Treatment {
+            id: "tone_map".to_string(),
+            params,
+        };
+        match e {
+            Effect::Treatment { id, params } => {
+                assert_eq!(id, "tone_map");
+                assert!((params["exposure"] - 0.25).abs() < 1e-6);
+            }
+            other => panic!("expected Effect::Treatment, got {other:?}"),
+        }
+    }
+
+    /// PCleanup.1.3 — Treatment round-trips through serde with both id and
+    /// params preserved.
+    #[test]
+    fn effect_treatment_serde_round_trip() {
+        let mut params = HashMap::new();
+        params.insert("contrast".to_string(), 1.2);
+        params.insert("shoulder".to_string(), 0.5);
+        let e = Effect::Treatment {
+            id: "tone_map".to_string(),
+            params,
+        };
+        let json = serde_json::to_string(&e).unwrap();
+        let back: Effect = serde_json::from_str(&json).unwrap();
+        match back {
+            Effect::Treatment { id, params } => {
+                assert_eq!(id, "tone_map");
+                assert!((params["contrast"] - 1.2).abs() < 1e-6);
+                assert!((params["shoulder"] - 0.5).abs() < 1e-6);
+            }
+            other => panic!("round-trip changed variant: {other:?}"),
+        }
+    }
+
+    /// PCleanup.1.3 — projects that author Treatment with no `params` field
+    /// (relying on `#[serde(default)]`) deserialise as an empty HashMap
+    /// rather than failing. Future-proofs against operators or scripts
+    /// emitting compact Treatment entries.
+    #[test]
+    fn effect_treatment_serde_default_empty_params() {
+        let legacy = r#"{
+            "Treatment": {
+                "id": "identity"
+            }
+        }"#;
+        let e: Effect = serde_json::from_str(legacy)
+            .expect("Treatment without params must deserialise via serde default");
+        match e {
+            Effect::Treatment { id, params } => {
+                assert_eq!(id, "identity");
+                assert!(params.is_empty(), "missing params field → empty map");
+            }
+            other => panic!("expected Effect::Treatment, got {other:?}"),
         }
     }
 
