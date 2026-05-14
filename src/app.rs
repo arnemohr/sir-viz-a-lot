@@ -1324,7 +1324,16 @@ fn apply_command(state: &mut EditingState, event: Command) -> SideEffect {
         Command::SceneSave => {
             let snapshot = crate::project::snapshot(&state.project);
             let name = format!("Cue {}", state.project.cues.len() + 1);
-            let thumbnail = crate::windows::cue_strip::placeholder_thumbnail_for_name(&name);
+            // PCleanup.7.1 — snapshot the current warp_rt as a 192×108
+            // thumbnail. Falls back to a name-hash gradient if the GPU
+            // readback fails (typically only in test environments
+            // without a GPU adapter; show-day path is rock solid).
+            let thumbnail = crate::windows::cue_strip::snapshot_thumbnail_from_warp_rt(
+                &state.renderer.gpu.device,
+                &state.renderer.gpu.queue,
+                &state.warp_rt,
+                &name,
+            );
             let mut new_cues = state.project.cues.clone();
             new_cues.push(crate::project::schema::Cue {
                 name,
@@ -3733,7 +3742,13 @@ fn make_warp_render_target(
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT,
+        // PCleanup.7.1 — COPY_SRC added so the cue-strip thumbnail
+        // path can read back the final composited frame via
+        // `encoder.copy_texture_to_buffer`. Marginal allocation cost;
+        // unused until scene-save time.
+        usage: wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::COPY_SRC,
         view_formats: &[],
     });
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());

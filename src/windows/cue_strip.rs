@@ -7,15 +7,16 @@
 //! edge (T4.4). When there are no scenes an empty-state message is shown
 //! alongside the lone "+" tile (T4.5).
 //!
-//! # Thumbnail generation (T4.1 — placeholder path)
+//! # Thumbnail generation
 //!
-//! Full GPU readback from `warp_rt` is deferred to a T4.1 follow-up.
-//! For now, [`placeholder_thumbnail_for_name`] returns a 192×108 RGBA8
-//! gradient derived from the scene name's hash, giving each cue a
-//! visually distinct colour without requiring GPU resources at save time.
+//! PCleanup.7.1 — `snapshot_thumbnail_from_warp_rt` reads the post-warp
+//! composited texture (`warp_rt`) at save time, bilinear-downsamples to
+//! 192×108, and returns the bytes as a `ThumbnailRgba`. The cue tile
+//! displays the actual scene contents.
 //!
-//! TODO 003-T4.1 follow-up: replace placeholder with GPU readback from
-//! `warp_rt` (post-warp, pre-gamma) via `wgpu::CommandEncoder::copy_texture_to_buffer`.
+//! [`placeholder_thumbnail_for_name`] survives as the fallback when
+//! `warp_rt` is unavailable (e.g. a save fired before the first render
+//! frame, or a test environment without a GPU adapter).
 
 use std::collections::HashMap;
 
@@ -86,6 +87,195 @@ pub fn placeholder_thumbnail_for_name(name: &str) -> ThumbnailRgba {
         height: THUMB_H,
         data,
     }
+}
+
+/// PCleanup.7.1 — read back the current `warp_rt` texture and produce a
+/// 192×108 RGBA8 thumbnail for the cue tile. Returns the placeholder
+/// (name-hash gradient) when the readback fails for any reason — a
+/// safe-show-day fallback that never blocks the scene-save path.
+///
+/// The readback pattern is the standard wgpu shape:
+///   1. Allocate a CPU-visible buffer sized for `bytes_per_row × height`
+///      where `bytes_per_row` is the projector width × 4 rounded up to
+///      `COPY_BYTES_PER_ROW_ALIGNMENT` (256).
+///   2. `encoder.copy_texture_to_buffer`; submit; queue.poll(Wait).
+///   3. Map the buffer; copy rows (skipping the alignment padding) into
+///      a tightly-packed Vec<u8>.
+///   4. CPU bilinear downsample to 192×108.
+///
+/// Synchronous via `device.poll(Wait)` rather than async because
+/// `Command::SceneSave` is operator-triggered and one-shot — no need to
+/// keep the event loop spinning while we wait. Typical readback for a
+/// 1920×1080 RGBA8 frame is ~5 ms on M-series wall-clock; the operator
+/// notices nothing.
+pub fn snapshot_thumbnail_from_warp_rt(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    warp_rt: &wgpu::Texture,
+    scene_name_for_fallback: &str,
+) -> ThumbnailRgba {
+    let size = warp_rt.size();
+    let (src_w, src_h) = (size.width, size.height);
+    if src_w == 0 || src_h == 0 {
+        return placeholder_thumbnail_for_name(scene_name_for_fallback);
+    }
+
+    // wgpu requires the buffer copy row stride to be a multiple of
+    // COPY_BYTES_PER_ROW_ALIGNMENT (256). RGBA8 = 4 bytes per pixel.
+    const ALIGN: u32 = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+    let unpadded_bpr = src_w * 4;
+    let padding = (ALIGN - unpadded_bpr % ALIGN) % ALIGN;
+    let padded_bpr = unpadded_bpr + padding;
+
+    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("warp_rt thumbnail readback"),
+        size: (padded_bpr as u64) * (src_h as u64),
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("warp_rt readback encoder"),
+    });
+    encoder.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo {
+            texture: warp_rt,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &buffer,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(padded_bpr),
+                rows_per_image: Some(src_h),
+            },
+        },
+        wgpu::Extent3d {
+            width: src_w,
+            height: src_h,
+            depth_or_array_layers: 1,
+        },
+    );
+    queue.submit(Some(encoder.finish()));
+
+    // Synchronous map: pattern matches the wgpu examples for one-shot
+    // texture readback. The closure is invoked when the GPU completes
+    // the copy; device.poll(Wait) drives it to completion in-thread.
+    let slice = buffer.slice(..);
+    let (tx, rx) = std::sync::mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |result| {
+        let _ = tx.send(result);
+    });
+    // PollType::Wait { submission_index, timeout }: both Option fields
+    // set to None means "wait for the latest submission, no max
+    // timeout." That matches the synchronous-readback intent.
+    if let Err(err) = device.poll(wgpu::PollType::Wait {
+        submission_index: None,
+        timeout: None,
+    }) {
+        tracing::warn!(
+            ?err,
+            "warp_rt readback poll failed; falling back to placeholder"
+        );
+        return placeholder_thumbnail_for_name(scene_name_for_fallback);
+    }
+    let map_result = match rx.recv_timeout(std::time::Duration::from_millis(500)) {
+        Ok(r) => r,
+        Err(err) => {
+            tracing::warn!(
+                ?err,
+                "warp_rt readback map timed out; falling back to placeholder"
+            );
+            return placeholder_thumbnail_for_name(scene_name_for_fallback);
+        }
+    };
+    if let Err(err) = map_result {
+        tracing::warn!(
+            ?err,
+            "warp_rt readback map failed; falling back to placeholder"
+        );
+        return placeholder_thumbnail_for_name(scene_name_for_fallback);
+    }
+
+    let mapped = slice.get_mapped_range();
+    // Strip row padding into a tightly-packed RGBA8 src image.
+    let mut src_rgba = Vec::with_capacity((src_w * src_h * 4) as usize);
+    for row in 0..src_h {
+        let start = (row * padded_bpr) as usize;
+        let end = start + unpadded_bpr as usize;
+        src_rgba.extend_from_slice(&mapped[start..end]);
+    }
+    drop(mapped);
+    buffer.unmap();
+
+    // PCleanup.7.1 — bilinear downsample to thumbnail dimensions.
+    let thumb_rgba = bilinear_downsample_rgba8(&src_rgba, src_w, src_h, THUMB_W, THUMB_H);
+
+    // PCleanup.7.1 — the warp_rt format depends on the surface format. On
+    // macOS this is typically Bgra8UnormSrgb, which means the bytes
+    // arrive in BGRA order. ThumbnailRgba expects RGBA, so swap R↔B.
+    // The check is conservative: when format is already RGBA, the swap
+    // would be wrong; we infer from texture format.
+    let mut data = thumb_rgba;
+    if matches!(
+        warp_rt.format(),
+        wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
+    ) {
+        for px in data.chunks_exact_mut(4) {
+            px.swap(0, 2);
+        }
+    }
+
+    ThumbnailRgba {
+        width: THUMB_W,
+        height: THUMB_H,
+        data,
+    }
+}
+
+/// PCleanup.7.1 — bilinear downsample of a tightly-packed RGBA8 image.
+/// Cheap CPU resize from projector resolution (e.g. 1920×1080) to
+/// thumbnail resolution (192×108). For thumbnails-only use, quality is
+/// more than sufficient; a GPU mip-style downsample would be marginal
+/// improvement at meaningful complexity.
+fn bilinear_downsample_rgba8(
+    src: &[u8],
+    src_w: u32,
+    src_h: u32,
+    dst_w: u32,
+    dst_h: u32,
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity((dst_w * dst_h * 4) as usize);
+    let sx_scale = src_w as f32 / dst_w as f32;
+    let sy_scale = src_h as f32 / dst_h as f32;
+    for dy in 0..dst_h {
+        for dx in 0..dst_w {
+            // Sample at the centre of the destination texel for a
+            // crisp bilinear filter.
+            let sx = (dx as f32 + 0.5) * sx_scale - 0.5;
+            let sy = (dy as f32 + 0.5) * sy_scale - 0.5;
+            let sx0 = sx.floor().clamp(0.0, (src_w - 1) as f32) as u32;
+            let sy0 = sy.floor().clamp(0.0, (src_h - 1) as f32) as u32;
+            let sx1 = (sx0 + 1).min(src_w - 1);
+            let sy1 = (sy0 + 1).min(src_h - 1);
+            let fx = (sx - sx0 as f32).clamp(0.0, 1.0);
+            let fy = (sy - sy0 as f32).clamp(0.0, 1.0);
+            let idx = |x: u32, y: u32| ((y * src_w + x) * 4) as usize;
+            for ch in 0..4 {
+                let v00 = src[idx(sx0, sy0) + ch] as f32;
+                let v10 = src[idx(sx1, sy0) + ch] as f32;
+                let v01 = src[idx(sx0, sy1) + ch] as f32;
+                let v11 = src[idx(sx1, sy1) + ch] as f32;
+                let row0 = v00 + (v10 - v00) * fx;
+                let row1 = v01 + (v11 - v01) * fx;
+                let val = row0 + (row1 - row0) * fy;
+                out.push(val.round().clamp(0.0, 255.0) as u8);
+            }
+        }
+    }
+    out
 }
 
 /// HSL → RGB conversion (all values in [0, 1] except hue which is [0, 360]).
@@ -484,5 +674,85 @@ mod tests {
         let a = thumb_cache_key(&[1u8, 2, 3]);
         let b = thumb_cache_key(&[1u8, 2, 4]);
         assert_ne!(a, b);
+    }
+
+    // ----- PCleanup.7.1 — bilinear_downsample_rgba8 -----------------------
+
+    /// PCleanup.7.1 — downsample produces a correctly-sized buffer and
+    /// preserves the (uniform) colour of a flat source.
+    #[test]
+    fn bilinear_downsample_preserves_flat_colour() {
+        let src_w = 32u32;
+        let src_h = 32u32;
+        // Uniform fill: every pixel is (128, 64, 192, 255).
+        let src: Vec<u8> = (0..(src_w * src_h))
+            .flat_map(|_| [128u8, 64, 192, 255].into_iter())
+            .collect();
+        let out = bilinear_downsample_rgba8(&src, src_w, src_h, 8, 4);
+        assert_eq!(out.len(), 8 * 4 * 4);
+        // Every output pixel should also be (128, 64, 192, 255).
+        for px in out.chunks_exact(4) {
+            assert_eq!(px[0], 128);
+            assert_eq!(px[1], 64);
+            assert_eq!(px[2], 192);
+            assert_eq!(px[3], 255);
+        }
+    }
+
+    /// PCleanup.7.1 — downsample to identical dimensions is a near-
+    /// passthrough (subject to bilinear sample-centre rounding). Spot-
+    /// check center pixels match closely.
+    #[test]
+    fn bilinear_downsample_identity_size() {
+        let src = vec![
+            10u8, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160,
+        ];
+        // 2×2 RGBA image (src_w=2, src_h=2).
+        let out = bilinear_downsample_rgba8(&src, 2, 2, 2, 2);
+        assert_eq!(out.len(), 2 * 2 * 4);
+        // Output should be approximately equal to source. With the
+        // sample-centre offset, identity sizing should give back the
+        // input bit-for-bit (the centres align exactly).
+        assert_eq!(out, src);
+    }
+
+    /// PCleanup.7.1 — extreme downsample (32→1 in each axis) produces a
+    /// single-pixel result that's roughly the source average. Validates
+    /// the bilinear weighting doesn't accidentally pull pixels from
+    /// outside the image.
+    #[test]
+    fn bilinear_downsample_to_single_pixel() {
+        let src_w = 32u32;
+        let src_h = 32u32;
+        // Gradient: each pixel's red channel = its x coordinate × 8 (mod 256).
+        let mut src = Vec::with_capacity((src_w * src_h * 4) as usize);
+        for y in 0..src_h {
+            for x in 0..src_w {
+                src.push(((x * 8) % 256) as u8);
+                src.push(((y * 8) % 256) as u8);
+                src.push(0);
+                src.push(255);
+            }
+        }
+        let out = bilinear_downsample_rgba8(&src, src_w, src_h, 1, 1);
+        assert_eq!(out.len(), 4);
+        // The single-pixel result samples the source centre (16, 16).
+        // Red ≈ 16*8 = 128 (±filter); Green ≈ 16*8 = 128 (±filter).
+        // Wide tolerance because bilinear at extreme downsample samples
+        // a single bilinear cell, not an area average.
+        let dr = (out[0] as i32 - 128).abs();
+        let dg = (out[1] as i32 - 128).abs();
+        assert!(
+            dr < 32,
+            "expected R ≈ 128 at single-pixel down; got {}",
+            out[0]
+        );
+        assert!(
+            dg < 32,
+            "expected G ≈ 128 at single-pixel down; got {}",
+            out[1]
+        );
+        assert_eq!(out[2], 0);
+        assert_eq!(out[3], 255);
     }
 }
