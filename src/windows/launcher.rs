@@ -31,7 +31,16 @@ use crate::render::RenderError;
 /// Default content size for the launcher. Logical pixels — winit scales by
 /// the active monitor's `scale_factor` automatically.
 #[allow(dead_code)] // Used by LauncherWindow::new; T-003-T2.2 wires the call site.
-const LAUNCHER_LOGICAL_SIZE: (u32, u32) = (600, 400);
+// PCleanup.7.x-fix — 400 px tall was too short: the content stack
+// (heading + tagline + 5 stacked 44 px buttons + "Try a demo" demos
+// list + projector picker + Identify rows) totals ~640–720 px once a
+// machine reports 1+ monitors, so the bottom buttons and the entire
+// projector picker were getting clipped off the screen. 720 logical
+// gives comfortable margin for the typical 1–2 monitor config + the
+// inline recents picker when it expands. Window also becomes resizable
+// so operators on smaller displays can drag it shorter and rely on the
+// inner ScrollArea (already present) to scroll the content.
+const LAUNCHER_LOGICAL_SIZE: (u32, u32) = (600, 720);
 
 #[allow(dead_code)] // Constructed by T-003-T2.2 from the AppState::Launcher path.
 pub struct LauncherWindow {
@@ -61,10 +70,14 @@ impl LauncherWindow {
         let (lw, lh) = LAUNCHER_LOGICAL_SIZE;
         let inner_size = winit::dpi::LogicalSize::new(lw, lh);
 
+        // PCleanup.7.x-fix — resizable so operators on smaller displays
+        // can drag the launcher shorter; the inner ScrollArea (added in
+        // the launcher_render closure in src/app.rs) carries the content
+        // when the window height drops below the natural content stack.
         let mut attrs = WindowAttributes::default()
             .with_title("rmap")
             .with_inner_size(inner_size)
-            .with_resizable(false);
+            .with_resizable(true);
 
         // Centre on the primary monitor when winit can identify one. The
         // primary's `position()` is in physical pixels, `size()` likewise;

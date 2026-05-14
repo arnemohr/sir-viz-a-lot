@@ -2993,255 +2993,270 @@ fn launcher_render(
 
     let render_result = state.launcher.render(device, queue, |ui| {
         egui::CentralPanel::default().show_inside(ui, |panel_ui| {
-            panel_ui.add_space(32.0);
-            panel_ui.vertical_centered(|center_ui| {
-                center_ui.heading("rmap");
-                center_ui.add_space(4.0);
-                center_ui.weak("Projection mapping for live shows.");
-                center_ui.add_space(28.0);
+            // PCleanup.7.x-fix — wrap the launcher content in a vertical
+            // ScrollArea so an operator who drags the resizable window
+            // shorter than the natural content stack (heading + 5 buttons
+            // + demos + projector picker, ~640 px tall) can scroll instead
+            // of seeing the bottom of the stack clipped off-screen.
+            egui::ScrollArea::vertical()
+                .id_salt("launcher_central_scroll")
+                .auto_shrink([false, false])
+                .show(panel_ui, |panel_ui| {
+                    panel_ui.add_space(32.0);
+                    panel_ui.vertical_centered(|center_ui| {
+                        center_ui.heading("rmap");
+                        center_ui.add_space(4.0);
+                        center_ui.weak("Projection mapping for live shows.");
+                        center_ui.add_space(28.0);
 
-                // Button stack — matched widths for visual rhythm. The
-                // T-003-T2.5 projector picker lands below this stack
-                // once it ships; for T2.4 we leave the spot empty so
-                // the layout doesn't reflow when T2.5 adds it.
-                let button_size = egui::vec2(280.0, 44.0);
+                        // Button stack — matched widths for visual rhythm. The
+                        // T-003-T2.5 projector picker lands below this stack
+                        // once it ships; for T2.4 we leave the spot empty so
+                        // the layout doesn't reflow when T2.5 adds it.
+                        let button_size = egui::vec2(280.0, 44.0);
 
-                // 1. Start a new show — always enabled. Drives
-                //    T-003-T2.22's blank-canvas path: emits
-                //    Command::Launch with ProjectSource::Empty so the
-                //    editor opens an empty canvas with the T-003-T2.16
-                //    drop hint visible.
-                if center_ui
-                    .add_sized(button_size, egui::Button::new("Start a new show"))
-                    .clicked()
-                {
-                    action = Some(LauncherAction::Launch {
-                        project: ProjectSource::Empty,
-                        monitor: *selected_monitor,
-                        secondary_monitor: *selected_secondary_monitor,
-                        windowed: true,
-                    });
-                }
-                center_ui.add_space(10.0);
+                        // 1. Start a new show — always enabled. Drives
+                        //    T-003-T2.22's blank-canvas path: emits
+                        //    Command::Launch with ProjectSource::Empty so the
+                        //    editor opens an empty canvas with the T-003-T2.16
+                        //    drop hint visible.
+                        if center_ui
+                            .add_sized(button_size, egui::Button::new("Start a new show"))
+                            .clicked()
+                        {
+                            action = Some(LauncherAction::Launch {
+                                project: ProjectSource::Empty,
+                                monitor: *selected_monitor,
+                                secondary_monitor: *selected_secondary_monitor,
+                                windowed: true,
+                            });
+                        }
+                        center_ui.add_space(10.0);
 
-                // 2. Open a recent show — disabled when no recents.
-                //    003-T2.10 — toggles the inline recents picker.
-                let recent_enabled = !recents.is_empty();
-                let recent_label = if *recents_open {
-                    "Hide recent shows"
-                } else {
-                    "Open a recent show"
-                };
-                let recent_resp =
-                    center_ui.add_enabled(recent_enabled, egui::Button::new(recent_label));
-                if recent_enabled && recent_resp.clicked() {
-                    *recents_open = !*recents_open;
-                }
-                if recent_enabled && *recents_open {
-                    // Inline list rather than a floating popup so we
-                    // don't fight egui's z-order machinery; click on
-                    // a stale entry (file deleted between scan and
-                    // click — acceptance #4) routes through the same
-                    // LauncherAction::Launch dispatch as any other
-                    // pick, and the load failure surfaces as an
-                    // AppState::Failed transition with the file's
-                    // ProjectError message.
-                    egui::Frame::group(center_ui.style()).show(center_ui, |inner| {
-                        inner.set_min_width(280.0);
-                        for entry in recents.iter() {
-                            let date = crate::app::recents::relative_date(entry.modified, now);
-                            let label = egui::RichText::new(format!("{}  ·  {date}", entry.label));
-                            if inner.button(label).clicked() {
+                        // 2. Open a recent show — disabled when no recents.
+                        //    003-T2.10 — toggles the inline recents picker.
+                        let recent_enabled = !recents.is_empty();
+                        let recent_label = if *recents_open {
+                            "Hide recent shows"
+                        } else {
+                            "Open a recent show"
+                        };
+                        let recent_resp =
+                            center_ui.add_enabled(recent_enabled, egui::Button::new(recent_label));
+                        if recent_enabled && recent_resp.clicked() {
+                            *recents_open = !*recents_open;
+                        }
+                        if recent_enabled && *recents_open {
+                            // Inline list rather than a floating popup so we
+                            // don't fight egui's z-order machinery; click on
+                            // a stale entry (file deleted between scan and
+                            // click — acceptance #4) routes through the same
+                            // LauncherAction::Launch dispatch as any other
+                            // pick, and the load failure surfaces as an
+                            // AppState::Failed transition with the file's
+                            // ProjectError message.
+                            egui::Frame::group(center_ui.style()).show(center_ui, |inner| {
+                                inner.set_min_width(280.0);
+                                for entry in recents.iter() {
+                                    let date =
+                                        crate::app::recents::relative_date(entry.modified, now);
+                                    let label =
+                                        egui::RichText::new(format!("{}  ·  {date}", entry.label));
+                                    if inner.button(label).clicked() {
+                                        action = Some(LauncherAction::Launch {
+                                            project: ProjectSource::RecentPath(entry.path.clone()),
+                                            monitor: *selected_monitor,
+                                            secondary_monitor: *selected_secondary_monitor,
+                                            windowed: true,
+                                        });
+                                    }
+                                }
+                            });
+                        }
+                        center_ui.add_space(10.0);
+
+                        // 3. Try a demo — small picker listing all bundled
+                        //    demos. The "Recommended" star badge attaches to
+                        //    the first entry (window-glow) while
+                        //    `prefs.first_launch_completed` is false.
+                        //
+                        // 004-V31.5.1: extended from a single hard-wired button
+                        // to a list driven by DEMO_LIST so adding a new demo
+                        // only requires one line in the const.
+                        const DEMO_LIST: &[(&str, &str)] = &[
+                            ("window-glow", "Window Glow"),
+                            ("film-strip", "Film Strip"),
+                            ("test-grid", "Test Grid"),
+                            ("fx-ripple-wash", "Ripple Wash"),
+                        ];
+
+                        let badge = !prefs.first_launch_completed;
+                        center_ui.weak("Try a demo");
+                        for (idx, (slug, title)) in DEMO_LIST.iter().enumerate() {
+                            let label = if idx == 0 && badge {
+                                egui::RichText::new(format!("★  {title}  (Recommended)")).strong()
+                            } else {
+                                egui::RichText::new(*title)
+                            };
+                            if center_ui
+                                .add_sized(button_size, egui::Button::new(label))
+                                .clicked()
+                            {
+                                // 003-T2.9 — telemetry: demo button click.
+                                tracing::info!(
+                                    target: "rmap::ux",
+                                    event = "demo_clicked",
+                                    demo = slug,
+                                );
                                 action = Some(LauncherAction::Launch {
-                                    project: ProjectSource::RecentPath(entry.path.clone()),
+                                    project: ProjectSource::Demo(slug),
                                     monitor: *selected_monitor,
                                     secondary_monitor: *selected_secondary_monitor,
                                     windowed: true,
                                 });
                             }
                         }
-                    });
-                }
-                center_ui.add_space(10.0);
 
-                // 3. Try a demo — small picker listing all bundled
-                //    demos. The "Recommended" star badge attaches to
-                //    the first entry (window-glow) while
-                //    `prefs.first_launch_completed` is false.
-                //
-                // 004-V31.5.1: extended from a single hard-wired button
-                // to a list driven by DEMO_LIST so adding a new demo
-                // only requires one line in the const.
-                const DEMO_LIST: &[(&str, &str)] = &[
-                    ("window-glow", "Window Glow"),
-                    ("film-strip", "Film Strip"),
-                    ("test-grid", "Test Grid"),
-                    ("fx-ripple-wash", "Ripple Wash"),
-                ];
-
-                let badge = !prefs.first_launch_completed;
-                center_ui.weak("Try a demo");
-                for (idx, (slug, title)) in DEMO_LIST.iter().enumerate() {
-                    let label = if idx == 0 && badge {
-                        egui::RichText::new(format!("★  {title}  (Recommended)")).strong()
-                    } else {
-                        egui::RichText::new(*title)
-                    };
-                    if center_ui
-                        .add_sized(button_size, egui::Button::new(label))
-                        .clicked()
-                    {
-                        // 003-T2.9 — telemetry: demo button click.
-                        tracing::info!(
-                            target: "rmap::ux",
-                            event = "demo_clicked",
-                            demo = slug,
-                        );
-                        action = Some(LauncherAction::Launch {
-                            project: ProjectSource::Demo(slug),
-                            monitor: *selected_monitor,
-                            secondary_monitor: *selected_secondary_monitor,
-                            windowed: true,
-                        });
-                    }
-                }
-
-                // 003-T2.5 / P0.7.1 — projector picker. Single-display
-                // setup gets a static label; multi-display gets a
-                // checkbox per monitor with a max-2 selection limit
-                // (one primary + at most one secondary) per the v0.4
-                // two-projector cap; Phase 7 grows beyond that. Each
-                // checkbox has an "Identify" button that flashes the
-                // alignment cross on that physical display for 5 s.
-                center_ui.add_space(20.0);
-                if monitors.is_empty() {
-                    center_ui.weak("No displays detected");
-                } else if monitors.len() == 1 {
-                    center_ui.horizontal(|row| {
-                        row.label(format!("Projector: {}", monitors[0].name));
-                        let identify_label = if test_session_active {
-                            "Identifying…"
-                        } else {
-                            "Identify"
-                        };
-                        if row
-                            .add_enabled(!test_session_active, egui::Button::new(identify_label))
-                            .clicked()
-                        {
-                            identify_request = Some(0);
-                        }
-                    });
-                } else {
-                    center_ui.label("Projector(s) — pick up to 2:");
-                    // PCleanup.7.6 — surface the 2-projector v1 limit
-                    // upfront when 3+ monitors are connected, so the
-                    // operator learns the constraint while reading the
-                    // picker rather than discovering it when ticking the
-                    // third checkbox. The conditional hint below (only
-                    // shown once a secondary is selected) stays as the
-                    // "you're at the limit now" reinforcement.
-                    if monitors.len() >= 3 {
-                        center_ui.weak(
-                            "v1 supports up to 2 projectors (with edge-blend). \
-                             3+ projectors and per-edge configuration are \
-                             planned for a future phase — see specs/roadmap.md.",
-                        );
-                    }
-                    for (idx, m) in monitors.iter().enumerate() {
-                        let is_primary = *selected_monitor == idx;
-                        let is_secondary = *selected_secondary_monitor == Some(idx);
-                        let mut selected = is_primary || is_secondary;
-                        center_ui.horizontal(|row| {
-                            // Checkbox: respects the max-2 invariant.
-                            // Toggling logic:
-                            //   • If currently primary and operator
-                            //     unticks: promote secondary (if any)
-                            //     to primary; clear secondary.
-                            //   • If currently secondary and operator
-                            //     unticks: clear secondary.
-                            //   • If currently unselected and operator
-                            //     ticks: if no secondary yet, become
-                            //     secondary; otherwise no-op (max
-                            //     reached — show a subdued hint below).
-                            let was_selected = selected;
-                            let resp = row.checkbox(&mut selected, &m.name);
-                            if resp.changed() {
-                                if was_selected {
-                                    // Untick.
-                                    if is_primary {
-                                        if let Some(sec_idx) = *selected_secondary_monitor {
-                                            *selected_monitor = sec_idx;
-                                            *selected_secondary_monitor = None;
-                                        }
-                                        // else: refuse to leave zero
-                                        // primaries — reselect to true.
-                                        else {
-                                            selected = true;
-                                        }
-                                    } else if is_secondary {
-                                        *selected_secondary_monitor = None;
-                                    }
-                                } else {
-                                    // Tick.
-                                    if selected_secondary_monitor.is_none()
-                                        && *selected_monitor != idx
-                                    {
-                                        *selected_secondary_monitor = Some(idx);
-                                    } else {
-                                        // Max reached — revert.
-                                        selected = false;
-                                    }
-                                }
-                                // selected variable is only used for
-                                // local revert logic above; the egui
-                                // checkbox bound it as &mut so
-                                // assigning false reverts the visual
-                                // state next paint.
-                                let _ = selected;
-                            }
-                            if is_primary {
-                                row.weak("primary");
-                            } else if is_secondary {
-                                row.weak("secondary");
-                            }
-                            let identify_label =
-                                if test_session_active && identify_request == Some(idx) {
+                        // 003-T2.5 / P0.7.1 — projector picker. Single-display
+                        // setup gets a static label; multi-display gets a
+                        // checkbox per monitor with a max-2 selection limit
+                        // (one primary + at most one secondary) per the v0.4
+                        // two-projector cap; Phase 7 grows beyond that. Each
+                        // checkbox has an "Identify" button that flashes the
+                        // alignment cross on that physical display for 5 s.
+                        center_ui.add_space(20.0);
+                        if monitors.is_empty() {
+                            center_ui.weak("No displays detected");
+                        } else if monitors.len() == 1 {
+                            center_ui.horizontal(|row| {
+                                row.label(format!("Projector: {}", monitors[0].name));
+                                let identify_label = if test_session_active {
                                     "Identifying…"
                                 } else {
                                     "Identify"
                                 };
-                            if row
-                                .add_enabled(
-                                    !test_session_active,
-                                    egui::Button::new(identify_label),
-                                )
-                                .clicked()
-                            {
-                                identify_request = Some(idx);
+                                if row
+                                    .add_enabled(
+                                        !test_session_active,
+                                        egui::Button::new(identify_label),
+                                    )
+                                    .clicked()
+                                {
+                                    identify_request = Some(0);
+                                }
+                            });
+                        } else {
+                            center_ui.label("Projector(s) — pick up to 2:");
+                            // PCleanup.7.6 — surface the 2-projector v1 limit
+                            // upfront when 3+ monitors are connected, so the
+                            // operator learns the constraint while reading the
+                            // picker rather than discovering it when ticking the
+                            // third checkbox. The conditional hint below (only
+                            // shown once a secondary is selected) stays as the
+                            // "you're at the limit now" reinforcement.
+                            if monitors.len() >= 3 {
+                                center_ui.weak(
+                                    "v1 supports up to 2 projectors (with edge-blend). \
+                             3+ projectors and per-edge configuration are \
+                             planned for a future phase — see specs/roadmap.md.",
+                                );
                             }
-                        });
-                    }
-                    if monitors.len() >= 3 && selected_secondary_monitor.is_some() {
-                        center_ui.weak(
-                            // PCleanup.7.6 — Phase 7 shipped without
-                            // lifting this constraint (deliberately
-                            // out of scope per specs/roadmap.md line 32-34
-                            // and the Phase 7 acceptance criteria). 3+
-                            // projectors and per-edge configuration are
-                            // deferred to a post-v1.0 phase.
-                            "Max 2 projectors in v1. Untick one to swap; \
+                            for (idx, m) in monitors.iter().enumerate() {
+                                let is_primary = *selected_monitor == idx;
+                                let is_secondary = *selected_secondary_monitor == Some(idx);
+                                let mut selected = is_primary || is_secondary;
+                                center_ui.horizontal(|row| {
+                                    // Checkbox: respects the max-2 invariant.
+                                    // Toggling logic:
+                                    //   • If currently primary and operator
+                                    //     unticks: promote secondary (if any)
+                                    //     to primary; clear secondary.
+                                    //   • If currently secondary and operator
+                                    //     unticks: clear secondary.
+                                    //   • If currently unselected and operator
+                                    //     ticks: if no secondary yet, become
+                                    //     secondary; otherwise no-op (max
+                                    //     reached — show a subdued hint below).
+                                    let was_selected = selected;
+                                    let resp = row.checkbox(&mut selected, &m.name);
+                                    if resp.changed() {
+                                        if was_selected {
+                                            // Untick.
+                                            if is_primary {
+                                                if let Some(sec_idx) = *selected_secondary_monitor {
+                                                    *selected_monitor = sec_idx;
+                                                    *selected_secondary_monitor = None;
+                                                }
+                                                // else: refuse to leave zero
+                                                // primaries — reselect to true.
+                                                else {
+                                                    selected = true;
+                                                }
+                                            } else if is_secondary {
+                                                *selected_secondary_monitor = None;
+                                            }
+                                        } else {
+                                            // Tick.
+                                            if selected_secondary_monitor.is_none()
+                                                && *selected_monitor != idx
+                                            {
+                                                *selected_secondary_monitor = Some(idx);
+                                            } else {
+                                                // Max reached — revert.
+                                                selected = false;
+                                            }
+                                        }
+                                        // selected variable is only used for
+                                        // local revert logic above; the egui
+                                        // checkbox bound it as &mut so
+                                        // assigning false reverts the visual
+                                        // state next paint.
+                                        let _ = selected;
+                                    }
+                                    if is_primary {
+                                        row.weak("primary");
+                                    } else if is_secondary {
+                                        row.weak("secondary");
+                                    }
+                                    let identify_label =
+                                        if test_session_active && identify_request == Some(idx) {
+                                            "Identifying…"
+                                        } else {
+                                            "Identify"
+                                        };
+                                    if row
+                                        .add_enabled(
+                                            !test_session_active,
+                                            egui::Button::new(identify_label),
+                                        )
+                                        .clicked()
+                                    {
+                                        identify_request = Some(idx);
+                                    }
+                                });
+                            }
+                            if monitors.len() >= 3 && selected_secondary_monitor.is_some() {
+                                center_ui.weak(
+                                    // PCleanup.7.6 — Phase 7 shipped without
+                                    // lifting this constraint (deliberately
+                                    // out of scope per specs/roadmap.md line 32-34
+                                    // and the Phase 7 acceptance criteria). 3+
+                                    // projectors and per-edge configuration are
+                                    // deferred to a post-v1.0 phase.
+                                    "Max 2 projectors in v1. Untick one to swap; \
                              3+ projectors are planned for a post-v1.0 phase.",
-                        );
-                    }
-                }
+                                );
+                            }
+                        }
 
-                // 003-T2.6 — error banner. Renders below the dropdown
-                // when the most-recent failure is still within its TTL.
-                if let Some((msg, _)) = last_error_label {
-                    center_ui.add_space(10.0);
-                    center_ui.colored_label(theme::DESTRUCTIVE, msg.as_str());
-                }
-            });
+                        // 003-T2.6 — error banner. Renders below the dropdown
+                        // when the most-recent failure is still within its TTL.
+                        if let Some((msg, _)) = last_error_label {
+                            center_ui.add_space(10.0);
+                            center_ui.colored_label(theme::DESTRUCTIVE, msg.as_str());
+                        }
+                    });
+                }); // close ScrollArea (PCleanup.7.x-fix)
         });
     });
     if let Err(err) = render_result {
