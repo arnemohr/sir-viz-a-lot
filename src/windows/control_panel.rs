@@ -804,15 +804,27 @@ pub fn show(
 
     // P6.3.1-P6.3.4 — Cue detail panel: timing spinners, fire mode, BPM quantize,
     // timecode trigger. Shown above the cue strip when a cue is selected.
+    //
+    // Sized for 8 rows of grid content (header + In/Hold/Out timing,
+    // fire mode, BPM quantize, timecode trigger) plus the close-button
+    // header. 110 px (the original value) cut everything below the Hold
+    // time row off. Wrapped in `ScrollArea::vertical` as a belt-and-
+    // braces so a tighter window that can't afford ~230 px still keeps
+    // every field reachable.
     #[cfg(feature = "v3")]
     if let Some(cue_idx) = st.selected_cue {
         if let Some(cue) = project.cues.get(cue_idx).cloned() {
-            let panel_height = 110.0_f32;
+            let panel_height = 240.0_f32;
             egui::TopBottomPanel::bottom("rmap_cue_detail_panel")
-                .resizable(false)
-                .exact_size(panel_height)
+                .resizable(true)
+                .default_height(panel_height)
+                .min_height(96.0)
                 .show_inside(ui, |ui| {
-                    show_cue_detail_panel(ui, project, st, cue_idx, &cue);
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            show_cue_detail_panel(ui, project, st, cue_idx, &cue);
+                        });
                 });
         }
     }
