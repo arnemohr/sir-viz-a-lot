@@ -16,31 +16,27 @@ use std::path::PathBuf;
 
 use crate::error::RmapError;
 
-/// Maps SVG user coordinates into oversample pixmap pixels: non-uniform
-/// scale so `bbox` fills the entire `over_w × over_h` pixmap edge-to-edge.
+/// Maps SVG user coordinates into oversample pixmap pixels: uniform scale so
+/// `bbox` fits inside `over_w × over_h`, centered. Letterboxing preserves
+/// aspect ratio; margins stay transparent.
 ///
-/// Stretches the SVG independently along X and Y if its bbox aspect doesn't
-/// match the requested pixmap aspect. This is deliberate: SVG layers are
-/// projection-mapping content, and operators position them by drawing a
-/// warp quad — they want the SVG to **fill the layer area**, not be
-/// letterboxed inside the layer with transparent margins.
-///
-/// Why fill, not letterbox? Per-layer effects (Tint, Feedback, Treatment,
-/// etc.) sample the layer texture in [0,1] UV. Letterboxing leaves
-/// transparent margins around the SVG content, and any per-layer effect
-/// then appears clipped at the SVG's bbox rectangle — an "invisible mask"
-/// the operator didn't define. Filling the texture means effects operate
-/// on the entire layer area edge-to-edge. The operator controls the
-/// projected aspect via the warp quad shape, not by hoping the SVG bbox
-/// happens to match the projector aspect.
-///
-/// Operators who need aspect-preserving letterboxing should pre-bake it
-/// into the SVG's viewBox (add transparent padding around the content),
-/// not rely on the rasterizer to letterbox at runtime.
-fn raster_fill_transform(bbox: &usvg::Rect, over_w: u32, over_h: u32) -> tiny_skia::Transform {
-    let sx = over_w as f32 / bbox.width();
-    let sy = over_h as f32 / bbox.height();
-    tiny_skia::Transform::from_row(sx, 0.0, 0.0, sy, -sx * bbox.left(), -sy * bbox.top())
+/// Aspect preservation is intentional and matches operator expectation:
+/// dropping a 1:1 logo into a 16:9 layer should NOT stretch the logo
+/// horizontally. The transparent margins around the content are the
+/// natural empty space — per-layer effects (Tint, Feedback, Treatment,
+/// etc.) read alpha = 0 in those margins and therefore appear to apply
+/// only to the SVG's visible content. If you need effects to extend
+/// past the SVG content, pre-bake transparent padding into the SVG's
+/// viewBox so the bbox covers the area you want effects to reach.
+fn raster_uniform_fit_transform(
+    bbox: &usvg::Rect,
+    over_w: u32,
+    over_h: u32,
+) -> tiny_skia::Transform {
+    let s = (over_w as f32 / bbox.width()).min(over_h as f32 / bbox.height());
+    let tx = (over_w as f32 - bbox.width() * s) * 0.5;
+    let ty = (over_h as f32 - bbox.height() * s) * 0.5;
+    tiny_skia::Transform::from_row(s, 0.0, 0.0, s, tx - s * bbox.left(), ty - s * bbox.top())
 }
 
 /// Cache key for the most recently rasterized pixmap.
@@ -210,9 +206,9 @@ impl SvgLayer {
             ))
         })?;
 
-        // Non-uniform scale: stretch the SVG bbox to fill the pixmap
-        // edge-to-edge (no transparent margins). See raster_fill_transform.
-        let transform = raster_fill_transform(&bbox, over_w, over_h);
+        // Uniform scale + center in the oversample pixmap (letterbox).
+        // Aspect-preserving — see raster_uniform_fit_transform.
+        let transform = raster_uniform_fit_transform(&bbox, over_w, over_h);
         resvg::render(tree, transform, &mut over.as_mut());
 
         // Downsample via `image` to the final target size.
@@ -443,44 +439,40 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    /// Stretched-fill rasterization: an SVG with a 2:1 viewBox rendered
-    /// into a 1:1 pixmap must fill the pixmap edge-to-edge (no transparent
-    /// margins). Verifies the fix for the "invisible mask" bug: per-layer
-    /// effects see SVG content out to the texture edge instead of being
-    /// clipped at a centered letterbox rectangle.
+    /// Aspect-preserving rasterization: an SVG with a 2:1 viewBox rendered
+    /// into a 64×64 pixmap must letterbox (uniform scale, transparent
+    /// top/bottom margins). Verifies the fix that restored aspect-preserving
+    /// behavior — a 1:1 logo dropped into a 16:9 layer must not stretch.
     ///
-    /// Detection: render a 2:1 SVG (40 wide × 20 tall) filled fully red into
-    /// a 64×64 pixmap. Under the old letterbox behavior, the top and bottom
-    /// 16-pixel strips would be transparent. Under fill, every pixel must
-    /// be opaque red.
+    /// Detection: render a 2:1 SVG fully filled red into a 64×64 pixmap.
+    /// Under uniform-fit letterbox, the SVG fills width = 64 with height
+    /// = 32 centered (top/bottom 16-pixel strips transparent). The top
+    /// and bottom rows must be fully transparent; the middle band must
+    /// be fully opaque.
     #[test]
-    fn rasterize_fills_pixmap_for_mismatched_aspect() {
-        const STRETCH_SVG: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+    fn rasterize_preserves_aspect_for_mismatched_viewbox() {
+        const ASPECT_SVG: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 20" width="40" height="20">
   <rect x="0" y="0" width="40" height="20" fill="red" />
 </svg>"#;
-        let path = std::env::temp_dir().join("rmap_pcleanup_fill_aspect.svg");
-        std::fs::write(&path, STRETCH_SVG).expect("write temp svg");
+        let path = std::env::temp_dir().join("rmap_pcleanup_aspect.svg");
+        std::fs::write(&path, ASPECT_SVG).expect("write temp svg");
 
         let mut layer = SvgLayer::load(path.clone()).expect("load should succeed");
         let p = layer.rasterize((64, 64)).expect("rasterize 64x64");
         assert_eq!(p.width(), 64);
         assert_eq!(p.height(), 64);
 
-        // Every pixel must be opaque (alpha > 0). A letterboxed render would
-        // leave the top and bottom strips transparent.
-        let data = p.data();
-        let mut opaque_count = 0usize;
-        for chunk in data.chunks_exact(4) {
-            if chunk[3] > 0 {
-                opaque_count += 1;
-            }
-        }
-        assert_eq!(
-            opaque_count,
-            (p.width() * p.height()) as usize,
-            "every pixel must be opaque after stretch-fill rasterization",
-        );
+        // Sample alpha along a column: top row (y=0) and bottom row (y=63)
+        // must be transparent (letterbox margins); middle row (y=32) must
+        // be opaque (SVG content).
+        let row_alpha = |y: u32| -> u8 {
+            let i = (y * p.width() * 4) as usize;
+            p.data()[i + 3]
+        };
+        assert_eq!(row_alpha(0), 0, "top row must be transparent letterbox");
+        assert_eq!(row_alpha(63), 0, "bottom row must be transparent letterbox");
+        assert!(row_alpha(32) > 0, "middle row must be opaque SVG content");
 
         let _ = std::fs::remove_file(&path);
     }

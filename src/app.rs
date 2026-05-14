@@ -4378,10 +4378,8 @@ fn render_m5_pipeline(
             };
 
             // T-M8-04: write per-layer fit-mode uniform.
-            //   SVG layers: Stretch + identity aspect. PCleanup-fix: the
-            //   resvg pixmap is stretched edge-to-edge (no letterbox
-            //   margins) so per-layer effects extend across the whole
-            //   layer area — see `raster_fill_transform` for the why.
+            //   SVG layers: Stretch + identity aspect (resvg pixmap is
+            //   sized to the output; stretching is the no-op case).
             //   Image layers: Cover/Contain/Stretch + texture's actual
             //   aspect + focal.
             //   FxLayer: Stretch with centred focal (output-sized texture,

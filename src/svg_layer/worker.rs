@@ -138,9 +138,8 @@ impl Worker {
 /// operates on bare paths and sizes without the `SvgLayer` cache.
 ///
 /// Algorithm: read file → `usvg::Tree::from_str` → 2× oversample via `resvg`
-/// (non-uniform scale, SVG bbox stretched to fill pixmap — see
-/// `raster_fill_transform`) → downsample with `image` Triangle filter →
-/// return `tiny_skia::Pixmap`.
+/// (uniform scale, centered letterbox — aspect-preserving) → downsample with
+/// `image` Triangle filter → return `tiny_skia::Pixmap`.
 fn rasterize_one(job: &RasterJob) -> Result<tiny_skia::Pixmap, RmapError> {
     let (width, height) = job.size;
 
@@ -171,7 +170,7 @@ fn rasterize_one(job: &RasterJob) -> Result<tiny_skia::Pixmap, RmapError> {
         ))
     })?;
 
-    let transform = super::raster_fill_transform(&bbox, over_w, over_h);
+    let transform = super::raster_uniform_fit_transform(&bbox, over_w, over_h);
     resvg::render(&tree, transform, &mut over.as_mut());
 
     // --- Downsample via `image` ---
