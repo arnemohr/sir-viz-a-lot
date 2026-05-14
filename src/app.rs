@@ -2225,7 +2225,8 @@ fn assemble_editing_state(
         control_panel.project_save_path = p.display().to_string();
     }
 
-    EditingState {
+    #[allow(unused_mut)] // `mut` is used under v3 (toast push); inert under non-v3.
+    let mut state = EditingState {
         // Invariant: outputs is always non-empty. Length equals the number
         // of monitors passed to `init_output_window` (1 for single-projector
         // sessions, 2 when the launcher's secondary was selected).
@@ -2320,7 +2321,42 @@ fn assemble_editing_state(
         // explicitly via "Load Calibration" (W7.4) or via the auto-load
         // offer (W7.3).
         loaded_calibration: None,
+    };
+
+    // PCleanup.6.3 — when a project carries audio-bound modulators but the
+    // binary was built without `--features audio`, the audio provider is
+    // never installed and every Modulator::Audio resolves to 0.0 silently
+    // (matching the no-provider fallback in modulators::audio). Surface
+    // this once at editing-state assembly so the operator notices upfront,
+    // not by debugging why an audio-mapped slider isn't moving.
+    //
+    // Toast queue is v3-only; under non-v3 the hint is best-effort (the
+    // log line at INFO carries the same diagnostic to the operator's
+    // log file at ~/Library/Logs/rmap/rmap.log).
+    let audio_modulator_count = crate::modulators::project_audio_modulator_count(&state.project);
+    if audio_modulator_count > 0 && !cfg!(feature = "audio") {
+        tracing::info!(
+            count = audio_modulator_count,
+            "this project carries audio-bound modulators but rmap was built \
+             without --features audio; bound parameters will read 0.0 until \
+             you rebuild with audio support"
+        );
+        #[cfg(feature = "v3")]
+        {
+            state.toast_queue.push(crate::windows::toast::Toast::new(
+                crate::windows::toast::ToastKind::Warn,
+                format!(
+                    "Project has {audio_modulator_count} audio-bound \
+                     modulator(s) but this build was compiled without \
+                     `--features audio` — bound parameters will read 0.0. \
+                     Rebuild rmap with `cargo build --features audio` to \
+                     enable."
+                ),
+            ));
+        }
     }
+
+    state
 }
 
 /// 003-T2.3: resolve a [`crate::controls::ProjectSource`] into the

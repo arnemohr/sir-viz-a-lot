@@ -397,6 +397,27 @@ full task breakdown.
 - **Per-output gamma / brightness / contrast** — the per-output panel
   sliders now drive the render chain.
 
+### Building with audio support
+
+Audio FFT band capture is an opt-in feature because the underlying
+`cpal` dependency adds a meaningful build-time cost. Default builds
+ship without it — `Modulator::Audio { band, ... }` resolves to `0.0`
+in those binaries (matching the documented no-provider fallback).
+
+Build with audio support:
+
+```bash
+cargo build --features audio                # default + audio
+cargo build --no-default-features --features audio,v3,osc,midi  # minimal
+```
+
+When a project carries audio-bound modulators but the binary was
+built without `--features audio`, rmap emits a one-shot warn-level
+toast at project load time so the operator notices the missing
+support upfront rather than debugging why an audio-mapped slider
+isn't moving. Same diagnostic also lands in the log file
+(`~/Library/Logs/rmap/rmap.log` on macOS) at INFO level.
+
 ## What's in v1.0
 
 rmap v1.0 closes the remaining gaps to professional media servers while staying

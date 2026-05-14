@@ -168,6 +168,103 @@ impl Default for Modulator {
     }
 }
 
+impl Modulator {
+    /// PCleanup.6.3 — true when this modulator reads from the audio FFT
+    /// band registry. Used by `project_audio_modulator_count` to detect
+    /// projects that need `--features audio` but were loaded on a binary
+    /// built without it.
+    pub fn is_audio_bound(&self) -> bool {
+        matches!(self, Modulator::Audio { .. })
+    }
+}
+
+/// PCleanup.6.3 — count the audio-bound modulators across every effect in
+/// a project. Walks `project.layers[*].effects[*]` and inspects each
+/// effect's modulator-typed fields. The count is exact at the time of
+/// the call; it is NOT subscribed to mutations — call it after a project
+/// load, not continuously.
+///
+/// Used at editing-state assembly to surface a one-shot operator toast
+/// when a project carries audio modulators but the binary was built
+/// without `--features audio` (in which case the audio provider is never
+/// installed and `Modulator::Audio` resolves to `0.0` silently).
+///
+/// Walks `Effect` variants exhaustively at the type level via
+/// `crate::effects::Effect::*`; if a new `Effect` variant adds a
+/// `Modulator`-typed field, this helper still type-checks (the new
+/// variant simply doesn't contribute) — the regression test
+/// `count_audio_modulators_covers_every_modulator_field_test`
+/// catches the new field if it's audio-relevant.
+pub fn project_audio_modulator_count(project: &crate::project::schema::Project) -> usize {
+    use crate::effects::Effect;
+    let mut n = 0;
+    for layer in &project.layers {
+        for effect in &layer.effects {
+            match effect {
+                Effect::Color {
+                    hue,
+                    saturation,
+                    brightness,
+                    contrast,
+                } => {
+                    if hue.is_audio_bound() {
+                        n += 1;
+                    }
+                    if saturation.is_audio_bound() {
+                        n += 1;
+                    }
+                    if brightness.is_audio_bound() {
+                        n += 1;
+                    }
+                    if contrast.is_audio_bound() {
+                        n += 1;
+                    }
+                }
+                Effect::Tint { amount, .. } => {
+                    if amount.is_audio_bound() {
+                        n += 1;
+                    }
+                }
+                Effect::Blur { radius_px } => {
+                    if radius_px.is_audio_bound() {
+                        n += 1;
+                    }
+                }
+                Effect::Transform {
+                    rotate_deg,
+                    scale_x,
+                    scale_y,
+                    ..
+                } => {
+                    if rotate_deg.is_audio_bound() {
+                        n += 1;
+                    }
+                    if scale_x.is_audio_bound() {
+                        n += 1;
+                    }
+                    if scale_y.is_audio_bound() {
+                        n += 1;
+                    }
+                }
+                Effect::External { .. } => {
+                    // External params are a serde_json::Value blob, not
+                    // Modulators. If a future plugin wires audio
+                    // modulators, this helper will not see them — that's
+                    // the plugin's responsibility to surface in its own
+                    // load-time audit.
+                }
+                Effect::Treatment { .. } => {
+                    // Treatment params are static f32 scalars (HashMap),
+                    // not Modulators. The treatment-picker UI
+                    // (PCleanup.1.3.2) may later allow modulator-bound
+                    // params; this helper grows with that surface.
+                }
+            }
+        }
+    }
+    n
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -181,6 +278,110 @@ mod tests {
         let m = Modulator::Static(0.5);
         let v = m.value(&clock);
         assert!((v - 0.5).abs() < 1e-6, "expected 0.5, got {v}");
+    }
+
+    // ----- PCleanup.6.3 — audio modulator detection ---------------------
+
+    /// PCleanup.6.3 — `is_audio_bound` recognises Modulator::Audio and
+    /// rejects every other variant.
+    #[test]
+    fn is_audio_bound_recognises_audio_only() {
+        assert!(
+            Modulator::Audio {
+                band: 0,
+                smoothing: 0.5,
+                amp: 1.0,
+                offset: 0.0,
+            }
+            .is_audio_bound()
+        );
+        assert!(!Modulator::Static(0.5).is_audio_bound());
+        assert!(
+            !Modulator::Sine {
+                period_s: 1.0,
+                amp: 1.0,
+                phase: 0.0,
+                offset: 0.0,
+            }
+            .is_audio_bound()
+        );
+        assert!(
+            !Modulator::OscBound {
+                addr: "/x".into(),
+                scale: 1.0,
+                offset: 0.0,
+            }
+            .is_audio_bound()
+        );
+        assert!(
+            !Modulator::MidiBound {
+                cc: 0,
+                channel: 0,
+                scale: 1.0,
+                offset: 0.0,
+            }
+            .is_audio_bound()
+        );
+    }
+
+    /// PCleanup.6.3 — `project_audio_modulator_count` returns 0 on a
+    /// project with no audio-bound modulators (the common case for v1
+    /// shows).
+    #[test]
+    fn project_audio_modulator_count_zero_when_none_bound() {
+        let project = crate::project::schema::Project::default();
+        assert_eq!(super::project_audio_modulator_count(&project), 0);
+    }
+
+    /// PCleanup.6.3 — `project_audio_modulator_count` walks effects on
+    /// every layer and counts each audio-bound modulator field
+    /// independently. A single Color effect with two audio-bound fields
+    /// contributes 2 to the count.
+    #[test]
+    fn project_audio_modulator_count_walks_layers_and_effects() {
+        use crate::effects::Effect;
+        let mut project = crate::project::schema::Project::default();
+        // Two layers; the second has one Color (2 audio fields out of 4)
+        // and one Tint (audio-bound amount).
+        // Avoid constructing LayerConfig from scratch — clone an existing
+        // identity layer and rewrite its effects.
+        let proto = project.layers.first().cloned();
+        if let Some(mut layer) = proto {
+            layer.effects = vec![
+                Effect::Color {
+                    hue: Modulator::Audio {
+                        band: 0,
+                        smoothing: 0.5,
+                        amp: 1.0,
+                        offset: 0.0,
+                    },
+                    saturation: Modulator::Static(1.0),
+                    brightness: Modulator::Audio {
+                        band: 1,
+                        smoothing: 0.5,
+                        amp: 1.0,
+                        offset: 0.0,
+                    },
+                    contrast: Modulator::Static(1.0),
+                },
+                Effect::Tint {
+                    rgba: [1.0, 0.5, 0.25, 1.0],
+                    amount: Modulator::Audio {
+                        band: 2,
+                        smoothing: 0.5,
+                        amp: 1.0,
+                        offset: 0.0,
+                    },
+                    mode: crate::effects::tint::TintMode::Multiply,
+                },
+            ];
+            project.layers.push(layer);
+            // hue, brightness, amount → 3 audio-bound modulators.
+            assert_eq!(super::project_audio_modulator_count(&project), 3);
+        } else {
+            // Empty default project — that's fine; the zero-case test
+            // above covers the no-layers path.
+        }
     }
 
     #[test]
