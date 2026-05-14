@@ -494,6 +494,28 @@ Total new variants: ~16. Bump `EXPECTED_VARIANT_COUNT` to the new total. Definit
 **What:** `rg 'pub [a-z_]+: f32' src/effects/ src/render/fx_presets.rs` and decide for each: should this be `Modulator`? At minimum, every animated parameter (speed, amplitude, frequency, brightness) should be `Modulator`-driven.
 **Acceptance:** Committed doc comment in this tasks file or a new `004-phase-cleanup-modulator-audit.md` listing which params changed `f32 → Modulator` and which stayed `f32` with reasons.
 
+**Audit result (run during cleanup-phase implementation):**
+
+`rg 'pub [a-z_]+: f32' src/effects/ src/render/fx_presets.rs` returned 17 matches. After cross-referencing each against its consumer + serde-schema context, the result is:
+
+| Field | Location | Stays `f32`? | Reason |
+|---|---|---|---|
+| `ColorParams::hue_shift_deg`, `saturation_mul`, `brightness_add`, `contrast_mul` | `src/effects/color.rs` | **Yes** | These are the *resolved* per-frame values written into the GPU uniform. The `Modulator` lives on the `Effect::Color { hue, saturation, brightness, contrast }` variant; the `*Params` struct is the std140-wire shape. Already-modulated. |
+| `BlurParams::radius_px` | `src/effects/blur.rs` | **Yes** | Same — `Effect::Blur { radius_px: Modulator }` carries the modulator; `BlurParams` is the wire shape. |
+| `TintParams::amount` | `src/effects/tint.rs` | **Yes** (PCleanup.4.1) | Same — `Effect::Tint { amount: Modulator, .. }`. The `f32` is the resolved-at-frame value. |
+| `TransformParams::rotate`, `translate`, `scale`, `anchor` | `src/effects/transform.rs` | **Yes** | Same. `Effect::Transform { rotate_deg: Modulator, scale_x: Modulator, scale_y: Modulator }` carries the modulators. `translate` and `anchor` are `[f32; 2]` static; see follow-up below. |
+| `FxParamDescriptor::min`, `max`, `default` | `src/render/fx_presets.rs` | **Yes** | UI metadata constants. Modulating these would invert the role of "this is the slider's range." |
+| `FxShaderInputs::clock_secs`, `t_layer_added_secs` | `src/render/fx_presets.rs` | **Yes** | Frame-level scalars; modulating them would create a circular reference (Clock → Modulator → Clock). |
+| `FxParamsUniform::wavelength`, `speed`, `falloff`, `base_r`, `base_g`, `base_b` | `src/render/fx_presets.rs` | **Yes** | Per-frame wire shape; populated from `params: HashMap<String, f32>` which is itself the resolved-at-frame value of each preset's operator-facing slider. Modulator-typed sliders for FX presets would require a per-preset `params: HashMap<String, Modulator>` schema change — substantial and out of scope; documented as a possible v2 enhancement. |
+
+**Conclusion:** all 17 `pub: f32` fields are correctly typed today. The `Effect::*` chain is fully Modulator-driven at the variant level (the per-effect data type carries the Modulators; the per-frame *Params struct carries the resolved f32). The FX preset registry uses `HashMap<String, f32>` for params by design (per the Phase 2 four-file pattern), which keeps presets schema-stable across changes. **No code changes required.**
+
+**Two follow-up opportunities surfaced** (out of scope for the cleanup phase; tracked for a future enhancement):
+
+1. **`Effect::Transform.translate: [f32; 2]` and `anchor`** are static, not Modulator-driven. The `rotate_deg` / `scale_x` / `scale_y` neighbours ARE modulated. Promoting `translate` to a 2-axis Modulator pair (`translate_x: Modulator, translate_y: Modulator`) would let operators wiggle a layer via LFO / audio / OSC. Schema migration required (`[f32; 2]` → two `Modulator` slots); not trivial. Worth its own future task.
+
+2. **FX preset params as `HashMap<String, Modulator>`** would unlock LFO / audio / OSC modulation of any FX slider. Bigger schema change; would touch every `for_*` uniform constructor and the dispatch arms. Genuinely a v2 design conversation, not a cleanup-phase fix.
+
 ---
 
 ### Workstream 7 — UI surface gaps
