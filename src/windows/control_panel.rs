@@ -1642,16 +1642,18 @@ fn show_effects_tab(ui: &mut Ui, project: &mut Project, st: &mut ControlPanelSta
                     project.layers[layer_idx].effects = new;
                 }
             }
-            // P2.7.3: External is a first-class menu entry. In v1 the registry
-            // is always empty at the control-panel call site (ExternalRegistry
-            // lives in EditingState and is not threaded into show_effects_tab),
-            // so the collapsing header will always show the placeholder note.
-            // The empty-id default is intentional: the operator sets the id via
-            // the project file once a plugin is installed.
-            if ui.selectable_label(false, "External").clicked() {
-                let new_effect = crate::effects::Effect::External {
-                    id: String::new(),
-                    params: serde_json::Value::Null,
+            // PCleanup.4.1 — Tint picker entry (gap-fill from the original
+            // PCleanup.4.1 commit, which added the variant + pipeline but
+            // didn't surface it in the v2 picker). Default amount = 0.0
+            // means a freshly-added Tint is inert until the operator
+            // drags the amount slider, matching the Color/Blur/Transform
+            // pattern of "added effect makes no visible change until
+            // configured."
+            if ui.selectable_label(false, "Tint").clicked() {
+                let new_effect = crate::effects::Effect::Tint {
+                    rgba: [1.0, 1.0, 1.0, 1.0],
+                    amount: crate::modulators::Modulator::Static(0.0),
+                    mode: crate::effects::tint::TintMode::Multiply,
                 };
                 let mut new = project.layers[layer_idx].effects.clone();
                 new.push(new_effect);
@@ -1665,6 +1667,40 @@ fn show_effects_tab(ui: &mut Ui, project: &mut Project, st: &mut ControlPanelSta
                     project.layers[layer_idx].effects = new;
                 }
             }
+            // PCleanup.1.3 — Treatment picker entry. Default id = "identity"
+            // → no visible change until the operator changes the id (matching
+            // the inert-on-add pattern). The treatment-picker UI for choosing
+            // a specific preset (PCleanup.1.3.2) is deferred; for now the
+            // operator JSON-edits the project file to change the id.
+            if ui.selectable_label(false, "Treatment").clicked() {
+                let new_effect = crate::effects::Effect::Treatment {
+                    id: "identity".to_string(),
+                    params: std::collections::HashMap::new(),
+                };
+                let mut new = project.layers[layer_idx].effects.clone();
+                new.push(new_effect);
+                #[cfg(feature = "v3")]
+                {
+                    st.pending_mutations
+                        .push(project.set_layer_effects_mutation(layer_idx, new));
+                }
+                #[cfg(not(feature = "v3"))]
+                {
+                    project.layers[layer_idx].effects = new;
+                }
+            }
+            // PCleanup.4.2 — Effect::External picker entry removed.
+            // v1 ships no built-in External passes (`ExternalRegistry` is
+            // default-empty per src/effects/registry.rs:58-62); exposing
+            // the picker entry created the surface for an operator to add
+            // an effect that would always log warn-and-skip at render
+            // time. Operators with a real plugin can still author the
+            // effect via the project JSON file — the show_effect display
+            // arm renders id + params just like before, so existing
+            // External entries continue to load. When the M7 plugin
+            // system lands and ExternalRegistry can carry real passes,
+            // a follow-up PR will re-introduce the picker entry gated
+            // on `registry.is_empty()`.
         });
 
     // 003-T1.21/T1.22: after the loop, apply staged changes.
