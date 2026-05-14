@@ -4099,15 +4099,37 @@ fn render_m5_passes_5_6(
         // tuning isn't visible there in either case — the override is
         // therefore the only way to make projector output diverge from
         // preview without a second gamma pass.
+        //
+        // PCleanup.7.3 — per-OUTPUT cascade replaces the previous
+        // project-only cascade. Lookup precedence (per knob):
+        //   1. output_target.{knob}_override   (per-projector trim)
+        //   2. project.{knob}_override         (project-wide trim)
+        //   3. project.{knob}                  (master)
+        // None at every level means use the master. Operator-set
+        // per-projector values let an under-bright second projector be
+        // pulled into match against the first without touching the
+        // master tuning that affects both.
+        let eff_gamma = output_target
+            .gamma_override
+            .or(project.gamma_override)
+            .unwrap_or(project.gamma);
+        let eff_brightness = output_target
+            .brightness_override
+            .or(project.brightness_override)
+            .unwrap_or(project.brightness);
+        let eff_contrast = output_target
+            .contrast_override
+            .or(project.contrast_override)
+            .unwrap_or(project.contrast);
         gamma.render(
             &renderer.gpu.device,
             &renderer.gpu.queue,
             &mut enc_gamma,
             &surface_view,
             warp_rt_view,
-            project.gamma_override.unwrap_or(project.gamma),
-            project.brightness_override.unwrap_or(project.brightness),
-            project.contrast_override.unwrap_or(project.contrast),
+            eff_gamma,
+            eff_brightness,
+            eff_contrast,
             // P0.8.2 — per-projector RGB matrix from the project's
             // OutputTarget. Identity by default (P0.1.2 set the
             // serde default to identity), so existing v6 projects
@@ -8004,6 +8026,10 @@ mod tests {
                 uuid: Some(uuid.clone()),
                 fallback_index: 0,
                 rgb_matrix: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+                // PCleanup.7.3 — test fixture: no per-output trims.
+                gamma_override: None,
+                brightness_override: None,
+                contrast_override: None,
             };
             let surface = CalibrationSurface::new("Left", ot.clone());
             // Manually set uuid on the calibration surface's output_target.
@@ -8023,6 +8049,10 @@ mod tests {
                 uuid: None,
                 fallback_index: 2,
                 rgb_matrix: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+                // PCleanup.7.3 — test fixture: no per-output trims.
+                gamma_override: None,
+                brightness_override: None,
+                contrast_override: None,
             };
             let surface = CalibrationSurface::new("Right", ot.clone());
             let unmatched = calibration_find_unmatched(&[surface], &[ot]);
@@ -8039,11 +8069,19 @@ mod tests {
                 uuid: Some("proj-uuid".to_string()),
                 fallback_index: 0,
                 rgb_matrix: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+                // PCleanup.7.3 — test fixture: no per-output trims.
+                gamma_override: None,
+                brightness_override: None,
+                contrast_override: None,
             };
             let cal_ot = OutputTarget {
                 uuid: Some("different-uuid".to_string()),
                 fallback_index: 99,
                 rgb_matrix: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+                // PCleanup.7.3 — test fixture: no per-output trims.
+                gamma_override: None,
+                brightness_override: None,
+                contrast_override: None,
             };
             let mut surface = CalibrationSurface::new("Orphan", cal_ot);
             surface.surface_slot_id = new_calibration_id();

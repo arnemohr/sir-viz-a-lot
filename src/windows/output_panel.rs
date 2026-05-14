@@ -11,15 +11,11 @@
 //!     parameterised on output_idx via the extended
 //!     `SetOutputRgbMatrix` Mutation).
 //!
-//! **Per-output gamma / brightness / contrast trims are deferred.**
-//! The spec calls them "per-display" but the schema today only carries
-//! project-level `Project.{gamma,brightness,contrast}_override:
-//! Option<f32>`. True per-output trims need
-//! `OutputTarget.{gamma,brightness,contrast}_override: Option<f32>` +
-//! a cascading lookup in the gamma render path. Non-breaking schema
-//! addition; not yet in scope for v0.4.
-//! TODO: P0.8.1 — wire per-output gamma/brightness/contrast overrides
-//! when OutputTarget gains those fields (Phase 7).
+//! PCleanup.7.3 — per-output gamma / brightness / contrast trims now ship.
+//! `OutputTarget.{gamma,brightness,contrast}_override: Option<f32>` are
+//! authored via the per-sub-card sliders below, and the gamma render
+//! pass at `src/app.rs::render_m5_passes_5_6` resolves them via a
+//! cascading lookup `output.override.or(project.override).unwrap_or(master)`.
 //!
 //! **Edge-blend lives at panel level, not per-sub-card.** v0.4 has one
 //! shared edge between outputs[0] and outputs[1]. Phase 7 generalises
@@ -176,6 +172,90 @@ pub fn show(
 
                 // ---- c) Per-output RGB matrix editor ----------------------------
                 show_rgb_matrix_editor(ui, project, st, i);
+
+                // ---- d) PCleanup.7.3 — per-output gamma / brightness / contrast.
+                // Sliders enable when the operator ticks the "override" box;
+                // unticking sets the field back to None so the gamma render
+                // path falls through to the project-level override (and
+                // ultimately the master).
+                ui.add_space(6.0);
+                ui.label("Per-projector trims (override for this output only):");
+                let inherited_gamma = project.gamma_override.unwrap_or(project.gamma);
+                let inherited_brightness =
+                    project.brightness_override.unwrap_or(project.brightness);
+                let inherited_contrast = project.contrast_override.unwrap_or(project.contrast);
+                let cur_gamma_override = project.output_targets[i].gamma_override;
+                let cur_brightness_override = project.output_targets[i].brightness_override;
+                let cur_contrast_override = project.output_targets[i].contrast_override;
+
+                // -- Gamma override --
+                ui.horizontal(|row| {
+                    let mut enabled = cur_gamma_override.is_some();
+                    if row.checkbox(&mut enabled, "Gamma").changed() {
+                        let new_val = if enabled { Some(inherited_gamma) } else { None };
+                        st.pending_mutations
+                            .push(project.set_output_gamma_override_mutation(i, new_val));
+                    } else if let Some(v) = cur_gamma_override {
+                        let mut edit = v;
+                        let resp =
+                            row.add(egui::Slider::new(&mut edit, 0.5..=2.5).fixed_decimals(2));
+                        if (resp.drag_stopped() || resp.lost_focus()) && (edit - v).abs() > 1e-4 {
+                            st.pending_mutations
+                                .push(project.set_output_gamma_override_mutation(i, Some(edit)));
+                        }
+                    } else {
+                        row.weak(format!("(inherits {inherited_gamma:.2})"));
+                    }
+                });
+
+                // -- Brightness override --
+                ui.horizontal(|row| {
+                    let mut enabled = cur_brightness_override.is_some();
+                    if row.checkbox(&mut enabled, "Brightness").changed() {
+                        let new_val = if enabled {
+                            Some(inherited_brightness)
+                        } else {
+                            None
+                        };
+                        st.pending_mutations
+                            .push(project.set_output_brightness_override_mutation(i, new_val));
+                    } else if let Some(v) = cur_brightness_override {
+                        let mut edit = v;
+                        let resp =
+                            row.add(egui::Slider::new(&mut edit, -1.0..=1.0).fixed_decimals(2));
+                        if (resp.drag_stopped() || resp.lost_focus()) && (edit - v).abs() > 1e-4 {
+                            st.pending_mutations.push(
+                                project.set_output_brightness_override_mutation(i, Some(edit)),
+                            );
+                        }
+                    } else {
+                        row.weak(format!("(inherits {inherited_brightness:.2})"));
+                    }
+                });
+
+                // -- Contrast override --
+                ui.horizontal(|row| {
+                    let mut enabled = cur_contrast_override.is_some();
+                    if row.checkbox(&mut enabled, "Contrast").changed() {
+                        let new_val = if enabled {
+                            Some(inherited_contrast)
+                        } else {
+                            None
+                        };
+                        st.pending_mutations
+                            .push(project.set_output_contrast_override_mutation(i, new_val));
+                    } else if let Some(v) = cur_contrast_override {
+                        let mut edit = v;
+                        let resp =
+                            row.add(egui::Slider::new(&mut edit, 0.5..=2.0).fixed_decimals(2));
+                        if (resp.drag_stopped() || resp.lost_focus()) && (edit - v).abs() > 1e-4 {
+                            st.pending_mutations
+                                .push(project.set_output_contrast_override_mutation(i, Some(edit)));
+                        }
+                    } else {
+                        row.weak(format!("(inherits {inherited_contrast:.2})"));
+                    }
+                });
             });
 
         ui.add_space(4.0);

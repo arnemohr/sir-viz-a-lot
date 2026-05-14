@@ -736,6 +736,22 @@ pub struct OutputTarget {
     /// g_g, g_b], [b_r, b_g, b_b]]` — `out = matrix * in` per channel.
     #[serde(default = "rgb_matrix_identity")]
     pub rgb_matrix: [[f32; 3]; 3],
+    /// PCleanup.7.3 — per-projector gamma trim. `Some(v)` overrides both
+    /// the project-level `gamma_override` and `gamma` master at the
+    /// gamma render pass for this output only. Cascading lookup:
+    /// `output.gamma_override.or(project.gamma_override).unwrap_or(project.gamma)`.
+    /// Additive schema change (serde default → None means "inherit");
+    /// existing projects load byte-identical to pre-PCleanup builds.
+    #[serde(default)]
+    pub gamma_override: Option<f32>,
+    /// PCleanup.7.3 — per-projector brightness trim. Same cascade as
+    /// `gamma_override`. Inert when None.
+    #[serde(default)]
+    pub brightness_override: Option<f32>,
+    /// PCleanup.7.3 — per-projector contrast trim. Same cascade as
+    /// `gamma_override`. Inert when None.
+    #[serde(default)]
+    pub contrast_override: Option<f32>,
 }
 
 impl Default for OutputTarget {
@@ -744,6 +760,11 @@ impl Default for OutputTarget {
             uuid: None,
             fallback_index: 0,
             rgb_matrix: rgb_matrix_identity(),
+            // PCleanup.7.3 — None means "inherit from project". Default
+            // construction → no per-output deviation.
+            gamma_override: None,
+            brightness_override: None,
+            contrast_override: None,
         }
     }
 }

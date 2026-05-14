@@ -1539,6 +1539,116 @@ impl ReverseStorage for SetOutputRgbMatrix {
     }
 }
 
+/// PCleanup.7.3 — Payload for [`Mutation::SetOutputGammaOverride`].
+/// Whole-`Option` Reverse so `Some → None → Some` round-trips byte-equally,
+/// matching the `SetProjectGammaOverride` precedent.
+#[derive(Debug, Clone)]
+pub struct SetOutputGammaOverride {
+    /// Index into `Project.output_targets`. Panics if out-of-range in `apply`.
+    pub output_idx: usize,
+    /// New gamma override value (`None` = clear per-output trim).
+    pub new: Option<f32>,
+    /// Pre-mutation value; `apply` `debug_assert_eq!`s this matches.
+    pub old: Option<f32>,
+}
+
+impl ReverseStorage for SetOutputGammaOverride {
+    fn apply(self, project: &mut Project) -> Self {
+        let live = project
+            .output_targets
+            .get(self.output_idx)
+            .expect("SetOutputGammaOverride: output_idx out of range")
+            .gamma_override;
+        debug_assert_eq!(
+            live, self.old,
+            "SetOutputGammaOverride stale Reverse: live={:?} expected old={:?}",
+            live, self.old,
+        );
+        project
+            .output_targets
+            .get_mut(self.output_idx)
+            .expect("SetOutputGammaOverride: output_idx out of range")
+            .gamma_override = self.new;
+        SetOutputGammaOverride {
+            output_idx: self.output_idx,
+            new: self.old,
+            old: self.new,
+        }
+    }
+}
+
+/// PCleanup.7.3 — Payload for [`Mutation::SetOutputBrightnessOverride`].
+#[derive(Debug, Clone)]
+pub struct SetOutputBrightnessOverride {
+    /// Index into `Project.output_targets`. Panics if out-of-range in `apply`.
+    pub output_idx: usize,
+    /// New brightness override value (`None` = clear per-output trim).
+    pub new: Option<f32>,
+    /// Pre-mutation value; `apply` `debug_assert_eq!`s this matches.
+    pub old: Option<f32>,
+}
+
+impl ReverseStorage for SetOutputBrightnessOverride {
+    fn apply(self, project: &mut Project) -> Self {
+        let live = project
+            .output_targets
+            .get(self.output_idx)
+            .expect("SetOutputBrightnessOverride: output_idx out of range")
+            .brightness_override;
+        debug_assert_eq!(
+            live, self.old,
+            "SetOutputBrightnessOverride stale Reverse: live={:?} expected old={:?}",
+            live, self.old,
+        );
+        project
+            .output_targets
+            .get_mut(self.output_idx)
+            .expect("SetOutputBrightnessOverride: output_idx out of range")
+            .brightness_override = self.new;
+        SetOutputBrightnessOverride {
+            output_idx: self.output_idx,
+            new: self.old,
+            old: self.new,
+        }
+    }
+}
+
+/// PCleanup.7.3 — Payload for [`Mutation::SetOutputContrastOverride`].
+#[derive(Debug, Clone)]
+pub struct SetOutputContrastOverride {
+    /// Index into `Project.output_targets`. Panics if out-of-range in `apply`.
+    pub output_idx: usize,
+    /// New contrast override value (`None` = clear per-output trim).
+    pub new: Option<f32>,
+    /// Pre-mutation value; `apply` `debug_assert_eq!`s this matches.
+    pub old: Option<f32>,
+}
+
+impl ReverseStorage for SetOutputContrastOverride {
+    fn apply(self, project: &mut Project) -> Self {
+        let live = project
+            .output_targets
+            .get(self.output_idx)
+            .expect("SetOutputContrastOverride: output_idx out of range")
+            .contrast_override;
+        debug_assert_eq!(
+            live, self.old,
+            "SetOutputContrastOverride stale Reverse: live={:?} expected old={:?}",
+            live, self.old,
+        );
+        project
+            .output_targets
+            .get_mut(self.output_idx)
+            .expect("SetOutputContrastOverride: output_idx out of range")
+            .contrast_override = self.new;
+        SetOutputContrastOverride {
+            output_idx: self.output_idx,
+            new: self.old,
+            old: self.new,
+        }
+    }
+}
+
 /// Payload for [`Mutation::SetProjectScenes`].
 ///
 /// Replaces `Project.scenes` wholesale (whole-Vec snapshot Reverse).
@@ -2262,6 +2372,15 @@ pub enum Mutation {
     /// per change. Delegates to [`SetOutputRgbMatrix`].
     SetOutputRgbMatrix(SetOutputRgbMatrix),
 
+    /// PCleanup.7.3 — replace `OutputTarget.gamma_override` for output
+    /// index. `None` clears the per-projector trim, falling back to the
+    /// project-level cascade. Delegates to [`SetOutputGammaOverride`].
+    SetOutputGammaOverride(SetOutputGammaOverride),
+    /// PCleanup.7.3 — replace `OutputTarget.brightness_override`.
+    SetOutputBrightnessOverride(SetOutputBrightnessOverride),
+    /// PCleanup.7.3 — replace `OutputTarget.contrast_override`.
+    SetOutputContrastOverride(SetOutputContrastOverride),
+
     /// Replace the modulator at `(layer_idx, effect_idx, field)`. Delegates to [`SetModulator`].
     SetModulator(SetModulator),
 
@@ -2426,6 +2545,16 @@ impl Mutation {
             }
             Mutation::SetFxLayerParams(s) => Mutation::SetFxLayerParams(s.apply(project)),
             Mutation::SetOutputRgbMatrix(s) => Mutation::SetOutputRgbMatrix(s.apply(project)),
+            // PCleanup.7.3 — per-output tone-override mutations.
+            Mutation::SetOutputGammaOverride(s) => {
+                Mutation::SetOutputGammaOverride(s.apply(project))
+            }
+            Mutation::SetOutputBrightnessOverride(s) => {
+                Mutation::SetOutputBrightnessOverride(s.apply(project))
+            }
+            Mutation::SetOutputContrastOverride(s) => {
+                Mutation::SetOutputContrastOverride(s.apply(project))
+            }
             Mutation::SetModulator(s) => Mutation::SetModulator(s.apply(project)),
             Mutation::ResetLayerWarpMesh(s) => Mutation::ResetLayerWarpMesh(s.apply(project)),
             Mutation::ResetLayerBezierMesh(s) => Mutation::ResetLayerBezierMesh(s.apply(project)),
@@ -2619,6 +2748,12 @@ impl Mutation {
             | Mutation::SetLayerTreatmentParams(_)
             | Mutation::SetFxLayerParams(_)
             | Mutation::SetOutputRgbMatrix(_)
+            // PCleanup.7.3 — per-output trim overrides; same undo
+            // policy as the project-level gamma/brightness/contrast
+            // overrides above.
+            | Mutation::SetOutputGammaOverride(_)
+            | Mutation::SetOutputBrightnessOverride(_)
+            | Mutation::SetOutputContrastOverride(_)
             | Mutation::SetVideoSpeed(_)
             | Mutation::SetVideoLoopMode(_)
             | Mutation::SetVideoClipRange(_)
@@ -2844,6 +2979,50 @@ impl Project {
     ) -> Mutation {
         let old = self.output_targets[output_idx].rgb_matrix;
         Mutation::SetOutputRgbMatrix(SetOutputRgbMatrix {
+            output_idx,
+            new,
+            old,
+        })
+    }
+
+    /// PCleanup.7.3 — build a `SetOutputGammaOverride` mutation. Captures
+    /// the current per-output gamma-override as `old`. Panics on
+    /// out-of-range `output_idx` — callers must guard.
+    pub fn set_output_gamma_override_mutation(
+        &self,
+        output_idx: usize,
+        new: Option<f32>,
+    ) -> Mutation {
+        let old = self.output_targets[output_idx].gamma_override;
+        Mutation::SetOutputGammaOverride(SetOutputGammaOverride {
+            output_idx,
+            new,
+            old,
+        })
+    }
+
+    /// PCleanup.7.3 — build a `SetOutputBrightnessOverride` mutation.
+    pub fn set_output_brightness_override_mutation(
+        &self,
+        output_idx: usize,
+        new: Option<f32>,
+    ) -> Mutation {
+        let old = self.output_targets[output_idx].brightness_override;
+        Mutation::SetOutputBrightnessOverride(SetOutputBrightnessOverride {
+            output_idx,
+            new,
+            old,
+        })
+    }
+
+    /// PCleanup.7.3 — build a `SetOutputContrastOverride` mutation.
+    pub fn set_output_contrast_override_mutation(
+        &self,
+        output_idx: usize,
+        new: Option<f32>,
+    ) -> Mutation {
+        let old = self.output_targets[output_idx].contrast_override;
+        Mutation::SetOutputContrastOverride(SetOutputContrastOverride {
             output_idx,
             new,
             old,
@@ -3946,6 +4125,51 @@ mod tests {
         assert_eq!(
             before, after,
             "Reverse should restore the project byte-equal (whole-matrix Reverse)",
+        );
+    }
+
+    /// PCleanup.7.3 — `SetOutputGammaOverride` round-trips through
+    /// apply + reverse with whole-Option Reverse semantics (Some →
+    /// None → Some restores byte-equal).
+    #[test]
+    fn set_output_gamma_override_round_trips() {
+        let mut p = fresh_project();
+        assert_eq!(p.output_targets[0].gamma_override, None);
+        let before = serde_json::to_value(&p).unwrap();
+
+        let m = p.set_output_gamma_override_mutation(0, Some(1.4));
+        let reverse = m.apply(&mut p);
+        assert_eq!(p.output_targets[0].gamma_override, Some(1.4));
+
+        let _ = reverse.apply(&mut p);
+        let after = serde_json::to_value(&p).unwrap();
+        assert_eq!(
+            before, after,
+            "PCleanup.7.3: SetOutputGammaOverride Reverse must restore byte-equal"
+        );
+    }
+
+    /// PCleanup.7.3 — same round-trip guarantee for the brightness +
+    /// contrast override mutations.
+    #[test]
+    fn set_output_brightness_and_contrast_overrides_round_trip() {
+        let mut p = fresh_project();
+        let before = serde_json::to_value(&p).unwrap();
+
+        let mb = p.set_output_brightness_override_mutation(0, Some(0.15));
+        let rb = mb.apply(&mut p);
+        let mc = p.set_output_contrast_override_mutation(0, Some(1.1));
+        let rc = mc.apply(&mut p);
+        assert_eq!(p.output_targets[0].brightness_override, Some(0.15));
+        assert_eq!(p.output_targets[0].contrast_override, Some(1.1));
+
+        // Reverse in reverse order to restore the original state.
+        let _ = rc.apply(&mut p);
+        let _ = rb.apply(&mut p);
+        let after = serde_json::to_value(&p).unwrap();
+        assert_eq!(
+            before, after,
+            "PCleanup.7.3: brightness + contrast override Reverse must restore byte-equal"
         );
     }
 
