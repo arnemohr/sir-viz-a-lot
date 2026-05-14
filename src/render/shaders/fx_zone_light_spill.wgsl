@@ -13,7 +13,12 @@
 //
 // Parameters (via FxParams / u_params):
 //   wavelength  → spill_radius: normalised distance the spill reaches (0..1)
-//   speed       → unused (kept at 0.0)
+//   speed       → PCleanup.3.3: breathing-pulse rate (cycles/sec). Default
+//                 0.0 = constant glow (back-compat with pre-PCleanup
+//                 behaviour). When speed > 0, the spill's intensity
+//                 modulates as 0.85 + 0.15·sin(2π · clock · speed) — a
+//                 ±15% AC swing around the static brightness so the
+//                 effect breathes without strobing the projector.
 //   falloff     → falloff sharpness (higher = narrower glow band)
 //   base_r/g/b  → spill colour (default warm: 1.0, 0.85, 0.55)
 
@@ -24,7 +29,7 @@ struct VsOut {
 
 struct FxParams {
     spill_radius: f32,   // alias: wavelength
-    _unused:      f32,   // alias: speed
+    speed:        f32,   // alias: speed (PCleanup.3.3 — breathing-pulse rate)
     falloff:      f32,
     base_r:       f32,
     base_g:       f32,
@@ -72,10 +77,24 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let falloff = max(u_params.falloff, 1e-3);
     let intensity = exp(-dist_in / (radius * falloff));
 
-    // Alpha: smooth from 1 at the edge to 0 at spill_radius.
-    let alpha = smoothstep(radius, 0.0, dist_in) * intensity;
+    // PCleanup.3.3 — breathing pulse: when speed > 0, modulate the
+    // intensity by ±15% around a 0.85 DC offset so the spill breathes.
+    // speed == 0 gives a constant 1.0 multiplier (no pulse), matching
+    // pre-PCleanup behaviour bit-for-bit for projects that don't set
+    // a speed value. The 2π factor is fold so `speed = 1.0` means
+    // exactly one full breath per second.
+    let speed = max(u_params.speed, 0.0);
+    let pulse = select(
+        1.0,
+        0.85 + 0.15 * sin(6.28318530718 * u_clock.x * speed),
+        speed > 1e-6,
+    );
 
-    let colour = vec3<f32>(u_params.base_r, u_params.base_g, u_params.base_b) * intensity;
+    // Alpha: smooth from 1 at the edge to 0 at spill_radius.
+    let alpha = smoothstep(radius, 0.0, dist_in) * intensity * pulse;
+
+    let colour =
+        vec3<f32>(u_params.base_r, u_params.base_g, u_params.base_b) * intensity * pulse;
 
     // Premultiplied alpha output.
     return vec4<f32>(colour * alpha, alpha);

@@ -519,6 +519,11 @@ const BOUNDED_FLUID_DESCRIPTORS: &[FxParamDescriptor] = &[
 ];
 
 /// P3.5.1 — param descriptors for `fx_zone_light_spill`.
+///
+/// PCleanup.3.3 — the `speed` slider drives the breathing pulse implemented
+/// in `fx_zone_light_spill.wgsl`. Default 0.0 = no pulse (back-compat with
+/// projects authored before this commit). Range 0–4 cycles/sec covers from
+/// "barely breathing" to "very lively" without ever reaching strobe rates.
 #[allow(dead_code)] // referenced through `fx_param_descriptors`
 const ZONE_LIGHT_SPILL_DESCRIPTORS: &[FxParamDescriptor] = &[
     FxParamDescriptor {
@@ -527,6 +532,14 @@ const ZONE_LIGHT_SPILL_DESCRIPTORS: &[FxParamDescriptor] = &[
         min: 0.05,
         max: 1.0,
         default: 0.3,
+        max_particle_count: None,
+    },
+    FxParamDescriptor {
+        key: "speed",
+        label: "Breathing pulse (cycles/sec)",
+        min: 0.0,
+        max: 4.0,
+        default: 0.0,
         max_particle_count: None,
     },
     FxParamDescriptor {
@@ -2027,7 +2040,9 @@ impl FxParamsUniform {
     pub fn for_zone_light_spill(params: &HashMap<String, f32>) -> Self {
         Self {
             wavelength: params.get("spill_radius").copied().unwrap_or(0.3),
-            speed: 0.0,
+            // PCleanup.3.3 — breathing-pulse rate, default 0.0 (no pulse)
+            // so projects authored before this commit look identical.
+            speed: params.get("speed").copied().unwrap_or(0.0),
             falloff: params.get("falloff").copied().unwrap_or(0.08),
             base_r: params.get("colour_r").copied().unwrap_or(1.0),
             base_g: params.get("colour_g").copied().unwrap_or(0.85),
@@ -2858,6 +2873,41 @@ mod tests {
                 d.key
             );
         }
+    }
+
+    /// PCleanup.3.3 — fx_zone_light_spill now exposes a `speed` slider
+    /// driving the breathing pulse. Default must be 0.0 (no pulse) so
+    /// projects authored before PCleanup.3.3 render bit-identically.
+    #[test]
+    fn zone_light_spill_exposes_speed_with_zero_default() {
+        let descs = fx_param_descriptors(ZONE_LIGHT_SPILL_PRESET_ID);
+        let speed = descs
+            .iter()
+            .find(|d| d.key == "speed")
+            .expect("speed descriptor must be present after PCleanup.3.3");
+        assert_eq!(
+            speed.default, 0.0,
+            "speed default must be 0 to preserve pre-PCleanup back-compat"
+        );
+        assert!(speed.min <= 0.0 && speed.max >= 1.0);
+    }
+
+    /// PCleanup.3.3 — `for_zone_light_spill` reads the `speed` param and
+    /// writes it into the uniform's `speed` field (previously hardcoded
+    /// to 0.0).
+    #[test]
+    fn zone_light_spill_uniform_carries_speed() {
+        let mut params = HashMap::new();
+        params.insert("speed".into(), 1.5_f32);
+        let u = FxParamsUniform::for_zone_light_spill(&params);
+        assert!((u.speed - 1.5).abs() < 1e-6);
+    }
+
+    /// PCleanup.3.3 — empty params map → speed 0.0 (back-compat default).
+    #[test]
+    fn zone_light_spill_uniform_speed_defaults_to_zero() {
+        let u = FxParamsUniform::for_zone_light_spill(&HashMap::new());
+        assert_eq!(u.speed, 0.0);
     }
 
     /// P3.5.2 — fx_zone_edge_ripple is registered.
