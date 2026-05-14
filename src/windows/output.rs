@@ -16,20 +16,24 @@ use crate::render::RenderError;
 /// before connecting a projector. The child window renders the same gamma output
 /// as the real projector would.
 ///
-/// **Stub status (T4.16a):** this struct exists so `EditingState` can hold
-/// `Option<PreviewWindow>` and the toolbar can open/close it. Full rendering
-/// (blitting `warp_rt_view` to the child surface) is deferred as a follow-up;
-/// for now the window opens with a solid background colour.
+/// PCleanup.7.4 — the blit path now ships: `render` samples `warp_rt_view`
+/// (post-warp, post-gamma composited frame) and writes it onto the preview
+/// surface via a tiny textured-quad pipeline owned by `PreviewWindow`. The
+/// preview displays the actual scene contents at the configured size.
 ///
 /// Sleep assertion: NOT held during preview mode. Only `GoLive` holds it.
-// T4.16a stub: `surface` and `config` will be consumed by the blit renderer
-// once the full preview rendering lands. Suppress dead-code lint for now.
-#[allow(dead_code)]
 #[cfg(feature = "v3")]
 pub struct PreviewWindow {
     pub window: Arc<Window>,
     pub surface: wgpu::Surface<'static>,
     pub config: wgpu::SurfaceConfiguration,
+    /// PCleanup.7.4 — the render-pipeline + bind-group layout for the
+    /// blit pass that samples `warp_rt_view` and writes the preview
+    /// surface. Built once in `new` from a fullscreen-quad shader; no
+    /// per-frame allocation.
+    blit_pipeline: wgpu::RenderPipeline,
+    blit_bgl: wgpu::BindGroupLayout,
+    blit_sampler: wgpu::Sampler,
 }
 
 #[cfg(feature = "v3")]
@@ -87,11 +91,179 @@ impl PreviewWindow {
         };
         surface.configure(device, &config);
 
+        // PCleanup.7.4 — build the blit pipeline. Reuses the existing
+        // `feedback_blit.wgsl` shader (a tiny textured-quad passthrough);
+        // semantically identical to what we need here — sample one
+        // texture, write to one attachment, no fit-mode logic. Format
+        // matches the preview's surface.
+        let blit_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("preview blit (feedback_blit.wgsl)"),
+            source: wgpu::ShaderSource::Wgsl(
+                include_str!("../render/shaders/feedback_blit.wgsl").into(),
+            ),
+        });
+        let blit_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("preview blit bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let blit_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("preview blit pipeline layout"),
+            bind_group_layouts: &[Some(&blit_bgl)],
+            immediate_size: 0,
+        });
+        let blit_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("preview blit pipeline"),
+            layout: Some(&blit_layout),
+            vertex: wgpu::VertexState {
+                module: &blit_shader,
+                entry_point: Some("vs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &blit_shader,
+                entry_point: Some("fs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        let blit_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("preview blit sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
+        });
+
         Ok(Self {
             window,
             surface,
             config,
+            blit_pipeline,
+            blit_bgl,
+            blit_sampler,
         })
+    }
+
+    /// PCleanup.7.4 — blit `src_view` (typically the main render's
+    /// `warp_rt_view`) onto the preview window's surface. Acquires the
+    /// preview surface texture, records a single fullscreen-quad render
+    /// pass, submits, and presents. Recovers from `Lost`/`Outdated`
+    /// surface states by reconfiguring; returns `Ok(())` for transient
+    /// states (`Timeout`, `Occluded`) so a one-off frame drop doesn't
+    /// kill the preview path.
+    pub fn render_blit(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        src_view: &wgpu::TextureView,
+    ) -> Result<(), RenderError> {
+        let frame = match self.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(f) => f,
+            wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
+            wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
+                self.surface.configure(device, &self.config);
+                return Ok(());
+            }
+            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
+                return Ok(());
+            }
+            wgpu::CurrentSurfaceTexture::Validation => {
+                return Err(RenderError::Surface(
+                    "preview surface validation error".into(),
+                ));
+            }
+        };
+        let surface_view = frame
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("preview blit encoder"),
+        });
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("preview blit bind group"),
+            layout: &self.blit_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(src_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.blit_sampler),
+                },
+            ],
+        });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("preview blit pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &surface_view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.blit_pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.draw(0..6, 0..1);
+        }
+        queue.submit(Some(encoder.finish()));
+        frame.present();
+        self.window.request_redraw();
+        Ok(())
+    }
+
+    /// PCleanup.7.4 — reconfigure the preview surface on resize. The
+    /// caller should invoke this from the `WindowEvent::Resized` arm
+    /// after updating `self.config.width / height`.
+    pub fn recreate_surface(&self, device: &wgpu::Device) {
+        self.surface.configure(device, &self.config);
     }
 }
 

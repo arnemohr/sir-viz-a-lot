@@ -6051,6 +6051,27 @@ fn handle_editing_window_event(
                     tracing::error!(?e, "render error");
                 }
             }
+
+            // PCleanup.7.4 — preview-as-projector window blit. When the
+            // preview is open, sample `warp_rt_view` (the post-warp,
+            // post-gamma composited frame) and write it onto the preview
+            // surface. A frame-drop here is non-fatal (the preview is a
+            // dry-run aid, not the show output); errors log + the next
+            // frame retries.
+            //
+            // Gated on `v3` because `preview_window` itself is v3-only
+            // (defined at line 637 under `#[cfg(feature = "v3")]`); the
+            // non-v3 control-window code path has no preview surface.
+            #[cfg(feature = "v3")]
+            if let Some(preview) = state.preview_window.as_ref() {
+                if let Err(err) = preview.render_blit(
+                    &state.renderer.gpu.device,
+                    &state.renderer.gpu.queue,
+                    &state.warp_rt_view,
+                ) {
+                    tracing::warn!(?err, "preview window blit failed (non-fatal)");
+                }
+            }
         }
         _ => {}
     }
