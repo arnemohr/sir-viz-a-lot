@@ -53,6 +53,7 @@ use crate::effects::RenderCtx;
 use crate::effects::blur::BlurPipeline;
 use crate::effects::color::ColorPipeline;
 use crate::effects::registry::ExternalRegistry;
+use crate::effects::tint::TintPipeline;
 use crate::effects::transform::TransformPipeline;
 use crate::error::{Result, RmapError};
 #[cfg(not(feature = "v3"))]
@@ -480,6 +481,8 @@ struct EditingState {
     color_pipeline: ColorPipeline,
     blur_pipeline: BlurPipeline,
     transform_pipeline: TransformPipeline,
+    /// PCleanup.4.1 — Tint effect pipeline (three-mode colour mix).
+    tint_pipeline: TintPipeline,
     /// Extension-pass lookup for [`Effect::External`] (T-M7-07). Empty in
     /// stock v1; populated by future plugins or in-tree extensions.
     external_registry: ExternalRegistry,
@@ -1559,6 +1562,8 @@ struct LayerState {
     color_uniform: wgpu::Buffer,
     blur_uniform: wgpu::Buffer,
     transform_uniform: wgpu::Buffer,
+    /// PCleanup.4.1 — per-layer tint uniform (32 bytes; see `tint::TintParams`).
+    tint_uniform: wgpu::Buffer,
     compositor_uniform: wgpu::Buffer,
     /// Per-layer fit-mode uniform consumed by the textured-quad shader
     /// (`textured_quad.wgsl`). 16 bytes: `[fit_mode, aspect, focal_x, focal_y]`.
@@ -1640,6 +1645,7 @@ fn create_layer_uniform_buffers(
     wgpu::Buffer,
     wgpu::Buffer,
     wgpu::Buffer,
+    wgpu::Buffer,
 ) {
     let mk = |label: &'static str, size: u64| {
         device.create_buffer(&wgpu::BufferDescriptor {
@@ -1653,6 +1659,8 @@ fn create_layer_uniform_buffers(
         mk("layer color uniform", 16),
         mk("layer blur uniform", 16),
         mk("layer transform uniform", 64),
+        // PCleanup.4.1 — TintParams is 32 bytes (vec4 + f32 + u32 + 2×f32 pad).
+        mk("layer tint uniform", 32),
         mk("layer compositor uniform", 16),
         mk("layer fit uniform", 16),
     )
@@ -2016,6 +2024,8 @@ struct OutputBundle {
     color_pipeline: ColorPipeline,
     blur_pipeline: BlurPipeline,
     transform_pipeline: TransformPipeline,
+    /// PCleanup.4.1 — Tint effect pipeline (three-mode colour mix).
+    tint_pipeline: TintPipeline,
     /// One `SleepAssertion` per output window (index-aligned). Held for
     /// the lifetime of the `EditingState` so each active display stays
     /// awake. Dropped (and the corresponding assertion released) when
@@ -2102,6 +2112,8 @@ fn init_output_window(
     let color_pipeline = ColorPipeline::new(&gpu.device, reference_format);
     let blur_pipeline = BlurPipeline::new(&gpu.device, reference_format);
     let transform_pipeline = TransformPipeline::new(&gpu.device, reference_format);
+    // PCleanup.4.1 — Tint effect pipeline.
+    let tint_pipeline = TintPipeline::new(&gpu.device, reference_format);
     let renderer = Renderer::new(gpu, reference_format)?;
     Ok(OutputBundle {
         outputs,
@@ -2110,6 +2122,7 @@ fn init_output_window(
         color_pipeline,
         blur_pipeline,
         transform_pipeline,
+        tint_pipeline,
         sleep_assertions,
     })
 }
@@ -2238,6 +2251,7 @@ fn assemble_editing_state(
         color_pipeline: output.color_pipeline,
         blur_pipeline: output.blur_pipeline,
         transform_pipeline: output.transform_pipeline,
+        tint_pipeline: output.tint_pipeline,
         external_registry: ExternalRegistry::new(),
         #[cfg(feature = "audio")]
         _audio_capture: inputs.audio_capture,
@@ -3347,8 +3361,14 @@ fn rebuild_layers(
                 make_intermediate_texture(device, width.max(1), height.max(1), surface_format);
             let (fx_texture, fx_view) =
                 make_fx_texture(device, width.max(1), height.max(1), surface_format);
-            let (color_uniform, blur_uniform, transform_uniform, compositor_uniform, fit_uniform) =
-                create_layer_uniform_buffers(device);
+            let (
+                color_uniform,
+                blur_uniform,
+                transform_uniform,
+                tint_uniform,
+                compositor_uniform,
+                fit_uniform,
+            ) = create_layer_uniform_buffers(device);
             let warp_renderer = WarpRenderer::new(device, surface_format);
             let (warp_texture, warp_view) =
                 make_layer_warp_texture(device, width, height, surface_format);
@@ -3371,6 +3391,7 @@ fn rebuild_layers(
                 color_uniform,
                 blur_uniform,
                 transform_uniform,
+                tint_uniform,
                 compositor_uniform,
                 fit_uniform,
                 texture_aspect: 1.0,
@@ -3497,8 +3518,14 @@ fn rebuild_layers(
             }
         }
 
-        let (color_uniform, blur_uniform, transform_uniform, compositor_uniform, fit_uniform) =
-            create_layer_uniform_buffers(device);
+        let (
+            color_uniform,
+            blur_uniform,
+            transform_uniform,
+            tint_uniform,
+            compositor_uniform,
+            fit_uniform,
+        ) = create_layer_uniform_buffers(device);
         let warp_renderer = WarpRenderer::new(device, surface_format);
         let (warp_texture, warp_view) =
             make_layer_warp_texture(device, width, height, surface_format);
@@ -3516,6 +3543,7 @@ fn rebuild_layers(
             color_uniform,
             blur_uniform,
             transform_uniform,
+            tint_uniform,
             compositor_uniform,
             fit_uniform,
             texture_aspect,
@@ -4016,6 +4044,7 @@ fn render_m5_pipeline(
     color: &ColorPipeline,
     blur: &BlurPipeline,
     transform: &TransformPipeline,
+    tint: &TintPipeline,
     external_registry: &ExternalRegistry,
     _surface_format: wgpu::TextureFormat,
     clock: &Clock,
@@ -4338,9 +4367,11 @@ fn render_m5_pipeline(
                         color,
                         blur,
                         transform,
+                        tint,
                         color_uniform: &ls.color_uniform,
                         blur_uniform: &ls.blur_uniform,
                         transform_uniform: &ls.transform_uniform,
+                        tint_uniform: &ls.tint_uniform,
                         external_registry,
                     };
                     if effect.render(&mut ctx, clock) {
@@ -5796,6 +5827,7 @@ fn handle_editing_window_event(
                     &state.color_pipeline,
                     &state.blur_pipeline,
                     &state.transform_pipeline,
+                    &state.tint_pipeline,
                     &state.external_registry,
                     surface_format,
                     &state.clock,

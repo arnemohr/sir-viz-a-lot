@@ -4,6 +4,7 @@
 pub mod blur;
 pub mod color;
 pub mod registry;
+pub mod tint;
 pub mod transform;
 
 use serde::{Deserialize, Serialize};
@@ -21,6 +22,11 @@ pub enum Effect {
     Tint {
         rgba: [f32; 4],
         amount: Modulator,
+        /// PCleanup.4.1 — three-mode tint. `#[serde(default)]` so projects
+        /// serialised before the field existed deserialise as
+        /// [`tint::TintMode::Multiply`] (the conventional tint).
+        #[serde(default)]
+        mode: tint::TintMode,
     },
     Blur {
         radius_px: Modulator,
@@ -62,10 +68,14 @@ pub struct RenderCtx<'a> {
     pub color: &'a crate::effects::color::ColorPipeline,
     pub blur: &'a crate::effects::blur::BlurPipeline,
     pub transform: &'a crate::effects::transform::TransformPipeline,
+    /// PCleanup.4.1 — Tint pipeline, used by [`Effect::Tint`].
+    pub tint: &'a crate::effects::tint::TintPipeline,
     /// Per-layer GPU uniforms (`queue.write_buffer` must target distinct buffers per layer).
     pub color_uniform: &'a wgpu::Buffer,
     pub blur_uniform: &'a wgpu::Buffer,
     pub transform_uniform: &'a wgpu::Buffer,
+    /// PCleanup.4.1 — per-layer tint uniform (32 bytes; see `tint::TintParams`).
+    pub tint_uniform: &'a wgpu::Buffer,
     /// Extension-pass lookup, consulted by [`Effect::External`] (T-M7-07).
     /// Empty by default; v1 ships no built-in External passes.
     pub external_registry: &'a registry::ExternalRegistry,
@@ -79,9 +89,6 @@ impl Effect {
     /// flip its ping-pong) and `false` for no-op stubs and unregistered
     /// `External` ids.
     ///
-    /// `Tint` is currently a no-op stub — the variant exists in the
-    /// enum but no TintPipeline has been built. Logged at warn! once
-    /// per call.
     /// `External { id }` is the extension hook (T-M7-07): looked up
     /// in `ctx.external_registry`; missing ids warn-and-skip.
     pub fn render(&self, ctx: &mut RenderCtx<'_>, clock: &crate::clock::Clock) -> bool {
@@ -109,11 +116,22 @@ impl Effect {
                 );
                 true
             }
-            Effect::Tint { rgba: _, amount: _ } => {
-                tracing::warn!(
-                    "Effect::Tint is not yet implemented (no TintPipeline built); skipping"
+            Effect::Tint { rgba, amount, mode } => {
+                let params = crate::effects::tint::TintParams {
+                    rgba: *rgba,
+                    amount: amount.value(clock),
+                    mode: *mode,
+                };
+                ctx.tint.render(
+                    ctx.device,
+                    ctx.queue,
+                    ctx.encoder,
+                    ctx.source_view,
+                    ctx.dst_view,
+                    ctx.tint_uniform,
+                    params,
                 );
-                false
+                true
             }
             Effect::Blur { radius_px } => {
                 let params = crate::effects::blur::BlurParams {
@@ -209,4 +227,55 @@ pub fn default_effect_chain() -> Vec<Effect> {
             scale_y: Modulator::Static(1.0),
         },
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// PCleanup.4.1 — old projects serialised before the `mode` field
+    /// existed must still deserialise cleanly, with `mode` defaulting to
+    /// [`tint::TintMode::Multiply`]. Catches accidental removal of the
+    /// `#[serde(default)]` attribute on the variant field.
+    #[test]
+    fn effect_tint_legacy_json_back_compat() {
+        // Legacy JSON: no `mode` field.
+        let legacy = r#"{
+            "Tint": {
+                "rgba": [1.0, 0.5, 0.25, 1.0],
+                "amount": {"Static": 0.8}
+            }
+        }"#;
+        let parsed: Effect =
+            serde_json::from_str(legacy).expect("legacy Tint JSON must deserialise");
+        match parsed {
+            Effect::Tint { rgba, mode, .. } => {
+                assert_eq!(rgba, [1.0, 0.5, 0.25, 1.0]);
+                assert_eq!(mode, tint::TintMode::Multiply, "missing mode → Multiply");
+            }
+            other => panic!("expected Effect::Tint, got {other:?}"),
+        }
+    }
+
+    /// PCleanup.4.1 — newer JSON with an explicit `mode` round-trips.
+    #[test]
+    fn effect_tint_new_json_round_trip() {
+        for m in [
+            tint::TintMode::Multiply,
+            tint::TintMode::Additive,
+            tint::TintMode::Screen,
+        ] {
+            let e = Effect::Tint {
+                rgba: [0.2, 0.4, 0.6, 1.0],
+                amount: Modulator::Static(0.5),
+                mode: m,
+            };
+            let json = serde_json::to_string(&e).unwrap();
+            let back: Effect = serde_json::from_str(&json).unwrap();
+            match back {
+                Effect::Tint { mode, .. } => assert_eq!(mode, m, "mode lost for {m:?}"),
+                other => panic!("round-trip changed variant: {other:?}"),
+            }
+        }
+    }
 }
