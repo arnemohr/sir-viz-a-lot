@@ -32,6 +32,11 @@ not "nice to have" — drop one and the product loses its differentiator.
 - **One projector at a time** through v3. A two-projector edge-blend stub
   lands at v0.4; full multi-projector workflows are deliberately out of
   scope until the single-surface case is excellent.
+  - PCleanup.7.6 — confirmed v1.0 ships with the 2-projector limit
+    intact. Phase 7 did not lift it; 3+ projectors and per-edge
+    configuration are deferred to a post-v1.0 phase. The launcher UI
+    surfaces this constraint to operators when 3+ monitors are
+    connected (`src/app.rs` launcher render path).
 - **Authored mappings, not auto-detected.** Manual warp + mask is more
   predictable in real venues than unreliable automation; AI-based facade
   detection is permanently out of scope.

@@ -3020,13 +3020,13 @@ fn launcher_render(
                 } else if monitors.len() == 1 {
                     center_ui.horizontal(|row| {
                         row.label(format!("Projector: {}", monitors[0].name));
-                        let identify_label =
-                            if test_session_active { "Identifying…" } else { "Identify" };
+                        let identify_label = if test_session_active {
+                            "Identifying…"
+                        } else {
+                            "Identify"
+                        };
                         if row
-                            .add_enabled(
-                                !test_session_active,
-                                egui::Button::new(identify_label),
-                            )
+                            .add_enabled(!test_session_active, egui::Button::new(identify_label))
                             .clicked()
                         {
                             identify_request = Some(0);
@@ -3034,6 +3034,20 @@ fn launcher_render(
                     });
                 } else {
                     center_ui.label("Projector(s) — pick up to 2:");
+                    // PCleanup.7.6 — surface the 2-projector v1 limit
+                    // upfront when 3+ monitors are connected, so the
+                    // operator learns the constraint while reading the
+                    // picker rather than discovering it when ticking the
+                    // third checkbox. The conditional hint below (only
+                    // shown once a secondary is selected) stays as the
+                    // "you're at the limit now" reinforcement.
+                    if monitors.len() >= 3 {
+                        center_ui.weak(
+                            "v1 supports up to 2 projectors (with edge-blend). \
+                             3+ projectors and per-edge configuration are \
+                             planned for a future phase — see specs/roadmap.md.",
+                        );
+                    }
                     for (idx, m) in monitors.iter().enumerate() {
                         let is_primary = *selected_monitor == idx;
                         let is_secondary = *selected_secondary_monitor == Some(idx);
@@ -3091,11 +3105,12 @@ fn launcher_render(
                             } else if is_secondary {
                                 row.weak("secondary");
                             }
-                            let identify_label = if test_session_active && identify_request == Some(idx) {
-                                "Identifying…"
-                            } else {
-                                "Identify"
-                            };
+                            let identify_label =
+                                if test_session_active && identify_request == Some(idx) {
+                                    "Identifying…"
+                                } else {
+                                    "Identify"
+                                };
                             if row
                                 .add_enabled(
                                     !test_session_active,
@@ -3109,7 +3124,14 @@ fn launcher_render(
                     }
                     if monitors.len() >= 3 && selected_secondary_monitor.is_some() {
                         center_ui.weak(
-                            "Max 2 projectors in v0.4. Untick one to swap; Phase 7 grows beyond two.",
+                            // PCleanup.7.6 — Phase 7 shipped without
+                            // lifting this constraint (deliberately
+                            // out of scope per specs/roadmap.md line 32-34
+                            // and the Phase 7 acceptance criteria). 3+
+                            // projectors and per-edge configuration are
+                            // deferred to a post-v1.0 phase.
+                            "Max 2 projectors in v1. Untick one to swap; \
+                             3+ projectors are planned for a post-v1.0 phase.",
                         );
                     }
                 }
