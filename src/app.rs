@@ -3178,11 +3178,8 @@ fn launcher_render(
                                     .selected_text(lead_name)
                                     .show_ui(row, |ui| {
                                         for (idx, m) in monitors.iter().enumerate() {
-                                            let resp = ui.selectable_value(
-                                                selected_monitor,
-                                                idx,
-                                                &m.name,
-                                            );
+                                            let resp =
+                                                ui.selectable_value(selected_monitor, idx, &m.name);
                                             // Promoting the current Follow to
                                             // Lead clears Follow so the same
                                             // display isn't claimed twice.
@@ -3194,13 +3191,12 @@ fn launcher_render(
                                         }
                                     });
                                 let lead_idx = *selected_monitor;
-                                let identify_label = if test_session_active
-                                    && identify_request == Some(lead_idx)
-                                {
-                                    "Identifying…"
-                                } else {
-                                    "Identify"
-                                };
+                                let identify_label =
+                                    if test_session_active && identify_request == Some(lead_idx) {
+                                        "Identifying…"
+                                    } else {
+                                        "Identify"
+                                    };
                                 if row
                                     .add_enabled(
                                         !test_session_active,
@@ -4382,8 +4378,10 @@ fn render_m5_pipeline(
             };
 
             // T-M8-04: write per-layer fit-mode uniform.
-            //   SVG layers: Stretch + identity aspect (resvg pixmap is
-            //   sized to the output; stretching is the no-op case).
+            //   SVG layers: Stretch + identity aspect. PCleanup-fix: the
+            //   resvg pixmap is stretched edge-to-edge (no letterbox
+            //   margins) so per-layer effects extend across the whole
+            //   layer area — see `raster_fill_transform` for the why.
             //   Image layers: Cover/Contain/Stretch + texture's actual
             //   aspect + focal.
             //   FxLayer: Stretch with centred focal (output-sized texture,
@@ -6497,41 +6495,38 @@ impl ApplicationHandler for App {
                             self.state = prev;
                             return;
                         };
-                        // P0.7.2: loop over the outputs covered by `target` and
-                        // fullscreen each on its remembered monitor. For
-                        // output[0] we resolve via UUID-then-index
-                        // (V31.2.2) as before; for outputs[1+] we use the
-                        // monitor stored in `output.monitor` (set at window
-                        // creation by the launcher's selection).
+                        // Fullscreen each output on the monitor it was opened
+                        // on. `output.monitor` was set at window-creation time
+                        // from the launcher's selection (`monitors_for_outputs`
+                        // in apply_launch_command), so this honours the
+                        // operator's Lead/Follow choice regardless of what the
+                        // project file has saved as its `output_target`.
+                        //
+                        // (The project's persisted `output_target` only
+                        // governs the *next launch* if the operator saves.
+                        // Re-resolving it here, as an earlier version did, made
+                        // Go-live ignore the launcher choice for output[0] and
+                        // fullscreen on display 0 — see the bug fixed by this
+                        // simplification.)
                         //
                         // `target == LeadOnly` stops after output[0] so the
                         // Follow window stays windowed as a cueing surface.
                         //
                         // If any output's set_fullscreen fails we log + toast
                         // and abort the GoLive transition, leaving all outputs
-                        // in their pre-transition state. A partial-fullscreen
-                        // state (output[0] fullscreen, output[1] windowed) is
-                        // avoided by checking all before applying any — but
-                        // winit's `set_fullscreen` is a hint, not atomic, so
-                        // we accept best-effort on actual windowing-system bugs.
-                        let primary_monitor: Option<winit::monitor::MonitorHandle> = {
-                            let live = crate::monitors::list(event_loop);
-                            let outcome = crate::monitors::resolve_output_target(
-                                editing.project.primary_output_target(),
-                                &live,
-                            );
-                            let idx = outcome.monitor().index;
-                            event_loop.available_monitors().nth(idx)
-                        };
+                        // in their pre-transition state. winit's
+                        // `set_fullscreen` is a hint, not atomic, so we accept
+                        // best-effort on actual windowing-system bugs.
                         let live_output_count = match target {
                             crate::controls::GoLiveTarget::Both => editing.outputs.len(),
                             crate::controls::GoLiveTarget::LeadOnly => 1,
                         };
                         tracing::info!(
-                            monitor = ?primary_monitor.as_ref().map(|m| m.name()),
                             output_count = editing.outputs.len(),
                             live_output_count,
                             target = ?target,
+                            lead_monitor = ?editing.outputs.first()
+                                .and_then(|o| o.monitor.as_ref().map(|m| m.name())),
                             "entering GoLive; set_fullscreen(true) for live outputs"
                         );
                         // Attempt fullscreen for the live outputs; first failure aborts.
@@ -6540,13 +6535,7 @@ impl ApplicationHandler for App {
                         for (out_idx, output) in
                             editing.outputs.iter().enumerate().take(live_output_count)
                         {
-                            let monitor = if out_idx == 0 {
-                                primary_monitor.clone()
-                            } else {
-                                // Use the monitor remembered at window-open time
-                                // (set by the launcher's two-projector selection).
-                                output.monitor.clone()
-                            };
+                            let monitor = output.monitor.clone();
                             if let Err(e) = output.set_fullscreen(true, monitor) {
                                 tracing::error!(
                                     ?e,
@@ -7643,10 +7632,8 @@ mod tests {
     #[cfg(feature = "v3")]
     #[test]
     fn editing_transition_variants_constructible() {
-        let enter_both =
-            EditingTransition::EnterGoLive(crate::controls::GoLiveTarget::Both);
-        let enter_lead =
-            EditingTransition::EnterGoLive(crate::controls::GoLiveTarget::LeadOnly);
+        let enter_both = EditingTransition::EnterGoLive(crate::controls::GoLiveTarget::Both);
+        let enter_lead = EditingTransition::EnterGoLive(crate::controls::GoLiveTarget::LeadOnly);
         let exit = EditingTransition::ExitGoLive;
         // Both variants exist (compile-time) and are distinct (match).
         assert!(matches!(enter_both, EditingTransition::EnterGoLive(_)));
