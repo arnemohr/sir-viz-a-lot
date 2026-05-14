@@ -286,6 +286,12 @@ const RIPPLE_WASH_DESCRIPTORS: &[FxParamDescriptor] = &[
 /// - `wave_speed` → `speed` (0.0..=5.0, default 1.0)
 /// - `wave_width` → `falloff` (0.0..=0.3, default 0.15)
 /// - `colour`     → `base_r` (0.0..=1.0, default 0.5)
+/// - `n_waves`    → `wavelength` (1..=8 integer crests, default 4)
+///   PCleanup.3.2 — was hardcoded to 4 in the shader before. Default 4
+///   means projects authored before this commit look identical.
+/// - `base_g`, `base_b`, `_pad0`, `_pad1` — intentionally unused; the
+///   shared `FxParamsUniform` carries them for cache symmetry with
+///   other presets (see the canonical slot table in this file).
 #[allow(dead_code)] // referenced only through `fx_param_descriptors` (P2.8.1 UI)
 const EDGE_WAVE_WASH_DESCRIPTORS: &[FxParamDescriptor] = &[
     FxParamDescriptor {
@@ -302,6 +308,14 @@ const EDGE_WAVE_WASH_DESCRIPTORS: &[FxParamDescriptor] = &[
         min: 0.0,
         max: 0.3,
         default: 0.15,
+        max_particle_count: None,
+    },
+    FxParamDescriptor {
+        key: "n_waves",
+        label: "Crests around boundary (1–8)",
+        min: 1.0,
+        max: 8.0,
+        default: 4.0,
         max_particle_count: None,
     },
     FxParamDescriptor {
@@ -1938,12 +1952,16 @@ impl FxParamsUniform {
     /// | `wave_speed` | `speed`             | 1.0     |
     /// | `wave_width` | `falloff`           | 0.15    |
     /// | `colour`     | `base_r`            | 0.5     |
+    /// | `n_waves`    | `wavelength`        | 4.0     |
+    ///   (PCleanup.3.2 — was hardcoded to 4 in the shader; default
+    ///   preserves bit-identical output for projects without an explicit
+    ///   `n_waves` param. Shader clamps via `max(1.0, round(...))`.)
     ///
-    /// All other fields (`wavelength`, `base_g`, `base_b`, `_pad0`, `_pad1`)
-    /// are set to `0.0` — the shader does not read them.
+    /// Other fields (`base_g`, `base_b`, `_pad0`, `_pad1`) are set to `0.0`
+    /// — the shader does not read them.
     pub fn for_edge_wave_wash(params: &HashMap<String, f32>) -> Self {
         Self {
-            wavelength: 0.0,
+            wavelength: params.get("n_waves").copied().unwrap_or(4.0),
             speed: params.get("wave_speed").copied().unwrap_or(1.0),
             falloff: params.get("wave_width").copied().unwrap_or(0.15),
             base_r: params.get("colour").copied().unwrap_or(0.5),
@@ -2341,13 +2359,37 @@ mod tests {
         assert!(fx_is_registered(EDGE_WAVE_WASH_PRESET_ID));
     }
 
-    /// P2.4.3 acceptance: descriptors for edge_wave_wash return exactly 3 entries.
+    /// P2.4.3 + PCleanup.3.2 — edge_wave_wash descriptors. Was 3 (wave_speed,
+    /// wave_width, colour) under the original P2.4.3 spec; PCleanup.3.2 added
+    /// `n_waves` so the operator can drive the crest count instead of the
+    /// shader hardcoding 4.
     #[test]
     fn edge_wave_wash_descriptors_present() {
         assert_eq!(
             fx_param_descriptors(EDGE_WAVE_WASH_PRESET_ID).len(),
-            3,
-            "mask_edge_wave_wash must have exactly 3 param descriptors"
+            4,
+            "mask_edge_wave_wash must have 4 param descriptors after PCleanup.3.2 \
+             (wave_speed, wave_width, colour, n_waves)"
+        );
+    }
+
+    /// PCleanup.3.2 — `n_waves` is exposed with default 4, preserving
+    /// bit-identical output for projects without an explicit value (the
+    /// previous shader hardcoded N_WAVES = 4.0).
+    #[test]
+    fn edge_wave_wash_n_waves_default_is_four() {
+        let descs = fx_param_descriptors(EDGE_WAVE_WASH_PRESET_ID);
+        let nw = descs
+            .iter()
+            .find(|d| d.key == "n_waves")
+            .expect("n_waves descriptor must be present after PCleanup.3.2");
+        assert_eq!(
+            nw.default, 4.0,
+            "n_waves default must preserve old shader's N_WAVES = 4"
+        );
+        assert!(
+            nw.min >= 1.0,
+            "n_waves min must be >= 1 (shader clamps via max(1.0, round))"
         );
     }
 
@@ -2370,7 +2412,12 @@ mod tests {
         assert_eq!(u.speed, 1.0, "wave_speed → speed default must be 1.0");
         assert_eq!(u.falloff, 0.15, "wave_width → falloff default must be 0.15");
         assert_eq!(u.base_r, 0.5, "colour → base_r default must be 0.5");
-        assert_eq!(u.wavelength, 0.0, "wavelength must be 0.0 (unused)");
+        // PCleanup.3.2 — wavelength now carries the n_waves crest count.
+        // Default 4.0 preserves the previous shader's hardcoded N_WAVES.
+        assert_eq!(
+            u.wavelength, 4.0,
+            "wavelength (= n_waves) default must be 4 to preserve pre-PCleanup output"
+        );
         assert_eq!(u.base_g, 0.0, "base_g must be 0.0 (unused)");
         assert_eq!(u.base_b, 0.0, "base_b must be 0.0 (unused)");
         assert_eq!(u._pad0, 0.0, "_pad0 must be 0.0");

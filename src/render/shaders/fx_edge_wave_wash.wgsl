@@ -40,12 +40,12 @@ struct VsOut {
 };
 
 struct FxParams {
-    wavelength: f32,  // unused by this preset
+    wavelength: f32,  // PCleanup.3.2: n_waves — crest count (1..=8, default 4).
     speed: f32,       // wave_speed: animation speed (cycles/sec). Default 1.0.
     falloff: f32,     // wave_width: half-width of the edge emission band. Default 0.15.
     base_r: f32,      // colour: 0.0 = cold blue tint, 1.0 = warm orange tint. Default 0.5.
-    base_g: f32,      // unused
-    base_b: f32,      // unused
+    base_g: f32,      // unused — see EDGE_WAVE_WASH_DESCRIPTORS doc for rationale.
+    base_b: f32,      // unused — see EDGE_WAVE_WASH_DESCRIPTORS doc for rationale.
     _pad0: f32,
     _pad1: f32,
 };
@@ -90,9 +90,14 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let normal = sample_sdf_normal(t_sdf, in.uv);
     let phi = atan2(normal.y, normal.x);
 
-    // Traveling wave along the edge: 4 crests around a closed mask boundary.
-    let N_WAVES = 4.0;
-    let wave = 0.5 + 0.5 * sin(phi * N_WAVES - clock_secs * wave_speed * 6.28318);
+    // PCleanup.3.2 — `wavelength` (aliased from FxParamsUniform) now drives
+    // the crest count. The shader rounds to the nearest integer because
+    // non-integer crest counts produce a visible seam at the angle wrap
+    // point (atan2 returns (-π, π]; a fractional N_WAVES makes
+    // `sin(phi*N - clock)` discontinuous at ±π). max(1, round(...))
+    // clamps below 1 → at least one crest always travels around the edge.
+    let n_waves = max(1.0, round(u_params.wavelength));
+    let wave = 0.5 + 0.5 * sin(phi * n_waves - clock_secs * wave_speed * 6.28318);
 
     // Interpolate between a cool blue and a warm amber for the tint.
     let cold = vec3<f32>(0.4, 0.6, 1.0);
