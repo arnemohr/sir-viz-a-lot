@@ -227,12 +227,17 @@ pub fn show(
 
                 // ── P1.5.1 video-row anatomy ─────────────────────────────
                 // For Video layers, overlay (a) a loop-mode glyph in the
-                // top-right corner of the thumbnail, and (b) two small
-                // in/out markers along the thumbnail's bottom edge if
-                // the layer carries a non-default trim. The inline scrub
-                // bar (with hover thumbnails + click-to-seek) is deferred
-                // to Phase 7 — it needs the thumbnail-extraction FFI
-                // (P1.4.5's deferred half).
+                // top-right corner of the thumbnail, (b) two small in/out
+                // markers along the thumbnail's bottom edge if the layer
+                // carries a non-default trim, and (c) PCleanup.7.2 — a
+                // click-to-seek scrub bar on the bottom edge.
+                //
+                // Hover thumbnails are still deferred — they need
+                // AVAssetImageGenerator FFI + per-frame egui texture
+                // registration. The scrub bar lands without them: it's
+                // a thin click target keyed off the bar x position, and
+                // the operator-facing in/out markers double as visual
+                // landmarks.
                 if let schema::LayerKind::Video {
                     loop_mode,
                     clip_in,
@@ -299,6 +304,54 @@ pub fn show(
                             mark(out_t, theme::ACCENT);
                         }
                     }
+                    // PCleanup.7.2 — click-to-seek scrub bar.
+                    // Allocate a thin hit zone covering the full thumb
+                    // bottom edge (8 px tall, 16 px above the bar
+                    // status line). Click anywhere in it to seek; drag
+                    // to scrub. The seek target is normalised against
+                    // the 60-second reference window the in/out markers
+                    // use, then sent via the layer's video_control
+                    // channel as `VideoControl::SeekTo(seconds)`.
+                    //
+                    // Outside the reference window we clamp to 0..60 s
+                    // — same caveat documented for the in/out markers
+                    // above. Operators who need precise scrubbing
+                    // beyond that range can author clip_in/clip_out
+                    // explicitly in the Selected-layer Video section.
+                    let scrub_top = thumb_rect.bottom() - 12.0;
+                    let scrub_bot = thumb_rect.bottom() - 4.0;
+                    let scrub_left = thumb_rect.left() + 2.0;
+                    let scrub_right = thumb_rect.right() - 2.0;
+                    let scrub_rect = egui::Rect::from_min_max(
+                        egui::pos2(scrub_left, scrub_top),
+                        egui::pos2(scrub_right, scrub_bot),
+                    );
+                    let scrub_resp = ui.interact(
+                        scrub_rect,
+                        ui.id().with(("layer_strip_scrub", idx)),
+                        egui::Sense::click_and_drag(),
+                    );
+                    if scrub_resp.dragged() || scrub_resp.clicked() || scrub_resp.drag_stopped() {
+                        if let Some(pos) = scrub_resp.interact_pointer_pos() {
+                            let t =
+                                ((pos.x - scrub_left) / (scrub_right - scrub_left)).clamp(0.0, 1.0);
+                            let ref_window = 60.0_f32;
+                            let target_secs = t * ref_window;
+                            st.pending_video_controls
+                                .push((idx, crate::video_layer::VideoControl::SeekTo(target_secs)));
+                        }
+                    }
+                    // Subtle hover highlight on the scrub region so the
+                    // operator discovers it without it being visually
+                    // loud during normal show-day operation.
+                    if scrub_resp.hovered() {
+                        painter.rect_filled(
+                            scrub_rect,
+                            egui::CornerRadius::same(1),
+                            egui::Color32::from_white_alpha(20),
+                        );
+                    }
+                    let _ = (loop_mode, clip_in, clip_out); // silence unused-vars under non-trim paths
                 }
 
                 // ── layer id label ──────────────────────────────────────
