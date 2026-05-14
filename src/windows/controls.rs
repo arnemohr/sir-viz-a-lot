@@ -1910,6 +1910,12 @@ fn collect_osc_bindings_in_effect(
             // sources its descriptors from
             // `treatments::param_descriptors(id)` instead of this walk.
         }
+        Effect::Feedback { decay, .. } => {
+            // PCleanup.1.4 — `decay` is the only Modulator field on
+            // Feedback. `offset` is a static `[f32; 2]` (similar to
+            // Effect::Transform's `translate`).
+            out.extend(extract("decay", decay));
+        }
     }
     out
 }
@@ -1924,6 +1930,8 @@ fn effect_kind_label(effect: &crate::effects::Effect) -> &'static str {
         Effect::External { .. } => "External",
         // PCleanup.1.3 — per-layer treatment dispatch.
         Effect::Treatment { .. } => "Treatment",
+        // PCleanup.1.4 — feedback / trails.
+        Effect::Feedback { .. } => "Feedback",
     }
 }
 

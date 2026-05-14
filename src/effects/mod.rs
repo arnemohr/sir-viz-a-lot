@@ -3,6 +3,7 @@
 
 pub mod blur;
 pub mod color;
+pub mod feedback;
 pub mod registry;
 pub mod tint;
 pub mod transform;
@@ -70,6 +71,25 @@ pub enum Effect {
         #[serde(default)]
         params: HashMap<String, f32>,
     },
+    /// PCleanup.1.4 — feedback / trails / motion smear. Blends the
+    /// current-frame source with the previous frame's output of this
+    /// effect:
+    ///   * `decay = 0.0` → no trail (pure source pass-through).
+    ///   * `decay = 0.95` → long trail; the current pixel inherits 95%
+    ///     of the previous frame's pixel at the offset location.
+    ///   * `decay = 1.0` → infinite hold (history sample only).
+    /// `offset` shifts the history sample (UV-space), so a non-zero
+    /// offset produces directional motion-trail behind the layer.
+    ///
+    /// History is kept in a per-layer texture; multiple Feedback effects
+    /// stacked on one layer share that history (a deliberate scope
+    /// decision — the per-effect variant would multiply allocation by
+    /// chain length).
+    Feedback {
+        decay: Modulator,
+        #[serde(default)]
+        offset: [f32; 2],
+    },
 }
 
 /// Bundle of references needed to dispatch a single effect pass.
@@ -113,6 +133,16 @@ pub struct RenderCtx<'a> {
     /// on `LayerState`; threaded here so per-layer treatments see the
     /// same fit metadata as the global treatment pass does.
     pub fit_uniform: &'a wgpu::Buffer,
+    /// PCleanup.1.4 — Feedback / trails pipeline, used by
+    /// [`Effect::Feedback`].
+    pub feedback: &'a crate::effects::feedback::FeedbackPipeline,
+    /// PCleanup.1.4 — per-layer feedback uniform (16 bytes; see
+    /// `feedback::FeedbackParams`).
+    pub feedback_uniform: &'a wgpu::Buffer,
+    /// PCleanup.1.4 — per-layer history texture view. Holds the previous
+    /// frame's output of the Feedback effect. The pass updates it
+    /// in-place at the end of `Effect::Feedback::render`.
+    pub history_view: &'a wgpu::TextureView,
 }
 
 impl Effect {
@@ -237,6 +267,29 @@ impl Effect {
                         false
                     }
                 }
+            }
+            Effect::Feedback { decay, offset } => {
+                // PCleanup.1.4 — per-layer feedback / trails. Two passes:
+                //   (a) mix(source, history(uv - offset), decay) → dst
+                //   (b) blit dst → history (for next frame)
+                // The per-layer history texture is allocated in
+                // `LayerState`; FeedbackPipeline::render handles both
+                // passes internally so the dispatch site stays simple.
+                let params = crate::effects::feedback::FeedbackParams {
+                    decay: decay.value(clock),
+                    offset: *offset,
+                };
+                ctx.feedback.render(
+                    ctx.device,
+                    ctx.queue,
+                    ctx.encoder,
+                    ctx.source_view,
+                    ctx.history_view,
+                    ctx.dst_view,
+                    ctx.feedback_uniform,
+                    params,
+                );
+                true
             }
             Effect::Treatment { id, params } => {
                 // PCleanup.1.3 — per-layer treatment dispatch. Reuses the

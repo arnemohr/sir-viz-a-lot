@@ -259,6 +259,13 @@ pub fn project_audio_modulator_count(project: &crate::project::schema::Project) 
                     // (PCleanup.1.3.2) may later allow modulator-bound
                     // params; this helper grows with that surface.
                 }
+                Effect::Feedback { decay, .. } => {
+                    // PCleanup.1.4 — Feedback's `decay` is Modulator-typed.
+                    // `offset` is a static [f32; 2] (no Modulator path).
+                    if decay.is_audio_bound() {
+                        n += 1;
+                    }
+                }
             }
         }
     }

@@ -1689,6 +1689,28 @@ fn show_effects_tab(ui: &mut Ui, project: &mut Project, st: &mut ControlPanelSta
                     project.layers[layer_idx].effects = new;
                 }
             }
+            // PCleanup.1.4 — Feedback picker entry. Default decay = 0.0 +
+            // offset = [0, 0] means a freshly-added Feedback is inert
+            // (passthrough) until the operator drags the decay slider —
+            // matching the inert-on-add pattern of every other effect
+            // variant.
+            if ui.selectable_label(false, "Feedback").clicked() {
+                let new_effect = crate::effects::Effect::Feedback {
+                    decay: crate::modulators::Modulator::Static(0.0),
+                    offset: [0.0, 0.0],
+                };
+                let mut new = project.layers[layer_idx].effects.clone();
+                new.push(new_effect);
+                #[cfg(feature = "v3")]
+                {
+                    st.pending_mutations
+                        .push(project.set_layer_effects_mutation(layer_idx, new));
+                }
+                #[cfg(not(feature = "v3"))]
+                {
+                    project.layers[layer_idx].effects = new;
+                }
+            }
             // PCleanup.4.2 — Effect::External picker entry removed.
             // v1 ships no built-in External passes (`ExternalRegistry` is
             // default-empty per src/effects/registry.rs:58-62); exposing
@@ -2165,6 +2187,8 @@ pub(super) fn effect_label(e: &Effect) -> &'static str {
         Effect::External { .. } => "External",
         // PCleanup.1.3 — per-layer treatment dispatch.
         Effect::Treatment { .. } => "Treatment",
+        // PCleanup.1.4 — feedback / trails.
+        Effect::Feedback { .. } => "Feedback",
     }
 }
 
@@ -2427,6 +2451,47 @@ pub(super) fn show_effect(
                     ui.label("This effect is configured in the project file.");
                 }
             }
+        }
+        Effect::Feedback { decay, offset } => {
+            // PCleanup.1.4 — feedback / trails. `decay` is the
+            // Modulator-driven mix factor; `offset` is a static UV-space
+            // [f32; 2]. Modulator slider for decay; plain DragValue for
+            // each offset axis.
+            #[cfg(feature = "v3")]
+            {
+                change = change.or(modulator_slider(
+                    ui,
+                    (idx, "decay"),
+                    "decay (0=no trail, 1=hold)",
+                    decay,
+                    0.0..=1.0,
+                    ModulatorField::FeedbackDecay,
+                    idx,
+                    layer_idx,
+                ));
+            }
+            #[cfg(not(feature = "v3"))]
+            {
+                // Non-v3 path: read-only display; full modulator-slider
+                // UX lands under v3.
+                let _ = (decay, layer_idx);
+                ui.label("decay: <modulator>");
+            }
+            ui.horizontal(|row| {
+                row.label("offset");
+                row.add(
+                    egui::DragValue::new(&mut offset[0])
+                        .speed(0.001)
+                        .range(-1.0..=1.0)
+                        .prefix("x: "),
+                );
+                row.add(
+                    egui::DragValue::new(&mut offset[1])
+                        .speed(0.001)
+                        .range(-1.0..=1.0)
+                        .prefix("y: "),
+                );
+            });
         }
         Effect::Treatment { id, params } => {
             // PCleanup.1.3 — per-layer treatment dispatch. Inline editor

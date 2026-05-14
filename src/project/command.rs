@@ -89,6 +89,8 @@ pub enum ModulatorField {
     TransformScaleX,
     /// `Effect::Transform::scale_y`.
     TransformScaleY,
+    /// PCleanup.1.4 — `Effect::Feedback::decay`.
+    FeedbackDecay,
 }
 
 /// Resolve a `ModulatorField` to the matching `&Modulator` slot
@@ -111,6 +113,8 @@ fn modulator_at_ref(
         }
         (Effect::Transform { scale_x, .. }, ModulatorField::TransformScaleX) => Some(scale_x),
         (Effect::Transform { scale_y, .. }, ModulatorField::TransformScaleY) => Some(scale_y),
+        // PCleanup.1.4 — Effect::Feedback::decay.
+        (Effect::Feedback { decay, .. }, ModulatorField::FeedbackDecay) => Some(decay),
         _ => None,
     }
 }
@@ -135,6 +139,8 @@ fn modulator_at_mut(
         }
         (Effect::Transform { scale_x, .. }, ModulatorField::TransformScaleX) => Some(scale_x),
         (Effect::Transform { scale_y, .. }, ModulatorField::TransformScaleY) => Some(scale_y),
+        // PCleanup.1.4 — Effect::Feedback::decay.
+        (Effect::Feedback { decay, .. }, ModulatorField::FeedbackDecay) => Some(decay),
         _ => None,
     }
 }
