@@ -431,13 +431,36 @@ pub fn show(
                                             crate::project::schema::LoopMode::Once,
                                             crate::project::schema::LoopMode::PingPong,
                                         ] {
-                                            if ui
-                                                .selectable_label(
-                                                    cur_loop_mode == mode,
-                                                    loop_mode_label(mode),
+                                            let resp = ui.selectable_label(
+                                                cur_loop_mode == mode,
+                                                loop_mode_label(mode),
+                                            );
+                                            // PCleanup.5.2 — PingPong currently
+                                            // falls back to forward Loop because
+                                            // reverse H.264 decode needs the
+                                            // I-frame cache that Phase 7 will
+                                            // add. Hover-tip the picker entry
+                                            // so an operator doesn't have to
+                                            // dig through specs to understand
+                                            // why selecting it produced a
+                                            // plain Loop.
+                                            let resp = if matches!(
+                                                mode,
+                                                crate::project::schema::LoopMode::PingPong
+                                            ) {
+                                                resp.on_hover_text(
+                                                    "Reverse playback isn't \
+                                                     implemented yet — selecting \
+                                                     PingPong currently plays \
+                                                     forward at the configured \
+                                                     speed, then loops. Real \
+                                                     ping-pong needs the I-frame \
+                                                     cache landing in Phase 7.",
                                                 )
-                                                .clicked()
-                                            {
+                                            } else {
+                                                resp
+                                            };
+                                            if resp.clicked() {
                                                 staged = Some(mode);
                                             }
                                         }
