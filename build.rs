@@ -34,6 +34,9 @@ const SDF_CONSUMERS: &[&str] = &[
     // PCleanup.2.2 — `treat_edge_lens.wgsl` consumes sample_sdf_normal
     // to drive N traveling refraction bumps around the mask boundary.
     "treat_edge_lens",
+    // PCleanup.2.7 — `treat_field_advect.wgsl` consumes sample_sdf_gradient
+    // to advect the source image along the mask's normal field.
+    "treat_field_advect",
 ];
 
 /// P3.3.1 — Basename prefixes that additionally need zone_tag_helper.wgsl

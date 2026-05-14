@@ -5,23 +5,23 @@ Companion task spec for [`004-phase-cleanup.md`](004-phase-cleanup.md). Each tas
 ## Implementation status
 
 ### W0 — Housekeeping (ship before W1–W8 leaf tasks)
-- [ ] PCleanup.0.1 — Glossary entries for cleanup-phase domain terms (~16 new variants)
-- [ ] PCleanup.0.2 — CHANGELOG + README v1.1 placeholder sections
+- [x] PCleanup.0.1 — Glossary entries for cleanup-phase domain terms (~16 new variants)
+- [x] PCleanup.0.2 — CHANGELOG + README v1.1 placeholder sections
 
 ### W1 — Architectural unlocks
-- [ ] PCleanup.1.1 — `FxFamily::SourceModifier` variant + dispatch arm
-- [ ] PCleanup.1.2 — `fluid_warp` preset (SourceModifier proof; mask-bounded fluid lensing the source)
-- [ ] PCleanup.1.3 — `Effect::Treatment(id, params)` variant (per-layer treatments)
-- [ ] PCleanup.1.4 — `Effect::Feedback { decay, offset }` variant (trails / echo)
+- [x] PCleanup.1.1 — `FxFamily::SourceModifier` variant + dispatch arm
+- [~] PCleanup.1.2 — `fluid_warp` preset (SourceModifier proof; mask-bounded fluid lensing the source) — **partial; pipeline path deferred** (commit `2a30578`)
+- [x] PCleanup.1.3 — `Effect::Treatment(id, params)` variant (per-layer treatments)
+- [x] PCleanup.1.4 — `Effect::Feedback { decay, offset }` variant (trails / echo)
 
-### W2 — Source-modifying FX preset siblings (10 of 12 deferred)
+### W2 — Source-modifying FX preset siblings (now ship as Treatments per `004-PCleanup.decision`)
 - [x] PCleanup.2.1 — `ripple_lens` (sibling of `mask_edge_ripple_wash`)
-- [ ] PCleanup.2.2 — `edge_lens` (sibling of `mask_edge_wave_wash`) — deferred
+- [x] PCleanup.2.2 — `edge_lens` (sibling of `mask_edge_wave_wash`)
 - [ ] PCleanup.2.3 — `fluid_warp_full` (sibling of `fluid_identity`) — deferred (needs compute prelude)
 - [ ] PCleanup.2.4 — `spotlights` (sibling of `particles_identity`) — deferred (needs particle SSBO)
 - [ ] PCleanup.2.5 — `drift_pinholes` OR `drift_brushstrokes` (sibling of `mask_constrained_drift`) — deferred (particles)
 - [ ] PCleanup.2.6 — `edge_sparks` (sibling of `mask_edge_emission`) — deferred (particles)
-- [ ] PCleanup.2.7 — `field_advect_source` (sibling of `mask_field_flow`) — deferred
+- [x] PCleanup.2.7 — `field_advect_source` (sibling of `mask_field_flow`)
 - [ ] PCleanup.2.8 — `collision_ripples` (sibling of `mask_collision_reflection`) — deferred (compute + readback)
 - [ ] PCleanup.2.9 — `zone_brighten` (sibling of `fx_zone_light_spill`) — deferred (zone uniform plumbing)
 - [ ] PCleanup.2.10 — `zone_lens` (sibling of `fx_zone_edge_ripple`) — deferred (zone uniform plumbing)
@@ -31,33 +31,33 @@ Companion task spec for [`004-phase-cleanup.md`](004-phase-cleanup.md). Each tas
 **Deferral rationale:** PCleanup.2.1 (ripple_lens) shipped as the proof of pattern; the W2 architecture is fully validated through it. The remaining 10 sibling treatments are each a self-contained shader-body swap following the same four-file pattern (shader + struct + descriptor + dispatch arm + 3 unit tests, ~300 LOC of pipeline boilerplate per preset). They land as standalone follow-up PRs when operator demand or scheduling warrants — none block other phase work, and the SourceModifier-as-Treatment routing they all share (PCleanup.1.3) is already complete. Glossary entries (PCleanup.0.1) and reserved registry IDs (PCleanup.1.1) are also already in place.
 
 ### W3 — Inert sliders / dead parameters
-- [ ] PCleanup.3.1 — `mask_bounded_fluid.particle_count` — remove descriptor OR implement particle SSBO
-- [ ] PCleanup.3.2 — `mask_edge_wave_wash` — expose `N_WAVES` as `wavelength` slider OR document inert fields
-- [ ] PCleanup.3.3 — `fx_zone_light_spill.speed` — animate spill with `clock*speed` OR drop descriptor
-- [ ] PCleanup.3.4 — Cue timing bindings (`in_time_binding`, `hold_binding`, `out_time_binding`) — wire `lookup_modulator` at cue-fire time
+- [x] PCleanup.3.1 — `mask_bounded_fluid.particle_count` — remove descriptor OR implement particle SSBO
+- [x] PCleanup.3.2 — `mask_edge_wave_wash` — expose `N_WAVES` as `wavelength` slider OR document inert fields
+- [x] PCleanup.3.3 — `fx_zone_light_spill.speed` — animate spill with `clock*speed` OR drop descriptor
+- [x] PCleanup.3.4 — Cue timing bindings (`in_time_binding`, `hold_binding`, `out_time_binding`) — wire `lookup_modulator` at cue-fire time
 
 ### W4 — No-op `Effect` variants
-- [ ] PCleanup.4.1 — Implement `Effect::Tint` (three-mode: multiply / additive / screen)
-- [ ] PCleanup.4.2 — `Effect::External` — hide from picker OR ship sample passes (LUT, RGB-shift)
+- [x] PCleanup.4.1 — Implement `Effect::Tint` (three-mode: multiply / additive / screen)
+- [x] PCleanup.4.2 — `Effect::External` — hide from picker OR ship sample passes (LUT, RGB-shift)
 
 ### W5 — Schema variants without renderers
-- [ ] PCleanup.5.1 — `MaskNode::Union` + `MaskNode::Subtract` — CPU-side SDF combine in baker
-- [ ] PCleanup.5.2 — `LoopMode::PingPong` — UI warning until Phase 7 I-frame cache lands
-- [ ] PCleanup.5.3 — Schema audit: sweep `src/project/schema.rs` for other no-renderer variants
+- [x] PCleanup.5.1 — `MaskNode::Union` + `MaskNode::Subtract` — CPU-side SDF combine in baker
+- [x] PCleanup.5.2 — `LoopMode::PingPong` — UI warning until Phase 7 I-frame cache lands
+- [x] PCleanup.5.3 — Schema audit: sweep `src/project/schema.rs` for other no-renderer variants
 
 ### W6 — Inputs & automation gaps
-- [ ] PCleanup.6.1 — Wire OSC `PROVIDER` registry from `OscSource::poll_into`
-- [ ] PCleanup.6.2 — Bar-phase re-anchor on tap-tempo (`Clock::tap`)
-- [ ] PCleanup.6.3 — Audio feature opt-in: runtime UI hint + README documentation
-- [ ] PCleanup.6.4 — Modulator coverage audit: which effect params should be `Modulator`?
+- [x] PCleanup.6.1 — Wire OSC `PROVIDER` registry from `OscSource::poll_into`
+- [x] PCleanup.6.2 — Bar-phase re-anchor on tap-tempo (`Clock::tap`)
+- [x] PCleanup.6.3 — Audio feature opt-in: runtime UI hint + README documentation
+- [x] PCleanup.6.4 — Modulator coverage audit: which effect params should be `Modulator`?
 
 ### W7 — UI surface gaps
-- [ ] PCleanup.7.1 — Real cue-strip scene thumbnails (reuse `warp_rt_view` registration)
-- [ ] PCleanup.7.2 — Layer-strip click-to-seek scrubber
-- [ ] PCleanup.7.3 — Per-output gamma / brightness / contrast trims wired through `GammaPipeline`
-- [ ] PCleanup.7.4 — Preview-as-projector output window blit path
-- [ ] PCleanup.7.5 — `AppState::Launcher → Failed` arm + GoLive keybind
-- [ ] PCleanup.7.6 — Multi-output 2-projector limit documentation (launcher hint + roadmap)
+- [x] PCleanup.7.1 — Real cue-strip scene thumbnails (reuse `warp_rt_view` registration)
+- [x] PCleanup.7.2 — Layer-strip click-to-seek scrubber
+- [x] PCleanup.7.3 — Per-output gamma / brightness / contrast trims wired through `GammaPipeline`
+- [x] PCleanup.7.4 — Preview-as-projector output window blit path
+- [x] PCleanup.7.5 — `AppState::Launcher → Failed` arm + GoLive keybind
+- [x] PCleanup.7.6 — Multi-output 2-projector limit documentation (launcher hint + roadmap)
 
 ### W8 — Treatments per-layer + `v3` flag
 - [ ] PCleanup.8.1 — Flip `v3` feature to default at M3 (gate-flip + pre-flip audit)
@@ -65,10 +65,10 @@ Companion task spec for [`004-phase-cleanup.md`](004-phase-cleanup.md). Each tas
 - [ ] PCleanup.8.3 — Treatment-specific reimagining (palette_extract zone-aware, collage kaleidoscope/mosaic, blur_mask distance-driven) — optional
 
 ### W9 — Release housekeeping (ship last)
-- [ ] PCleanup.9.1 — Version bump (1.0.x → 1.1.0)
-- [ ] PCleanup.9.2 — CHANGELOG body for v1.1
-- [ ] PCleanup.9.3 — README updates (new SourceModifier presets, new `Effect::Treatment` / `Effect::Feedback` / `Effect::Tint` variants, OSC modulator wiring)
-- [ ] PCleanup.9.4 — Show-day checklist update (per-output gamma trims, audio-feature opt-in hint)
+- [x] PCleanup.9.1 — Version bump (1.0.x → 1.1.0)
+- [x] PCleanup.9.2 — CHANGELOG body for v1.1
+- [x] PCleanup.9.3 — README updates (new SourceModifier presets, new `Effect::Treatment` / `Effect::Feedback` / `Effect::Tint` variants, OSC modulator wiring)
+- [x] PCleanup.9.4 — Show-day checklist update (per-output gamma trims, audio-feature opt-in hint)
 - [ ] PCleanup.9.5 — 5-minute acceptance smoke test (operator applies ≥4 SourceModifier presets across one project and observes source-image manipulation throughout)
 
 **Total: 45 tasks (43 implementable + 1 subsumed + 1 optional).**

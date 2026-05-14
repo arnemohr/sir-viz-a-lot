@@ -75,6 +75,11 @@ pub const RIPPLE_LENS_PRESET_ID: &str = "ripple_lens";
 /// generative `mask_edge_wave_wash` FX preset.
 pub const EDGE_LENS_PRESET_ID: &str = "edge_lens";
 
+/// PCleanup.2.7 — `field_advect_source` preset id. Advects the source
+/// image along the SDF gradient field — the SourceModifier sibling of
+/// the generative `mask_field_flow` FX preset.
+pub const FIELD_ADVECT_PRESET_ID: &str = "field_advect_source";
+
 /// Number of collage slots supported by the v0.5 `collage` preset.
 /// Fixed at 4 (a 2×2 grid) — true variable-N collage requires either
 /// dynamically-built bind groups or a texture array binding, deferred
@@ -165,6 +170,8 @@ pub fn registry() -> &'static [(&'static str, &'static str)] {
         (RIPPLE_LENS_PRESET_ID, "Ripple lens (source warp)"),
         // PCleanup.2.2 — second W2 sibling treatment.
         (EDGE_LENS_PRESET_ID, "Edge lens (orbiting refraction)"),
+        // PCleanup.2.7 — third W2 sibling treatment.
+        (FIELD_ADVECT_PRESET_ID, "Field advect (source drift)"),
     ]
 }
 
@@ -193,6 +200,8 @@ pub fn param_descriptors(preset_id: &str) -> &'static [ParamDescriptor] {
         RIPPLE_LENS_PRESET_ID => RIPPLE_LENS_DESCRIPTORS,
         // PCleanup.2.2 — second W2 sibling treatment.
         EDGE_LENS_PRESET_ID => EDGE_LENS_DESCRIPTORS,
+        // PCleanup.2.7 — third W2 sibling treatment.
+        FIELD_ADVECT_PRESET_ID => FIELD_ADVECT_DESCRIPTORS,
         _ => &[],
     }
 }
@@ -452,6 +461,19 @@ const RIPPLE_LENS_DESCRIPTORS: &[ParamDescriptor] = &[
     },
 ];
 
+/// PCleanup.2.7 — Static descriptors for the `field_advect_source` treatment.
+/// Identity at default `flow_speed = 0.0` — adding this treatment without
+/// configuring it is a guaranteed no-op (offset = gradient × 0 × clock = 0).
+/// Higher `flow_speed` drifts the photo along mask normals at increasing rate.
+#[allow(dead_code)] // referenced through `param_descriptors`
+const FIELD_ADVECT_DESCRIPTORS: &[ParamDescriptor] = &[ParamDescriptor {
+    key: "flow_speed",
+    label: "Flow speed (UV/s along gradient)",
+    min: 0.0,
+    max: 2.0,
+    default: 0.0,
+}];
+
 /// Static descriptors for the `refraction` preset (P2.4.2).
 /// Identity at default ior = 1.0 — the operator sees no change until they
 /// increase the ior slider. edge_width controls the SDF-distance band around
@@ -490,6 +512,8 @@ pub struct TreatmentPipeline {
     ripple_lens: RippleLensTreatmentPipeline,
     // PCleanup.2.2 — second W2 sibling treatment.
     edge_lens: EdgeLensTreatmentPipeline,
+    // PCleanup.2.7 — third W2 sibling treatment.
+    field_advect: FieldAdvectTreatmentPipeline,
     refraction: RefractionTreatmentPipeline,
 }
 
@@ -510,6 +534,8 @@ impl TreatmentPipeline {
             ripple_lens: RippleLensTreatmentPipeline::new(device, target_format),
             // PCleanup.2.2 — second W2 sibling treatment.
             edge_lens: EdgeLensTreatmentPipeline::new(device, target_format),
+            // PCleanup.2.7 — third W2 sibling treatment.
+            field_advect: FieldAdvectTreatmentPipeline::new(device, target_format),
             refraction: RefractionTreatmentPipeline::new(device, target_format),
         }
     }
@@ -610,6 +636,16 @@ impl TreatmentPipeline {
                     return false;
                 };
                 self.edge_lens
+                    .render(device, queue, encoder, dst, inputs, sdf);
+                true
+            }
+            // PCleanup.2.7 — third W2 sibling treatment. Advects the source
+            // image along the SDF gradient field. Skips when no SDF present.
+            FIELD_ADVECT_PRESET_ID => {
+                let Some(sdf) = inputs.sdf else {
+                    return false;
+                };
+                self.field_advect
                     .render(device, queue, encoder, dst, inputs, sdf);
                 true
             }
@@ -2882,6 +2918,221 @@ impl EdgeLensTreatmentPipeline {
     }
 }
 
+/// PCleanup.2.7 — `field_advect_source` treatment pipeline. Single fragment
+/// pass, SDF-aware. Advects the source image along the SDF gradient field:
+/// samples t_source at `uv - gradient(uv) * flow_speed * clock_secs`.
+/// Identity at `flow_speed = 0.0` (offset collapses to vec2(0)).
+///
+/// Bind-group layout matches `edge_lens` / `displacement_ripple`:
+///   0 source texture (filterable)
+///   1 filtering sampler (source)
+///   2 params uniform    (vec4: flow_speed, _pad, _pad, clock_secs)
+///   3 fit uniform       (vec4: mode, aspect, focal_x, focal_y)
+///   4 SDF texture       (R32Float, NonFiltering)
+///
+/// The `clock_secs` field in slot `w` of the params uniform is written
+/// each frame by `render` from `TreatmentInputs::clock_secs` — there is
+/// no operator-facing slider for it.
+struct FieldAdvectTreatmentPipeline {
+    pipeline: wgpu::RenderPipeline,
+    bind_group_layout: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
+    params_buf: wgpu::Buffer,
+}
+
+impl FieldAdvectTreatmentPipeline {
+    fn new(device: &wgpu::Device, target_format: wgpu::TextureFormat) -> Self {
+        let src = format!(
+            "{}\n{}",
+            crate::render::sdf::SDF_HELPER_WGSL,
+            include_str!("shaders/treat_field_advect.wgsl")
+        );
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("treat_field_advect.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(src.into()),
+        });
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("treat_field_advect bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: std::num::NonZeroU64::new(16),
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: std::num::NonZeroU64::new(16),
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("treat_field_advect pipeline layout"),
+            bind_group_layouts: &[Some(&bind_group_layout)],
+            immediate_size: 0,
+        });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("treat_field_advect pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: target_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("treat_field_advect sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
+        });
+        let params_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("treat_field_advect params"),
+            size: 16,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        Self {
+            pipeline,
+            bind_group_layout,
+            sampler,
+            params_buf,
+        }
+    }
+
+    fn render(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        dst: &wgpu::TextureView,
+        inputs: &TreatmentInputs<'_>,
+        sdf: &wgpu::TextureView,
+    ) {
+        let flow_speed = inputs.params.get("flow_speed").copied().unwrap_or(0.0);
+
+        // clock_secs is packed into the params uniform's `w` slot (no
+        // separate binding) so the shader can compute the advection offset
+        // without an extra uniform buffer.
+        let mut bytes = [0u8; 16];
+        bytes[0..4].copy_from_slice(&flow_speed.to_le_bytes());
+        // bytes[4..8] and [8..12] are _pad, left as zero.
+        bytes[12..16].copy_from_slice(&inputs.clock_secs.to_le_bytes());
+        queue.write_buffer(&self.params_buf, 0, &bytes);
+
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("treat_field_advect bg"),
+            layout: &self.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(inputs.source),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: self.params_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: inputs.fit_uniform.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(sdf),
+                },
+            ],
+        });
+
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("treat_field_advect pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: dst,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.draw(0..6, 0..1);
+    }
+}
+
 /// Refraction treatment pipeline (P2.4.2). Single pass, SDF-aware.
 /// Bends the source UV along the SDF normal near the mask boundary using a
 /// Snell-like offset, producing a glass-lens refraction effect at the edge.
@@ -3412,5 +3663,52 @@ mod tests {
             .find(|d| d.key == "ior")
             .expect("ior descriptor must be present");
         assert_eq!(ior_desc.default, 1.0, "ior identity default = 1.0");
+    }
+
+    // ----- PCleanup.2.7 — field_advect_source treatment ------------------
+
+    /// PCleanup.2.7 — `field_advect_source` is registered in the treatment
+    /// list so the operator can apply it from the picker.
+    #[test]
+    fn field_advect_is_registered() {
+        assert!(
+            is_registered(FIELD_ADVECT_PRESET_ID),
+            "field_advect_source must appear in treatments::registry()"
+        );
+    }
+
+    /// PCleanup.2.7 — `field_advect_source` exposes exactly one operator
+    /// param (`flow_speed`) with a valid min/max/default range.
+    #[test]
+    fn field_advect_descriptors_present() {
+        let descriptors = param_descriptors(FIELD_ADVECT_PRESET_ID);
+        assert_eq!(
+            descriptors.len(),
+            1,
+            "field_advect_source exposes exactly 1 param"
+        );
+        for d in descriptors {
+            assert!(d.min < d.max, "{}: min < max", d.key);
+            assert!(
+                d.default >= d.min && d.default <= d.max,
+                "{}: default in [min, max]",
+                d.key
+            );
+        }
+    }
+
+    /// PCleanup.2.7 — `field_advect_source` `flow_speed` default = 0.0
+    /// satisfies the identity-default rule: offset = gradient × 0 × clock
+    /// = vec2(0) everywhere → bit-identical passthrough on freshly-added
+    /// Treatment (no GPU test needed; the passthrough is structural in the
+    /// shader formula, not dependent on texture values).
+    #[test]
+    fn field_advect_flow_speed_default_is_zero() {
+        let descriptors = param_descriptors(FIELD_ADVECT_PRESET_ID);
+        let speed_desc = descriptors
+            .iter()
+            .find(|d| d.key == "flow_speed")
+            .expect("flow_speed descriptor must be present");
+        assert_eq!(speed_desc.default, 0.0, "flow_speed identity default = 0.0");
     }
 }
