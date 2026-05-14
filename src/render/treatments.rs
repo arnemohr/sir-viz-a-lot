@@ -70,6 +70,11 @@ pub const REFRACTION_PRESET_ID: &str = "refraction";
 /// of the generative `mask_edge_ripple_wash` FX preset.
 pub const RIPPLE_LENS_PRESET_ID: &str = "ripple_lens";
 
+/// PCleanup.2.2 — `edge_lens` preset id. N traveling refraction bumps
+/// orbiting the mask boundary — the SourceModifier sibling of the
+/// generative `mask_edge_wave_wash` FX preset.
+pub const EDGE_LENS_PRESET_ID: &str = "edge_lens";
+
 /// Number of collage slots supported by the v0.5 `collage` preset.
 /// Fixed at 4 (a 2×2 grid) — true variable-N collage requires either
 /// dynamically-built bind groups or a texture array binding, deferred
@@ -158,6 +163,8 @@ pub fn registry() -> &'static [(&'static str, &'static str)] {
         (REFRACTION_PRESET_ID, "Refraction"),
         // PCleanup.2.1 — first W2 sibling treatment.
         (RIPPLE_LENS_PRESET_ID, "Ripple lens (source warp)"),
+        // PCleanup.2.2 — second W2 sibling treatment.
+        (EDGE_LENS_PRESET_ID, "Edge lens (orbiting refraction)"),
     ]
 }
 
@@ -184,6 +191,8 @@ pub fn param_descriptors(preset_id: &str) -> &'static [ParamDescriptor] {
         REFRACTION_PRESET_ID => REFRACTION_DESCRIPTORS,
         // PCleanup.2.1 — first W2 sibling treatment.
         RIPPLE_LENS_PRESET_ID => RIPPLE_LENS_DESCRIPTORS,
+        // PCleanup.2.2 — second W2 sibling treatment.
+        EDGE_LENS_PRESET_ID => EDGE_LENS_DESCRIPTORS,
         _ => &[],
     }
 }
@@ -383,6 +392,36 @@ const DISPLACEMENT_RIPPLE_DESCRIPTORS: &[ParamDescriptor] = &[
     },
 ];
 
+/// PCleanup.2.2 — Static descriptors for the `edge_lens` treatment.
+/// Identity at default `amplitude = 0.0`. `n_waves` controls the crest
+/// count orbiting the boundary (clamped to integer in the shader);
+/// `speed` drives the angular travel rate (clock-driven, populated
+/// each frame by the dispatcher into the params uniform's `w` slot).
+#[allow(dead_code)] // referenced through `param_descriptors`
+const EDGE_LENS_DESCRIPTORS: &[ParamDescriptor] = &[
+    ParamDescriptor {
+        key: "amplitude",
+        label: "Amplitude (UV displacement)",
+        min: 0.0,
+        max: 0.1,
+        default: 0.0,
+    },
+    ParamDescriptor {
+        key: "n_waves",
+        label: "Crests around boundary (1–8)",
+        min: 1.0,
+        max: 8.0,
+        default: 4.0,
+    },
+    ParamDescriptor {
+        key: "speed",
+        label: "Animation speed (cycles/sec)",
+        min: 0.0,
+        max: 5.0,
+        default: 1.0,
+    },
+];
+
 /// PCleanup.2.1 — Static descriptors for the `ripple_lens` treatment.
 /// Identity at default `amplitude = 0.0` — the operator sees no change
 /// until they increase the slider. `wavelength` controls how tightly
@@ -449,6 +488,8 @@ pub struct TreatmentPipeline {
     displacement_ripple: DisplacementRippleTreatmentPipeline,
     // PCleanup.2.1 — first W2 sibling treatment (SourceModifier as Treatment).
     ripple_lens: RippleLensTreatmentPipeline,
+    // PCleanup.2.2 — second W2 sibling treatment.
+    edge_lens: EdgeLensTreatmentPipeline,
     refraction: RefractionTreatmentPipeline,
 }
 
@@ -467,6 +508,8 @@ impl TreatmentPipeline {
             displacement_ripple: DisplacementRippleTreatmentPipeline::new(device, target_format),
             // PCleanup.2.1 — first W2 sibling treatment.
             ripple_lens: RippleLensTreatmentPipeline::new(device, target_format),
+            // PCleanup.2.2 — second W2 sibling treatment.
+            edge_lens: EdgeLensTreatmentPipeline::new(device, target_format),
             refraction: RefractionTreatmentPipeline::new(device, target_format),
         }
     }
@@ -557,6 +600,16 @@ impl TreatmentPipeline {
                     return false;
                 };
                 self.ripple_lens
+                    .render(device, queue, encoder, dst, inputs, sdf);
+                true
+            }
+            // PCleanup.2.2 — second W2 sibling treatment. Like ripple_lens,
+            // skips when no SDF is present (SVG / FxLayer routes).
+            EDGE_LENS_PRESET_ID => {
+                let Some(sdf) = inputs.sdf else {
+                    return false;
+                };
+                self.edge_lens
                     .render(device, queue, encoder, dst, inputs, sdf);
                 true
             }
@@ -2610,6 +2663,225 @@ impl RippleLensTreatmentPipeline {
     }
 }
 
+/// PCleanup.2.2 — `edge_lens` treatment pipeline. Single fragment pass,
+/// SDF-aware. Uses the SDF normal direction to compute an angular
+/// position around the mask boundary; N traveling sine crests displace
+/// the source UV radially. Identity at `amplitude = 0.0`.
+///
+/// Bind-group layout matches `ripple_lens` / `displacement_ripple`:
+///   0 source texture (filterable)
+///   1 filtering sampler (source)
+///   2 params uniform    (vec4: amplitude, n_waves, speed, clock_secs)
+///   3 fit uniform       (vec4: mode, aspect, focal_x, focal_y)
+///   4 SDF texture       (R32Float, NonFiltering)
+///
+/// The `clock_secs` field in slot `w` of the params uniform is written
+/// each frame by `render` from `TreatmentInputs::clock_secs` — there is
+/// no operator-facing slider for it (advancing time animates the crests
+/// around the boundary).
+struct EdgeLensTreatmentPipeline {
+    pipeline: wgpu::RenderPipeline,
+    bind_group_layout: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
+    params_buf: wgpu::Buffer,
+}
+
+impl EdgeLensTreatmentPipeline {
+    fn new(device: &wgpu::Device, target_format: wgpu::TextureFormat) -> Self {
+        let src = format!(
+            "{}\n{}",
+            crate::render::sdf::SDF_HELPER_WGSL,
+            include_str!("shaders/treat_edge_lens.wgsl")
+        );
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("treat_edge_lens.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(src.into()),
+        });
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("treat_edge_lens bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: std::num::NonZeroU64::new(16),
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: std::num::NonZeroU64::new(16),
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("treat_edge_lens pipeline layout"),
+            bind_group_layouts: &[Some(&bind_group_layout)],
+            immediate_size: 0,
+        });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("treat_edge_lens pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: target_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("treat_edge_lens sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
+        });
+        let params_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("treat_edge_lens params"),
+            size: 16,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        Self {
+            pipeline,
+            bind_group_layout,
+            sampler,
+            params_buf,
+        }
+    }
+
+    fn render(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        dst: &wgpu::TextureView,
+        inputs: &TreatmentInputs<'_>,
+        sdf: &wgpu::TextureView,
+    ) {
+        let amplitude = inputs.params.get("amplitude").copied().unwrap_or(0.0);
+        let n_waves = inputs.params.get("n_waves").copied().unwrap_or(4.0);
+        let speed = inputs.params.get("speed").copied().unwrap_or(1.0);
+
+        // clock_secs is packed into the params uniform's `w` slot (no
+        // separate binding) so the shader can compute crest travel
+        // without an extra uniform buffer.
+        let mut bytes = [0u8; 16];
+        bytes[0..4].copy_from_slice(&amplitude.to_le_bytes());
+        bytes[4..8].copy_from_slice(&n_waves.to_le_bytes());
+        bytes[8..12].copy_from_slice(&speed.to_le_bytes());
+        bytes[12..16].copy_from_slice(&inputs.clock_secs.to_le_bytes());
+        queue.write_buffer(&self.params_buf, 0, &bytes);
+
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("treat_edge_lens bg"),
+            layout: &self.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(inputs.source),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: self.params_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: inputs.fit_uniform.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(sdf),
+                },
+            ],
+        });
+
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("treat_edge_lens pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: dst,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.draw(0..6, 0..1);
+    }
+}
+
 /// Refraction treatment pipeline (P2.4.2). Single pass, SDF-aware.
 /// Bends the source UV along the SDF normal near the mask boundary using a
 /// Snell-like offset, producing a glass-lens refraction effect at the edge.
@@ -3071,6 +3343,41 @@ mod tests {
     #[test]
     fn ripple_lens_amplitude_default_is_zero() {
         let descriptors = param_descriptors(RIPPLE_LENS_PRESET_ID);
+        let amplitude_desc = descriptors
+            .iter()
+            .find(|d| d.key == "amplitude")
+            .expect("amplitude descriptor must be present");
+        assert_eq!(amplitude_desc.default, 0.0);
+    }
+
+    /// PCleanup.2.2 — `edge_lens` registered.
+    #[test]
+    fn edge_lens_is_registered() {
+        assert!(
+            is_registered(EDGE_LENS_PRESET_ID),
+            "edge_lens must appear in treatments::registry()"
+        );
+    }
+
+    /// PCleanup.2.2 — `edge_lens` exposes amplitude + n_waves + speed.
+    #[test]
+    fn edge_lens_descriptors_present() {
+        let descriptors = param_descriptors(EDGE_LENS_PRESET_ID);
+        assert_eq!(descriptors.len(), 3, "edge_lens exposes exactly 3 params");
+        for d in descriptors {
+            assert!(d.min < d.max, "{}: min < max", d.key);
+            assert!(
+                d.default >= d.min && d.default <= d.max,
+                "{}: default in [min, max]",
+                d.key
+            );
+        }
+    }
+
+    /// PCleanup.2.2 — `edge_lens` `amplitude` default = 0.0 → inert on add.
+    #[test]
+    fn edge_lens_amplitude_default_is_zero() {
+        let descriptors = param_descriptors(EDGE_LENS_PRESET_ID);
         let amplitude_desc = descriptors
             .iter()
             .find(|d| d.key == "amplitude")

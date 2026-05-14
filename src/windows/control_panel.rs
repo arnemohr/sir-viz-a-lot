@@ -356,9 +356,12 @@ pub enum ControlPanelAction {
     #[cfg(feature = "v3")]
     RequestSaveAs,
     /// 003-T4.17: toolbar "Go live" button clicked while in `Editing`.
-    /// App transitions `Editing → GoLive` and calls `set_fullscreen(true)`.
+    /// App transitions `Editing → GoLive` and calls `set_fullscreen(true)` on
+    /// the outputs named by the target. With a single output the toolbar
+    /// always sends `Both` (its only output goes fullscreen); with two
+    /// outputs the toolbar's split button picks either `Both` or `LeadOnly`.
     #[cfg(feature = "v3")]
-    RequestEnterGoLive,
+    RequestEnterGoLive(crate::controls::GoLiveTarget),
     /// 003-T4.17: toolbar "Stop" button clicked while in `GoLive`.
     /// App transitions `GoLive → Editing` and calls `set_fullscreen(false)`.
     #[cfg(feature = "v3")]
@@ -436,6 +439,12 @@ pub struct ControlPanelInputs {
     /// uses this to show "Stop" instead of "Go live" on the same button slot.
     #[cfg(feature = "v3")]
     pub is_go_live: bool,
+    /// Number of output windows (1 = single projector; 2 = Lead + Follow).
+    /// The toolbar uses this to decide whether to render the Go-live split
+    /// button: a single output always goes live, two outputs offer
+    /// `Both` / `Lead only`.
+    #[cfg(feature = "v3")]
+    pub output_count: usize,
     /// 003-T4.16a — `true` when `EditingState::preview_window` is `Some`.
     /// The toolbar uses this to toggle the Preview button label.
     #[cfg(feature = "v3")]

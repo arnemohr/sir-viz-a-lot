@@ -319,18 +319,50 @@ pub fn show(
                 ui.add_space(4.0);
             }
 
-            // 003-T4.17: Go-live / Stop button. Label flips on is_go_live;
-            // the click returns RequestEnterGoLive or RequestExitGoLive so
+            // Go-live / Stop button. Label flips on is_go_live; the click
+            // returns RequestEnterGoLive(target) or RequestExitGoLive so
             // App::window_event can perform the AppState swap.
+            //
+            // With one output we render a single "Go live" button — there is
+            // no choice to make. With two outputs we render a split control:
+            // the main "Go live" button defaults to `Both` (the safe choice)
+            // and an adjacent caret opens a menu with the "Lead only"
+            // alternative for operators who want Follow to stay windowed as
+            // a cueing surface.
             #[cfg(feature = "v3")]
             {
-                let go_live_label = if inputs.is_go_live { "Stop" } else { "Go live" };
-                if ui.button(go_live_label).clicked() {
-                    if inputs.is_go_live {
+                use crate::controls::GoLiveTarget;
+                if inputs.is_go_live {
+                    if ui.button("Stop").clicked() {
                         action = Some(ControlPanelAction::RequestExitGoLive);
-                    } else {
-                        action = Some(ControlPanelAction::RequestEnterGoLive);
                     }
+                } else if inputs.output_count >= 2 {
+                    // Caret menu first because right_to_left layout draws
+                    // right-most child first; this lands the caret to the
+                    // right of the primary "Go live" button.
+                    ui.menu_button("\u{25BE}", |menu| {
+                        if menu.button("Both projectors").clicked() {
+                            action = Some(ControlPanelAction::RequestEnterGoLive(
+                                GoLiveTarget::Both,
+                            ));
+                            menu.close_menu();
+                        }
+                        if menu.button("Lead only (keep Follow as preview)").clicked() {
+                            action = Some(ControlPanelAction::RequestEnterGoLive(
+                                GoLiveTarget::LeadOnly,
+                            ));
+                            menu.close_menu();
+                        }
+                    });
+                    if ui.button("Go live").clicked() {
+                        action = Some(ControlPanelAction::RequestEnterGoLive(
+                            GoLiveTarget::Both,
+                        ));
+                    }
+                } else if ui.button("Go live").clicked() {
+                    action = Some(ControlPanelAction::RequestEnterGoLive(
+                        GoLiveTarget::Both,
+                    ));
                 }
             }
             // 003-T4.16a: Preview button. Opens / closes the child preview window.

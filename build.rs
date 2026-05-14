@@ -31,6 +31,9 @@ const SDF_CONSUMERS: &[&str] = &[
     // (sample_sdf_bilinear + sample_sdf_normal) to drive concentric-
     // ring UV displacement keyed to mask distance.
     "treat_ripple_lens",
+    // PCleanup.2.2 — `treat_edge_lens.wgsl` consumes sample_sdf_normal
+    // to drive N traveling refraction bumps around the mask boundary.
+    "treat_edge_lens",
 ];
 
 /// P3.3.1 — Basename prefixes that additionally need zone_tag_helper.wgsl

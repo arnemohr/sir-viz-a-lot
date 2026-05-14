@@ -1492,9 +1492,10 @@ enum SideEffect {
 #[derive(Debug)]
 enum EditingTransition {
     /// 003-T4.17: Operator clicked "Go live". Swap `Editing → GoLive`; call
-    /// `set_fullscreen(true, monitor)`.
+    /// `set_fullscreen(true, monitor)` on the outputs named by the target
+    /// (`Both` = every output, `LeadOnly` = output[0]).
     #[cfg(feature = "v3")]
-    EnterGoLive,
+    EnterGoLive(crate::controls::GoLiveTarget),
     /// 003-T4.17: Operator clicked "Stop". Swap `GoLive → Editing`; call
     /// `set_fullscreen(false, None)`.
     #[cfg(feature = "v3")]
@@ -2956,6 +2957,15 @@ fn launcher_render(
         state.selected_monitor =
             default_monitor_for_launcher(&state.monitors, &state.prefs, event_loop);
     }
+    // Clamp the Follow slot the same way: a hot-unplug of the secondary
+    // display, or the Lead being changed to what was previously the
+    // Follow, clears the slot rather than leaving it pointing at a
+    // stale / duplicate index.
+    if let Some(sec) = state.selected_secondary_monitor {
+        if sec >= state.monitors.len() || sec == state.selected_monitor {
+            state.selected_secondary_monitor = None;
+        }
+    }
 
     // 003-T2.6 — drop the last_error if it's expired so the closure's
     // banner test (read after this) sees a fresh state.
@@ -3117,13 +3127,11 @@ fn launcher_render(
                             }
                         }
 
-                        // 003-T2.5 / P0.7.1 — projector picker. Single-display
-                        // setup gets a static label; multi-display gets a
-                        // checkbox per monitor with a max-2 selection limit
-                        // (one primary + at most one secondary) per the v0.4
-                        // two-projector cap; Phase 7 grows beyond that. Each
-                        // checkbox has an "Identify" button that flashes the
-                        // alignment cross on that physical display for 5 s.
+                        // Projector picker. Two named slots: Lead (required,
+                        // the display Go Live fullscreens by default) and
+                        // Follow (optional, the second display for edge-blend
+                        // or cueing). Each slot has an Identify button that
+                        // flashes the alignment cross on its display for 5 s.
                         center_ui.add_space(20.0);
                         if monitors.is_empty() {
                             center_ui.weak("No displays detected");
@@ -3146,84 +3154,98 @@ fn launcher_render(
                                 }
                             });
                         } else {
-                            center_ui.label("Projector(s) — pick up to 2:");
-                            // PCleanup.7.6 — surface the 2-projector v1 limit
-                            // upfront when 3+ monitors are connected, so the
-                            // operator learns the constraint while reading the
-                            // picker rather than discovering it when ticking the
-                            // third checkbox. The conditional hint below (only
-                            // shown once a secondary is selected) stays as the
-                            // "you're at the limit now" reinforcement.
+                            center_ui.label("Projectors");
+                            center_ui.weak(
+                                "Lead is the projector your show goes live on. \
+                                 Follow is an optional second projector.",
+                            );
+                            // v1 caps at two projectors; the slot UI enforces
+                            // it structurally, this line just explains why.
                             if monitors.len() >= 3 {
                                 center_ui.weak(
-                                    "v1 supports up to 2 projectors (with edge-blend). \
-                             3+ projectors and per-edge configuration are \
-                             planned for a future phase — see specs/roadmap.md.",
+                                    "v1 supports up to 2 projectors. \
+                                     3+ projectors and per-edge configuration \
+                                     are planned for a future phase \
+                                     — see specs/roadmap.md.",
                                 );
                             }
-                            for (idx, m) in monitors.iter().enumerate() {
-                                let is_primary = *selected_monitor == idx;
-                                let is_secondary = *selected_secondary_monitor == Some(idx);
-                                let mut selected = is_primary || is_secondary;
-                                center_ui.horizontal(|row| {
-                                    // Checkbox: respects the max-2 invariant.
-                                    // Toggling logic:
-                                    //   • If currently primary and operator
-                                    //     unticks: promote secondary (if any)
-                                    //     to primary; clear secondary.
-                                    //   • If currently secondary and operator
-                                    //     unticks: clear secondary.
-                                    //   • If currently unselected and operator
-                                    //     ticks: if no secondary yet, become
-                                    //     secondary; otherwise no-op (max
-                                    //     reached — show a subdued hint below).
-                                    let was_selected = selected;
-                                    let resp = row.checkbox(&mut selected, &m.name);
-                                    if resp.changed() {
-                                        if was_selected {
-                                            // Untick.
-                                            if is_primary {
-                                                if let Some(sec_idx) = *selected_secondary_monitor {
-                                                    *selected_monitor = sec_idx;
-                                                    *selected_secondary_monitor = None;
-                                                }
-                                                // else: refuse to leave zero
-                                                // primaries — reselect to true.
-                                                else {
-                                                    selected = true;
-                                                }
-                                            } else if is_secondary {
+
+                            // Lead slot.
+                            let lead_name = monitors[*selected_monitor].name.clone();
+                            center_ui.horizontal(|row| {
+                                row.label("Lead");
+                                egui::ComboBox::from_id_salt("launcher_lead_monitor")
+                                    .selected_text(lead_name)
+                                    .show_ui(row, |ui| {
+                                        for (idx, m) in monitors.iter().enumerate() {
+                                            let resp = ui.selectable_value(
+                                                selected_monitor,
+                                                idx,
+                                                &m.name,
+                                            );
+                                            // Promoting the current Follow to
+                                            // Lead clears Follow so the same
+                                            // display isn't claimed twice.
+                                            if resp.changed()
+                                                && *selected_secondary_monitor == Some(idx)
+                                            {
                                                 *selected_secondary_monitor = None;
                                             }
-                                        } else {
-                                            // Tick.
-                                            if selected_secondary_monitor.is_none()
-                                                && *selected_monitor != idx
-                                            {
-                                                *selected_secondary_monitor = Some(idx);
-                                            } else {
-                                                // Max reached — revert.
-                                                selected = false;
-                                            }
                                         }
-                                        // selected variable is only used for
-                                        // local revert logic above; the egui
-                                        // checkbox bound it as &mut so
-                                        // assigning false reverts the visual
-                                        // state next paint.
-                                        let _ = selected;
-                                    }
-                                    if is_primary {
-                                        row.weak("primary");
-                                    } else if is_secondary {
-                                        row.weak("secondary");
-                                    }
-                                    let identify_label =
-                                        if test_session_active && identify_request == Some(idx) {
-                                            "Identifying…"
-                                        } else {
-                                            "Identify"
-                                        };
+                                    });
+                                let lead_idx = *selected_monitor;
+                                let identify_label = if test_session_active
+                                    && identify_request == Some(lead_idx)
+                                {
+                                    "Identifying…"
+                                } else {
+                                    "Identify"
+                                };
+                                if row
+                                    .add_enabled(
+                                        !test_session_active,
+                                        egui::Button::new(identify_label),
+                                    )
+                                    .clicked()
+                                {
+                                    identify_request = Some(lead_idx);
+                                }
+                            });
+
+                            // Follow slot.
+                            let follow_name: String = match *selected_secondary_monitor {
+                                Some(idx) => monitors[idx].name.clone(),
+                                None => "— None —".to_string(),
+                            };
+                            center_ui.horizontal(|row| {
+                                row.label("Follow");
+                                egui::ComboBox::from_id_salt("launcher_follow_monitor")
+                                    .selected_text(follow_name)
+                                    .show_ui(row, |ui| {
+                                        ui.selectable_value(
+                                            selected_secondary_monitor,
+                                            None,
+                                            "— None —",
+                                        );
+                                        for (idx, m) in monitors.iter().enumerate() {
+                                            if idx == *selected_monitor {
+                                                continue;
+                                            }
+                                            ui.selectable_value(
+                                                selected_secondary_monitor,
+                                                Some(idx),
+                                                &m.name,
+                                            );
+                                        }
+                                    });
+                                if let Some(sec_idx) = *selected_secondary_monitor {
+                                    let identify_label = if test_session_active
+                                        && identify_request == Some(sec_idx)
+                                    {
+                                        "Identifying…"
+                                    } else {
+                                        "Identify"
+                                    };
                                     if row
                                         .add_enabled(
                                             !test_session_active,
@@ -3231,22 +3253,15 @@ fn launcher_render(
                                         )
                                         .clicked()
                                     {
-                                        identify_request = Some(idx);
+                                        identify_request = Some(sec_idx);
                                     }
-                                });
-                            }
-                            if monitors.len() >= 3 && selected_secondary_monitor.is_some() {
-                                center_ui.weak(
-                                    // PCleanup.7.6 — Phase 7 shipped without
-                                    // lifting this constraint (deliberately
-                                    // out of scope per specs/roadmap.md line 32-34
-                                    // and the Phase 7 acceptance criteria). 3+
-                                    // projectors and per-edge configuration are
-                                    // deferred to a post-v1.0 phase.
-                                    "Max 2 projectors in v1. Untick one to swap; \
-                             3+ projectors are planned for a post-v1.0 phase.",
-                                );
-                            }
+                                    if row.button("Clear").clicked() {
+                                        *selected_secondary_monitor = None;
+                                    }
+                                } else {
+                                    row.weak("(optional)");
+                                }
+                            });
                         }
 
                         // 003-T2.6 — error banner. Renders below the dropdown
@@ -5016,6 +5031,8 @@ fn handle_editing_window_event(
                     // 003-T4.17: GoLive state drives the "Stop" / "Go live" toolbar label.
                     #[cfg(feature = "v3")]
                     is_go_live,
+                    #[cfg(feature = "v3")]
+                    output_count: state.outputs.len(),
                     // 003-T4.16a: Preview window presence drives the "Close preview" / "Preview"
                     // toolbar label.
                     #[cfg(feature = "v3")]
@@ -5401,9 +5418,13 @@ fn handle_editing_window_event(
                     // `editing_transition`; the actual `mem::replace` happens
                     // in `App::window_event` once this function returns.
                     #[cfg(feature = "v3")]
-                    ControlPanelAction::RequestEnterGoLive => {
-                        tracing::info!(target: "rmap::ux", event = "go_live_clicked");
-                        editing_transition = Some(EditingTransition::EnterGoLive);
+                    ControlPanelAction::RequestEnterGoLive(target) => {
+                        tracing::info!(
+                            target: "rmap::ux",
+                            event = "go_live_clicked",
+                            go_live_target = ?target,
+                        );
+                        editing_transition = Some(EditingTransition::EnterGoLive(target));
                     }
                     #[cfg(feature = "v3")]
                     ControlPanelAction::RequestExitGoLive => {
@@ -5597,7 +5618,9 @@ fn handle_editing_window_event(
                             target: "rmap::ux",
                             event = "go_live_keybind_enter"
                         );
-                        EditingTransition::EnterGoLive
+                        // "L for Live" keybind has no target picker — pick
+                        // the safe default (every output goes fullscreen).
+                        EditingTransition::EnterGoLive(crate::controls::GoLiveTarget::Both)
                     });
                 }
                 #[cfg(feature = "v3")]
@@ -6467,18 +6490,22 @@ impl ApplicationHandler for App {
             if let Some(t) = transition {
                 let prev = std::mem::replace(&mut self.state, AppState::Booting);
                 match t {
-                    EditingTransition::EnterGoLive => {
+                    EditingTransition::EnterGoLive(target) => {
                         let AppState::Editing(mut editing) = prev else {
                             // Already in GoLive (double-click race); restore.
                             tracing::warn!("EnterGoLive received in non-Editing state; ignoring");
                             self.state = prev;
                             return;
                         };
-                        // P0.7.2: loop over all outputs and fullscreen each on
-                        // its remembered monitor. For output[0] we resolve via
-                        // UUID-then-index (V31.2.2) as before; for outputs[1+]
-                        // we use the monitor stored in `output.monitor` (set at
-                        // window creation by the launcher's selection).
+                        // P0.7.2: loop over the outputs covered by `target` and
+                        // fullscreen each on its remembered monitor. For
+                        // output[0] we resolve via UUID-then-index
+                        // (V31.2.2) as before; for outputs[1+] we use the
+                        // monitor stored in `output.monitor` (set at window
+                        // creation by the launcher's selection).
+                        //
+                        // `target == LeadOnly` stops after output[0] so the
+                        // Follow window stays windowed as a cueing surface.
                         //
                         // If any output's set_fullscreen fails we log + toast
                         // and abort the GoLive transition, leaving all outputs
@@ -6496,14 +6523,23 @@ impl ApplicationHandler for App {
                             let idx = outcome.monitor().index;
                             event_loop.available_monitors().nth(idx)
                         };
+                        let live_output_count = match target {
+                            crate::controls::GoLiveTarget::Both => editing.outputs.len(),
+                            crate::controls::GoLiveTarget::LeadOnly => 1,
+                        };
                         tracing::info!(
                             monitor = ?primary_monitor.as_ref().map(|m| m.name()),
                             output_count = editing.outputs.len(),
-                            "entering GoLive; set_fullscreen(true) for all outputs"
+                            live_output_count,
+                            target = ?target,
+                            "entering GoLive; set_fullscreen(true) for live outputs"
                         );
-                        // Attempt fullscreen for all outputs; first failure aborts.
+                        // Attempt fullscreen for the live outputs; first failure aborts.
                         let mut go_live_ok = true;
-                        for (out_idx, output) in editing.outputs.iter().enumerate() {
+                        let mut fullscreened: Vec<usize> = Vec::with_capacity(live_output_count);
+                        for (out_idx, output) in
+                            editing.outputs.iter().enumerate().take(live_output_count)
+                        {
                             let monitor = if out_idx == 0 {
                                 primary_monitor.clone()
                             } else {
@@ -6524,6 +6560,7 @@ impl ApplicationHandler for App {
                                 go_live_ok = false;
                                 break;
                             }
+                            fullscreened.push(out_idx);
                         }
                         if go_live_ok {
                             // P5.2.4 — start the lighting thread on Go-live.
@@ -6563,10 +6600,15 @@ impl ApplicationHandler for App {
                             editing.light_subscribers.go_live();
                             self.state = AppState::GoLive(editing);
                         } else {
-                            // Roll back any outputs that succeeded before the failure.
-                            // `set_fullscreen(false, None)` on a windowed window is a no-op.
-                            for output in &editing.outputs {
-                                let _ = output.set_fullscreen(false, None);
+                            // Roll back only the outputs that successfully
+                            // entered fullscreen before the failure. The
+                            // remaining outputs are still windowed; calling
+                            // set_fullscreen(false) on them would be a no-op
+                            // but clutters the logs.
+                            for out_idx in &fullscreened {
+                                if let Some(output) = editing.outputs.get(*out_idx) {
+                                    let _ = output.set_fullscreen(false, None);
+                                }
                             }
                             self.state = AppState::Editing(editing);
                         }
@@ -7601,13 +7643,26 @@ mod tests {
     #[cfg(feature = "v3")]
     #[test]
     fn editing_transition_variants_constructible() {
-        let enter = EditingTransition::EnterGoLive;
+        let enter_both =
+            EditingTransition::EnterGoLive(crate::controls::GoLiveTarget::Both);
+        let enter_lead =
+            EditingTransition::EnterGoLive(crate::controls::GoLiveTarget::LeadOnly);
         let exit = EditingTransition::ExitGoLive;
         // Both variants exist (compile-time) and are distinct (match).
-        assert!(matches!(enter, EditingTransition::EnterGoLive));
+        assert!(matches!(enter_both, EditingTransition::EnterGoLive(_)));
+        assert!(matches!(enter_lead, EditingTransition::EnterGoLive(_)));
         assert!(matches!(exit, EditingTransition::ExitGoLive));
-        assert!(!matches!(enter, EditingTransition::ExitGoLive));
-        assert!(!matches!(exit, EditingTransition::EnterGoLive));
+        assert!(!matches!(enter_both, EditingTransition::ExitGoLive));
+        assert!(!matches!(exit, EditingTransition::EnterGoLive(_)));
+        // Payload distinguishes the two enter variants.
+        assert!(matches!(
+            enter_both,
+            EditingTransition::EnterGoLive(crate::controls::GoLiveTarget::Both)
+        ));
+        assert!(matches!(
+            enter_lead,
+            EditingTransition::EnterGoLive(crate::controls::GoLiveTarget::LeadOnly)
+        ));
     }
 
     /// 003-T4.17: `Command::EnterGoLive` / `ExitGoLive` / `OpenPreview` /

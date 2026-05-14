@@ -36,6 +36,20 @@ pub enum ProjectSource {
     Demo(&'static str),
 }
 
+/// Which outputs the operator wants fullscreened when entering GoLive.
+/// `Both` is the safe default (matches single-projector behaviour: the only
+/// output goes fullscreen). `LeadOnly` lets the operator keep the Follow
+/// window onscreen as a cueing surface while the Lead projector goes live.
+#[cfg(feature = "v3")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GoLiveTarget {
+    /// Fullscreen every output (Lead + Follow). Default.
+    #[default]
+    Both,
+    /// Fullscreen only the Lead (first) output; Follow stays windowed.
+    LeadOnly,
+}
+
 /// Operator-driven event coming from any registered [`Source`].
 #[derive(Debug, Clone)]
 pub enum Command {
