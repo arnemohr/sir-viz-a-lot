@@ -30,10 +30,9 @@ static PROVIDER: OnceLock<Arc<dyn OscProvider>> = OnceLock::new();
 /// ignored — once the dispatch sees a provider it should not change
 /// for the lifetime of the app.
 ///
-/// W2.1 follow-up wires `controls::osc::OscSource::start` to install
-/// a `CcRegistry`-equivalent provider here; until then the resolve
-/// path always returns `0.0`.
-#[allow(dead_code)] // wired by W2.1 OSC value-registry follow-up
+/// PCleanup.6.1 — `controls::osc::OscSource::start` calls this with an
+/// `OscValueRegistry` instance when the UDP listener binds successfully.
+/// Before that wiring, the resolve path always returned `0.0`.
 pub fn install(provider: Arc<dyn OscProvider>) {
     let _ = PROVIDER.set(provider);
 }
