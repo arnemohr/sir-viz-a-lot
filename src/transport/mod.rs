@@ -20,7 +20,73 @@
 //! that advances `fade_progress` and fires follow-chain cues without any
 //! async machinery.
 
-use crate::project::schema::{BpmQuantize, Cue, CueFireMode, TimecodePosition};
+use crate::project::schema::{
+    BpmQuantize, CcBinding, Cue, CueFireMode, OscBinding, TimecodePosition,
+};
+
+// -----------------------------------------------------------------------
+// PCleanup.3.4 — Cue timing binding resolution
+// -----------------------------------------------------------------------
+//
+// Cue carries six optional bindings (in_time/hold/out_time × MIDI/OSC).
+// They were authored into the schema in P6.2.1 but the transport tick
+// read `cue.in_time_s` / `cue.hold_time_s` directly, ignoring the bound
+// values — a stranded feature until this commit.
+//
+// Resolution rules:
+//   * OSC binding takes precedence over MIDI binding when both are set
+//     (OSC bindings are the more deliberate / less-default-configured
+//     mapping in practice).
+//   * Either binding REPLACES the static value when set; the static is
+//     the fallback when no binding fires.
+//   * scale + offset apply linearly to the controller's normalised value
+//     (0.0..=1.0 from MIDI CC or OSC 0..=1 convention), matching how
+//     `Modulator::MidiBound` / `Modulator::OscBound` already resolve.
+//   * MIDI provider returns 0.0 when no controller has sent that CC yet;
+//     OSC provider returns 0.0 for never-seen addresses. So `scale=1.0`
+//     `offset=2.0` gives a 2-second default before any movement.
+
+fn resolve_cc_binding(b: &Option<CcBinding>) -> Option<f32> {
+    b.as_ref()
+        .map(|cc| crate::modulators::midi::current_value(cc.channel, cc.cc) * cc.scale + cc.offset)
+}
+
+fn resolve_osc_binding(b: &Option<OscBinding>) -> Option<f32> {
+    b.as_ref()
+        .map(|o| crate::modulators::osc::current_value(&o.addr) * o.scale + o.offset)
+}
+
+/// PCleanup.3.4 — Effective in-time at fire-tick. Returns the OSC-bound
+/// value if set, else the MIDI-CC-bound value if set, else `cue.in_time_s`.
+pub fn effective_in_time(cue: &Cue) -> f32 {
+    resolve_osc_binding(&cue.in_time_osc)
+        .or_else(|| resolve_cc_binding(&cue.in_time_binding))
+        .unwrap_or(cue.in_time_s)
+}
+
+/// PCleanup.3.4 — Effective hold-time at fire-tick. A bound value
+/// produces `Some(value)` (a concrete hold, overriding the static); an
+/// unbound cue returns `cue.hold_time_s` (which may itself be `None`
+/// for "indefinite hold"; behaviour matches the pre-binding code path).
+pub fn effective_hold_time(cue: &Cue) -> Option<f32> {
+    if let Some(v) = resolve_osc_binding(&cue.hold_osc) {
+        return Some(v);
+    }
+    if let Some(v) = resolve_cc_binding(&cue.hold_binding) {
+        return Some(v);
+    }
+    cue.hold_time_s
+}
+
+/// PCleanup.3.4 — Effective out-time at fire-tick. Bindings override the
+/// static value when set. Out-time is currently consumed only by future
+/// crossfade-out work (P6.5.x); wired here for completeness and parity
+/// with in-time / hold-time binding behaviour.
+pub fn effective_out_time(cue: &Cue) -> f32 {
+    resolve_osc_binding(&cue.out_time_osc)
+        .or_else(|| resolve_cc_binding(&cue.out_time_binding))
+        .unwrap_or(cue.out_time_s)
+}
 
 /// P6.5.1 — Session-scoped transport state.
 ///
@@ -118,15 +184,21 @@ impl TransportState {
         };
 
         // --- In-time crossfade progress ---
-        if cue.in_time_s > 0.0 {
-            self.fade_progress = (self.fade_progress + delta_s / cue.in_time_s).clamp(0.0, 1.0);
+        // PCleanup.3.4 — read through effective_in_time so a per-cue
+        // OSC/MIDI binding can live-trim the fade duration during the show.
+        let in_time = effective_in_time(cue);
+        if in_time > 0.0 {
+            self.fade_progress = (self.fade_progress + delta_s / in_time).clamp(0.0, 1.0);
         } else {
             self.fade_progress = 1.0;
         }
 
         // Once the in-time fade is complete and fire_mode is Follow, count hold time.
         if self.fade_progress >= 1.0 && cue.fire_mode == CueFireMode::Follow {
-            let hold_limit = cue.hold_time_s.unwrap_or(f32::INFINITY);
+            // PCleanup.3.4 — effective_hold_time returns the bound value
+            // when set; falls back to cue.hold_time_s (which may itself be
+            // None for indefinite hold).
+            let hold_limit = effective_hold_time(cue).unwrap_or(f32::INFINITY);
             self.hold_elapsed_s += delta_s;
 
             if self.hold_elapsed_s >= hold_limit {
@@ -275,6 +347,123 @@ mod tests {
 
     fn snap_cue(name: &str) -> Cue {
         Cue::new(name, serde_json::json!({}), None)
+    }
+
+    // ----- PCleanup.3.4 — cue timing binding resolution ------------------
+
+    /// PCleanup.3.4 — no binding set → effective_* returns the static value.
+    /// Regression guard: the binding plumbing must not change behaviour for
+    /// existing cues that have no bindings (the common case for v1 shows).
+    #[test]
+    fn effective_times_fall_back_to_static_when_unbound() {
+        let mut c = snap_cue("plain");
+        c.in_time_s = 2.0;
+        c.hold_time_s = Some(5.0);
+        c.out_time_s = 0.5;
+        assert_eq!(effective_in_time(&c), 2.0);
+        assert_eq!(effective_hold_time(&c), Some(5.0));
+        assert_eq!(effective_out_time(&c), 0.5);
+    }
+
+    /// PCleanup.3.4 — hold_time_s = None (indefinite) is preserved when no
+    /// binding fires. Catches accidental replacement with Some(0.0).
+    #[test]
+    fn effective_hold_time_preserves_indefinite() {
+        let c = snap_cue("indefinite");
+        // Cue::new defaults hold_time_s to None.
+        assert_eq!(c.hold_time_s, None);
+        assert_eq!(effective_hold_time(&c), None);
+    }
+
+    /// PCleanup.3.4 — OSC binding alone (never-seen address → 0.0 from
+    /// provider) resolves to `0.0 * scale + offset = offset`. Lets an
+    /// operator set a sensible default through the binding's offset field
+    /// without sending an initial OSC packet.
+    ///
+    /// No PROVIDER installed in this test process (matches
+    /// `modulators::osc::tests::current_value_is_zero_without_provider`'s
+    /// safety guarantee), so the addr lookup yields 0.0.
+    #[test]
+    fn effective_in_time_osc_binding_offset_only() {
+        let mut c = snap_cue("osc-bound");
+        c.in_time_s = 9.0; // static — should be overridden
+        c.in_time_osc = Some(OscBinding {
+            addr: "/rmap/cue/1/in_time".into(),
+            scale: 10.0,
+            offset: 1.5, // default when address never seen
+        });
+        // 0.0 * 10.0 + 1.5 = 1.5; static 9.0 ignored because binding is set.
+        assert!((effective_in_time(&c) - 1.5).abs() < 1e-6);
+    }
+
+    /// PCleanup.3.4 — CC binding alone with never-seen CC resolves to
+    /// `offset`. Same semantics as the OSC case for parity.
+    #[test]
+    fn effective_in_time_cc_binding_offset_only() {
+        let mut c = snap_cue("cc-bound");
+        c.in_time_s = 9.0;
+        c.in_time_binding = Some(CcBinding {
+            channel: 0,
+            cc: 7,
+            scale: 5.0,
+            offset: 0.25,
+        });
+        // 0.0 * 5.0 + 0.25 = 0.25; static 9.0 ignored.
+        assert!((effective_in_time(&c) - 0.25).abs() < 1e-6);
+    }
+
+    /// PCleanup.3.4 — OSC takes precedence over CC when both are set on
+    /// the same field. This is the documented resolution order.
+    #[test]
+    fn effective_in_time_osc_precedes_cc() {
+        let mut c = snap_cue("both-bound");
+        c.in_time_s = 9.0;
+        c.in_time_osc = Some(OscBinding {
+            addr: "/rmap/cue/1/in_time".into(),
+            scale: 1.0,
+            offset: 3.0, // OSC offset wins
+        });
+        c.in_time_binding = Some(CcBinding {
+            channel: 0,
+            cc: 7,
+            scale: 1.0,
+            offset: 7.0, // CC offset, should be shadowed by OSC
+        });
+        // Resolution: OSC -> 0.0 * 1.0 + 3.0 = 3.0. CC not consulted.
+        assert!((effective_in_time(&c) - 3.0).abs() < 1e-6);
+    }
+
+    /// PCleanup.3.4 — bound hold time produces a concrete Some(value),
+    /// overriding a static `None` (indefinite hold). Bound-by-static-None
+    /// is the exact case the test exists for: an operator binds hold to
+    /// a knob so the indefinite default becomes a concrete duration.
+    #[test]
+    fn effective_hold_time_binding_overrides_none() {
+        let mut c = snap_cue("hold-bound");
+        c.hold_time_s = None; // indefinite by default
+        c.hold_binding = Some(CcBinding {
+            channel: 0,
+            cc: 8,
+            scale: 1.0,
+            offset: 4.0,
+        });
+        // Bound -> 0.0 + 4.0 = 4.0, so hold is now Some(4.0).
+        assert_eq!(effective_hold_time(&c), Some(4.0));
+    }
+
+    /// PCleanup.3.4 — out_time wiring parity (currently unused at runtime
+    /// but the helper exists so future crossfade-out work picks it up
+    /// without re-plumbing).
+    #[test]
+    fn effective_out_time_respects_binding() {
+        let mut c = snap_cue("out-bound");
+        c.out_time_s = 1.0;
+        c.out_time_osc = Some(OscBinding {
+            addr: "/rmap/cue/1/out".into(),
+            scale: 1.0,
+            offset: 2.5,
+        });
+        assert!((effective_out_time(&c) - 2.5).abs() < 1e-6);
     }
 
     fn follow_cue(name: &str, hold_s: f32) -> Cue {
