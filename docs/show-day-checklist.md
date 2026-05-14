@@ -79,6 +79,13 @@ Use this top-to-bottom before doors; aim for under five minutes once you know yo
     across the seam should look even (approximately 1.0 combined). Adjust
     the overlap width in the OutputPanel until the seam is invisible at show
     distance.
+22a. **Per-projector gamma trims (v1.1)** — If the two projectors are not
+    perfectly matched (one slightly brighter / cooler than the other), use
+    the **Per-projector trims** sliders in each Output sub-card (Gamma /
+    Brightness / Contrast) to pull them into alignment. The cascade is
+    `output override > project override > project master`, so per-output
+    trims override the project-level tuning for that one projector only.
+    Set during setup; verify with a flat-grey test image before doors.
 
 ## MIDI controller (v0.4)
 
@@ -96,6 +103,20 @@ Use this top-to-bottom before doors; aim for under five minutes once you know yo
     every expected OSC address appears in the read-only bindings summary.
     Send a test value from your patch; verify the bound parameter moves.
     Check this before going to go-live.
+25a. **OSC parameter modulators (v1.1)** — `Modulator::OscBound` now reads
+    live values from incoming OSC traffic. Send a known value to a bound
+    address and confirm the slider moves before the show. If the slider
+    stays at zero, the OSC datagram isn't reaching rmap (firewall? wrong
+    port?) — debug with the macOS `nc -u -l <port>` listener.
+
+## Audio feature (v1.1)
+
+25b. **Audio feature compiled in?** — If your show binds any parameter to
+    `Modulator::Audio { band, .. }`, ensure rmap was built with
+    `cargo build --features audio` (CPAL is opt-in). The launcher emits a
+    one-shot warn-toast at project load if audio modulators exist but the
+    feature is compiled out; if you see that toast, rebuild with the
+    feature before doors.
 
 ## FX layer presets (v0.4)
 

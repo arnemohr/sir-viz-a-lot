@@ -1,14 +1,16 @@
 # rmap
 
-rmap is a single-machine projection-mapping tool for small live shows. Load a
-still image or SVG, drag the warp corners onto your wall or screen, dial in a
-mask polygon to hide the edges, and save the whole setup as a project file you
-can reload at the next event. Up to two projectors are supported, with edge
-blend and per-projector RGB colour calibration. The launcher opens a bundled
-demo so you can explore the canvas immediately — no command-line flags required.
+rmap is a projection-mapping tool for small live shows — one laptop in the
+booth driving one or two projectors at a club, gallery, warehouse, or event.
+Drop in a photo, a video, or a logo; warp it to fit the wall; stack effects
+that move with the music; save the whole setup as a project file you can
+reload at the next gig.
 
-**Supported media:** SVG, PNG, JPG (stable); video decode — decoder selected
-(AVFoundation), integration in flight.
+If you've used VJ software or a media server before, the pieces will look
+familiar. If not, the guide below walks you from zero to a visually striking
+scene in about fifteen minutes — no coding, no shader writing.
+
+**Media supported today:** SVG, PNG, JPG; H.264 video (mp4 / mov / m4v).
 
 <!-- TODO: screenshot of launcher -->
 
@@ -16,253 +18,474 @@ demo so you can explore the canvas immediately — no command-line flags require
 
 <!-- TODO: screenshot of show-day strip -->
 
+## Getting rmap on your machine
+
+There is no public prebuilt app yet. You'll need either:
+
+- **The Rust toolchain installed** — `make setup` once, then `cargo run
+  --release`. Most casual users skip this path.
+- **A `.app` someone built for you** — if a developer hands you `rmap.app`,
+  drag it into `/Applications` and launch it like any Mac app.
+
+macOS is the only supported platform in v1 — the live-show features
+(display-sleep prevention, app-nap suppression) are macOS-specific by design.
+
 ## Quick start
 
-1. Build and run:
+1. Launch rmap. The launcher window opens.
+2. Click **Try a demo** for one of four built-in demos:
+   - **window-glow** — a lit architectural still.
+   - **film-strip** — multi-layer composition.
+   - **test-grid** — alignment grid, useful for verifying the warp.
+   - **fx-ripple-wash** — animated ripple along a mask edge.
+3. To use your own visuals, click **Open a recent show** or drag a JPG,
+   PNG, SVG, or MP4 onto the canvas after a project is open.
+4. Drag the **warp corners** on the canvas until the image lines up with
+   the wall or screen.
+5. Tap **Save** in the toolbar — the project becomes a `.rmap.json` file
+   you can reload next time.
 
-   ```bash
-   cargo run --release
-   ```
+That's the floor. Everything else is decoration.
 
-2. The launcher window opens. Click **Try a demo** to choose from four bundled
-   demos: **window-glow** (a lit architectural still), **film-strip** (a
-   multi-layer composition), **test-grid** (an alignment grid useful for
-   verifying warp accuracy), and **fx-ripple-wash** (a mask-edge FX preset
-   demo).
+---
 
-3. To use your own content, click **Open a recent show** (if you have one) or
-   drag a JPG, PNG, or SVG onto the canvas once a project is open.
+## Pick a look
 
-4. Adjust warp corners directly on the canvas, mask out surfaces you don't
-   want lit, and save with **Save** in the toolbar.
+Tell rmap what you want; the recipe below tells you which buttons to click.
 
-## Top-chrome live readouts
+| You want… | See |
+|---|---|
+| A still image that breathes / pulses with the music | [Recipe 1](#recipe-1--photo-that-breathes-with-the-beat) |
+| A video that smears into trails as it plays | [Recipe 2](#recipe-2--video-with-motion-trails) |
+| A logo that flashes on every beat | [Recipe 3](#recipe-3--beat-strobed-logo) |
+| Glowing particles drifting through a window or portal | [Recipe 4](#recipe-4--particles-on-architecture) |
+| A heavy, trippy, posterised colour-shift abstract | [Recipe 5](#recipe-5--trippy-colour-shift) |
+| A full immersive scene with one click | [Scene templates](#scene-templates--the-five-minute-stage-look) |
 
-The top bar of the control window shows the project name (with a `*` dirty
-marker when there are unsaved changes), undo/redo buttons, and save controls.
-To the right of those: the **BPM HUD** — a live tempo readout, the tap source
-("Space", "MIDI", or "OSC"), and a quantize selector (Off / 1 bar / 2 bars …)
-that makes cue firing wait for the next bar boundary instead of firing
-immediately. At the far right, a **live thumbnail of the projector output** is
-always visible; click it to bring the preview window forward.
+Each recipe is a short click sequence. None require coding or shader work.
 
-## Layer solo / mute
+---
 
-Every layer row in the left rail carries two toggle buttons:
+## Vocabulary primer
 
-- **S (solo)** — isolates a single layer; only one layer can be soloed at a
-  time across the whole project.
-- **M (mute)** — drops the layer from the output without deleting it. The row
-  thumbnail and label dim to roughly 50 % to show the muted state.
+Three words that matter:
 
-Both toggles survive undo and scene recall, making them safe for silently
-subbing a layer in or out mid-cue before committing to a scene save.
+- **Layer** — one image, video, SVG, or generative element on the wall.
+  A project can have many; they stack like Photoshop layers.
+- **Effect** — a process applied to *one* layer (Color, Blur, Transform,
+  Tint, Treatment, Feedback). Each layer has its own effect stack; they
+  run in order.
+- **Modulator** — what makes an effect parameter move on its own (BPM
+  tap, audio band, MIDI knob, internal sine LFO, …).
+- **Mask** — the polygon that defines where the layer is visible on the
+  wall. Outside the polygon, the layer is invisible.
 
-## Multi-projector (v0.4)
+Whenever a slider supports a modulator, there is a small combobox next to
+it (showing "fixed value" by default). Click that combobox to change the
+source — "fixed value" / "sine" / "tri" / "noise" / "bpm" / "audio" /
+"osc" / "midi".
 
-The launcher's output picker lets you assign up to two projectors. An
-identify-flash highlights each output so you can confirm which display is
-which. The `output_targets` list in the project file stores one entry per
-projector; the render loop applies passes 1–4 once and passes 5–6 (including
-edge-blend and colour calibration) per output.
+---
 
-**Edge blend** — set an overlap width and the edge-blend WGSL applies a
-multiply-blend gradient so the intensity across the seam sums to 1.0. The
-edge-blend gradient test pattern in the show-day strip makes alignment
-verification fast.
+## Recipes
 
-**Per-projector RGB matrix** — a 3×3 colour matrix in the OutputPanel corrects
-white-point and colour-temperature per projector. The identity matrix is
-bit-equivalent to the un-matrixed path; a non-identity state is marked in the
-panel header.
+### Recipe 1 — Photo that breathes with the beat
 
-## OSC and MIDI bindings (v0.4)
+1. Drag a PNG or JPG onto the canvas. The image becomes a layer in the
+   left rail with a default effect stack (Color → Blur → Transform — all
+   inert at default values).
+2. Click the layer to select it. The right panel shows its effects.
+3. Find the **Transform** effect. Next to the **Scale X** slider, change
+   the modulator combobox from "fixed value" to **bpm**.
+4. The picker reveals three numbers: **divisor**, **amp**, **offset**.
+   Set `offset = 1.0`, `amp = 0.05`, `divisor = 1` — meaning one full
+   breath cycle per beat, centred at scale 1.0, breathing ±5 %.
+5. Repeat for **Scale Y**.
+6. Tap the tempo: press **Space** four times in time with the kick. The
+   BPM HUD in the top chrome shows the tempo and the tap source ("Space").
+   Or feed in MIDI Clock from your DJ controller — see [Sync to
+   music](#sync-to-music).
 
-Right-click any parameter row to open the binding picker. Choose **OSC** to
-bind to an incoming OSC address, or **MIDI** to use MIDI-learn: arm the
-parameter, send a CC from your controller, and the binding is captured and
-added to the undo stack. Scale and offset are derived from the CC range
-automatically. Active OSC bindings are summarised in the Advanced panel's OSC
-section before go-live.
+Push `amp` higher for stronger pulses; raise `divisor` to slow it down
+(2 = one cycle every 2 beats).
 
-## FX layers (v0.4)
+**Watch out for:** if the image has straight edges, large `amp` will
+bleed past the mask boundary visibly. Use `Cover` fit (see Source fit
+below) and a tight mask polygon to hide it.
 
-Add an FX layer from the layer picker. Each FX layer holds a `preset_id` and
-a parameter map. The shipped preset, `mask_edge_ripple_wash`, applies an
-animated ripple wash along the edges of the layer's mask polygon. The demo
-project `fx-ripple-wash` in the launcher shows the preset in action.
+### Recipe 2 — Video with motion trails
 
-## Spatial Zones (v0.7)
+1. Drag a `.mp4` / `.mov` / `.m4v` onto the canvas. The video auto-plays
+   in a loop.
+2. Select the layer. In the right panel, click **+ Add effect** →
+   **Feedback**.
+3. Drag the **decay** slider up — the higher the decay, the longer the
+   trails. Try **0.85** to start. `offset` shifts the previous frame
+   before re-blending; small non-zero offsets give directional motion
+   smear.
+4. Optional: change the **decay** modulator to **audio** (needs audio
+   build; see below), band 0 or 1 for bass-driven smear, amp around 0.3,
+   offset 0.7.
 
-Operators can tag any mask polygon with a semantic zone role — **Window**,
-**Portal**, **Void**, **Spill**, **Edge**, **Highlight**, or **Light Source** —
-from a small palette inside Mask mode. Zone-aware FX presets read the tag at
-runtime and activate their effect only for the matching role, outputting
-transparent black for everything else (no crash, no configuration needed).
+**Watch out for:** decay ≥ 0.95 never fully fades — anything you paint
+stays effectively forever. Looks great for ten seconds, then you want to
+clear it. Mute the layer briefly (M button in the left rail) to reset.
 
-The three zone-consuming presets shipped in v0.7 cover the most common
-projection-mapping scenarios: a warm-glow light spill for window surfaces, a
-tight boundary ripple for architectural edges, and a luminous particle drift for
-portal-like regions. Each preset shows a "requires zone tag" hint in the preset
-browser so the operator knows the workflow before applying it. Zone roles are
-documented in the Glossary window — search "zone" or hover any role label in
-Mask mode for a concise definition.
+### Recipe 3 — Beat-strobed logo
 
-Old projects without zone tags load and render identically; the schema migration
-adds `zone_role: null` automatically.
+1. Drag an SVG or transparent PNG onto the canvas.
+2. Select the layer. In the right panel under **Layer**, change the
+   **Opacity** slider's modulator combobox from "fixed value" to **bpm**.
+3. Set `offset = 0.5`, `amp = 0.5`, `divisor = 1` — opacity rides 0 → 1
+   on every beat (`0.5 ± 0.5 · sin(2π·t/beat)`). For double-time, set
+   `divisor = 0.5`; for half-time, `divisor = 2`.
+4. Tap tempo via **Space** or sync to MIDI Clock.
 
-## Scene Grammars (v0.8)
+**Watch out for:** strobing above ~3 Hz can trigger photosensitive
+seizures in a small fraction of the audience. Warn the room or keep
+strobe rate low. The **B (Blackout)** key kills output instantly if you
+need an emergency cut.
 
-Scene templates let operators build a complete immersive scene in under five
-minutes: pick a template, assign a few media assets, map zone roles, and
-confirm. Every template is a portable, self-contained recipe — it carries no
-projector-specific warp geometry, only semantic declarations (zones, media
-slots, FX presets).
+### Recipe 4 — Particles on architecture
 
-### Starting the wizard
+1. Drop a photo of the wall as a reference layer. Mute it (`M` button)
+   so it doesn't render — you'll see only the particles on top of black.
+2. Add an FX layer: layer picker → **+ FX layer**.
+3. Select the FX layer. Open **Advanced → Selected layer → FX Preset**.
+   The preset browser opens.
+4. In the **Particle** family, pick one of:
+   - **Constrained drift** — particles drift around inside the mask.
+   - **Edge emission** — particles spawn along the mask boundary.
+   - **Flow field** — particles follow a curl-noise flow field.
+   - **Collision reflection** — particles bounce off the mask polygon.
+5. Draw a mask polygon in **Mask mode** matching the wall feature you
+   want lit (window, doorway, alcove). Tag it as **Window** or **Portal**
+   from the small palette in Mask mode.
+6. Unmute the reference photo once you're happy with the particle
+   behaviour. Keep it muted for clean particle-only renders.
 
-Click **"New scene…"** in the toolbar (available while in Editing mode). A
-five-step wizard opens:
+**Watch out for:** there is also a basic **Particles** preset (without
+"constrained" / "edge" / "flow" / "collision" in the name) that is
+hardcoded to the centre 40 % of the layer regardless of mask. Use the
+four mask-aware presets above. Tagging the mask polygon as **Window** /
+**Portal** is what unlocks zone-aware preset behaviour.
 
-1. **Template** — pick from the eight built-in templates.
-2. **Media** — assign image or video files to each slot via the native file
-   picker. Empty slots produce invisible layers; you can assign media after
-   confirming.
-3. **Zones** — bind project zone roles to the template's declared zones.
-   (Requires masks tagged in Phase 3 Zone mode; templates still instantiate
-   without zone bindings.)
-4. **Palette & Mood** — choose a colour accent (Warm / Cool / Neutral) and
-   mood character (Calm / Energetic / Ethereal).
-5. **Tempo** — enable BPM sync to lock animation speed to the project clock.
+### Recipe 5 — Trippy colour shift
 
-Press **Confirm** (or Return) to apply. The resulting layers appear in the
-layer list as ordinary entries — you can adjust them via the usual editor
-tools. Press Cmd-Z to undo the entire wizard in one step.
+1. Drag an image or video onto the canvas.
+2. Select the layer. Open **Advanced → Selected layer → Treatment**.
+   (Treatment is only available on Image and Video layers — SVG / FX /
+   NDI layers show a greyed-out panel.)
+3. From the preset combobox, pick **Palette / posterize**. Drag the
+   bit-depth slider down — lower bit depths give chunkier, more posterised
+   colour. Enable ordered dither for a stippled look.
+4. Back in the layer's effect stack, **+ Add effect** → **Color**.
+   Change the **hue** modulator combobox to **bpm** and set
+   `divisor = 16, amp = 1.0, offset = 0.0` — one full hue rotation every
+   16 beats.
+5. Optional: stack **+ Add effect** → **Tint**, set the colour and the
+   mode (Multiply / Add / Screen). Tint with `amount` modulated by
+   audio band 4 or 5 for a glow that responds to mids.
 
-### Built-in templates
+**Watch out for:** Treatment is an image-grammar concept and only applies
+to Image and Video layers. On SVG / FX / NDI layers, build the look from
+Color + Tint + Blur effects instead.
 
-| Template | Zones | Media | Effect |
-|---|---|---|---|
-| Window Reveal | Window | Background | Ripple wash |
-| Pixel Drift | — | Source | Constrained drift |
-| Collage Bloom | — | 4 images | Edge emission |
-| Glow Behind Openings | Portal | Glow source | Bounded fluid |
-| Fragmented Portrait | — | Portrait | Collision reflection |
-| Architectural Wash | Edge | Surface | Ripple wash |
-| Mask-Edge Ripple Wash (Scene) | — | — | Ripple wash |
-| Light Spill from Windows | Window | Interior | Field flow |
+### Scene templates — the five-minute stage look
 
-### Zone binding note
+Click **New scene…** in the toolbar. A five-step wizard opens:
 
-Templates that declare `zones_consumed` (Window Reveal, Glow Behind Openings,
-Architectural Wash, Light Spill from Windows) emit a `TemplateZonesMissing`
-audit warning if the project has no masks tagged with the required roles.
-The template still instantiates and renders — zone roles improve the output
-but are not required. Tag masks in Mask mode (Phase 3) for full effect.
+1. **Template** — pick from eight built-in templates.
+2. **Media** — drop photos / videos into each slot via the native file
+   picker.
+3. **Zones** — match your project's tagged masks to the template's
+   declared zone roles. Templates instantiate even with no zone matches,
+   they just look better when zones line up.
+4. **Palette & Mood** — Warm / Cool / Neutral, Calm / Energetic / Ethereal.
+5. **Tempo** — turn on BPM sync to lock animations to the project clock.
 
-## FX Preset Library (v0.6)
+Press **Confirm** (or Return) and a complete scene appears in the layer
+list. **Cmd-Z** undoes the entire wizard in one step.
 
-rmap ships 14 built-in procedural presets across three families — **Wave**
-(mask-edge ripple and displacement/refraction Treatments), **Particle** (GPU
-compute presets: constrained drift, edge emission, flow field, collision
-reflection), and **Fluid** (Navier-Stokes advection bounded inside the mask
-polygon). The three-click flow is: drop a mask, open the preset browser from
-Advanced → Selected layer → FX Preset, pick a preset, and it runs immediately.
+| Template | Best for |
+|---|---|
+| Window Reveal | Lit interior visible through a window-mask |
+| Pixel Drift | One image dispersed into drifting pixels |
+| Collage Bloom | Four images blooming at the edges |
+| Glow Behind Openings | Soft glow filling a portal-tagged mask |
+| Fragmented Portrait | A portrait broken up by collision particles |
+| Architectural Wash | Ripple wash along edges of a wall mask |
+| Light Spill from Windows | Warm interior light spilling out of windows |
+| Mask-Edge Ripple Wash | Pure ripple animation on the mask edge |
 
-The browser lets you search by name, filter by family, and star presets you
-reach for often. Once you've tuned a preset's parameters to your taste, use
-**Export preset** to save a `.rmap-preset.json` file you can share between
-projects — the export carries only `preset_id` and parameter values, with no
-media paths or warp data embedded.
+Templates are portable. Once you've built a look in one project you can
+export it as a `.rmap-preset.json` for FX, or save the whole scene to a
+`.rmap-scene-pack.zip` for sharing.
 
-## Treatment presets (v0.5)
+---
 
-Drop an image or video, open Advanced → Selected layer → **Treatment**, and
-pick one of six presets. Each one is bit-exact identity at default
-parameters, so the operator sees no change until they reach for a slider —
-makes the preset list safe to scrub through on stage.
+## Building blocks
 
-- **Tone map** — exposure / contrast / shoulder rolloff. Lifts shadows and
-  rolls off highlights for video frames shot in mixed lighting.
+### Layers — what goes on the wall
+
+| Kind | Description | When to use |
+|---|---|---|
+| **Image** | PNG, JPG | Photos, posters, logos with raster detail |
+| **SVG** | Scalable vector graphic | Logos, line-art, anything that should scale cleanly |
+| **Video** | mp4 / mov / m4v (H.264) | Looping content, pre-rendered VJ footage |
+| **FX layer** | Procedural shader preset | Particles, fluid simulation, mask-edge animation |
+| **NDI** | Live network stream | Output from another machine (TouchDesigner, Resolume…) |
+
+Every layer carries its own warp corners, mask polygon, blend mode,
+opacity, and effect stack.
+
+Image and SVG layers expose **Source fit** (Cover / Contain / Stretch +
+focal X / Y for Cover). Video layers add **Playback speed** (0.25× – 4×,
+log slider), **Loop mode** (Loop / Once / Ping-pong), and **In / Out
+points** for trimming. With **BPM-lock** on, effective video speed
+scales with the project clock (120 BPM = identity).
+
+### Effects — the per-layer stack
+
+You stack effects on a single layer with **+ Add effect**. They run in
+order; drag to reorder; the × button removes one.
+
+| Effect | What it does | Watch out for |
+|---|---|---|
+| **Color** | Hue / saturation / brightness / contrast | Defaults are inert — slide to see anything |
+| **Blur** | Two-pass gaussian blur | Radius 0 = inert; large radii are GPU-heavy |
+| **Transform** | Translate / rotate / scale the layer | Stacks with the mask, not the warp |
+| **Tint** | Wash a colour over the layer (Multiply / Add / Screen) | `amount = 0` is inert |
+| **Treatment** | Apply a Treatment preset — but the per-effect preset picker is not wired yet; use **Advanced → Treatment** instead | Effect-stack Treatment is currently inert (no UI to pick a preset). Use the **Advanced → Treatment** panel on Image / Video layers |
+| **Feedback** | Blend the previous frame back in for trails | `decay ≥ 0.95` never decays — looks frozen |
+
+### Modulators — what makes effects move
+
+Whenever a slider supports modulation, a small combobox sits next to it.
+The eight sources:
+
+| Source | What it reads | Notes |
+|---|---|---|
+| **fixed value** | A static number | The default; not really a modulator |
+| **sine** | Internal sine LFO (period, amp, offset) | Smooth oscillation; needs no music |
+| **tri** | Triangle LFO | Same as sine, with triangular shape |
+| **noise** | Smoothed random LFO | Drifting, organic motion |
+| **bpm** | Sine tied to the project beat clock | `divisor` = cycle length in beats |
+| **audio** | One of 8 FFT bands (0 = sub-bass, 7 = highs) | Needs audio build — see below |
+| **osc** | An incoming OSC address | Bind via the picker |
+| **midi** | A specific MIDI CC | Right-click the parameter label → "Learn next MIDI CC", then turn the knob |
+
+All bindings are undoable. Range, scale, and offset adjust per binding.
+
+### Masks — where the light lands
+
+The mask polygon tells rmap where the layer is visible. Outside the
+polygon, the layer renders as transparent black.
+
+Open **Mask mode** to draw the polygon directly on the canvas: drag
+vertices, click an edge to insert a new vertex, right-click a vertex to
+remove. The mask is stored per-layer and survives undo.
+
+Tag any mask with a **zone role** from the small palette in Mask mode:
+**Window**, **Portal**, **Void**, **Spill**, **Edge**, **Highlight**, or
+**Light Source**. Zone-aware FX presets activate only for the matching
+role, outputting transparent black for everything else (no crash, no
+configuration needed). Plain effects ignore the tag — it's purely a hint
+for zone-aware presets and for Art-Net DMX fixtures (see Power users).
+
+---
+
+## Sync to music
+
+This is the single biggest reason to use rmap for parties and live
+events. Pick whichever you have.
+
+### BPM tap tempo (always available)
+
+Press **Space** four times in time with the kick. The BPM HUD in the top
+chrome shows the current tempo and the tap source ("Space"). A
+**quantize** dropdown (Off / ½ bar / 1 bar / 2 bars / 4 bars) makes
+scene transitions wait for the next bar boundary instead of firing
+immediately.
+
+Once the BPM clock has a tempo, every slider with its modulator set to
+**bpm** moves in time.
+
+### MIDI controller (always available)
+
+Plug in any USB MIDI controller. Right-click the parameter's label (the
+text next to the slider) → **Learn next MIDI CC**. The label gets a
+pulsing dot to show it is armed. Turn the knob you want — rmap captures
+the CC and scales it to the slider's range.
+
+MIDI Clock from a DJ controller (Pioneer, Denon, Native Instruments…)
+drives the BPM clock automatically. The BPM HUD will show "MIDI" as the
+tap source.
+
+### OSC (always available)
+
+Phone apps (TouchOSC, Hexler, Lemur), Resolume, TouchDesigner — anything
+that speaks OSC. In the modulator combobox, switch to **osc**, then
+enter the address (e.g. `/1/fader1`), a scale, and an offset. Active
+OSC bindings are summarised in **Advanced → Live → OSC**.
+
+### Audio-reactive (needs audio build)
+
+When the binary was built with `--features audio`, an 8-band FFT meter
+strip appears above the cue strip. In the modulator combobox, switch to
+**audio** and pick the band (0 = sub-bass, 7 = highs). The slider
+follows the FFT amplitude in real time.
+
+Default builds do not include audio capture. If you switch a slider to
+**audio** in such a build, the value resolves to 0.0 and rmap shows a
+one-shot toast at project load explaining the binary lacks audio
+support. Ask whoever built your app to rebuild with audio support if you
+need this.
+
+### Internal LFOs (always available, music-free)
+
+The **sine**, **tri**, and **noise** modulator sources are pure
+software oscillators with a `period_s` in seconds, an `amp`, and an
+`offset`. No music input required — useful for slow, automatic motion
+in installations or when there is no live beat to lock to.
+
+---
+
+## Live workflow
+
+### Top chrome
+
+The top bar of the control window:
+
+- **Project name** with a `*` for unsaved changes.
+- **Undo / Redo** buttons (also Cmd-Z / Cmd-Shift-Z).
+- **Save** / **Save As** controls.
+- **BPM HUD** — live tempo, tap source ("Space" / "MIDI" / "OSC"),
+  quantize selector.
+- **Live thumbnail** of the projector output, always visible. Click it
+  to bring the projector preview window forward.
+
+### Solo and mute
+
+Every row in the left rail carries two toggle buttons:
+
+- **S (solo)** — isolate one layer; only one solo at a time across the
+  whole project.
+- **M (mute)** — drop the layer from the output without deleting it.
+  The row thumbnail dims to ~50 % to show muted state.
+
+Both survive undo and scene recall, so they're safe for silently swapping
+a layer in or out mid-cue before committing to a scene save.
+
+### Blackout
+
+Press **B** to kill the projector output (and, if `--features lighting`
+is enabled, all Art-Net fixtures in the same frame). Press **B** again
+to restore.
+
+### Save and reload
+
+**Save** writes a `.rmap.json` file with your full setup: layers, warp,
+masks, scenes, BPM clock, projector outputs, gamma.
+
+**Save Calibration…** writes a separate `.rmap-calibration.json`
+containing only the venue's warp + mask + gamma. Reusable across show
+files — a same-directory calibration is offered automatically when you
+open a project.
+
+---
+
+## Treatment presets
+
+Drop an image or video, open **Advanced → Selected layer → Treatment**,
+and pick one of nine presets. Each one is bit-exact at default parameters,
+so the preset list is safe to scrub through on stage:
+
+- **Tone map** — exposure / contrast / shoulder rolloff. Lifts shadows
+  and rolls off highlights for video shot in mixed lighting.
 - **Luminance reveal** — Rec. 601 luminance threshold modulates alpha;
-  useful for keying bright subjects out of a dark background.
-- **Blur mask** — SDF-gated separable gaussian. Feathers the mask edge into
-  the background without losing centre detail.
-- **Texture overlay** — composites an external image (loaded through the
-  shared image cache) over the source with one of four blend modes
-  (Normal / Multiply / Screen / Add).
+  keys bright subjects out of a dark background.
+- **Blur mask** — SDF-gated separable gaussian. Feathers the mask edge
+  into the background without losing centre detail.
+- **Texture overlay** — composites an external image over the source
+  with Normal / Multiply / Screen / Add.
 - **Palette / posterize** — bit-depth quantization with optional ordered
   dither.
-- **Collage (2×2)** — fixed four-slot grid composited over the source.
-  Pick up to four images; empty slots fall back to source.
+- **Collage (2×2)** — four-slot grid composited over the source; empty
+  slots fall back to source.
+- **Displacement ripple** — refracts the source through a sinusoidal
+  band around the mask edge.
+- **Refraction** — Snell-like UV bend near the mask boundary; glass-lens
+  look at the edge.
+- **Ripple lens** *(v1.1)* — concentric refraction rings keyed to mask
+  distance; the source warps into bulging-bands at the edge.
 
-The combobox plus per-param sliders dispatch undoable mutations on
-drag-release, so accidental scrubbing is one Cmd-Z away.
+Drag-release commits a single undoable mutation — accidental scrubbing
+is one **Cmd-Z** away.
 
-## Video grammar (v0.5)
+**Per-layer treatments (v1.1).** Treatments also run as
+`Effect::Treatment(id)` inside any layer's Effect stack — so the same
+shaders that ship as a global post-composition pass can now grade or
+warp a single layer hard while the rest of the scene stays untouched.
+Add via **+ Add effect → Treatment** and (until the picker UI lands)
+JSON-edit the `id` field to switch presets.
 
-Drag-drop an mp4 / mov / m4v; the layer auto-plays. Selected-layer →
-**Video** exposes:
+## FX preset library
 
-- **Playback speed** (0.25× — 4×, log slider).
-- **Loop mode** — *Loop* (seamless, default), *Once* (stop on EOF), or
-  *Ping-pong* (forward-only stub in v0.5; true reverse lands with the
-  Phase 7 keyframe cache).
-- **In / Out points** — number inputs in seconds. Default `Out` is the
-  sentinel "end" (no trim). The worker sets the AVAssetReader's
-  `timeRange` before reading, so trimming is decoder-bounded rather than
-  per-frame filtered.
-- **BPM-lock** — when on, effective speed scales with the show clock's
-  BPM (120 = identity). Pair with the BPM tap-tempo in the top chrome.
+rmap ships 14 procedural presets across three families:
 
-Video layers also expose the **Source fit** section (Cover / Contain /
-Stretch + focal X/Y when fit == Cover), parity with image layers.
+- **Wave** — mask-edge ripple and displacement / refraction Treatments.
+- **Particle** — GPU compute presets bounded by the mask polygon:
+  constrained drift, edge emission, flow field, collision reflection.
+- **Fluid** — Navier-Stokes advection bounded inside the mask.
 
-A small loop-mode glyph (∞ / → / ⇆) and in/out markers appear on the
-video layer's thumbnail in the left rail so the operator can read
-playback state at a glance without opening Advanced.
+Three-click flow: draw a mask, open **Advanced → Selected layer → FX
+Preset**, pick. The browser lets you search by name, filter by family,
+and star presets you reach for often. **Export preset** saves a
+`.rmap-preset.json` carrying only `preset_id` and parameter values — no
+media paths or warp data — that you can share between projects.
 
-## Show Control (v0.7)
+---
 
-<!-- Stub — P6.14.2 will fill this section with release copy. -->
+## Multi-projector and edge blend
 
-rmap v0.7 adds a full show-control system on top of the projection engine:
-a cuelist with per-cue timing, a transport state machine, a live transport
-HUD, audio-band parameter binding, and timecode sync (LTC, MTC, MIDI Clock).
+The launcher's output picker lets you assign up to two projectors. An
+**identify-flash** highlights each output so you can confirm which
+physical display is which.
 
-<!-- Cuelist + Transport placeholder -->
+- **Edge blend** — set an overlap width; the edge-blend shader applies
+  a multiply-blend gradient so the intensity across the seam sums to 1.0.
+  A gradient test pattern in the show-day strip makes alignment
+  verification fast.
+- **Per-projector RGB matrix** — a 3×3 colour matrix in the Output panel
+  corrects white-point and colour temperature per projector. Identity
+  matrix is bit-equivalent to the un-matrixed path; a non-identity state
+  is marked in the panel header.
 
-<!-- Live Input Surface placeholder -->
+Project files store the projector display UUID; on load, rmap matches
+the UUID first, falls back to the saved index, then falls back to
+display 0 with an audit warning. A `.rmap.json` saved on machine A opens
+on the same physical projector on machine B as long as the display UUID
+is recognised — no `--monitor` flag required.
 
-<!-- Timecode Sync placeholder -->
+---
+
+## Glossary
+
+The in-app **Glossary** window (Help → Glossary) defines every zone role,
+modulator source, and effect with examples. Searchable. Useful in the
+booth when memory fails.
+
+---
 
 ## Docs
 
-- [Show-day operator checklist](docs/show-day-checklist.md) — macOS-focused
-  pre-show steps, cables, verifying display-sleep prevention, and v0.4
-  two-projector / binding / FX checks.
-- [Keyboard accelerators](specs/keyboard-accelerators.md) — every key binding
-  with its source location.
-- [Capability scope](specs/v3-capability-scope.md) — v3 feature scope and
-  historical v3.1 deferred-item list.
-
-## Tests
-
-```bash
-make test
-```
-
-GPU golden tests (optional feature, requires a working wgpu adapter):
-
-```bash
-make test-gpu
-```
-
-Full CI (fmt + clippy + tests + doctests):
-
-```bash
-make ci
-```
+- [Show-day operator checklist](docs/show-day-checklist.md) — pre-show
+  steps, cables, verifying display-sleep prevention, two-projector /
+  binding / FX checks.
+- [Keyboard accelerators](specs/keyboard-accelerators.md) — every key
+  binding with source locations.
+- [Capability scope](specs/v3-capability-scope.md) — v3 feature scope.
 
 ---
 
@@ -274,31 +497,19 @@ make ci
 cargo run --release -- --help
 ```
 
-- **`*.rmap.json`** — full project (layers, warp, scenes, gamma,
-  `output_targets` list, optional `output_windowed`). Each `OutputTarget`
-  records the projector display's UUID; on load, rmap matches the saved UUID
-  first, falls back to the saved index, then falls back to display 0 with an
-  audit warning. This means a `.rmap.json` saved on machine A opens onto the
-  same physical projector on machine B as long as the display UUID is recognised
-  — no `--monitor` flag required. Projects from schema v6 and earlier migrate
-  automatically.
-- **`*.svg`** — bootstrap one layer; warp defaults are added automatically.
-- **`--monitor INDEX`** — output monitor (overrides the value saved in the
-  project file). Use `--list-monitors` to print indices.
-- **`--windowed`** / **`--fullscreen`** — windowed draws a 1280×720 decorated
-  window on the chosen monitor; fullscreen is the default and can be forced to
-  override a saved `output_windowed` flag. The two flags are mutually
-  exclusive.
-- **`--autostart`** — with a `.rmap.json` argument, logs startup intent and
-  uses the loaded project's monitor index when `--monitor` is omitted (no
-  extra click gate in this build).
+- `*.rmap.json` — full project (layers, warp, scenes, gamma,
+  `output_targets`, optional `output_windowed`).
+- `*.svg` — bootstrap one layer; warp defaults are added automatically.
+- `--monitor INDEX` — output monitor. `--list-monitors` to print indices.
+- `--windowed` / `--fullscreen` — windowed draws a 1280×720 decorated
+  window on the chosen monitor; fullscreen is the default.
+- `--autostart` — with a `.rmap.json` argument, uses the loaded
+  project's monitor index when `--monitor` is omitted.
 
 ### Native macOS menu bar
 
-Standard macOS keyboard shortcuts work via the native menu bar:
-
 | Action | Shortcut |
-|--------|----------|
+|---|---|
 | Save | Cmd-S |
 | Save As | Cmd-Shift-S |
 | Open | Cmd-O |
@@ -306,155 +517,63 @@ Standard macOS keyboard shortcuts work via the native menu bar:
 | Undo | Cmd-Z |
 | Redo | Cmd-Shift-Z |
 
-The `rmap > About rmap` menu item shows the running version. The canonical
-list of all key bindings is in
+The canonical key-binding list is in
 [`specs/keyboard-accelerators.md`](specs/keyboard-accelerators.md).
-
-## Lighting output
-
-v0.9 adds Art-Net DMX output so one scene drives both projection and physical
-lights. Enable with `--features lighting` (off by default to keep the show-day
-binary lean).
-
-**Capability set (Phase 5)**
-
-- **Art-Net transport** — `ArtNetTransport` sends `ArtDmx` PDUs at ~44 Hz over UDP.
-  Default destination is subnet broadcast (`255.255.255.255:6454`); override in the
-  Output panel → Lighting section.
-- **Fixture groups** — Define named groups of RGB fixtures: personality
-  (`Vec<ChannelRole>`), universe ID, base DMX channel, and fixture count.
-- **Colour-from-pixel canvas sampling** — Each fixture group samples a UV-space
-  rectangle of the rendered canvas (64×36 downsample). The fixture output follows
-  the canvas colour in real time.
-- **Zone-derived fixtures** — Fixture intensity can follow a Phase 3 zone's
-  `LightSource` or `Highlight` activity level.
-- **BPM-locked chases** — `FixtureChase` drives a fixture group through colour
-  steps locked to the project BPM clock.
-- **Blackout fan-out** — `B` (Blackout) kills both projector and fixtures in the
-  same frame. Go-live arms all lighting output alongside the visual transition.
-- **Diagnostics** — DMX activity LED (green/grey) and packet-rate badge in the
-  Diagnostics section.
-
-**5-minute operator story:** open the Output panel → Lighting, add a fixture group,
-set the universe and base channel, assign a canvas region, Go-live, watch the
-fixture follow the canvas.
 
 ### Cargo features
 
-- `v3` — Spec 003 UI/UX overhaul (state machine, command/mutation pattern,
-  undo, launcher, project audit). Currently behind the flag while v3 ships
-  incrementally; planned to flip to default at M3.
+- `v3` — UI/UX overhaul (state machine, command/mutation pattern, undo).
+- `midi`, `osc` — MIDI CC and OSC live input. **Default-on**.
+- `audio` — 8-band FFT audio input. **Off by default** because the
+  `cpal` dependency adds meaningful build-time cost. Audio-band
+  modulators on any project load regardless; without this feature they
+  resolve to 0.0 and a one-shot toast tells the operator the binary
+  lacks audio.
+- `lighting` — Art-Net DMX output. Off by default.
 - `gpu-tests` — headless wgpu golden-image harness. Off by default.
-- `midi`, `osc` — MIDI CC and OSC live input sources. **Default-on** as of
-  v0.4; binding pickers and MIDI-learn are available out of the box.
-- `audio` — 8-band FFT audio input source. Off by default; when enabled, a
-  meter strip appears above the cue strip. Do not promote to default.
-- `lighting` — Phase 5 Art-Net DMX light output. Off by default; when
-  enabled, the Output panel grows a fixture-group editor and the lighting
-  thread starts on Go-live.
+
+```bash
+cargo build --features audio                                # default + audio
+cargo build --no-default-features --features audio,v3,osc,midi  # minimal
+```
 
 ### Build profiles
 
 ```bash
 make build          # debug
 make build-release  # release
-make build-show     # release-show (LTO, panic=abort, stripped) — for live use
+make build-show     # release-show — LTO, panic=abort, stripped, for live use
 make bundle         # macOS .app via cargo-bundle
 ```
 
-Logs land in `~/Library/Logs/rmap/rmap.log` (daily rolling); override with
-`RUST_LOG`.
+Logs land in `~/Library/Logs/rmap/rmap.log` (daily rolling); override
+with `RUST_LOG`.
 
----
+### Lighting output (DMX)
 
-## Coming in v1.1 (Cleanup Phase)
+Build with `--features lighting`. Enables Art-Net DMX output so one
+scene drives both projection and physical lights.
 
-A cross-cutting cleanup phase landing on top of v1.0. The headline shift is
-that FX layers can now *modify the underlying image* (warp, lens, brighten,
-smear the photo) instead of only painting generative overlays on top. The
-following capability set is in active development; see
-`specs/004-phase-cleanup.md` and `specs/004-phase-cleanup-tasks.md` for the
-full task breakdown.
+- **Art-Net transport** sends `ArtDmx` PDUs at ~44 Hz over UDP. Default
+  destination is subnet broadcast (`255.255.255.255:6454`); override in
+  the Output panel.
+- **Fixture groups** — RGB fixtures defined by personality
+  (`Vec<ChannelRole>`), universe ID, base DMX channel, and count.
+- **Colour-from-pixel sampling** — each fixture group samples a UV-space
+  rectangle of the rendered canvas (64×36 downsample) and the fixture
+  follows the canvas colour in real time.
+- **Zone-derived intensity** — fixtures can follow a zone's
+  **Light Source** or **Highlight** activity level.
+- **BPM-locked chases** through colour steps locked to the project BPM.
+- **Blackout** — `B` kills projector and fixtures in the same frame.
+  Go-live arms all lighting output alongside the visual transition.
+- **Diagnostics** — DMX activity LED (green / grey) and packet-rate
+  badge in the Diagnostics section.
 
-- **Source-modifying FX family** — a new `FxFamily::SourceModifier` plus
-  sibling presets to existing generative overlays: `fluid_warp`, `ripple_lens`,
-  `edge_lens`, `spotlights`, `drift_pinholes`, `edge_sparks`,
-  `field_advect_source`, `collision_ripples`, `zone_brighten`, `zone_lens`,
-  `portal_warp`.
-- **Per-layer Treatment effect** — `Effect::Treatment(id)` lets the existing
-  treatment shaders (tone map, displacement ripple, refraction, palette
-  extract, collage, etc.) run on individual layers rather than only as a
-  global pass.
-- **Feedback / Trails** — `Effect::Feedback { decay, offset }` blends the
-  previous frame's layer output back into the current frame for trails, echo,
-  and motion smear.
-- **Effect::Tint** — three-mode colour mixing (multiply, additive, screen)
-  with a modulator-driven amount.
-- **OSC parameter modulators** — bound OSC addresses can now drive any FX
-  parameter live, completing the modulation matrix.
-- **Real cue-strip scene thumbnails** — the cue strip shows actual scene
-  contents, not placeholder gradients.
-- **Per-output gamma / brightness / contrast** — the per-output panel
-  sliders now drive the render chain.
-
-### Building with audio support
-
-Audio FFT band capture is an opt-in feature because the underlying
-`cpal` dependency adds a meaningful build-time cost. Default builds
-ship without it — `Modulator::Audio { band, ... }` resolves to `0.0`
-in those binaries (matching the documented no-provider fallback).
-
-Build with audio support:
+### Tests
 
 ```bash
-cargo build --features audio                # default + audio
-cargo build --no-default-features --features audio,v3,osc,midi  # minimal
+make test        # cargo nextest
+make test-gpu    # golden-image tests, requires wgpu adapter
+make ci          # fmt + clippy + tests + doctests
 ```
-
-When a project carries audio-bound modulators but the binary was
-built without `--features audio`, rmap emits a one-shot warn-level
-toast at project load time so the operator notices the missing
-support upfront rather than debugging why an audio-mapped slider
-isn't moving. Same diagnostic also lands in the log file
-(`~/Library/Logs/rmap/rmap.log` on macOS) at INFO level.
-
-## What's in v1.0
-
-rmap v1.0 closes the remaining gaps to professional media servers while staying
-focused on clarity and show-day reliability. See `CHANGELOG.md` for the full
-per-workstream history.
-
-### Shipped in v1.0
-
-- **Calibration file** — save venue warp + mask + gamma as a separate
-  `.rmap-calibration.json` (File > Save Calibration…), reusable across show
-  files (File > Load Calibration…). Same-directory files are offered
-  automatically after project open.
-- **Bezier warp schema** — cubic Bezier mesh data model (v10 schema), CPU
-  tessellation via Coons patches, `MoveBezierAnchor` + `SetBezierHandle`
-  mutations with undo. Bilinear-equivalent for all-None handles; GPU render
-  pipeline integration is planned post-v1.0.
-- **Inverse mask + luma key + chroma key** — `MaskGraph` schema (v11),
-  CPU SDF evaluator for Polygon + Inverse; LumaKey + ChromaKey node kinds
-  defined. GPU render pipeline integration is planned post-v1.0.
-- **RGBW + colour-temperature mixing** — CCT-aware white-channel extraction
-  for warm-white LED fixtures; per-fixture-group CCT dropdown + W scale;
-  DMX output path for four-channel RGBW fixtures.
-- **Scene packs** — export and import portable `.rmap-scene-pack.zip`
-  archives for sharing scene templates across projects.
-- **Phase 7 audit kinds** — `SyphonFrameworkMissing`,
-  `CalibrationSurfaceUnmatched`, `BezierMeshSchemaUpgraded`,
-  `RgbwConfigInvalid` — each surfaces as a single-line operator toast.
-
-### Planned post-v1.0
-
-- **Syphon output** — Syphon.framework linkage scaffold is in place
-  (`syphon-out` feature); the ObjC Metal wrapper requires the vendored
-  framework binary and is deferred.
-- **Bezier handle overlay + palette UI** — requires interactive GPU canvas
-  rendering (overlay pipeline pass).
-- **Mask key UIs** — luma/chroma key sliders in the Mask mode sub-row require
-  MaskGraph GPU render pipeline integration.
-- **Calibration verify patterns** — alignment cross, dot grid, colour bars,
-  edge-blend gradient, focus chart, geometry grid require a projector
-  OverlayPipeline pass.

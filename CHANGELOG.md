@@ -10,15 +10,53 @@ Cross-cutting cleanup phase that converts stranded features (tech-demo presets, 
 
 ### Added
 
-<!-- Filled by PCleanup.9.2: new SourceModifier presets, Effect::Treatment, Effect::Feedback, Effect::Tint, OSC parameter modulators, real cue-strip scene thumbnails, per-output gamma/brightness/contrast, MaskNode Union/Subtract rendering. -->
+- **`Effect::Treatment(id, params)`** — per-layer treatment dispatch. Operators can now stack any of the 9 treatments (`tone_map`, `luminance_reveal`, `palette_extract`, `displacement_ripple`, `refraction`, etc.) inside a layer's effect chain, not just as a global post-composition pass. Lets you grade or warp one layer hard while the rest of the scene stays untouched. (PCleanup.1.3)
+- **`Effect::Feedback { decay, offset }`** — trails / echo / motion smear on any layer. Two-pass mix + blit with a per-layer history texture. `decay = 0` is no trail, `0.95` is a long ghosting trail, `1.0` is infinite hold. Modulator-driven decay so the trail length can pulse with audio or MIDI. (PCleanup.1.4)
+- **`Effect::Tint`** — three-mode colour mixing (multiply / additive / screen) with a modulator-driven amount. The variant existed since v0.5 as a no-op stub; now it actually renders. (PCleanup.4.1)
+- **`FxFamily::SourceModifier`** — new FX family variant reserved for source-modifying presets. Decision doc (`specs/004-phase-cleanup-source-modifier-placement-decision.md`) re-paths the W2 sibling presets through `Effect::Treatment` instead; the variant is preserved as forward-compat for a future adjustment-layer rendering path. (PCleanup.1.1)
+- **`ripple_lens` treatment** — first source-modifying sibling preset. Concentric-ring UV displacement keyed to the mask SDF; refracts the underlying photo through the same phase pattern as the generative `mask_edge_ripple_wash`. (PCleanup.2.1; 10 further W2 siblings tracked as deferred follow-ups.)
+- **`MaskNode::Union` and `MaskNode::Subtract`** — CPU SDF combine in the mask-graph evaluator. Union = per-pixel min of operand SDFs; Subtract = max(base, -sub). Mask-editor UI for authoring these nodes still deferred; operators hand-author in project JSON. (PCleanup.5.1)
+- **OSC parameter modulator wiring** — `Modulator::OscBound` now reads live values from incoming OSC traffic. The `PROVIDER` registry was unwired (always returned 0.0); `OscSource::start` now installs a real `OscValueRegistry` that the recv thread populates. OSC command path (TapTempo, SceneRecall, CueGo, etc.) unchanged. (PCleanup.6.1)
+- **Cue timing bindings wired at fire time** — `Cue.in_time_binding`, `hold_binding`, `out_time_binding` (MIDI and OSC) finally drive the live transport. Resolution order: OSC > MIDI > static. (PCleanup.3.4)
+- **Bar-phase re-anchor on tap-tempo** — `Clock::tap` now snaps `started` so the tap lands on beat 1 of a new bar. BPM-quantized cues fire on-beat after every tap; the elapsed-monotonicity invariant is preserved (phase shift bounded by one bar). (PCleanup.6.2)
+- **Real cue-strip scene thumbnails** — GPU readback of `warp_rt` at scene-save time, bilinear-downsampled to 192×108. The cue strip shows actual scene contents instead of name-hash gradients. Fallback to placeholder gradient when readback fails (no GPU adapter, surface-acquisition failure, etc.). (PCleanup.7.1)
+- **Per-output gamma / brightness / contrast trims** — `OutputTarget` grows three optional override fields. Render-time cascade: per-output override > project-level override > project master. Operators can pull one projector to match another without touching the project-wide master tuning. UI sliders in the Output panel. (PCleanup.7.3)
+- **Preview-as-projector window blit path** — the preview window (open via the toolbar) now shows live projector output. Two-pass: main render writes warp_rt, a textured-quad pipeline blits to the preview surface. (PCleanup.7.4)
+- **`L` keybind** — toggles GoLive state from the output-window focus. "L for Live"; unbound elsewhere in the keymap. (PCleanup.7.5)
+- **`fx_zone_light_spill` breathing-pulse slider** — the previously-unused `speed` uniform field now drives a ±15% intensity pulse at the operator-set rate. Default 0 = constant glow (bit-identical to pre-cleanup output). (PCleanup.3.3)
+- **`mask_edge_wave_wash` N_WAVES exposed as `n_waves` slider** — was hardcoded to 4 crests in the shader; now operator-tunable 1–8 with default 4. (PCleanup.3.2)
+- **18 glossary entries** for cleanup-phase domain terms (architectural variants + 12 sibling preset names). (PCleanup.0.1)
+- **Decision doc**: `specs/004-phase-cleanup-source-modifier-placement-decision.md` documents the three-option analysis and the routing of W2 sibling presets through `Effect::Treatment` rather than the FX preset registry.
 
 ### Changed
 
-<!-- Filled by PCleanup.9.2: FX picker grouping (preset browser surfaces SourceModifier presets first), glossary expansion (18 new domain terms). -->
+- **`Effect::External` no longer appears in the v2 effect picker** — the default-empty `ExternalRegistry` would create an effect that warn-and-skips at render. Operators with a real plugin still author the effect via the project JSON file. Picker entry re-introduced (gated on `registry.is_empty()`) when M7 plugins land. (PCleanup.4.2)
+- **`Effect::Tint` and `Effect::Treatment` added to the v2 effect picker** — gap-fill from PCleanup.4.1 and PCleanup.1.3, which added the variants + dispatches but didn't surface them in the "Add effect" dropdown. Both default to inert-on-add. (PCleanup.4.2)
+- **`LoopMode::PingPong` picker hover-tip** — explains that PingPong currently falls back to forward Loop because reverse H.264 decode needs the Phase 7 I-frame cache. Operators discover the limitation in the picker, not by debugging confused video playback. (PCleanup.5.2)
+- **v1 2-projector limit documentation** — the launcher's monitor picker surfaces "v1 supports up to 2 projectors" upfront when 3+ monitors are connected (was: only shown after the operator hit the limit). Roadmap entry tightened. (PCleanup.7.6)
+- **Audio feature opt-in documentation** — README "Building with audio support" section + runtime warn-toast at project-load when an audio-bound modulator project is loaded on a binary built without `--features audio`. (PCleanup.6.3)
+- **Layer-strip click-to-seek scrubber** — thin click-and-drag hit zone on the bottom edge of every Video layer's thumbnail. Emits `VideoControl::SeekTo(seconds)` against the existing video-worker seek path. Hover thumbnails still deferred (needs AVAssetImageGenerator FFI). (PCleanup.7.2)
 
 ### Fixed
 
-<!-- Filled by PCleanup.9.2: Effect::Tint no longer silently skips, inert FX sliders either drive output or are removed, cue timing bindings wire to live modulators. -->
+- **`Effect::Tint` no longer silently skips at render time** — was a `tracing::warn!` + `return false` stub since v0.5; now renders properly. Projects with Tint effects in their chains render correctly. (PCleanup.4.1)
+- **Inert `mask_bounded_fluid.particle_count` slider removed** — the dispatch path is a pure velocity-field sim with no particle SSBO; the descriptor exposed a slider that did nothing. Slider returns when the particle SSBO pass ships. (PCleanup.3.1)
+- **`MaskNode::Union` / `Subtract` no longer render as full-canvas positive (no-mask) fallbacks** — projects authoring these nodes in JSON were getting silently disappeared masks. Now render the standard SDF combines. (PCleanup.5.1)
+
+### Architectural
+
+- **Spec landing**: `specs/004-phase-cleanup.md` + `specs/004-phase-cleanup-tasks.md` document the 45-task scope, the architectural fault line (three tiers; only the FX preset tier was purely generative), and the per-effect reimagining table.
+- **Schema additions** (back-compat — no version bump): `OutputTarget` gains 3 optional override fields; `Effect::Treatment` and `Effect::Feedback` variants. Existing projects load byte-identical to pre-1.1 builds via serde defaults.
+- **Mutation surface grows** with `SetOutputGammaOverride`, `SetOutputBrightnessOverride`, `SetOutputContrastOverride` (PCleanup.7.3) and `ModulatorField::FeedbackDecay` (PCleanup.1.4). All follow the existing ReverseStorage whole-Option / whole-enum Reverse rules.
+- **Render-graph additions**: per-layer history texture for Feedback (`PCleanup.1.4`); `warp_rt` gains `COPY_SRC` usage for thumbnail readback (PCleanup.7.1); `PreviewWindow` grows blit pipeline (PCleanup.7.4).
+
+### Deferred to a follow-up
+
+- 10 of 12 W2 sibling SourceModifier treatments (edge_lens, fluid_warp_full, spotlights, drift_pinholes, edge_sparks, field_advect_source, collision_ripples, zone_brighten, zone_lens, portal_warp). Each is a standalone shader-body swap following the `ripple_lens` four-file pattern; ships when operator demand warrants.
+- Treatment-picker UI (PCleanup.1.3.2) for choosing a specific treatment id from a dropdown. Operators currently JSON-edit the project file. Dispatches + read-only display already in place.
+- GPU goldens for `Effect::Treatment`, `Effect::Feedback`, `ripple_lens`. Requires `--features gpu-tests` and the broader treatment-golden harness.
+- `v3` feature flag flip to default-on (PCleanup.8.1) — milestone-gated on M3, not on this phase.
+- Mask-editor UI for authoring Union / Subtract / Inverse nodes interactively (PCleanup.5.1 ships only the SDF-combine evaluation).
 
 ---
 

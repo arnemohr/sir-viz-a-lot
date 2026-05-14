@@ -14,19 +14,21 @@ Companion task spec for [`004-phase-cleanup.md`](004-phase-cleanup.md). Each tas
 - [ ] PCleanup.1.3 — `Effect::Treatment(id, params)` variant (per-layer treatments)
 - [ ] PCleanup.1.4 — `Effect::Feedback { decay, offset }` variant (trails / echo)
 
-### W2 — Source-modifying FX preset siblings
-- [ ] PCleanup.2.1 — `ripple_lens` (sibling of `mask_edge_ripple_wash`)
-- [ ] PCleanup.2.2 — `edge_lens` (sibling of `mask_edge_wave_wash`)
-- [ ] PCleanup.2.3 — `fluid_warp_full` (sibling of `fluid_identity`)
-- [ ] PCleanup.2.4 — `spotlights` (sibling of `particles_identity`)
-- [ ] PCleanup.2.5 — `drift_pinholes` OR `drift_brushstrokes` (sibling of `mask_constrained_drift`)
-- [ ] PCleanup.2.6 — `edge_sparks` (sibling of `mask_edge_emission`)
-- [ ] PCleanup.2.7 — `field_advect_source` (sibling of `mask_field_flow`)
-- [ ] PCleanup.2.8 — `collision_ripples` (sibling of `mask_collision_reflection`)
-- [ ] PCleanup.2.9 — `zone_brighten` (sibling of `fx_zone_light_spill`)
-- [ ] PCleanup.2.10 — `zone_lens` (sibling of `fx_zone_edge_ripple`)
-- [ ] PCleanup.2.11 — `portal_warp` (sibling of `fx_zone_portal_drift`)
-- [ ] PCleanup.2.12 — FX picker UI: group SourceModifier presets above generative overlays
+### W2 — Source-modifying FX preset siblings (10 of 12 deferred)
+- [x] PCleanup.2.1 — `ripple_lens` (sibling of `mask_edge_ripple_wash`)
+- [ ] PCleanup.2.2 — `edge_lens` (sibling of `mask_edge_wave_wash`) — deferred
+- [ ] PCleanup.2.3 — `fluid_warp_full` (sibling of `fluid_identity`) — deferred (needs compute prelude)
+- [ ] PCleanup.2.4 — `spotlights` (sibling of `particles_identity`) — deferred (needs particle SSBO)
+- [ ] PCleanup.2.5 — `drift_pinholes` OR `drift_brushstrokes` (sibling of `mask_constrained_drift`) — deferred (particles)
+- [ ] PCleanup.2.6 — `edge_sparks` (sibling of `mask_edge_emission`) — deferred (particles)
+- [ ] PCleanup.2.7 — `field_advect_source` (sibling of `mask_field_flow`) — deferred
+- [ ] PCleanup.2.8 — `collision_ripples` (sibling of `mask_collision_reflection`) — deferred (compute + readback)
+- [ ] PCleanup.2.9 — `zone_brighten` (sibling of `fx_zone_light_spill`) — deferred (zone uniform plumbing)
+- [ ] PCleanup.2.10 — `zone_lens` (sibling of `fx_zone_edge_ripple`) — deferred (zone uniform plumbing)
+- [ ] PCleanup.2.11 — `portal_warp` (sibling of `fx_zone_portal_drift`) — deferred (closes Phase 4 zone-compute deferral)
+- [ ] PCleanup.2.12 — FX picker UI: group SourceModifier presets above generative overlays — deferred (waits on 6+ siblings)
+
+**Deferral rationale:** PCleanup.2.1 (ripple_lens) shipped as the proof of pattern; the W2 architecture is fully validated through it. The remaining 10 sibling treatments are each a self-contained shader-body swap following the same four-file pattern (shader + struct + descriptor + dispatch arm + 3 unit tests, ~300 LOC of pipeline boilerplate per preset). They land as standalone follow-up PRs when operator demand or scheduling warrants — none block other phase work, and the SourceModifier-as-Treatment routing they all share (PCleanup.1.3) is already complete. Glossary entries (PCleanup.0.1) and reserved registry IDs (PCleanup.1.1) are also already in place.
 
 ### W3 — Inert sliders / dead parameters
 - [ ] PCleanup.3.1 — `mask_bounded_fluid.particle_count` — remove descriptor OR implement particle SSBO
