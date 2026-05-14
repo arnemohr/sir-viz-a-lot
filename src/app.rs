@@ -989,9 +989,9 @@ fn process_pending_cue(state: &mut EditingState) -> bool {
     }
     // 4 beats per bar — hardcoded for v3.1; future variable-time-signature
     // work would parameterise this constant.
-    // TODO: re-anchor bar phase on tap-tempo? Currently tap updates bpm but
-    // not clock.started, so bar phase drifts after each tap. Tracked for a
-    // future task.
+    // PCleanup.6.2 — bar phase is re-anchored on tap by `Clock::tap_at`
+    // (the tap lands on beat 1 of a new bar), so the bar index computed
+    // here stays coherent with the latest tap.
     let bar_idx = bar_index(state.clock.elapsed().as_secs_f64(), bpm as f64);
     let did_cross = crossed_n_bar_boundary(state.prior_bar_idx, bar_idx, n);
     state.prior_bar_idx = bar_idx;
