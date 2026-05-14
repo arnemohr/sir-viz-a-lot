@@ -491,32 +491,31 @@ const FLUID_IDENTITY_DESCRIPTORS: &[FxParamDescriptor] = &[
 
 /// P2.6.2 — Param descriptors for `mask_bounded_fluid`.
 ///
-/// `particle_count` carries `max_particle_count: Some(512)` to satisfy the
-/// spec acceptance criterion.  The current implementation does not maintain
-/// a particle SSBO; particle visualisation is deferred.
+/// PCleanup.3.1 — `particle_count` was removed. The original P2.6.2 spec
+/// required `max_particle_count: Some(512)` on a `particle_count`
+/// descriptor entry, but the dispatch path at
+/// `fx_presets::dispatch::BOUNDED_FLUID_PRESET_ID` only reads
+/// `dissipation` — there is no particle SSBO in the bounded-fluid
+/// pipeline (the shader is a pure velocity-field sim per
+/// `src/render/shaders/fx_fluid_bounded.wgsl:27-30`). The slider on
+/// `particle_count` did nothing visible at the operator surface,
+/// which the previous descriptor still exposed.
+///
+/// Honest contract: only the dissipation slider is shown until the
+/// deferred particle SSBO pass lands. When that pass ships, the
+/// `particle_count` entry returns alongside it with a real consumer.
 ///
 /// FxParamsUniform field aliasing:
-///   `particle_count` → `wavelength` (1..=512, default 64, max_particle_count: Some(512))
 ///   `dissipation`    → `speed`      (0.9..=1.0, default 0.95)
 #[allow(dead_code)] // referenced through `fx_param_descriptors` (P2.8.1 browser UI)
-const BOUNDED_FLUID_DESCRIPTORS: &[FxParamDescriptor] = &[
-    FxParamDescriptor {
-        key: "particle_count",
-        label: "Particle count (1–512)",
-        min: 1.0,
-        max: 512.0,
-        default: 64.0,
-        max_particle_count: Some(512),
-    },
-    FxParamDescriptor {
-        key: "dissipation",
-        label: "Dissipation (fraction/sec, 0.9–1.0)",
-        min: 0.9,
-        max: 1.0,
-        default: 0.95,
-        max_particle_count: None,
-    },
-];
+const BOUNDED_FLUID_DESCRIPTORS: &[FxParamDescriptor] = &[FxParamDescriptor {
+    key: "dissipation",
+    label: "Dissipation (fraction/sec, 0.9–1.0)",
+    min: 0.9,
+    max: 1.0,
+    default: 0.95,
+    max_particle_count: None,
+}];
 
 /// P3.5.1 — param descriptors for `fx_zone_light_spill`.
 ///
@@ -2770,30 +2769,37 @@ mod tests {
         );
     }
 
-    /// P2.6.2 acceptance: `particle_count` descriptor has `max_particle_count: Some(512)`.
+    /// PCleanup.3.1 — `mask_bounded_fluid` no longer exposes `particle_count`
+    /// because the dispatch path is a pure velocity-field sim with no
+    /// particle SSBO (per `src/render/shaders/fx_fluid_bounded.wgsl:27-30`).
+    /// The previous P2.6.2 test asserted the slider was *present* with
+    /// `max_particle_count: Some(512)`; PCleanup.3.1 removed the slider so
+    /// operators no longer see a dead UI knob. When the deferred particle
+    /// SSBO pass lands, this test inverts back to a presence-assertion.
     #[test]
-    fn bounded_fluid_max_particle_count_is_512() {
+    fn bounded_fluid_has_no_inert_particle_count_slider() {
         let descs = fx_param_descriptors(BOUNDED_FLUID_PRESET_ID);
-        let pc = descs
-            .iter()
-            .find(|d| d.key == "particle_count")
-            .expect("particle_count descriptor must be present for mask_bounded_fluid");
-        assert_eq!(
-            pc.max_particle_count,
-            Some(512),
-            "bounded_fluid particle_count max_particle_count must be Some(512)"
+        assert!(
+            descs.iter().all(|d| d.key != "particle_count"),
+            "PCleanup.3.1: `particle_count` must not appear in descriptors \
+             until the particle SSBO pass ships. Found: {:?}",
+            descs.iter().map(|d| d.key).collect::<Vec<_>>()
         );
     }
 
-    /// P2.6.2 acceptance: descriptors count matches spec (2); each min < max;
-    /// default ∈ range.
+    /// PCleanup.3.1 (was P2.6.2 acceptance) — descriptors count matches the
+    /// current honest contract (1: just `dissipation`); each min < max;
+    /// default ∈ range. Bump back to 2 when `particle_count` returns
+    /// alongside a real particle SSBO consumer.
     #[test]
     fn bounded_fluid_descriptors_present() {
         let descs = fx_param_descriptors(BOUNDED_FLUID_PRESET_ID);
         assert_eq!(
             descs.len(),
-            2,
-            "mask_bounded_fluid must have 2 descriptors (particle_count, dissipation)"
+            1,
+            "PCleanup.3.1: mask_bounded_fluid must have 1 descriptor \
+             (dissipation only; particle_count removed until the particle \
+             SSBO pass ships)"
         );
         for d in descs {
             assert!(
@@ -2812,10 +2818,10 @@ mod tests {
                 d.max
             );
         }
-        assert!(
-            descs.iter().any(|d| d.key == "particle_count"),
-            "particle_count descriptor must be present"
-        );
+        // PCleanup.3.1 — particle_count assertion intentionally removed
+        // (descriptor entry deleted; see comment above). The
+        // bounded_fluid_has_no_inert_particle_count_slider test now asserts
+        // the *absence* explicitly.
         assert!(
             descs.iter().any(|d| d.key == "dissipation"),
             "dissipation descriptor must be present"
