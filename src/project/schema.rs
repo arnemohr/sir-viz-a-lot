@@ -624,7 +624,9 @@ pub enum MaskNode {
         of: NodeId,
     },
     /// Union (min SDF) of two nodes.
-    /// **Schema scaffolding only** — no CPU evaluation or UI in Phase 7.
+    /// PCleanup.5.1 — CPU evaluation in `render::sdf::eval_node` ships;
+    /// mask-editor UI to author Union nodes is still deferred (operators
+    /// hand-author them in the project JSON until the editor lands).
     Union {
         /// NodeId of the first operand.
         a: NodeId,
@@ -632,7 +634,9 @@ pub enum MaskNode {
         b: NodeId,
     },
     /// Subtraction (max negative SDF) of two nodes.
-    /// **Schema scaffolding only** — no CPU evaluation or UI in Phase 7.
+    /// PCleanup.5.1 — CPU evaluation in `render::sdf::eval_node` ships;
+    /// mask-editor UI to author Subtract nodes is still deferred (operators
+    /// hand-author them in the project JSON until the editor lands).
     Subtract {
         /// NodeId of the base node.
         base: NodeId,

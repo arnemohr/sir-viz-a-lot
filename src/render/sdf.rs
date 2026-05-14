@@ -151,10 +151,36 @@ fn eval_node(nodes: &[crate::project::schema::MaskNode], idx: usize, size: usize
             inner.into_iter().map(|v| -v).collect()
         }
 
-        MaskNode::Union { .. } | MaskNode::Subtract { .. } => {
-            // Schema scaffolding only in Phase 7 — no CPU evaluation path.
-            // Return full-canvas positive SDF (fully transparent = no mask).
-            vec![1.0; size * size]
+        MaskNode::Union { a, b } => {
+            // PCleanup.5.1 — union of two SDFs is the per-pixel min:
+            // a pixel is inside the union iff it's inside either operand
+            // (i.e., the SDF is negative iff at least one operand's SDF
+            // is negative). `min(a, b)` is the standard signed-distance
+            // semantics; if both are positive the closest one wins (the
+            // negative-of-min-positive is preserved correctly).
+            let a_buf = eval_node(nodes, *a, size);
+            let b_buf = eval_node(nodes, *b, size);
+            a_buf
+                .into_iter()
+                .zip(b_buf)
+                .map(|(av, bv)| av.min(bv))
+                .collect()
+        }
+
+        MaskNode::Subtract { base, sub } => {
+            // PCleanup.5.1 — subtract = base ∧ ¬sub. A pixel is inside
+            // the result iff it's inside `base` AND outside `sub`. SDF
+            // arithmetic: max(base, -sub). When base is positive (outside
+            // base) the result is positive (base wins); when base is
+            // negative and sub is negative (inside both), -sub is
+            // positive and wins, kicking the pixel outside the result.
+            let base_buf = eval_node(nodes, *base, size);
+            let sub_buf = eval_node(nodes, *sub, size);
+            base_buf
+                .into_iter()
+                .zip(sub_buf)
+                .map(|(b, s)| b.max(-s))
+                .collect()
         }
 
         MaskNode::LumaKey { .. } | MaskNode::ChromaKey { .. } => {
@@ -504,6 +530,115 @@ mod tests {
         for &v in &sdf {
             assert!(v < 0.0, "Empty graph must return all-inside SDF, got {v}");
         }
+    }
+
+    // ----- PCleanup.5.1 — MaskNode::Union / Subtract -----------------------
+
+    /// PCleanup.5.1 — Union of two non-overlapping polygons covers both
+    /// (per-pixel min of SDFs ≤ 0 wherever either operand's SDF ≤ 0).
+    /// Construction: two unit squares offset on the X axis, no overlap;
+    /// pixels inside either square must read negative in the union; pixels
+    /// outside both must read positive.
+    #[test]
+    fn mask_graph_union_covers_both_operands() {
+        use crate::project::schema::{MaskGraph, MaskNode};
+        let size = 64;
+        // Two disjoint squares: left half-canvas + right half-canvas
+        // (skinny strips so a centre column lies outside both).
+        let left = vec![[0.05, 0.40], [0.30, 0.40], [0.30, 0.60], [0.05, 0.60]];
+        let right = vec![[0.70, 0.40], [0.95, 0.40], [0.95, 0.60], [0.70, 0.60]];
+
+        let graph = MaskGraph {
+            nodes: vec![
+                MaskNode::Polygon {
+                    points: left.clone(),
+                    feather: 0.0,
+                },
+                MaskNode::Polygon {
+                    points: right.clone(),
+                    feather: 0.0,
+                },
+                MaskNode::Union { a: 0, b: 1 },
+            ],
+        };
+        // Reorder so the Union is the root: the eval starts at node 0.
+        let graph_with_root = MaskGraph {
+            nodes: vec![
+                MaskNode::Union { a: 1, b: 2 },
+                MaskNode::Polygon {
+                    points: left,
+                    feather: 0.0,
+                },
+                MaskNode::Polygon {
+                    points: right,
+                    feather: 0.0,
+                },
+            ],
+        };
+        let union_sdf = bake_mask_graph_sdf(&graph_with_root, size);
+
+        // Pick three sample points:
+        //  (a) inside the left square          → must be negative
+        //  (b) inside the right square         → must be negative
+        //  (c) in the centre gap (no operand)  → must be positive
+        let pix = |uv: [f32; 2]| {
+            let x = (uv[0] * size as f32) as usize;
+            let y = (uv[1] * size as f32) as usize;
+            union_sdf[y * size + x]
+        };
+        assert!(
+            pix([0.17, 0.50]) < 0.0,
+            "inside left square must be negative"
+        );
+        assert!(
+            pix([0.82, 0.50]) < 0.0,
+            "inside right square must be negative"
+        );
+        assert!(pix([0.50, 0.50]) > 0.0, "centre gap must be positive");
+
+        // Sanity: silence the unused-variable warning for the original
+        // graph constructor above (we keep it for documentation).
+        let _ = graph;
+    }
+
+    /// PCleanup.5.1 — Subtract removes the `sub` region from the `base`.
+    /// Construction: base = a centred square; sub = a smaller centred
+    /// square fully inside it. The result is a square donut — pixels in
+    /// the donut's ring read negative; pixels in the hole (inside both)
+    /// read positive (kicked outside by the subtract).
+    #[test]
+    fn mask_graph_subtract_carves_hole() {
+        use crate::project::schema::{MaskGraph, MaskNode};
+        let size = 64;
+        let big = vec![[0.20, 0.20], [0.80, 0.20], [0.80, 0.80], [0.20, 0.80]];
+        let small = vec![[0.40, 0.40], [0.60, 0.40], [0.60, 0.60], [0.40, 0.60]];
+
+        let graph = MaskGraph {
+            nodes: vec![
+                MaskNode::Subtract { base: 1, sub: 2 },
+                MaskNode::Polygon {
+                    points: big,
+                    feather: 0.0,
+                },
+                MaskNode::Polygon {
+                    points: small,
+                    feather: 0.0,
+                },
+            ],
+        };
+        let donut = bake_mask_graph_sdf(&graph, size);
+
+        let pix = |uv: [f32; 2]| {
+            let x = (uv[0] * size as f32) as usize;
+            let y = (uv[1] * size as f32) as usize;
+            donut[y * size + x]
+        };
+        // Inside donut's ring (in big, NOT in small) → negative.
+        assert!(pix([0.30, 0.30]) < 0.0, "ring must be negative");
+        // Inside the hole (in both big AND small) → positive (carved out).
+        assert!(pix([0.50, 0.50]) > 0.0, "hole must be positive");
+        // Outside the big square → positive.
+        assert!(pix([0.10, 0.10]) > 0.0, "outside big must be positive");
     }
 
     /// P3.3.1 — `From<ZoneRole> for u32` mapping matches WGSL constant values.
