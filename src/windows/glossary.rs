@@ -376,6 +376,68 @@ pub enum GlossaryTerm {
     /// verify warp accuracy, colour balance, focus, or edge alignment; activated
     /// from the Output panel without affecting the show file.
     CalibrationVerify,
+    // -----------------------------------------------------------------------
+    // PCleanup.0.1 — Cleanup phase architectural variants + W2 SourceModifier
+    // preset names. See specs/004-phase-cleanup.md and the W2 task list in
+    // specs/004-phase-cleanup-tasks.md.
+    // -----------------------------------------------------------------------
+    /// PCleanup.0.1 — FX preset family that reads the underlying layer image
+    /// and writes a modified version, as opposed to a generative overlay that
+    /// paints its own pixels on top.
+    FxFamilySourceModifier,
+    /// PCleanup.0.1 — per-layer Treatment effect chain variant: applies any
+    /// treatment (tone map, displacement ripple, refraction, etc.) to a single
+    /// layer rather than the whole composited frame.
+    EffectTreatment,
+    /// PCleanup.0.1 — effect that blends the previous frame's layer output back
+    /// into the current frame, producing trails, echoes, and motion smear with
+    /// modulator-driven decay.
+    EffectFeedback,
+    /// PCleanup.0.1 — three-mode colour-mixing effect: multiply (proper tint),
+    /// additive (wash), or screen, with a modulator-driven amount.
+    EffectTint,
+    /// PCleanup.0.1 — mask-graph node that combines two mask polygons so the
+    /// result covers either region: a Boolean union of overlapping shapes.
+    MaskNodeUnion,
+    /// PCleanup.0.1 — mask-graph node that cuts one polygon out of another:
+    /// the first mask's coverage minus the second mask's coverage.
+    MaskNodeSubtract,
+    /// PCleanup.0.1 — built-in SourceModifier preset: 2D fluid simulation
+    /// inside the mask, displacing the underlying photo by the velocity field.
+    FluidWarp,
+    /// PCleanup.0.1 — built-in SourceModifier preset: concentric rings from the
+    /// mask edge act as refraction lenses bulging the underlying image.
+    RippleLens,
+    /// PCleanup.0.1 — built-in SourceModifier preset: four traveling refraction
+    /// bumps orbit the mask edge, distorting the image at each crest.
+    EdgeLens,
+    /// PCleanup.0.1 — built-in SourceModifier preset: like FluidWarp but
+    /// unbounded — the underlying photo flows across the entire layer.
+    FluidWarpFull,
+    /// PCleanup.0.1 — built-in SourceModifier preset: each particle is a soft
+    /// Gaussian brightener that lifts source-pixel luminance in its radius.
+    Spotlights,
+    /// PCleanup.0.1 — built-in SourceModifier preset: particles drift inside
+    /// the mask as pinholes through which the underlying photo is visible.
+    DriftPinholes,
+    /// PCleanup.0.1 — built-in SourceModifier preset: particles fly outward
+    /// from the mask edge, additively lifting source luminance in a soft radius.
+    EdgeSparks,
+    /// PCleanup.0.1 — built-in SourceModifier preset: uses the mask SDF
+    /// gradient field to advect the underlying photo along the mask normals.
+    FieldAdvectSource,
+    /// PCleanup.0.1 — built-in SourceModifier preset: particles bounce inside
+    /// the mask; each collision injects a ripple that warps the underlying photo.
+    CollisionRipples,
+    /// PCleanup.0.1 — built-in SourceModifier preset: multiplicatively lifts
+    /// the luminance of source pixels in the zone-spill region.
+    ZoneBrighten,
+    /// PCleanup.0.1 — built-in SourceModifier preset: displaces the underlying
+    /// photo's UV in a thin band at the zone edge.
+    ZoneLens,
+    /// PCleanup.0.1 — built-in SourceModifier preset: particles drift through
+    /// portal zones, each one displacing source pixels in its radius.
+    PortalWarp,
 }
 
 /// A single glossary entry: a short headline and a 1–2 sentence body.
@@ -1308,6 +1370,137 @@ pub fn entry(t: GlossaryTerm) -> GlossaryEntry {
                    colour, and focus.  Select a pattern in the Output panel's \
                    Verify section; deactivate to return to the show.",
         },
+        // PCleanup.0.1 — Cleanup phase entries.
+        GlossaryTerm::FxFamilySourceModifier => GlossaryEntry {
+            headline: "Source-Modifying FX",
+            body: "A class of FX preset that reads the underlying layer image \
+                   and writes a modified version — warping, lensing, brightening, \
+                   or smearing the photo — rather than painting its own pixels on \
+                   top.  Distinct from generative overlays like ripple wash or \
+                   edge emission.",
+        },
+        GlossaryTerm::EffectTreatment => GlossaryEntry {
+            headline: "Treatment (per-layer)",
+            body: "An effect-chain variant that runs a single treatment preset \
+                   (tone map, displacement ripple, refraction, palette extract, \
+                   collage, etc.) on one layer only, rather than as a global \
+                   pass over the composited frame.  Lets you grade or warp one \
+                   layer while others remain untouched.",
+        },
+        GlossaryTerm::EffectFeedback => GlossaryEntry {
+            headline: "Feedback / Trails",
+            body: "An effect that blends the previous frame's layer output back \
+                   into the current frame, producing trails, echoes, and motion \
+                   smear.  Decay controls trail length; offset adds directional \
+                   motion-trail.  Decay is modulator-driven so the trail can \
+                   pulse with audio or MIDI.",
+        },
+        GlossaryTerm::EffectTint => GlossaryEntry {
+            headline: "Tint",
+            body: "A colour-mixing effect with three modes: multiply (proper tint \
+                   that darkens toward the chosen colour), additive (wash that \
+                   lightens), and screen.  The amount slider is modulator-driven \
+                   so the tint can pulse with audio or MIDI input.",
+        },
+        GlossaryTerm::MaskNodeUnion => GlossaryEntry {
+            headline: "Mask Union",
+            body: "A mask-graph operation that combines two mask polygons so the \
+                   result covers either region — the Boolean union of overlapping \
+                   shapes.  Use it when you want one logical mask out of two \
+                   separately drawn polygons.",
+        },
+        GlossaryTerm::MaskNodeSubtract => GlossaryEntry {
+            headline: "Mask Subtract",
+            body: "A mask-graph operation that cuts the second polygon out of the \
+                   first, leaving the area the first mask covers minus the area \
+                   the second mask covers.  Useful for window-with-mullion shapes \
+                   and other 'hole through' geometry.",
+        },
+        GlossaryTerm::FluidWarp => GlossaryEntry {
+            headline: "Fluid Warp",
+            body: "Source-modifying preset: runs a 2D fluid simulation inside \
+                   the mask, displacing the underlying photo by the velocity \
+                   field.  The image flows like water; amplitude scales the \
+                   distortion.  Mask-bounded — fluid never leaks outside the \
+                   shape.",
+        },
+        GlossaryTerm::RippleLens => GlossaryEntry {
+            headline: "Ripple Lens",
+            body: "Source-modifying preset: concentric rings from the mask edge \
+                   act as refraction lenses, bulging and contracting the \
+                   underlying image in bands.  Optional chromatic split per ring \
+                   gives a chromatic-aberration look.",
+        },
+        GlossaryTerm::EdgeLens => GlossaryEntry {
+            headline: "Edge Lens",
+            body: "Source-modifying preset: four traveling refraction bumps orbit \
+                   the mask edge, distorting the image at each crest and letting \
+                   it recover between them — a 'force field' look without any \
+                   overlay geometry.",
+        },
+        GlossaryTerm::FluidWarpFull => GlossaryEntry {
+            headline: "Fluid Warp (Full)",
+            body: "Source-modifying preset: like Fluid Warp but unbounded — the \
+                   underlying photo flows across the entire layer, not just \
+                   inside the mask.  Pair with Fluid Warp on a sibling layer for \
+                   'fluid inside, calm outside' compositions.",
+        },
+        GlossaryTerm::Spotlights => GlossaryEntry {
+            headline: "Spotlights",
+            body: "Source-modifying preset: each particle becomes a soft Gaussian \
+                   brightener that lifts source-pixel luminance in its radius.  \
+                   The underlying photo stays visible everywhere; particles light \
+                   it up rather than painting on top.",
+        },
+        GlossaryTerm::DriftPinholes => GlossaryEntry {
+            headline: "Drift Pinholes",
+            body: "Source-modifying preset: white-dot particles drift inside the \
+                   mask, but instead of being opaque dots each one is a pinhole \
+                   through which the underlying photo is visible.  The layer \
+                   becomes a moving stencil of the image.",
+        },
+        GlossaryTerm::EdgeSparks => GlossaryEntry {
+            headline: "Edge Sparks",
+            body: "Source-modifying preset: particles fly outward from the mask \
+                   edge and each one additively lifts the underlying source's \
+                   luminance in a soft radius — sparks light up the photo rather \
+                   than overlaying opaque dots.",
+        },
+        GlossaryTerm::FieldAdvectSource => GlossaryEntry {
+            headline: "Field Advect Source",
+            body: "Source-modifying preset: uses the mask SDF gradient field to \
+                   advect the underlying photo along the mask normals over time.  \
+                   No visible particles — the gradient acts on the image \
+                   directly.",
+        },
+        GlossaryTerm::CollisionRipples => GlossaryEntry {
+            headline: "Collision Ripples",
+            body: "Source-modifying preset: particles bounce inside the mask, and \
+                   each collision event injects a small ripple into a \
+                   displacement field that warps the underlying photo — physical \
+                   interaction between simulation and image.",
+        },
+        GlossaryTerm::ZoneBrighten => GlossaryEntry {
+            headline: "Zone Brighten",
+            body: "Source-modifying preset: like Zone Light Spill but instead of \
+                   adding a warm colour overlay, multiplicatively lifts the \
+                   luminance of source pixels in the spill region.  Same falloff \
+                   curve, more grounded look.",
+        },
+        GlossaryTerm::ZoneLens => GlossaryEntry {
+            headline: "Zone Lens",
+            body: "Source-modifying preset: displaces the underlying photo's UV \
+                   in a thin band at the zone edge, so the image warps when you \
+                   cross through the zone perimeter.  Rest of the layer remains \
+                   untouched.",
+        },
+        GlossaryTerm::PortalWarp => GlossaryEntry {
+            headline: "Portal Warp",
+            body: "Source-modifying preset: particles drift through portal zones \
+                   (doorways, openings) and each one displaces source pixels in \
+                   its radius — produces a 'ghost moving through the room' \
+                   effect on a photo of the room.",
+        },
     }
 }
 
@@ -1462,6 +1655,26 @@ pub fn all_terms() -> &'static [GlossaryTerm] {
         GlossaryTerm::ScenePack,
         GlossaryTerm::EdgeBlendGradient,
         GlossaryTerm::CalibrationVerify,
+        // PCleanup.0.1 — Cleanup phase architectural variants.
+        GlossaryTerm::FxFamilySourceModifier,
+        GlossaryTerm::EffectTreatment,
+        GlossaryTerm::EffectFeedback,
+        GlossaryTerm::EffectTint,
+        GlossaryTerm::MaskNodeUnion,
+        GlossaryTerm::MaskNodeSubtract,
+        // PCleanup.0.1 — Cleanup phase W2 SourceModifier preset names.
+        GlossaryTerm::FluidWarp,
+        GlossaryTerm::RippleLens,
+        GlossaryTerm::EdgeLens,
+        GlossaryTerm::FluidWarpFull,
+        GlossaryTerm::Spotlights,
+        GlossaryTerm::DriftPinholes,
+        GlossaryTerm::EdgeSparks,
+        GlossaryTerm::FieldAdvectSource,
+        GlossaryTerm::CollisionRipples,
+        GlossaryTerm::ZoneBrighten,
+        GlossaryTerm::ZoneLens,
+        GlossaryTerm::PortalWarp,
     ]
 }
 
@@ -1538,7 +1751,7 @@ mod tests {
     #[test]
     fn all_terms_covers_every_variant() {
         // Bump this when you add a new GlossaryTerm variant.
-        const EXPECTED_VARIANT_COUNT: usize = 129;
+        const EXPECTED_VARIANT_COUNT: usize = 147;
         assert_eq!(
             super::all_terms().len(),
             EXPECTED_VARIANT_COUNT,
