@@ -4,6 +4,24 @@ All notable changes to rmap are documented here.
 
 ---
 
+## [1.1.0] — unreleased (Cleanup Phase)
+
+Cross-cutting cleanup phase that converts stranded features (tech-demo presets, no-op effect variants, schema variants without renderers, inert sliders, placeholder UI surfaces) into shipped capabilities. Source-modifying FX, per-layer treatments, feedback / trails, and OSC parameter modulators land in v1.1. See `specs/004-phase-cleanup.md` and `specs/004-phase-cleanup-tasks.md`.
+
+### Added
+
+<!-- Filled by PCleanup.9.2: new SourceModifier presets, Effect::Treatment, Effect::Feedback, Effect::Tint, OSC parameter modulators, real cue-strip scene thumbnails, per-output gamma/brightness/contrast, MaskNode Union/Subtract rendering. -->
+
+### Changed
+
+<!-- Filled by PCleanup.9.2: FX picker grouping (preset browser surfaces SourceModifier presets first), glossary expansion (18 new domain terms). -->
+
+### Fixed
+
+<!-- Filled by PCleanup.9.2: Effect::Tint no longer silently skips, inert FX sliders either drive output or are removed, cue timing bindings wire to live modulators. -->
+
+---
+
 ## [Unreleased] — v1.0 (Phase 6: Show Control)
 
 ### Cuelist + Transport

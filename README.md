@@ -367,6 +367,36 @@ Logs land in `~/Library/Logs/rmap/rmap.log` (daily rolling); override with
 
 ---
 
+## Coming in v1.1 (Cleanup Phase)
+
+A cross-cutting cleanup phase landing on top of v1.0. The headline shift is
+that FX layers can now *modify the underlying image* (warp, lens, brighten,
+smear the photo) instead of only painting generative overlays on top. The
+following capability set is in active development; see
+`specs/004-phase-cleanup.md` and `specs/004-phase-cleanup-tasks.md` for the
+full task breakdown.
+
+- **Source-modifying FX family** — a new `FxFamily::SourceModifier` plus
+  sibling presets to existing generative overlays: `fluid_warp`, `ripple_lens`,
+  `edge_lens`, `spotlights`, `drift_pinholes`, `edge_sparks`,
+  `field_advect_source`, `collision_ripples`, `zone_brighten`, `zone_lens`,
+  `portal_warp`.
+- **Per-layer Treatment effect** — `Effect::Treatment(id)` lets the existing
+  treatment shaders (tone map, displacement ripple, refraction, palette
+  extract, collage, etc.) run on individual layers rather than only as a
+  global pass.
+- **Feedback / Trails** — `Effect::Feedback { decay, offset }` blends the
+  previous frame's layer output back into the current frame for trails, echo,
+  and motion smear.
+- **Effect::Tint** — three-mode colour mixing (multiply, additive, screen)
+  with a modulator-driven amount.
+- **OSC parameter modulators** — bound OSC addresses can now drive any FX
+  parameter live, completing the modulation matrix.
+- **Real cue-strip scene thumbnails** — the cue strip shows actual scene
+  contents, not placeholder gradients.
+- **Per-output gamma / brightness / contrast** — the per-output panel
+  sliders now drive the render chain.
+
 ## What's in v1.0
 
 rmap v1.0 closes the remaining gaps to professional media servers while staying
