@@ -22,6 +22,7 @@ regardless of the operator's locale.
 | `F` | `Command::Freeze` | Hold current frame on projector. Source: `src/app.rs:3409` |
 | `T` | `Command::CycleTestPattern` | Cycle through test patterns. Source: `src/app.rs:3412` |
 | `O` | `Command::ToggleEditorOverlay` | Toggle warp/mask handles on projector. Source: `src/app.rs:3415` |
+| `L` | `EditingTransition::{Enter,Exit}GoLive` | Toggle GoLive (fullscreen on projector). PCleanup.7.5 — peers to the UI "Go live" / "Stop" buttons. Routed outside `apply_command` because the AppState swap happens one level up in `App::window_event` via mem::replace. |
 | `Escape` | `event_loop.exit()` | Quit the application (output window focused). Source: `src/app.rs:3403` |
 
 ### Scene recall (output-window focus)

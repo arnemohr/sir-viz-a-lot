@@ -5516,6 +5516,38 @@ fn handle_editing_window_event(
                 PhysicalKey::Code(KeyCode::KeyO) => {
                     let _ = apply_command(state, Command::ToggleEditorOverlay);
                 }
+                // PCleanup.7.5 — "L for Live" toggle: enters GoLive when
+                // we're in Editing, exits when we're in GoLive. The
+                // AppState transition machinery lives one level up in
+                // App::window_event (mem::replace pattern); we signal
+                // intent here via `editing_transition`, identical to the
+                // ControlPanelAction::Request{Enter,Exit}GoLive paths
+                // around line 5352-5360. Routed outside `apply_command`
+                // because the latter holds only `&mut EditingState` and
+                // can't swap variants.
+                //
+                // KeyL chosen because it's unbound elsewhere in the
+                // keymap (B/F/T/O/Z/Space/digits/arrows/Backspace are
+                // taken) and reads mnemonic. Spec PCleanup.7.5 suggested
+                // Shift+Enter; the current keyboard surface in
+                // `controls/keyboard.rs` is modifier-agnostic, so a
+                // plain unmodified key avoids a wider keymap refactor.
+                #[cfg(feature = "v3")]
+                PhysicalKey::Code(KeyCode::KeyL) => {
+                    editing_transition = Some(if is_go_live {
+                        tracing::info!(
+                            target: "rmap::ux",
+                            event = "go_live_keybind_exit"
+                        );
+                        EditingTransition::ExitGoLive
+                    } else {
+                        tracing::info!(
+                            target: "rmap::ux",
+                            event = "go_live_keybind_enter"
+                        );
+                        EditingTransition::EnterGoLive
+                    });
+                }
                 #[cfg(feature = "v3")]
                 PhysicalKey::Code(KeyCode::KeyZ) => {
                     // 003-T1.18: Cmd-Z / Ctrl-Z = undo, +Shift = redo.
