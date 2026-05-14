@@ -441,6 +441,23 @@ Total new variants: ~16. Bump `EXPECTED_VARIANT_COUNT` to the new total. Definit
 **What:** `rg --type rust 'scaffolding|not yet|deferred|placeholder' src/project/schema.rs` and cross-reference each match against actual dispatch arms.
 **Acceptance:** Committed audit report listing any other no-renderer variants beyond `MaskNode::Union/Subtract` and `LoopMode::PingPong`.
 
+**Audit result (run during cleanup-phase implementation):**
+
+`rg --type rust 'scaffolding|not yet|deferred|placeholder|stub|forward-compat' src/project/schema.rs` returned 12 matches. After cross-referencing each against the dispatch / migration / render paths, the result is:
+
+| Match site | Kind | Already covered? |
+|---|---|---|
+| `MaskNode::Union` (line 606) | Schema scaffolding only — no SDF combine | PCleanup.5.1 ✅ |
+| `MaskNode::Subtract` (line 635) | Schema scaffolding only — no SDF combine | PCleanup.5.1 ✅ |
+| `LoopMode::PingPong` (forward-only stub) | Falls back to forward Loop | PCleanup.5.2 ✅ (picker hover-tip shipped) |
+| `OutputTarget.fallback_index` (forward-compat for v5→v6) | Intentional back-compat shape | Not a stranded feature |
+| Pre-v10 schema fallback fields | Intentional migration scaffolding | Not stranded |
+| Phase-7 hardware-curve deferral | Out of scope for cleanup phase | Tracked in Phase 7 docs |
+| Second-projector edge-blend stub | Tracked by PCleanup.7.6 (multi-output docs) | ✅ |
+| Various `forward-compat`/`Option<f32>` shapes | Intentional schema-evolution affordances | Not stranded |
+
+**Conclusion:** no additional no-renderer schema variants exist beyond the two already in flight (5.1, 5.2). The schema is clean modulo those two and the intentional migration / forward-compat scaffolding the codebase relies on. This task is **complete via audit-only deliverable** — no code changes required.
+
 ---
 
 ### Workstream 6 — Inputs & automation gaps
