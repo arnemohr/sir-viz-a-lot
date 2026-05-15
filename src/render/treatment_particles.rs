@@ -135,7 +135,23 @@ impl TreatmentParticlePipeline {
     /// layer rect when no mask is present) and boost source luminance with a
     /// Gaussian weight around each particle position.
     pub fn new_spotlights(device: &wgpu::Device, target_format: wgpu::TextureFormat) -> Self {
-        // --- Compute shader (position-update) ---
+        Self::new_with_frag_shader(
+            device,
+            target_format,
+            include_str!("shaders/treat_spotlights.wgsl"),
+            "treat_spotlights",
+        )
+    }
+
+    // PCleanup.2.5a — the inline `new_spotlights` body was deleted; the
+    // `new_with_frag_shader` helper below subsumes it. See git history for
+    // the original construction body.
+    #[allow(dead_code)]
+    #[doc(hidden)]
+    fn _legacy_spotlights_inline_deleted(
+        device: &wgpu::Device,
+        target_format: wgpu::TextureFormat,
+    ) -> Self {
         let compute_src = format!(
             "{}\n{}\n{}",
             crate::render::sdf::SDF_HELPER_WGSL,
@@ -581,6 +597,363 @@ impl TreatmentParticlePipeline {
 
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("treat_spotlights render pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: dst,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&self.render_pipeline);
+        pass.set_bind_group(0, &render_bg, &[]);
+        pass.draw(0..6, 0..1);
+    }
+
+    /// PCleanup.2.5a — Construct a `TreatmentParticlePipeline` for the
+    /// `drift_pinholes` preset.
+    ///
+    /// Same compute pass as [`Self::new_spotlights`] (particles drift in mask,
+    /// or over [0,1]² when no mask is bound).  The fragment pass differs: it
+    /// masks the source by particle proximity, so only pixels under particles
+    /// remain visible.  `opacity` controls the strength of the masking:
+    ///   - `opacity = 0.0` → bit-exact passthrough (structural).
+    ///   - `opacity = 1.0` → fully masked (only pinholes visible).
+    ///
+    /// The pipeline shape (BGLs, buffers, SSBO size) is identical to spotlights
+    /// — drift_pinholes is a fragment-shader-only swap.
+    pub fn new_drift_pinholes(device: &wgpu::Device, target_format: wgpu::TextureFormat) -> Self {
+        Self::new_with_frag_shader(
+            device,
+            target_format,
+            include_str!("shaders/treat_drift_pinholes.wgsl"),
+            "treat_drift_pinholes",
+        )
+    }
+
+    /// PCleanup.2.5a — Shared constructor body, parameterised by the
+    /// fragment-shader source and label prefix.
+    ///
+    /// The compute side (position-update shader, BGL, params buffer, dummy SDF,
+    /// double-buffered SSBOs) is identical across particle Treatments — only
+    /// the fragment shader varies.  This helper centralises the duplicated
+    /// pipeline-construction code so each sibling preset (`new_spotlights`,
+    /// `new_drift_pinholes`, future W2.5b/W2.6) is a thin wrapper that just
+    /// names its fragment shader.
+    fn new_with_frag_shader(
+        device: &wgpu::Device,
+        target_format: wgpu::TextureFormat,
+        frag_wgsl: &'static str,
+        label_prefix: &str,
+    ) -> Self {
+        // --- Compute shader (position-update; shared across siblings) ---
+        let compute_src = format!(
+            "{}\n{}\n{}",
+            crate::render::sdf::SDF_HELPER_WGSL,
+            TREATMENT_PARTICLE_SIM_WGSL,
+            include_str!("shaders/treat_spotlights_compute.wgsl"),
+        );
+        let compute_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some(&format!("{label_prefix} compute")),
+            source: wgpu::ShaderSource::Wgsl(compute_src.into()),
+        });
+
+        // --- Fragment shader (per-preset) ---
+        let frag_src = format!("{}\n{}", TREATMENT_PARTICLE_SIM_WGSL, frag_wgsl);
+        let frag_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some(&format!("{label_prefix} frag")),
+            source: wgpu::ShaderSource::Wgsl(frag_src.into()),
+        });
+
+        let compute_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some(&format!("{label_prefix} compute bgl")),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: std::num::NonZeroU64::new(32),
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: std::num::NonZeroU64::new(16),
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 7,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: std::num::NonZeroU64::new(SPOTLIGHTS_SSBO_SIZE),
+                    },
+                    count: None,
+                },
+            ],
+        });
+
+        let compute_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some(&format!("{label_prefix} compute layout")),
+                bind_group_layouts: &[Some(&compute_bgl)],
+                immediate_size: 0,
+            });
+
+        let compute_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some(&format!("{label_prefix} compute")),
+            layout: Some(&compute_pipeline_layout),
+            module: &compute_shader,
+            entry_point: Some("cs_main"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            cache: None,
+        });
+
+        let render_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some(&format!("{label_prefix} render bgl")),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: std::num::NonZeroU64::new(32),
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 7,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: std::num::NonZeroU64::new(SPOTLIGHTS_SSBO_SIZE),
+                    },
+                    count: None,
+                },
+            ],
+        });
+
+        let render_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some(&format!("{label_prefix} render layout")),
+                bind_group_layouts: &[Some(&render_bgl)],
+                immediate_size: 0,
+            });
+
+        let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some(&format!("{label_prefix} render")),
+            layout: Some(&render_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &frag_shader,
+                entry_point: Some("vs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &frag_shader,
+                entry_point: Some("fs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: target_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some(&format!("{label_prefix} sampler")),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
+        });
+
+        let compute_params_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(&format!("{label_prefix} compute params")),
+            size: 32,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let clock_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(&format!("{label_prefix} clock")),
+            size: 16,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let frag_params_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(&format!("{label_prefix} frag params")),
+            size: 32,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let dummy_sdf = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(&format!("{label_prefix} dummy sdf")),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R32Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+
+        let dummy_sdf_view = dummy_sdf.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let ssbo = [
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(&format!("{label_prefix} ssbo 0")),
+                size: SPOTLIGHTS_SSBO_SIZE,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }),
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(&format!("{label_prefix} ssbo 1")),
+                size: SPOTLIGHTS_SSBO_SIZE,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }),
+        ];
+
+        Self {
+            compute_pipeline,
+            compute_bgl,
+            render_pipeline,
+            render_bgl,
+            sampler,
+            compute_params_buf,
+            clock_buf,
+            frag_params_buf,
+            dummy_sdf,
+            dummy_sdf_view,
+            ssbo,
+            write_idx: Cell::new(0),
+        }
+    }
+
+    /// PCleanup.2.5a — Fragment pass for the `drift_pinholes` preset.
+    ///
+    /// Reads `params["opacity"]` (default 0.0 — identity passthrough) and
+    /// `params["radius"]` (default 0.05 — UV-normalised) and uploads them to
+    /// the fragment params buffer in the same 32-byte layout
+    /// `treat_drift_pinholes.wgsl` expects.  Identical shape to [`Self::render`]
+    /// (the spotlights variant) except for the param keys read.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_drift_pinholes(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        dst: &wgpu::TextureView,
+        source: &wgpu::TextureView,
+        params: &HashMap<String, f32>,
+        n_particles: u32,
+    ) {
+        let n = n_particles.min(MAX_SPOTLIGHTS);
+        let opacity = params.get("opacity").copied().unwrap_or(0.0);
+        let radius = params.get("radius").copied().unwrap_or(0.05);
+
+        // DriftPinholesFragParams: 8 × f32 = 32 bytes.
+        // Layout: [opacity, radius, n_particles, _pad0..4]
+        let mut frag_bytes = [0u8; 32];
+        let frag_floats = [opacity, radius, n as f32, 0.0f32, 0.0, 0.0, 0.0, 0.0];
+        for (i, f) in frag_floats.iter().enumerate() {
+            frag_bytes[i * 4..(i + 1) * 4].copy_from_slice(&f.to_le_bytes());
+        }
+        queue.write_buffer(&self.frag_params_buf, 0, &frag_bytes);
+
+        let read_idx = 1 - self.write_idx.get();
+
+        let render_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("treat_drift_pinholes render bg"),
+            layout: &self.render_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(source),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: self.frag_params_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: self.ssbo[read_idx].as_entire_binding(),
+                },
+            ],
+        });
+
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("treat_drift_pinholes render pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: dst,
                 depth_slice: None,

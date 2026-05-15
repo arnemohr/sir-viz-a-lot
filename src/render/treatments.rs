@@ -114,6 +114,14 @@ pub const ZONE_LENS_PRESET_ID: &str = "zone_lens";
 /// `brightness_gain = 0.0` is a bit-exact passthrough.
 pub const SPOTLIGHTS_PRESET_ID: &str = "spotlights";
 
+/// PCleanup.2.5a — `drift_pinholes` preset id. Eighth W2 sibling treatment.
+/// Same particle compute pass as `spotlights`; the fragment pass inverts
+/// the visibility — source pixels under particles stay visible, everywhere
+/// else fades to black.  The effect resembles peepholes drifting over the
+/// photo.  `opacity = 0.0` is a bit-exact passthrough; `opacity = 1.0` is
+/// fully masked.
+pub const DRIFT_PINHOLES_PRESET_ID: &str = "drift_pinholes";
+
 /// Number of collage slots supported by the v0.5 `collage` preset.
 /// Fixed at 4 (a 2×2 grid) — true variable-N collage requires either
 /// dynamically-built bind groups or a texture array binding, deferred
@@ -252,6 +260,7 @@ pub fn treatment_group(preset_id: &str) -> TreatmentGroup {
         | ZONE_BRIGHTEN_PRESET_ID
         | ZONE_LENS_PRESET_ID
         | SPOTLIGHTS_PRESET_ID
+        | DRIFT_PINHOLES_PRESET_ID
         | DISPLACEMENT_RIPPLE_PRESET_ID
         | REFRACTION_PRESET_ID => TreatmentGroup::SourceModifier,
         _ => TreatmentGroup::GenerativeOrUtility,
@@ -283,6 +292,11 @@ pub fn registry() -> &'static [(&'static str, &'static str)] {
         (ZONE_LENS_PRESET_ID, "Zone lens (source warp at edge)"),
         // PCleanup.2.4 — particle-based luminance boost (Gaussian dot).
         (SPOTLIGHTS_PRESET_ID, "Spotlights (particle luminance lift)"),
+        // PCleanup.2.5a — particle-based source mask (drifting peepholes).
+        (
+            DRIFT_PINHOLES_PRESET_ID,
+            "Drift pinholes (particle source mask)",
+        ),
         // P2.4.1 — displacement-map ripple warp (pre-W2).
         (DISPLACEMENT_RIPPLE_PRESET_ID, "Displacement ripple"),
         // P2.4.2 — refraction warp (pre-W2).
@@ -335,6 +349,8 @@ pub fn param_descriptors(preset_id: &str) -> &'static [ParamDescriptor] {
         ZONE_LENS_PRESET_ID => ZONE_LENS_DESCRIPTORS,
         // PCleanup.2.4 — spotlights treatment.
         SPOTLIGHTS_PRESET_ID => SPOTLIGHTS_DESCRIPTORS,
+        // PCleanup.2.5a — drift_pinholes treatment.
+        DRIFT_PINHOLES_PRESET_ID => DRIFT_PINHOLES_DESCRIPTORS,
         _ => &[],
     }
 }
@@ -751,6 +767,46 @@ const SPOTLIGHTS_DESCRIPTORS: &[ParamDescriptor] = &[
     },
 ];
 
+/// PCleanup.2.5a — Static descriptors for the `drift_pinholes` preset.
+///
+/// Identity at `opacity = 0.0`: the fragment `mix(src, masked, 0.0)` collapses
+/// to `src` regardless of particle positions, so a freshly-added Treatment is
+/// a bit-exact passthrough until the operator pulls the opacity slider up.
+///
+/// Shares `particle_count`, `radius`, `drift_speed` semantics with
+/// `spotlights` — same compute pass, same SSBO, same MAX_SPOTLIGHTS cap.
+#[allow(dead_code)] // referenced only through `param_descriptors` (v3 UI)
+const DRIFT_PINHOLES_DESCRIPTORS: &[ParamDescriptor] = &[
+    ParamDescriptor {
+        key: "particle_count",
+        label: "Pinhole count (1–512)",
+        min: 1.0,
+        max: 512.0,
+        default: 32.0,
+    },
+    ParamDescriptor {
+        key: "opacity",
+        label: "Pinhole opacity (0 = no effect, 1 = fully masked)",
+        min: 0.0,
+        max: 1.0,
+        default: 0.0,
+    },
+    ParamDescriptor {
+        key: "radius",
+        label: "Pinhole radius (normalised UV)",
+        min: 0.01,
+        max: 0.3,
+        default: 0.05,
+    },
+    ParamDescriptor {
+        key: "drift_speed",
+        label: "Drift speed (UV/s)",
+        min: 0.0,
+        max: 1.0,
+        default: 0.1,
+    },
+];
+
 /// Static descriptors for the `refraction` preset (P2.4.2).
 /// Identity at default ior = 1.0 — the operator sees no change until they
 /// increase the ior slider. edge_width controls the SDF-distance band around
@@ -802,6 +858,8 @@ pub struct TreatmentPipeline {
     zone_lens: ZoneLensTreatmentPipeline,
     // PCleanup.2.4 — seventh W2 sibling: particle-based luminance boost.
     spotlights: crate::render::treatment_particles::TreatmentParticlePipeline,
+    // PCleanup.2.5a — eighth W2 sibling: particle-based source mask.
+    drift_pinholes: crate::render::treatment_particles::TreatmentParticlePipeline,
 }
 
 impl TreatmentPipeline {
@@ -835,6 +893,13 @@ impl TreatmentPipeline {
             // PCleanup.2.4 — spotlights particle pipeline.
             spotlights:
                 crate::render::treatment_particles::TreatmentParticlePipeline::new_spotlights(
+                    device,
+                    target_format,
+                ),
+            // PCleanup.2.5a — drift_pinholes particle pipeline (shares compute,
+            // different fragment shader from spotlights).
+            drift_pinholes:
+                crate::render::treatment_particles::TreatmentParticlePipeline::new_drift_pinholes(
                     device,
                     target_format,
                 ),
@@ -1023,6 +1088,33 @@ impl TreatmentPipeline {
                     inputs.sdf,
                 );
                 self.spotlights.render(
+                    device,
+                    queue,
+                    encoder,
+                    dst,
+                    inputs.source,
+                    inputs.params,
+                    n,
+                );
+                true
+            }
+            // PCleanup.2.5a — drift_pinholes. Same compute pass as spotlights;
+            // the fragment masks the source by particle proximity instead of
+            // lifting luminance.  SDF is optional (same fallback as spotlights).
+            DRIFT_PINHOLES_PRESET_ID => {
+                let n = inputs.params.get("particle_count").copied().unwrap_or(32.0) as u32;
+                self.drift_pinholes.dispatch_compute(
+                    queue,
+                    device,
+                    encoder,
+                    n,
+                    inputs.seed,
+                    inputs.clock_secs,
+                    inputs.t_layer_added_secs,
+                    inputs.params,
+                    inputs.sdf,
+                );
+                self.drift_pinholes.render_drift_pinholes(
                     device,
                     queue,
                     encoder,
@@ -5303,6 +5395,54 @@ mod tests {
         assert_eq!(
             gain_desc.default, 0.0,
             "brightness_gain identity default = 0.0"
+        );
+    }
+
+    // ----- PCleanup.2.5a — drift_pinholes treatment ----------------------
+
+    #[test]
+    fn drift_pinholes_is_registered() {
+        assert!(
+            is_registered(DRIFT_PINHOLES_PRESET_ID),
+            "drift_pinholes must appear in treatments::registry()"
+        );
+    }
+
+    #[test]
+    fn drift_pinholes_descriptors_present() {
+        let descriptors = param_descriptors(DRIFT_PINHOLES_PRESET_ID);
+        assert_eq!(
+            descriptors.len(),
+            4,
+            "drift_pinholes exposes exactly 4 params"
+        );
+        for d in descriptors {
+            assert!(d.min < d.max, "{}: min < max", d.key);
+            assert!(
+                d.default >= d.min && d.default <= d.max,
+                "{}: default in [min, max]",
+                d.key
+            );
+        }
+    }
+
+    #[test]
+    fn drift_pinholes_opacity_default_is_zero() {
+        let descriptors = param_descriptors(DRIFT_PINHOLES_PRESET_ID);
+        let opacity_desc = descriptors
+            .iter()
+            .find(|d| d.key == "opacity")
+            .expect("opacity descriptor must be present");
+        assert_eq!(opacity_desc.default, 0.0, "opacity identity default = 0.0");
+    }
+
+    /// PCleanup.2.5a — drift_pinholes is classified as a source-modifying
+    /// Treatment (it masks the source by particle proximity).
+    #[test]
+    fn drift_pinholes_is_source_modifier_group() {
+        assert_eq!(
+            treatment_group(DRIFT_PINHOLES_PRESET_ID),
+            TreatmentGroup::SourceModifier
         );
     }
 }

@@ -19,7 +19,8 @@ Companion task spec for [`004-phase-cleanup.md`](004-phase-cleanup.md). Each tas
 - [x] PCleanup.2.2 — `edge_lens` (sibling of `mask_edge_wave_wash`)
 - [x] PCleanup.2.3 — `fluid_warp_full` (sibling of `fluid_identity`)
 - [x] PCleanup.2.4 — `spotlights` (sibling of `particles_identity`) — particle SSBO infra in `src/render/treatment_particles.rs`; Gaussian luminance boost from drifting particles (commit `6470acc`)
-- [ ] PCleanup.2.5 — `drift_pinholes` OR `drift_brushstrokes` (sibling of `mask_constrained_drift`) — deferred (particles)
+- [x] PCleanup.2.5a — `drift_pinholes` (sibling of `mask_constrained_drift`) — particle SSBO mask, fragment shader inverts spotlights' luminance lift; W2.5b `drift_brushstrokes` next
+- [ ] PCleanup.2.5b — `drift_brushstrokes` (sibling of `mask_constrained_drift`) — needs per-particle velocity history; deferred
 - [ ] PCleanup.2.6 — `edge_sparks` (sibling of `mask_edge_emission`) — deferred (particles)
 - [x] PCleanup.2.7 — `field_advect_source` (sibling of `mask_field_flow`)
 - [ ] PCleanup.2.8 — `collision_ripples` (sibling of `mask_collision_reflection`) — deferred (compute + readback)
