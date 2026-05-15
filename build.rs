@@ -61,6 +61,11 @@ const SDF_CONSUMERS: &[&str] = &[
 /// get both helpers prepended during build-time validation.
 const ZONE_CONSUMERS: &[&str] = &["fx_zone_", "treat_zone_"];
 
+/// PCleanup.8.3a — Basename prefixes that need ONLY zone_tag_helper.wgsl
+/// prepended (not the SDF helper). Used for treatments that consume the
+/// ZoneTagUniform but do not call any `sample_sdf_*` functions.
+const ZONE_ONLY_CONSUMERS: &[&str] = &["treat_palette_extract"];
+
 /// PCleanup.2.4 — Treatment compute shaders that need SDF helper +
 /// treatment_particles_helper.wgsl prepended (in that order, SDF first).
 /// These are compute shaders that both call `sample_sdf_bilinear` AND use
@@ -162,6 +167,11 @@ fn main() {
             .iter()
             .any(|prefix| basename.starts_with(prefix));
 
+        // PCleanup.8.3a — shaders that need ONLY the zone-tag helper (no SDF).
+        let is_zone_only_consumer = ZONE_ONLY_CONSUMERS
+            .iter()
+            .any(|prefix| basename.starts_with(prefix));
+
         // PCleanup.2.4 — treatment-particle consumers.
         let is_tp_compute_consumer = TREATMENT_PARTICLE_COMPUTE_CONSUMERS
             .iter()
@@ -179,6 +189,11 @@ fn main() {
         } else if is_tp_frag_consumer {
             // Particle helper only + fragment shader source.
             format!("{}\n{}", tp_helper_src, src)
+        } else if is_zone_only_consumer {
+            // PCleanup.8.3a — zone-tag helper only (no SDF helper needed).
+            // Used for treatments that consume ZoneTagUniform but do not
+            // call any `sample_sdf_*` functions.
+            format!("{}\n{}", zone_helper_src, src)
         } else {
             match (is_sdf_consumer, is_zone_consumer) {
                 (true, true) => format!("{}\n{}\n{}", sdf_helper_src, zone_helper_src, src),

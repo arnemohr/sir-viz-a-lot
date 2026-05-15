@@ -478,6 +478,8 @@ const LUMINANCE_REVEAL_DESCRIPTORS: &[ParamDescriptor] = &[
 ];
 
 /// Static descriptors for the `collage` preset (P1.3.6).
+/// PCleanup.8.3b: added `mode` (0=grid default, 1=kaleidoscope, 2=mosaic).
+/// Default mode=0 preserves existing 2×2 grid behaviour for all projects.
 #[allow(dead_code)] // referenced only through `param_descriptors` (v3 UI)
 const COLLAGE_DESCRIPTORS: &[ParamDescriptor] = &[
     ParamDescriptor {
@@ -494,9 +496,19 @@ const COLLAGE_DESCRIPTORS: &[ParamDescriptor] = &[
         max: 0.1,
         default: 0.02,
     },
+    ParamDescriptor {
+        key: "mode",
+        label: "Mode (0=grid, 1=kaleidoscope, 2=mosaic)",
+        min: 0.0,
+        max: 2.0,
+        default: 0.0,
+    },
 ];
 
 /// Static descriptors for the `palette_extract` preset (P1.3.5).
+/// PCleanup.8.3a: added `zone_mode` (default 0 = ignore_zone = existing
+/// behaviour) and `outside_levels` (only meaningful at zone_mode=2).
+/// Default zone_mode=0 preserves pre-8.3a output for all existing projects.
 #[allow(dead_code)] // referenced only through `param_descriptors` (v3 UI)
 const PALETTE_EXTRACT_DESCRIPTORS: &[ParamDescriptor] = &[
     ParamDescriptor {
@@ -519,6 +531,20 @@ const PALETTE_EXTRACT_DESCRIPTORS: &[ParamDescriptor] = &[
         min: 0.0,
         max: 1.0,
         default: 0.0,
+    },
+    ParamDescriptor {
+        key: "zone_mode",
+        label: "Zone mode (0=ignore, 1=strict ZONE_WINDOW, 2=dual quantisation)",
+        min: 0.0,
+        max: 2.0,
+        default: 0.0,
+    },
+    ParamDescriptor {
+        key: "outside_levels",
+        label: "Levels outside zone (zone_mode=2 only)",
+        min: 1.0,
+        max: 8.0,
+        default: 4.0,
     },
 ];
 
@@ -561,6 +587,9 @@ const TEXTURE_OVERLAY_DESCRIPTORS: &[ParamDescriptor] = &[
 /// Defaults: zero radius (identity = no blur), 0.1 norm-units edge band
 /// (~7 % of layer width), smooth falloff. Identity at default radius =
 /// the operator sees no change until they reach for the radius slider.
+/// PCleanup.8.3c: added `radius_mode` (0=edge-band default, 1=distance-driven)
+/// and `distance_falloff` (only meaningful at radius_mode=1). Default
+/// radius_mode=0 preserves existing behaviour exactly for all projects.
 #[allow(dead_code)] // referenced only through `param_descriptors` (v3 UI)
 const BLUR_MASK_DESCRIPTORS: &[ParamDescriptor] = &[
     ParamDescriptor {
@@ -572,17 +601,31 @@ const BLUR_MASK_DESCRIPTORS: &[ParamDescriptor] = &[
     },
     ParamDescriptor {
         key: "edge_band",
-        label: "Edge band (norm)",
+        label: "Edge band (norm, radius_mode=0 only)",
         min: 0.01,
         max: 0.3,
         default: 0.1,
     },
     ParamDescriptor {
         key: "falloff",
-        label: "Falloff (0=hard, 1=smooth)",
+        label: "Falloff (0=hard, 1=smooth, radius_mode=0 only)",
         min: 0.0,
         max: 1.0,
         default: 0.7,
+    },
+    ParamDescriptor {
+        key: "radius_mode",
+        label: "Radius mode (0=edge-band, 1=distance-driven)",
+        min: 0.0,
+        max: 1.0,
+        default: 0.0,
+    },
+    ParamDescriptor {
+        key: "distance_falloff",
+        label: "Distance falloff (norm, radius_mode=1 only)",
+        min: 0.01,
+        max: 0.5,
+        default: 0.2,
     },
 ];
 
@@ -2100,7 +2143,9 @@ impl BlurMaskTreatmentPipeline {
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
-                        min_binding_size: std::num::NonZeroU64::new(16),
+                        // PCleanup.8.3c: expanded from 16 to 32 bytes
+                        // (array<vec4<f32>, 2>) for radius_mode + distance_falloff.
+                        min_binding_size: std::num::NonZeroU64::new(32),
                     },
                     count: None,
                 },
@@ -2242,9 +2287,11 @@ impl BlurMaskTreatmentPipeline {
             ..Default::default()
         });
 
+        // PCleanup.8.3c: expanded to 32 bytes (array<vec4<f32>, 2>) to
+        // accommodate the new `radius_mode` and `distance_falloff` params.
         let blur_params_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("treat_blur_mask params"),
-            size: 16,
+            size: 32,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -2274,15 +2321,27 @@ impl BlurMaskTreatmentPipeline {
         intermediate: &wgpu::TextureView,
     ) {
         // Read params (operator-tuned values, falling back to descriptor
-        // defaults). Pack into 16-byte uniform: [max_radius_px, edge_band,
-        // falloff, reserved].
+        // defaults). Pack into 32-byte uniform: array<vec4<f32>, 2>.
+        // vec4[0]: [max_radius_px, edge_band, falloff, radius_mode]
+        // vec4[1]: [distance_falloff, _pad, _pad, _pad]
+        // PCleanup.8.3c: radius_mode (default 0 = edge-band, existing behaviour);
+        // distance_falloff only meaningful at radius_mode=1.
         let max_radius = inputs.params.get("max_radius_px").copied().unwrap_or(0.0);
         let edge_band = inputs.params.get("edge_band").copied().unwrap_or(0.1);
         let falloff = inputs.params.get("falloff").copied().unwrap_or(0.7);
-        let mut bytes = [0u8; 16];
+        let radius_mode = inputs.params.get("radius_mode").copied().unwrap_or(0.0);
+        let distance_falloff = inputs
+            .params
+            .get("distance_falloff")
+            .copied()
+            .unwrap_or(0.2);
+        let mut bytes = [0u8; 32];
         bytes[0..4].copy_from_slice(&max_radius.to_le_bytes());
         bytes[4..8].copy_from_slice(&edge_band.to_le_bytes());
         bytes[8..12].copy_from_slice(&falloff.to_le_bytes());
+        bytes[12..16].copy_from_slice(&radius_mode.to_le_bytes());
+        bytes[16..20].copy_from_slice(&distance_falloff.to_le_bytes());
+        // bytes[20..32] — padding, left as zero.
         queue.write_buffer(&self.blur_params_buf, 0, &bytes);
 
         // ---- Pass 1: fit → dst (textured_quad with cover/contain) -----
@@ -2640,13 +2699,13 @@ impl CollageTreatmentPipeline {
             ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
             count: None,
         };
-        let uniform_entry = |binding: u32| wgpu::BindGroupLayoutEntry {
+        let uniform_entry = |binding: u32, size: u64| wgpu::BindGroupLayoutEntry {
             binding,
             visibility: wgpu::ShaderStages::FRAGMENT,
             ty: wgpu::BindingType::Buffer {
                 ty: wgpu::BufferBindingType::Uniform,
                 has_dynamic_offset: false,
-                min_binding_size: std::num::NonZeroU64::new(16),
+                min_binding_size: std::num::NonZeroU64::new(size),
             },
             count: None,
         };
@@ -2656,8 +2715,8 @@ impl CollageTreatmentPipeline {
             entries: &[
                 texture_entry(0),
                 sampler_entry(1),
-                uniform_entry(2),
-                uniform_entry(3),
+                uniform_entry(2, 16), // fit_uniform: vec4<f32>
+                uniform_entry(3, 32), // params: array<vec4<f32>, 2> (PCleanup.8.3b)
                 texture_entry(4),
                 texture_entry(5),
                 texture_entry(6),
@@ -2727,9 +2786,11 @@ impl CollageTreatmentPipeline {
             ..Default::default()
         });
 
+        // PCleanup.8.3b: expanded to 32 bytes (array<vec4<f32>, 2>) to
+        // accommodate the new `mode` param + mosaic seed offsets.
         let params_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("treat_collage params"),
-            size: 16,
+            size: 32,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -2753,6 +2814,8 @@ impl CollageTreatmentPipeline {
     ) {
         let mix_amt = inputs.params.get("mix").copied().unwrap_or(0.0);
         let gap = inputs.params.get("gap").copied().unwrap_or(0.02);
+        // PCleanup.8.3b: mode 0=grid (default), 1=kaleidoscope, 2=mosaic.
+        let col_mode = inputs.params.get("mode").copied().unwrap_or(0.0);
 
         // Build the slot_mask: bit i set if the slot view is provided.
         let mut mask: u32 = 0;
@@ -2760,10 +2823,38 @@ impl CollageTreatmentPipeline {
             mask |= 1 << i;
         }
 
-        let mut bytes = [0u8; 16];
+        // PCleanup.8.3b — mosaic mode: derive 3 quasi-random f32 offsets from
+        // the u64 seed so the shader can compute per-tile UV offsets without
+        // any 64-bit WGSL math. Splits the seed into low/high u32 words and
+        // applies a simple hash mix (large-prime multiply + xorshift) to
+        // produce values well-distributed in [0, 1).
+        let seed_lo = inputs.seed as u32;
+        let seed_hi = (inputs.seed >> 32) as u32;
+        // Mix functions: wrapping multiply by large primes to spread bits.
+        let h0 = seed_lo
+            .wrapping_mul(0x9e37_79b9)
+            .wrapping_add(seed_hi.wrapping_mul(0x6c62_272e));
+        let h1 = seed_hi
+            .wrapping_mul(0x9e37_79b9)
+            .wrapping_add(seed_lo.wrapping_mul(0x2f4a_d0cf));
+        let h2 = h0.wrapping_add(h1).wrapping_mul(0xbf58_476d);
+        // Map to [0, 1) via bit-cast to normalised float (u32 / 2^32).
+        let r0 = (h0 >> 8) as f32 / 16_777_216.0_f32;
+        let r1 = (h1 >> 8) as f32 / 16_777_216.0_f32;
+        let r2 = (h2 >> 8) as f32 / 16_777_216.0_f32;
+
+        // Pack 32-byte params uniform: array<vec4<f32>, 2>
+        // vec4[0]: [mix, gap, slot_mask_f32, mode]
+        // vec4[1]: [seed_r0, seed_r1, seed_r2, _pad]
+        let mut bytes = [0u8; 32];
         bytes[0..4].copy_from_slice(&mix_amt.to_le_bytes());
         bytes[4..8].copy_from_slice(&gap.to_le_bytes());
         bytes[8..12].copy_from_slice(&(mask as f32).to_le_bytes());
+        bytes[12..16].copy_from_slice(&col_mode.to_le_bytes());
+        bytes[16..20].copy_from_slice(&r0.to_le_bytes());
+        bytes[20..24].copy_from_slice(&r1.to_le_bytes());
+        bytes[24..28].copy_from_slice(&r2.to_le_bytes());
+        // bytes[28..32] — padding, left as zero.
         queue.write_buffer(&self.params_buf, 0, &bytes);
 
         // Slot textures: provided ones use the caller's view; empty
@@ -2841,28 +2932,172 @@ impl CollageTreatmentPipeline {
     }
 }
 
-/// Palette-extract / posterize treatment pipeline (P1.3.5). Single
-/// pass; uses the shared single-pass treatment helper.
+/// Palette-extract / posterize treatment pipeline (P1.3.5).
+///
+/// PCleanup.8.3a — extended with zone-aware mode. The pipeline now builds
+/// its own BGL (no longer delegating to `build_single_pass_treatment`) so
+/// it can add:
+///   - binding 3: 32-byte params uniform (array<vec4<f32>, 2>) for zone_mode
+///     and outside_levels in addition to the original levels/mix/dither fields.
+///   - binding 6: 16-byte ZoneTagUniform (zone_tag u32 + 3×u32 padding),
+///     following the P3.3.2 slot contract shared by all zone-aware treatments.
+///
+/// `build_single_pass_treatment` is NOT used here because that helper fixes
+/// the params buffer to 16 bytes and has no binding-6 slot.
 struct PaletteExtractTreatmentPipeline {
     pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     params_buf: wgpu::Buffer,
+    zone_tag_buf: wgpu::Buffer,
 }
 
 impl PaletteExtractTreatmentPipeline {
     fn new(device: &wgpu::Device, target_format: wgpu::TextureFormat) -> Self {
-        let (pipeline, bind_group_layout, sampler, params_buf) = build_single_pass_treatment(
-            device,
-            target_format,
-            "treat_palette_extract.wgsl",
-            include_str!("shaders/treat_palette_extract.wgsl"),
+        // PCleanup.8.3a: prepend ZONE_TAG_WGSL at runtime to match
+        // build.rs's ZONE_ONLY_CONSUMERS compile-time validation.
+        let src = format!(
+            "{}\n{}",
+            crate::render::sdf::ZONE_TAG_WGSL,
+            include_str!("shaders/treat_palette_extract.wgsl")
         );
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("treat_palette_extract.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(src.into()),
+        });
+
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("treat_palette_extract bgl"),
+            entries: &[
+                // binding 0: source texture (filterable)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    },
+                    count: None,
+                },
+                // binding 1: source sampler (filtering)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                // binding 2: fit uniform (16 bytes, vec4<f32>)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: std::num::NonZeroU64::new(16),
+                    },
+                    count: None,
+                },
+                // binding 3: params uniform (32 bytes, array<vec4<f32>, 2>)
+                // PCleanup.8.3a: expanded from 16 to 32 bytes for zone_mode
+                // and outside_levels fields.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: std::num::NonZeroU64::new(32),
+                    },
+                    count: None,
+                },
+                // binding 6: ZoneTagUniform (16 bytes; P3.3.2 slot contract)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 6,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: std::num::NonZeroU64::new(16),
+                    },
+                    count: None,
+                },
+            ],
+        });
+
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("treat_palette_extract pipeline layout"),
+            bind_group_layouts: &[Some(&bind_group_layout)],
+            immediate_size: 0,
+        });
+
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("treat_palette_extract pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: target_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("treat_palette_extract sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
+        });
+
+        // 32-byte params uniform: array<vec4<f32>, 2>.
+        let params_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("treat_palette_extract params"),
+            size: 32,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        // 16-byte zone-tag uniform: ZoneTagUniform (u32 zone_tag + 3 × u32 padding).
+        let zone_tag_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("treat_palette_extract zone_tag"),
+            size: 16,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         Self {
             pipeline,
             bind_group_layout,
             sampler,
             params_buf,
+            zone_tag_buf,
         }
     }
 
@@ -2877,24 +3112,80 @@ impl PaletteExtractTreatmentPipeline {
         let levels = inputs.params.get("levels").copied().unwrap_or(4.0);
         let mix_amt = inputs.params.get("mix").copied().unwrap_or(0.0);
         let dither = inputs.params.get("dither").copied().unwrap_or(0.0);
+        // PCleanup.8.3a — new zone-aware params. Default zone_mode=0 preserves
+        // pre-8.3a behaviour for all existing projects.
+        let zone_mode = inputs.params.get("zone_mode").copied().unwrap_or(0.0);
+        let outside_levels = inputs.params.get("outside_levels").copied().unwrap_or(4.0);
 
-        let mut bytes = [0u8; 16];
+        // Pack 32-byte params uniform: array<vec4<f32>, 2>
+        // vec4[0]: [levels, mix, dither, zone_mode]
+        // vec4[1]: [outside_levels, _pad, _pad, _pad]
+        let mut bytes = [0u8; 32];
         bytes[0..4].copy_from_slice(&levels.to_le_bytes());
         bytes[4..8].copy_from_slice(&mix_amt.to_le_bytes());
         bytes[8..12].copy_from_slice(&dither.to_le_bytes());
+        bytes[12..16].copy_from_slice(&zone_mode.to_le_bytes());
+        bytes[16..20].copy_from_slice(&outside_levels.to_le_bytes());
+        // bytes[20..32] — padding, left as zero.
         queue.write_buffer(&self.params_buf, 0, &bytes);
 
-        draw_single_pass_treatment(
-            device,
-            encoder,
-            dst,
-            inputs,
-            &self.pipeline,
-            &self.bind_group_layout,
-            &self.sampler,
-            &self.params_buf,
-            "treat_palette_extract",
-        );
+        // Write ZoneTagUniform: u32 zone_tag + 3 × u32 padding = 16 bytes.
+        let zone_tag = crate::project::schema::zone_role_to_u32(inputs.zone_role);
+        let zone_bytes = [
+            zone_tag.to_le_bytes(),
+            [0u8; 4], // _pad0
+            [0u8; 4], // _pad1
+            [0u8; 4], // _pad2
+        ]
+        .concat();
+        queue.write_buffer(&self.zone_tag_buf, 0, &zone_bytes);
+
+        let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("treat_palette_extract bg"),
+            layout: &self.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(inputs.source),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: inputs.fit_uniform.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: self.params_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: self.zone_tag_buf.as_entire_binding(),
+                },
+            ],
+        });
+
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("treat_palette_extract pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: dst,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &bg, &[]);
+        pass.draw(0..6, 0..1);
     }
 }
 
@@ -5345,13 +5636,14 @@ mod tests {
     }
 
     /// Acceptance: blur_mask exposes max_radius_px + edge_band + falloff
-    /// with the documented defaults. The default `max_radius_px = 0` is
-    /// the key identity property — operator sees no change until they
-    /// reach for the radius slider.
+    /// plus PCleanup.8.3c additions (radius_mode + distance_falloff).
+    /// The default `max_radius_px = 0` is the key identity property —
+    /// operator sees no change until they reach for the radius slider.
+    /// The default `radius_mode = 0` preserves pre-8.3c behaviour exactly.
     #[test]
     fn blur_mask_defaults_are_no_op() {
         let descriptors = param_descriptors(BLUR_MASK_PRESET_ID);
-        assert_eq!(descriptors.len(), 3);
+        assert_eq!(descriptors.len(), 5);
 
         let by_key: std::collections::HashMap<&str, &ParamDescriptor> =
             descriptors.iter().map(|d| (d.key, d)).collect();
@@ -5361,6 +5653,12 @@ mod tests {
         );
         assert!(by_key["edge_band"].default > 0.0);
         assert!(by_key["falloff"].default >= 0.0 && by_key["falloff"].default <= 1.0);
+        // PCleanup.8.3c: radius_mode default=0 (edge-band, existing behaviour).
+        assert_eq!(
+            by_key["radius_mode"].default, 0.0,
+            "radius_mode default = 0 preserves pre-8.3c behaviour"
+        );
+        assert!(by_key["distance_falloff"].default > 0.0);
 
         for d in descriptors {
             assert!(d.min < d.max, "{}: min < max", d.key);
