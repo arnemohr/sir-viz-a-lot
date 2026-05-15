@@ -139,6 +139,19 @@ pub const DRIFT_BRUSHSTROKES_PRESET_ID: &str = "drift_brushstrokes";
 /// at a new edge point after expiring.  `brightness_gain = 0.0` is a
 /// bit-exact passthrough.
 pub const EDGE_SPARKS_PRESET_ID: &str = "edge_sparks";
+
+/// PCleanup.2.8 — `collision_ripples` preset id. Eleventh W2 sibling.
+/// Particles drift in the mask; when one would cross the boundary it
+/// freezes at the collision point and starts a circular ripple that
+/// radially displaces source UVs.  After a configurable lifetime the
+/// ripple expires and the particle respawns.  Implementation is fully
+/// GPU-resident: the existing per-particle SSBO encodes drift-vs-rippling
+/// state in `_pad` (≥ 0.5 = active ripple, < 0.5 = drifting), so no CPU
+/// readback or second buffer is needed.  `amplitude = 0.0` is bit-exact
+/// passthrough — displacement collapses to zero and the fragment samples
+/// the source at the original UV.
+pub const COLLISION_RIPPLES_PRESET_ID: &str = "collision_ripples";
+
 /// Fixed at 4 (a 2×2 grid) — true variable-N collage requires either
 /// dynamically-built bind groups or a texture array binding, deferred
 /// to Phase 7.
@@ -279,6 +292,7 @@ pub fn treatment_group(preset_id: &str) -> TreatmentGroup {
         | DRIFT_PINHOLES_PRESET_ID
         | DRIFT_BRUSHSTROKES_PRESET_ID
         | EDGE_SPARKS_PRESET_ID
+        | COLLISION_RIPPLES_PRESET_ID
         | DISPLACEMENT_RIPPLE_PRESET_ID
         | REFRACTION_PRESET_ID => TreatmentGroup::SourceModifier,
         _ => TreatmentGroup::GenerativeOrUtility,
@@ -322,6 +336,11 @@ pub fn registry() -> &'static [(&'static str, &'static str)] {
         ),
         // PCleanup.2.6 — sparks at the mask edge fading over their lifetime.
         (EDGE_SPARKS_PRESET_ID, "Edge sparks (mask-edge embers)"),
+        // PCleanup.2.8 — particle collisions on the mask emit ripples.
+        (
+            COLLISION_RIPPLES_PRESET_ID,
+            "Collision ripples (mask-bounce displacement)",
+        ),
         // P2.4.1 — displacement-map ripple warp (pre-W2).
         (DISPLACEMENT_RIPPLE_PRESET_ID, "Displacement ripple"),
         // P2.4.2 — refraction warp (pre-W2).
@@ -380,6 +399,8 @@ pub fn param_descriptors(preset_id: &str) -> &'static [ParamDescriptor] {
         DRIFT_BRUSHSTROKES_PRESET_ID => DRIFT_BRUSHSTROKES_DESCRIPTORS,
         // PCleanup.2.6 — edge_sparks treatment.
         EDGE_SPARKS_PRESET_ID => EDGE_SPARKS_DESCRIPTORS,
+        // PCleanup.2.8 — collision_ripples treatment.
+        COLLISION_RIPPLES_PRESET_ID => COLLISION_RIPPLES_DESCRIPTORS,
         _ => &[],
     }
 }
@@ -930,6 +951,65 @@ const EDGE_SPARKS_DESCRIPTORS: &[ParamDescriptor] = &[
     },
 ];
 
+/// PCleanup.2.8 — Static descriptors for the `collision_ripples` preset.
+///
+/// Identity at `amplitude = 0.0`: total displacement is zero everywhere, so
+/// the fragment samples `t_source` at the original UV — bit-exact pass.
+/// `frequency` and `ripple_speed` control the visual shape; `ripple_decay`
+/// tunes how fast each bounce's ripple fades.
+#[allow(dead_code)] // referenced only through `param_descriptors` (v3 UI)
+const COLLISION_RIPPLES_DESCRIPTORS: &[ParamDescriptor] = &[
+    ParamDescriptor {
+        key: "particle_count",
+        label: "Bouncer count (1–512)",
+        min: 1.0,
+        max: 512.0,
+        default: 64.0,
+    },
+    ParamDescriptor {
+        key: "amplitude",
+        label: "Ripple amplitude (UV displacement; 0 = no effect)",
+        min: 0.0,
+        max: 0.05,
+        default: 0.0,
+    },
+    ParamDescriptor {
+        key: "frequency",
+        label: "Ripple frequency (higher = tighter ring)",
+        min: 1.0,
+        max: 80.0,
+        default: 20.0,
+    },
+    ParamDescriptor {
+        key: "ripple_speed",
+        label: "Ring expansion speed (UV/s)",
+        min: 0.0,
+        max: 2.0,
+        default: 0.5,
+    },
+    ParamDescriptor {
+        key: "ripple_decay",
+        label: "Ripple decay (1/s; higher = fades sooner)",
+        min: 0.0,
+        max: 5.0,
+        default: 1.0,
+    },
+    ParamDescriptor {
+        key: "drift_speed",
+        label: "Bouncer drift speed (UV/s)",
+        min: 0.0,
+        max: 1.0,
+        default: 0.3,
+    },
+    ParamDescriptor {
+        key: "ripple_lifetime",
+        label: "Ripple lifetime (seconds before respawn)",
+        min: 0.1,
+        max: 4.0,
+        default: 1.2,
+    },
+];
+
 /// Static descriptors for the `refraction` preset (P2.4.2).
 /// Identity at default ior = 1.0 — the operator sees no change until they
 /// increase the ior slider. edge_width controls the SDF-distance band around
@@ -987,6 +1067,9 @@ pub struct TreatmentPipeline {
     drift_brushstrokes: crate::render::treatment_particles::TreatmentParticlePipeline,
     // PCleanup.2.6 — tenth W2 sibling: edge-spawning sparks with lifetime fade.
     edge_sparks: crate::render::treatment_particles::TreatmentParticlePipeline,
+    // PCleanup.2.8 — eleventh W2 sibling: particle bounces emit UV-displacing
+    // ripples (GPU-only, no CPU readback — state encoded in Particle._pad).
+    collision_ripples: crate::render::treatment_particles::TreatmentParticlePipeline,
 }
 
 impl TreatmentPipeline {
@@ -1041,6 +1124,13 @@ impl TreatmentPipeline {
             // particles at the mask edge and tracks per-particle lifetime).
             edge_sparks:
                 crate::render::treatment_particles::TreatmentParticlePipeline::new_edge_sparks(
+                    device,
+                    target_format,
+                ),
+            // PCleanup.2.8 — collision_ripples (different compute: drift+collide
+            // state machine; fragment displaces UVs by active ripple sum).
+            collision_ripples:
+                crate::render::treatment_particles::TreatmentParticlePipeline::new_collision_ripples(
                     device,
                     target_format,
                 ),
@@ -1310,6 +1400,34 @@ impl TreatmentPipeline {
                     inputs.sdf,
                 );
                 self.edge_sparks.render_edge_sparks(
+                    device,
+                    queue,
+                    encoder,
+                    dst,
+                    inputs.source,
+                    inputs.params,
+                    n,
+                    inputs.clock_secs - inputs.t_layer_added_secs,
+                );
+                true
+            }
+            // PCleanup.2.8 — collision_ripples. Drift+collide state machine
+            // in compute; fragment displaces source UVs by accumulated radial
+            // ripples from each active collision.
+            COLLISION_RIPPLES_PRESET_ID => {
+                let n = inputs.params.get("particle_count").copied().unwrap_or(64.0) as u32;
+                self.collision_ripples.dispatch_compute_collision_ripples(
+                    queue,
+                    device,
+                    encoder,
+                    n,
+                    inputs.seed,
+                    inputs.clock_secs,
+                    inputs.t_layer_added_secs,
+                    inputs.params,
+                    inputs.sdf,
+                );
+                self.collision_ripples.render_collision_ripples(
                     device,
                     queue,
                     encoder,
@@ -5751,6 +5869,48 @@ mod tests {
     fn edge_sparks_is_source_modifier_group() {
         assert_eq!(
             treatment_group(EDGE_SPARKS_PRESET_ID),
+            TreatmentGroup::SourceModifier
+        );
+    }
+
+    // ----- PCleanup.2.8 — collision_ripples treatment --------------------
+
+    #[test]
+    fn collision_ripples_is_registered() {
+        assert!(
+            is_registered(COLLISION_RIPPLES_PRESET_ID),
+            "collision_ripples must appear in treatments::registry()"
+        );
+    }
+
+    #[test]
+    fn collision_ripples_descriptors_present() {
+        let descriptors = param_descriptors(COLLISION_RIPPLES_PRESET_ID);
+        assert_eq!(descriptors.len(), 7, "collision_ripples exposes 7 params");
+        for d in descriptors {
+            assert!(d.min < d.max, "{}: min < max", d.key);
+            assert!(
+                d.default >= d.min && d.default <= d.max,
+                "{}: default in [min, max]",
+                d.key
+            );
+        }
+    }
+
+    #[test]
+    fn collision_ripples_amplitude_default_is_zero() {
+        let descriptors = param_descriptors(COLLISION_RIPPLES_PRESET_ID);
+        let amp_desc = descriptors
+            .iter()
+            .find(|d| d.key == "amplitude")
+            .expect("amplitude descriptor must be present");
+        assert_eq!(amp_desc.default, 0.0, "amplitude identity default = 0.0");
+    }
+
+    #[test]
+    fn collision_ripples_is_source_modifier_group() {
+        assert_eq!(
+            treatment_group(COLLISION_RIPPLES_PRESET_ID),
             TreatmentGroup::SourceModifier
         );
     }

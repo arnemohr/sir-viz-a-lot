@@ -65,17 +65,21 @@ const ZONE_CONSUMERS: &[&str] = &["fx_zone_", "treat_zone_"];
 /// treatment_particles_helper.wgsl prepended (in that order, SDF first).
 /// These are compute shaders that both call `sample_sdf_bilinear` AND use
 /// the `Particle` struct from the particle helper.
-const TREATMENT_PARTICLE_COMPUTE_CONSUMERS: &[&str] =
-    &["treat_spotlights_compute", "treat_edge_sparks_compute"];
+const TREATMENT_PARTICLE_COMPUTE_CONSUMERS: &[&str] = &[
+    "treat_spotlights_compute",
+    "treat_edge_sparks_compute",
+    "treat_collision_ripples_compute",
+];
 
-/// PCleanup.2.4 / PCleanup.2.5a / PCleanup.2.5b / PCleanup.2.6 — Treatment
-/// fragment shaders that need ONLY the particle helper prepended (no SDF
-/// calls in the fragment pass).
+/// PCleanup.2.4 / PCleanup.2.5a / PCleanup.2.5b / PCleanup.2.6 / PCleanup.2.8
+/// — Treatment fragment shaders that need ONLY the particle helper prepended
+/// (no SDF calls in the fragment pass).
 const TREATMENT_PARTICLE_FRAG_CONSUMERS: &[&str] = &[
     "treat_spotlights",
     "treat_drift_pinholes",
     "treat_drift_brushstrokes",
     "treat_edge_sparks",
+    "treat_collision_ripples",
 ];
 
 fn main() {

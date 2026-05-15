@@ -675,6 +675,27 @@ impl TreatmentParticlePipeline {
         )
     }
 
+    /// PCleanup.2.8 — Construct a `TreatmentParticlePipeline` for the
+    /// `collision_ripples` preset.
+    ///
+    /// Compute shader gives each particle a two-state lifecycle (drifting →
+    /// rippling on boundary crossing → respawn).  Fragment shader displaces
+    /// source UVs by accumulated radial pulses from every active ripple.
+    /// No CPU readback; ripples are entirely GPU-resident in the existing
+    /// particle SSBO (the `_pad` field encodes the state marker).
+    pub fn new_collision_ripples(
+        device: &wgpu::Device,
+        target_format: wgpu::TextureFormat,
+    ) -> Self {
+        Self::new_with_shaders(
+            device,
+            target_format,
+            include_str!("shaders/treat_collision_ripples_compute.wgsl"),
+            include_str!("shaders/treat_collision_ripples.wgsl"),
+            "treat_collision_ripples",
+        )
+    }
+
     /// PCleanup.2.5a — Shared constructor body, parameterised by the
     /// fragment-shader source and label prefix.
     ///
@@ -1305,6 +1326,193 @@ impl TreatmentParticlePipeline {
         }
 
         self.write_idx.set(1 - w_idx);
+    }
+
+    /// PCleanup.2.8 — Compute dispatch for `collision_ripples`.
+    /// Uploads the 3-field compute params (drift_speed, ripple_lifetime,
+    /// initial_amplitude) before reusing the shared compute BGL.
+    #[allow(clippy::too_many_arguments)]
+    pub fn dispatch_compute_collision_ripples(
+        &self,
+        queue: &wgpu::Queue,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        n_particles: u32,
+        seed: u64,
+        clock_secs: f32,
+        t_layer_added_secs: f32,
+        params: &HashMap<String, f32>,
+        sdf_view: Option<&wgpu::TextureView>,
+    ) {
+        let n = n_particles.min(MAX_SPOTLIGHTS);
+        let t_local = clock_secs - t_layer_added_secs;
+        let seed_f = (seed as u32 & 0x7f_ffff) as f32;
+
+        let drift_speed = params.get("drift_speed").copied().unwrap_or(0.3);
+        let ripple_lifetime = params.get("ripple_lifetime").copied().unwrap_or(1.2);
+        // initial_amplitude doubles as the >= 0.5 RIPPLING state marker.
+        let initial_amplitude = params
+            .get("initial_amplitude")
+            .copied()
+            .unwrap_or(1.0)
+            .max(0.51);
+
+        let mut compute_bytes = [0u8; 32];
+        let compute_floats = [
+            drift_speed,
+            ripple_lifetime,
+            initial_amplitude,
+            0.0f32,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+        ];
+        for (i, f) in compute_floats.iter().enumerate() {
+            compute_bytes[i * 4..(i + 1) * 4].copy_from_slice(&f.to_le_bytes());
+        }
+        queue.write_buffer(&self.compute_params_buf, 0, &compute_bytes);
+
+        let mut clock_bytes = [0u8; 16];
+        clock_bytes[0..4].copy_from_slice(&clock_secs.to_le_bytes());
+        clock_bytes[4..8].copy_from_slice(&t_local.to_le_bytes());
+        clock_bytes[8..12].copy_from_slice(&seed_f.to_le_bytes());
+        clock_bytes[12..16].copy_from_slice(&(n as f32).to_le_bytes());
+        queue.write_buffer(&self.clock_buf, 0, &clock_bytes);
+
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.dummy_sdf,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &0.5f32.to_le_bytes(),
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(4),
+                rows_per_image: Some(1),
+            },
+            wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+        );
+
+        let w_idx = self.write_idx.get();
+        let active_sdf = sdf_view.unwrap_or(&self.dummy_sdf_view);
+
+        let compute_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("treat_collision_ripples compute bg"),
+            layout: &self.compute_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: self.compute_params_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: self.clock_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(active_sdf),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: self.ssbo[w_idx].as_entire_binding(),
+                },
+            ],
+        });
+
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("treat_collision_ripples compute pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.compute_pipeline);
+            pass.set_bind_group(0, &compute_bg, &[]);
+            let groups = n.div_ceil(64);
+            pass.dispatch_workgroups(groups, 1, 1);
+        }
+
+        self.write_idx.set(1 - w_idx);
+    }
+
+    /// PCleanup.2.8 — Fragment pass for `collision_ripples`.
+    /// Uploads 6-field frag params and dispatches the displacement shader.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_collision_ripples(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        dst: &wgpu::TextureView,
+        source: &wgpu::TextureView,
+        params: &HashMap<String, f32>,
+        n_particles: u32,
+        clock_secs: f32,
+    ) {
+        let n = n_particles.min(MAX_SPOTLIGHTS);
+        let amplitude = params.get("amplitude").copied().unwrap_or(0.0);
+        let frequency = params.get("frequency").copied().unwrap_or(20.0);
+        let speed = params.get("ripple_speed").copied().unwrap_or(0.5);
+        let decay = params.get("ripple_decay").copied().unwrap_or(1.0);
+
+        let mut frag_bytes = [0u8; 32];
+        let frag_floats = [
+            amplitude, frequency, speed, decay, n as f32, clock_secs, 0.0f32, 0.0,
+        ];
+        for (i, f) in frag_floats.iter().enumerate() {
+            frag_bytes[i * 4..(i + 1) * 4].copy_from_slice(&f.to_le_bytes());
+        }
+        queue.write_buffer(&self.frag_params_buf, 0, &frag_bytes);
+
+        let read_idx = 1 - self.write_idx.get();
+
+        let render_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("treat_collision_ripples render bg"),
+            layout: &self.render_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(source),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: self.frag_params_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: self.ssbo[read_idx].as_entire_binding(),
+                },
+            ],
+        });
+
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("treat_collision_ripples render pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: dst,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&self.render_pipeline);
+        pass.set_bind_group(0, &render_bg, &[]);
+        pass.draw(0..6, 0..1);
     }
 }
 
