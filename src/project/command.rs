@@ -1218,6 +1218,18 @@ pub struct MoveBezierAnchor {
     pub new_pos: [f32; 2],
     /// Pre-mutation position snapshot — restored on undo.
     pub old_pos: [f32; 2],
+    /// PCleanup.bezier-handle-reverse — pre-mutation snapshot of the
+    /// horizontal-tangent handle at this anchor.  Apply propagates the
+    /// anchor delta to handles via float `+= delta`, which is NOT
+    /// bit-exact on reverse (float subtraction can drift by 1 ULP per
+    /// round-trip).  Storing the original handle bits restores them
+    /// exactly on undo, satisfying the V31.3.2 ReverseStorage trait
+    /// invariant (every `Mutation::apply` opens with `debug_assert!`
+    /// that the carried `old` value matches current state).
+    pub old_h_handle: Option<[f32; 2]>,
+    /// Pre-mutation snapshot of the vertical-tangent handle.  See
+    /// [`Self::old_h_handle`] for the rationale.
+    pub old_v_handle: Option<[f32; 2]>,
 }
 
 impl ReverseStorage for MoveBezierAnchor {
@@ -1241,35 +1253,84 @@ impl ReverseStorage for MoveBezierAnchor {
              current={:?}, expected old={:?}",
             self.anchor_row, self.anchor_col, anchor, self.old_pos,
         );
-        // Compute delta and apply rigidly to both handles of this anchor.
-        let delta = [
-            self.new_pos[0] - self.old_pos[0],
-            self.new_pos[1] - self.old_pos[1],
-        ];
         *anchor = self.new_pos;
-        // Propagate delta to handles_h and handles_v if set.
-        if let Some(Some(pos)) = bm
-            .handles_h
-            .get_mut(self.anchor_row)
-            .and_then(|row| row.get_mut(self.anchor_col))
-        {
-            pos[0] += delta[0];
-            pos[1] += delta[1];
+
+        // PCleanup.bezier-handle-reverse — two paths:
+        //
+        // FORWARD (from `move_bezier_anchor_mutation`): both `old_h_handle`
+        // and `old_v_handle` are `None`.  Propagate the anchor delta to
+        // each handle via float `+= delta`, then SNAPSHOT the result.
+        // The returned reverse mutation carries those snapshots so undo
+        // can restore them bit-exact (no float arithmetic on the reverse).
+        //
+        // REVERSE (from a prior apply): the snapshots are `Some(...)`.
+        // Restore handles directly from the snapshot — no delta math —
+        // so the round-trip is bit-exact and the proptest invariant
+        // (apply N → undo N → byte-equal to start) holds.
+        let restore_mode = self.old_h_handle.is_some() || self.old_v_handle.is_some();
+        let mut captured_h: Option<[f32; 2]> = None;
+        let mut captured_v: Option<[f32; 2]> = None;
+
+        if restore_mode {
+            // Restore from snapshots — bit-exact.
+            if let Some(slot) = bm
+                .handles_h
+                .get_mut(self.anchor_row)
+                .and_then(|row| row.get_mut(self.anchor_col))
+            {
+                *slot = self.old_h_handle;
+            }
+            if let Some(slot) = bm
+                .handles_v
+                .get_mut(self.anchor_row)
+                .and_then(|row| row.get_mut(self.anchor_col))
+            {
+                *slot = self.old_v_handle;
+            }
+        } else {
+            // Forward delta-propagate.  CAPTURE the pre-apply handle bits
+            // (which become `old_*_handle` for the reverse — undoing this
+            // mutation restores those bits exactly), then mutate.
+            let delta = [
+                self.new_pos[0] - self.old_pos[0],
+                self.new_pos[1] - self.old_pos[1],
+            ];
+            if let Some(slot) = bm
+                .handles_h
+                .get_mut(self.anchor_row)
+                .and_then(|row| row.get_mut(self.anchor_col))
+            {
+                if let Some(pos) = slot.as_mut() {
+                    captured_h = Some(*pos); // PRE-apply value
+                    pos[0] += delta[0];
+                    pos[1] += delta[1];
+                }
+            }
+            if let Some(slot) = bm
+                .handles_v
+                .get_mut(self.anchor_row)
+                .and_then(|row| row.get_mut(self.anchor_col))
+            {
+                if let Some(pos) = slot.as_mut() {
+                    captured_v = Some(*pos); // PRE-apply value
+                    pos[0] += delta[0];
+                    pos[1] += delta[1];
+                }
+            }
         }
-        if let Some(Some(pos)) = bm
-            .handles_v
-            .get_mut(self.anchor_row)
-            .and_then(|row| row.get_mut(self.anchor_col))
-        {
-            pos[0] += delta[0];
-            pos[1] += delta[1];
-        }
+
         MoveBezierAnchor {
             layer_idx: self.layer_idx,
             anchor_row: self.anchor_row,
             anchor_col: self.anchor_col,
             new_pos: self.old_pos,
             old_pos: self.new_pos,
+            // After a FORWARD apply, captured_* holds the PRE-apply
+            // handle bits — these are the values undo needs to restore.
+            // After a REVERSE apply, the snapshots should be None (the
+            // next forward apply re-captures from pre-state).
+            old_h_handle: captured_h,
+            old_v_handle: captured_v,
         }
     }
 }
@@ -3292,6 +3353,10 @@ impl Project {
             anchor_col,
             new_pos,
             old_pos,
+            // PCleanup.bezier-handle-reverse — forward mutation: handle
+            // snapshots are populated by apply, not by the constructor.
+            old_h_handle: None,
+            old_v_handle: None,
         })
     }
 
