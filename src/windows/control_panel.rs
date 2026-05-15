@@ -2843,10 +2843,10 @@ mod preset_t1_16_tests {
             let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("assets/presets")
                 .join(format!("{name}.json"));
-            let text = std::fs::read_to_string(&path)
-                .unwrap_or_else(|e| panic!("read {name}: {e}"));
-            let preset: Preset = serde_json::from_str(&text)
-                .unwrap_or_else(|e| panic!("parse {name}: {e}"));
+            let text =
+                std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {name}: {e}"));
+            let preset: Preset =
+                serde_json::from_str(&text).unwrap_or_else(|e| panic!("parse {name}: {e}"));
             assert_eq!(
                 preset.effects.len(),
                 3,

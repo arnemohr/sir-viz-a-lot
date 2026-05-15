@@ -1949,15 +1949,25 @@ mod tests {
 
         // First node: Treatment
         let first = &arr[0];
-        assert_eq!(first["enabled"], serde_json::json!(true), "enabled must be true");
+        assert_eq!(
+            first["enabled"],
+            serde_json::json!(true),
+            "enabled must be true"
+        );
         let treatment_variant = &first["effect"]["Treatment"];
-        assert!(treatment_variant.is_object(), "first effect must be Treatment");
+        assert!(
+            treatment_variant.is_object(),
+            "first effect must be Treatment"
+        );
         assert_eq!(treatment_variant["id"], serde_json::json!("tone_map"));
         assert!((treatment_variant["params"]["exposure"].as_f64().unwrap() - 0.5).abs() < 1e-6);
 
         // Second and third nodes: Color and Blur — all enabled.
         assert_eq!(arr[1]["enabled"], serde_json::json!(true));
-        assert!(arr[1]["effect"].get("Color").is_some(), "second must be Color");
+        assert!(
+            arr[1]["effect"].get("Color").is_some(),
+            "second must be Color"
+        );
         assert_eq!(arr[2]["enabled"], serde_json::json!(true));
         assert!(arr[2]["effect"].get("Blur").is_some(), "third must be Blur");
 
@@ -1993,7 +2003,10 @@ mod tests {
         let arr = effects.as_array().expect("effects must be array");
         assert_eq!(arr.len(), 1, "idempotent: still 1 node after re-migration");
         assert_eq!(arr[0]["enabled"], serde_json::json!(true));
-        assert!(arr[0]["effect"].get("Color").is_some(), "Color node preserved");
+        assert!(
+            arr[0]["effect"].get("Color").is_some(),
+            "Color node preserved"
+        );
     }
 
     /// 004-T1.4 test 3 — treatment with `overlay_path` pointing to a non-existent

@@ -332,7 +332,9 @@ pub fn show(
                         .id_salt(HDR_TREATMENT)
                         .default_open(true)
                         .show(ui, |ui| {
-                            crate::windows::look_chain::show_look_chain_section(ui, project, st, layer_idx);
+                            crate::windows::look_chain::show_look_chain_section(
+                                ui, project, st, layer_idx,
+                            );
                         });
 
                     ui.add_space(4.0);

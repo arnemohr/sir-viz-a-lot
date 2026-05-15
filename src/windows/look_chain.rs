@@ -35,12 +35,7 @@ pub(crate) fn intent_group_glyph(g: IntentGroup) -> (&'static str, Color32) {
 /// Winding matches `zone_templates::window_rectangle` (clockwise, y-down):
 /// top-left → top-right → bottom-right → bottom-left.
 pub(crate) fn full_quad_polygon() -> Vec<[f32; 2]> {
-    vec![
-        [0.0, 0.0],
-        [1.0, 0.0],
-        [1.0, 1.0],
-        [0.0, 1.0],
-    ]
+    vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]
 }
 
 // ---------------------------------------------------------------------------
@@ -157,44 +152,102 @@ fn show_effect_full_params(
     // Exception: Transform.translate is a plain [f32;2] — it's staged as
     // EffectChange::TransformTranslate{X,Y} and applied post-loop.
     match effect {
-        Effect::Color { hue, saturation, brightness, contrast } => {
+        Effect::Color {
+            hue,
+            saturation,
+            brightness,
+            contrast,
+        } => {
             let mut hue_m = hue.clone();
             let mut sat_m = saturation.clone();
             let mut bri_m = brightness.clone();
             let mut con_m = contrast.clone();
             if let Some(c) = modulator_slider(
-                ui, (node_idx, "hue"), "hue (deg)", &mut hue_m, -180.0..=180.0,
-                ModulatorField::ColorHue, node_idx, layer_idx,
-            ) { staged.push((node_idx, c)); }
+                ui,
+                (node_idx, "hue"),
+                "hue (deg)",
+                &mut hue_m,
+                -180.0..=180.0,
+                ModulatorField::ColorHue,
+                node_idx,
+                layer_idx,
+            ) {
+                staged.push((node_idx, c));
+            }
             if let Some(c) = modulator_slider(
-                ui, (node_idx, "sat"), "saturation", &mut sat_m, 0.0..=2.0,
-                ModulatorField::ColorSaturation, node_idx, layer_idx,
-            ) { staged.push((node_idx, c)); }
+                ui,
+                (node_idx, "sat"),
+                "saturation",
+                &mut sat_m,
+                0.0..=2.0,
+                ModulatorField::ColorSaturation,
+                node_idx,
+                layer_idx,
+            ) {
+                staged.push((node_idx, c));
+            }
             if let Some(c) = modulator_slider(
-                ui, (node_idx, "bri"), "brightness", &mut bri_m, -1.0..=1.0,
-                ModulatorField::ColorBrightness, node_idx, layer_idx,
-            ) { staged.push((node_idx, c)); }
+                ui,
+                (node_idx, "bri"),
+                "brightness",
+                &mut bri_m,
+                -1.0..=1.0,
+                ModulatorField::ColorBrightness,
+                node_idx,
+                layer_idx,
+            ) {
+                staged.push((node_idx, c));
+            }
             if let Some(c) = modulator_slider(
-                ui, (node_idx, "con"), "contrast", &mut con_m, 0.0..=2.0,
-                ModulatorField::ColorContrast, node_idx, layer_idx,
-            ) { staged.push((node_idx, c)); }
+                ui,
+                (node_idx, "con"),
+                "contrast",
+                &mut con_m,
+                0.0..=2.0,
+                ModulatorField::ColorContrast,
+                node_idx,
+                layer_idx,
+            ) {
+                staged.push((node_idx, c));
+            }
         }
         Effect::Tint { amount, .. } => {
             let mut amount_m = amount.clone();
             if let Some(c) = modulator_slider(
-                ui, (node_idx, "tamt"), "amount", &mut amount_m, 0.0..=1.0,
-                ModulatorField::TintAmount, node_idx, layer_idx,
-            ) { staged.push((node_idx, c)); }
+                ui,
+                (node_idx, "tamt"),
+                "amount",
+                &mut amount_m,
+                0.0..=1.0,
+                ModulatorField::TintAmount,
+                node_idx,
+                layer_idx,
+            ) {
+                staged.push((node_idx, c));
+            }
             ui.weak("(color RGBA editable via headline slider row)");
         }
         Effect::Blur { radius_px } => {
             let mut r = radius_px.clone();
             if let Some(c) = modulator_slider(
-                ui, (node_idx, "blur"), "radius (px)", &mut r, 0.0..=32.0,
-                ModulatorField::BlurRadius, node_idx, layer_idx,
-            ) { staged.push((node_idx, c)); }
+                ui,
+                (node_idx, "blur"),
+                "radius (px)",
+                &mut r,
+                0.0..=32.0,
+                ModulatorField::BlurRadius,
+                node_idx,
+                layer_idx,
+            ) {
+                staged.push((node_idx, c));
+            }
         }
-        Effect::Transform { translate, rotate_deg, scale_x, scale_y } => {
+        Effect::Transform {
+            translate,
+            rotate_deg,
+            scale_x,
+            scale_y,
+        } => {
             // translate uses command_slider pattern (plain f32 — no Modulator)
             let (tx_cur, ty_cur) = (translate[0], translate[1]);
             let mut tx_edit = tx_cur;
@@ -211,24 +264,56 @@ fn show_effect_full_params(
             let mut scx_m = scale_x.clone();
             let mut scy_m = scale_y.clone();
             if let Some(c) = modulator_slider(
-                ui, (node_idx, "rot"), "rotate (deg)", &mut rot_m, -180.0..=180.0,
-                ModulatorField::TransformRotateDeg, node_idx, layer_idx,
-            ) { staged.push((node_idx, c)); }
+                ui,
+                (node_idx, "rot"),
+                "rotate (deg)",
+                &mut rot_m,
+                -180.0..=180.0,
+                ModulatorField::TransformRotateDeg,
+                node_idx,
+                layer_idx,
+            ) {
+                staged.push((node_idx, c));
+            }
             if let Some(c) = modulator_slider(
-                ui, (node_idx, "scx"), "scale x", &mut scx_m, 0.1..=3.0,
-                ModulatorField::TransformScaleX, node_idx, layer_idx,
-            ) { staged.push((node_idx, c)); }
+                ui,
+                (node_idx, "scx"),
+                "scale x",
+                &mut scx_m,
+                0.1..=3.0,
+                ModulatorField::TransformScaleX,
+                node_idx,
+                layer_idx,
+            ) {
+                staged.push((node_idx, c));
+            }
             if let Some(c) = modulator_slider(
-                ui, (node_idx, "scy"), "scale y", &mut scy_m, 0.1..=3.0,
-                ModulatorField::TransformScaleY, node_idx, layer_idx,
-            ) { staged.push((node_idx, c)); }
+                ui,
+                (node_idx, "scy"),
+                "scale y",
+                &mut scy_m,
+                0.1..=3.0,
+                ModulatorField::TransformScaleY,
+                node_idx,
+                layer_idx,
+            ) {
+                staged.push((node_idx, c));
+            }
         }
         Effect::Feedback { decay, offset } => {
             let mut d = decay.clone();
             if let Some(c) = modulator_slider(
-                ui, (node_idx, "decay"), "decay (0=no trail, 1=hold)", &mut d, 0.0..=1.0,
-                ModulatorField::FeedbackDecay, node_idx, layer_idx,
-            ) { staged.push((node_idx, c)); }
+                ui,
+                (node_idx, "decay"),
+                "decay (0=no trail, 1=hold)",
+                &mut d,
+                0.0..=1.0,
+                ModulatorField::FeedbackDecay,
+                node_idx,
+                layer_idx,
+            ) {
+                staged.push((node_idx, c));
+            }
             // offset is shown read-only since it's static [f32;2]
             ui.label(format!("offset x: {:.3}  y: {:.3}", offset[0], offset[1]));
             ui.weak("(offset editable via project file — drag-DragValue coming soon)");
@@ -237,8 +322,7 @@ fn show_effect_full_params(
             ui.label(format!("id: {id}"));
             ui.label("params (JSON, edit via project file):");
             ui.label(
-                serde_json::to_string_pretty(params)
-                    .unwrap_or_else(|_| "<unprintable>".into()),
+                serde_json::to_string_pretty(params).unwrap_or_else(|_| "<unprintable>".into()),
             );
         }
         Effect::Treatment { id, params, .. } => {
@@ -272,7 +356,11 @@ pub fn show_look_chain_section(
     ui.horizontal(|ui| {
         ui.strong("Look chain");
         ui.add_space(8.0);
-        let ab_label = if st.ab_compare { "A/B compare: ON" } else { "A/B compare" };
+        let ab_label = if st.ab_compare {
+            "A/B compare: ON"
+        } else {
+            "A/B compare"
+        };
         if ui.selectable_label(st.ab_compare, ab_label).clicked() {
             st.ab_compare = !st.ab_compare;
         }
@@ -332,186 +420,182 @@ pub fn show_look_chain_section(
 
     // ---- Row loop ----------------------------------------------------------
     for idx in 0..effects_len {
-        let (_, drop_payload) =
-            ui.dnd_drop_zone::<usize, _>(egui::Frame::default(), |ui| {
-                ui.horizontal(|ui| {
-                    // ---- Drag handle: ≡ glyph, payload = source index ------
-                    let handle =
-                        ui.add(egui::Label::new("\u{2261}").sense(Sense::drag()));
-                    handle.dnd_set_drag_payload(idx);
+        let (_, drop_payload) = ui.dnd_drop_zone::<usize, _>(egui::Frame::default(), |ui| {
+            ui.horizontal(|ui| {
+                // ---- Drag handle: ≡ glyph, payload = source index ------
+                let handle = ui.add(egui::Label::new("\u{2261}").sense(Sense::drag()));
+                handle.dnd_set_drag_payload(idx);
 
-                    // ---- Intent-group glyph --------------------------------
-                    let group = intent_group(&project.layers[layer_idx].effects[idx].effect);
-                    let (glyph, glyph_color) = intent_group_glyph(group);
-                    ui.label(RichText::new(glyph).color(glyph_color));
+                // ---- Intent-group glyph --------------------------------
+                let group = intent_group(&project.layers[layer_idx].effects[idx].effect);
+                let (glyph, glyph_color) = intent_group_glyph(group);
+                ui.label(RichText::new(glyph).color(glyph_color));
 
-                    // ---- T1.25 — status dot (click toggles enabled) --------
-                    let layer = &project.layers[layer_idx];
-                    let node = &layer.effects[idx];
-                    let no_op_reason = if node.enabled {
-                        effect_is_no_op(node, layer)
-                    } else {
-                        None
-                    };
-                    let dot_color = if !node.enabled {
-                        Color32::from_rgb(0x88, 0x88, 0x88) // grey — bypassed
-                    } else if no_op_reason.is_some() {
-                        Color32::from_rgb(0xFF, 0xB0, 0x30) // amber — no-op
-                    } else {
-                        Color32::from_rgb(0x40, 0xD0, 0x60) // green — active
-                    };
+                // ---- T1.25 — status dot (click toggles enabled) --------
+                let layer = &project.layers[layer_idx];
+                let node = &layer.effects[idx];
+                let no_op_reason = if node.enabled {
+                    effect_is_no_op(node, layer)
+                } else {
+                    None
+                };
+                let dot_color = if !node.enabled {
+                    Color32::from_rgb(0x88, 0x88, 0x88) // grey — bypassed
+                } else if no_op_reason.is_some() {
+                    Color32::from_rgb(0xFF, 0xB0, 0x30) // amber — no-op
+                } else {
+                    Color32::from_rgb(0x40, 0xD0, 0x60) // green — active
+                };
 
-                    // Allocate a clickable 12×12 rect for the dot
-                    let dot_resp =
-                        ui.allocate_response(Vec2::splat(12.0), Sense::click());
-                    ui.painter()
-                        .circle_filled(dot_resp.rect.center(), 5.0, dot_color);
-                    if dot_resp.clicked() {
-                        let mut new_effects =
-                            project.layers[layer_idx].effects.clone();
-                        new_effects[idx].enabled = !new_effects[idx].enabled;
-                        st.pending_mutations.push(
-                            project
-                                .set_layer_effects_mutation(layer_idx, new_effects),
-                        );
-                    }
-                    dot_resp.on_hover_text(if !node.enabled {
-                        "Bypassed \u{2014} click to enable".to_string()
-                    } else if let Some(reason) = no_op_reason {
-                        format!("\u{26A0} {reason}")
-                    } else {
-                        "Active".to_string()
-                    });
+                // Allocate a clickable 12×12 rect for the dot
+                let dot_resp = ui.allocate_response(Vec2::splat(12.0), Sense::click());
+                ui.painter()
+                    .circle_filled(dot_resp.rect.center(), 5.0, dot_color);
+                if dot_resp.clicked() {
+                    let mut new_effects = project.layers[layer_idx].effects.clone();
+                    new_effects[idx].enabled = !new_effects[idx].enabled;
+                    st.pending_mutations
+                        .push(project.set_layer_effects_mutation(layer_idx, new_effects));
+                }
+                dot_resp.on_hover_text(if !node.enabled {
+                    "Bypassed \u{2014} click to enable".to_string()
+                } else if let Some(reason) = no_op_reason {
+                    format!("\u{26A0} {reason}")
+                } else {
+                    "Active".to_string()
+                });
 
-                    // ---- T1.28 — autofix chip (inline, next to dot) --------
-                    if let Some(reason) = no_op_reason {
-                        if ui
-                            .add(
-                                egui::Button::new(format!(
-                                    "\u{26A0} {reason} \u{2014} auto-fix"
-                                ))
-                                .small(),
-                            )
-                            .clicked()
-                        {
-                            handle_autofix(reason, idx, layer_idx, project, st);
-                        }
-                    }
-
-                    // ---- T1.25 — headline param slider on-row ---------------
-                    // We read from the live project (immutable borrow of effect)
-                    // and clone the Modulator for the slider. On change, push
-                    // EffectChange. For Treatment, use a read-only param slider.
-                    let effect_ref = &project.layers[layer_idx].effects[idx].effect;
-                    if let Some(headline) = headline_for_effect(effect_ref) {
-                        match headline {
-                            HeadlineParam::Modulator(field) => {
-                                // Clone the current Modulator to drive the slider
-                                let mut m = match field {
-                                    ModulatorField::ColorBrightness => {
-                                        if let Effect::Color { brightness, .. } = effect_ref {
-                                            brightness.clone()
-                                        } else { return; }
-                                    }
-                                    ModulatorField::BlurRadius => {
-                                        if let Effect::Blur { radius_px } = effect_ref {
-                                            radius_px.clone()
-                                        } else { return; }
-                                    }
-                                    ModulatorField::TintAmount => {
-                                        if let Effect::Tint { amount, .. } = effect_ref {
-                                            amount.clone()
-                                        } else { return; }
-                                    }
-                                    ModulatorField::TransformScaleX => {
-                                        if let Effect::Transform { scale_x, .. } = effect_ref {
-                                            scale_x.clone()
-                                        } else { return; }
-                                    }
-                                    ModulatorField::FeedbackDecay => {
-                                        if let Effect::Feedback { decay, .. } = effect_ref {
-                                            decay.clone()
-                                        } else { return; }
-                                    }
-                                    _ => return,
-                                };
-                                let range = headline_modulator_range(field);
-                                let label = headline_label(&HeadlineParam::Modulator(field));
-                                if let Some(c) = modulator_slider(
-                                    ui,
-                                    (idx, "headline"),
-                                    label,
-                                    &mut m,
-                                    range,
-                                    field,
-                                    idx,
-                                    layer_idx,
-                                ) {
-                                    staged_changes.push((idx, c));
-                                }
-                            }
-                            HeadlineParam::TreatmentParam(key) => {
-                                if let Effect::Treatment { id, params, .. } = effect_ref {
-                                    let descs =
-                                        crate::render::treatments::param_descriptors(id);
-                                    if let Some(d) = descs.iter().find(|d| d.key == key) {
-                                        let cur =
-                                            params.get(key).copied().unwrap_or(d.default);
-                                        let mut edit = cur;
-                                        let resp = ui.add(
-                                            egui::Slider::new(&mut edit, d.min..=d.max)
-                                                .text(d.label),
-                                        );
-                                        if (resp.drag_stopped() || resp.lost_focus())
-                                            && (edit - cur).abs() > 1e-6
-                                        {
-                                            treatment_param_changes.push(
-                                                TreatmentParamChange {
-                                                    node_idx: idx,
-                                                    key: key.to_string(),
-                                                    value: edit,
-                                                },
-                                            );
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // ---- T1.25 — expand chevron via CollapsingHeader --------
-                    // Empty label: the row already identifies the effect via glyph
-                    // + headline slider; the chevron is purely an expander. The
-                    // id_salt is still required for egui to track collapse state
-                    // per (layer, node) slot.
-                    egui::CollapsingHeader::new("")
-                        .id_salt((layer_idx, idx))
-                        .default_open(false)
-                        .show(ui, |ui| {
-                            // T1.26 — full param list (read-only borrows,
-                            // staged changes returned for post-loop dispatch)
-                            let effect_snap =
-                                project.layers[layer_idx].effects[idx].effect.clone();
-                            show_effect_full_params(
-                                ui,
-                                &effect_snap,
-                                idx,
-                                layer_idx,
-                                &mut staged_changes,
-                                &mut treatment_param_changes,
-                            );
-                        });
-
-                    // ---- T1.25 — delete × button ----------------------------
+                // ---- T1.28 — autofix chip (inline, next to dot) --------
+                if let Some(reason) = no_op_reason {
                     if ui
-                        .add(egui::Button::new("\u{00D7}").small())
-                        .on_hover_text("Remove from chain")
+                        .add(
+                            egui::Button::new(format!("\u{26A0} {reason} \u{2014} auto-fix"))
+                                .small(),
+                        )
                         .clicked()
                     {
-                        pending_remove = Some(idx);
+                        handle_autofix(reason, idx, layer_idx, project, st);
                     }
-                });
+                }
+
+                // ---- T1.25 — headline param slider on-row ---------------
+                // We read from the live project (immutable borrow of effect)
+                // and clone the Modulator for the slider. On change, push
+                // EffectChange. For Treatment, use a read-only param slider.
+                let effect_ref = &project.layers[layer_idx].effects[idx].effect;
+                if let Some(headline) = headline_for_effect(effect_ref) {
+                    match headline {
+                        HeadlineParam::Modulator(field) => {
+                            // Clone the current Modulator to drive the slider
+                            let mut m = match field {
+                                ModulatorField::ColorBrightness => {
+                                    if let Effect::Color { brightness, .. } = effect_ref {
+                                        brightness.clone()
+                                    } else {
+                                        return;
+                                    }
+                                }
+                                ModulatorField::BlurRadius => {
+                                    if let Effect::Blur { radius_px } = effect_ref {
+                                        radius_px.clone()
+                                    } else {
+                                        return;
+                                    }
+                                }
+                                ModulatorField::TintAmount => {
+                                    if let Effect::Tint { amount, .. } = effect_ref {
+                                        amount.clone()
+                                    } else {
+                                        return;
+                                    }
+                                }
+                                ModulatorField::TransformScaleX => {
+                                    if let Effect::Transform { scale_x, .. } = effect_ref {
+                                        scale_x.clone()
+                                    } else {
+                                        return;
+                                    }
+                                }
+                                ModulatorField::FeedbackDecay => {
+                                    if let Effect::Feedback { decay, .. } = effect_ref {
+                                        decay.clone()
+                                    } else {
+                                        return;
+                                    }
+                                }
+                                _ => return,
+                            };
+                            let range = headline_modulator_range(field);
+                            let label = headline_label(&HeadlineParam::Modulator(field));
+                            if let Some(c) = modulator_slider(
+                                ui,
+                                (idx, "headline"),
+                                label,
+                                &mut m,
+                                range,
+                                field,
+                                idx,
+                                layer_idx,
+                            ) {
+                                staged_changes.push((idx, c));
+                            }
+                        }
+                        HeadlineParam::TreatmentParam(key) => {
+                            if let Effect::Treatment { id, params, .. } = effect_ref {
+                                let descs = crate::render::treatments::param_descriptors(id);
+                                if let Some(d) = descs.iter().find(|d| d.key == key) {
+                                    let cur = params.get(key).copied().unwrap_or(d.default);
+                                    let mut edit = cur;
+                                    let resp = ui.add(
+                                        egui::Slider::new(&mut edit, d.min..=d.max).text(d.label),
+                                    );
+                                    if (resp.drag_stopped() || resp.lost_focus())
+                                        && (edit - cur).abs() > 1e-6
+                                    {
+                                        treatment_param_changes.push(TreatmentParamChange {
+                                            node_idx: idx,
+                                            key: key.to_string(),
+                                            value: edit,
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // ---- T1.25 — expand chevron via CollapsingHeader --------
+                // Empty label: the row already identifies the effect via glyph
+                // + headline slider; the chevron is purely an expander. The
+                // id_salt is still required for egui to track collapse state
+                // per (layer, node) slot.
+                egui::CollapsingHeader::new("")
+                    .id_salt((layer_idx, idx))
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        // T1.26 — full param list (read-only borrows,
+                        // staged changes returned for post-loop dispatch)
+                        let effect_snap = project.layers[layer_idx].effects[idx].effect.clone();
+                        show_effect_full_params(
+                            ui,
+                            &effect_snap,
+                            idx,
+                            layer_idx,
+                            &mut staged_changes,
+                            &mut treatment_param_changes,
+                        );
+                    });
+
+                // ---- T1.25 — delete × button ----------------------------
+                if ui
+                    .add(egui::Button::new("\u{00D7}").small())
+                    .on_hover_text("Remove from chain")
+                    .clicked()
+                {
+                    pending_remove = Some(idx);
+                }
             });
+        });
 
         if let Some(source) = drop_payload {
             let source_idx = *source;
@@ -544,7 +628,11 @@ pub fn show_look_chain_section(
         let mut field_changes: Vec<(usize, EffectChange)> = Vec::new();
         for (effect_idx, change) in staged_changes {
             match change {
-                EffectChange::ModulatorSwitch { effect_idx: ei, field, new } => {
+                EffectChange::ModulatorSwitch {
+                    effect_idx: ei,
+                    field,
+                    new,
+                } => {
                     st.pending_mutations
                         .push(project.set_modulator_mutation(layer_idx, ei, field, new));
                 }
@@ -640,8 +728,7 @@ fn show_add_picker(
 
         // Treatment presets in this group
         for (preset_id, preset_label) in crate::render::treatments::registry() {
-            let preset_group =
-                crate::render::treatments::intent_group_for_preset(preset_id);
+            let preset_group = crate::render::treatments::intent_group_for_preset(preset_id);
             if preset_group != group {
                 continue;
             }
@@ -670,19 +757,16 @@ fn show_add_picker(
                 // T1.32 — smart-fill: SDF-keyed preset + empty mask_polygon
                 // → SetLayerEffectsAndMask (single undo step).
                 let needs_sdf = cap.requires_sdf;
-                let mask_empty =
-                    project.layers[layer_idx].warp.mask_polygon.is_empty();
+                let mask_empty = project.layers[layer_idx].warp.mask_polygon.is_empty();
                 if needs_sdf && mask_empty {
-                    let mut new_effects =
-                        project.layers[layer_idx].effects.clone();
+                    let mut new_effects = project.layers[layer_idx].effects.clone();
                     new_effects.push(new_node);
-                    st.pending_mutations.push(
-                        project.set_layer_effects_and_mask_mutation(
+                    st.pending_mutations
+                        .push(project.set_layer_effects_and_mask_mutation(
                             layer_idx,
                             new_effects,
                             full_quad_polygon(),
-                        ),
-                    );
+                        ));
                     // TODO(004-T1.32): zone-fill deferred — cap.requires_zone &&
                     // zone_role.is_none() → SetLayerEffectsAndMask doesn't carry
                     // zone_role; zone-role assignment is a separate field not
@@ -873,4 +957,3 @@ fn handle_autofix(
         }
     }
 }
-

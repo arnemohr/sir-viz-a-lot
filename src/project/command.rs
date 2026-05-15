@@ -5081,7 +5081,9 @@ mod tests {
                         let mut new = project.layers[0].effects.clone();
                         // 004-T1.12 — dereference EffectNode.effect
                         for node in new.iter_mut() {
-                            if let crate::effects::Effect::Transform { translate, .. } = &mut node.effect {
+                            if let crate::effects::Effect::Transform { translate, .. } =
+                                &mut node.effect
+                            {
                                 translate[0] = *x;
                                 translate[1] = *y;
                                 break;
@@ -5129,7 +5131,9 @@ mod tests {
                             });
                         }
                         for node in new.iter_mut() {
-                            if let crate::effects::Effect::Transform { translate, .. } = &mut node.effect {
+                            if let crate::effects::Effect::Transform { translate, .. } =
+                                &mut node.effect
+                            {
                                 translate[0] += dx;
                                 translate[1] += dy;
                                 break;
@@ -5168,7 +5172,9 @@ mod tests {
                             });
                         }
                         for node in new.iter_mut() {
-                            if let crate::effects::Effect::Transform { rotate_deg, .. } = &mut node.effect {
+                            if let crate::effects::Effect::Transform { rotate_deg, .. } =
+                                &mut node.effect
+                            {
                                 *rotate_deg = crate::modulators::Modulator::Static(*degrees);
                                 break;
                             }
@@ -5772,8 +5778,8 @@ mod tests {
                     (0.0_f32..=1.0, 0.0_f32..=1.0).prop_map(|(x, y)| [x, y]),
                     0..6,
                 )
-                .prop_map(|new_mask_polygon| MutationKind::SetLayerEffectsAndMask {
-                    new_mask_polygon,
+                .prop_map(|new_mask_polygon| {
+                    MutationKind::SetLayerEffectsAndMask { new_mask_polygon }
                 }),
             ]
         }
@@ -6150,8 +6156,7 @@ mod tests {
             "after apply: effects len should match new_effects"
         );
         assert_eq!(
-            p.layers[0].warp.mask_polygon,
-            new_mask,
+            p.layers[0].warp.mask_polygon, new_mask,
             "after apply: mask_polygon should match new_mask"
         );
 
@@ -6171,8 +6176,7 @@ mod tests {
             "after redo: effects len should match new_effects"
         );
         assert_eq!(
-            p.layers[0].warp.mask_polygon,
-            new_mask,
+            p.layers[0].warp.mask_polygon, new_mask,
             "after redo: mask_polygon should match new_mask"
         );
     }

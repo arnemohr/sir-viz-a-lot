@@ -5803,7 +5803,9 @@ pub fn intent_group_for_preset(preset_id: &str) -> crate::effects::IntentGroup {
         | ZONE_LENS_PRESET_ID
         | PORTAL_WARP_PRESET_ID => IntentGroup::Warp,
         // Color — tone / luminance / palette grading
-        TONE_MAP_PRESET_ID | LUMINANCE_REVEAL_PRESET_ID | PALETTE_EXTRACT_PRESET_ID
+        TONE_MAP_PRESET_ID
+        | LUMINANCE_REVEAL_PRESET_ID
+        | PALETTE_EXTRACT_PRESET_ID
         | ZONE_BRIGHTEN_PRESET_ID => IntentGroup::Color,
         // Texture — external texture compositing or SDF-gated blur
         TEXTURE_OVERLAY_PRESET_ID | BLUR_MASK_PRESET_ID => IntentGroup::Texture,
@@ -6688,7 +6690,10 @@ mod tests {
         layer.warp.mask_polygon = vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
         let mut params = HashMap::new();
         params.insert("amplitude".to_string(), 0.05_f32);
-        assert_eq!(treatment_is_no_op(RIPPLE_LENS_PRESET_ID, &params, &layer), None);
+        assert_eq!(
+            treatment_is_no_op(RIPPLE_LENS_PRESET_ID, &params, &layer),
+            None
+        );
     }
 
     /// SDF-keyed preset with empty mask_polygon reports "Needs a mask polygon".
@@ -6754,6 +6759,9 @@ mod tests {
             crate::project::schema::layer_from_image_path("t", std::path::PathBuf::from("x.png"));
         let mut params = HashMap::new();
         params.insert("exposure".to_string(), 0.5_f32);
-        assert_eq!(treatment_is_no_op(TONE_MAP_PRESET_ID, &params, &layer), None);
+        assert_eq!(
+            treatment_is_no_op(TONE_MAP_PRESET_ID, &params, &layer),
+            None
+        );
     }
 }

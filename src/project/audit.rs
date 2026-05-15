@@ -549,7 +549,13 @@ impl ProjectAudit {
             //   (3) missing collage_paths[i] → Warn MissingTreatmentAsset
             // `effect_idx` is the position in the chain (not always 0).
             for (effect_idx, node) in layer.effects.iter().enumerate() {
-                if let crate::effects::Effect::Treatment { id, overlay_path, collage_paths, .. } = &node.effect {
+                if let crate::effects::Effect::Treatment {
+                    id,
+                    overlay_path,
+                    collage_paths,
+                    ..
+                } = &node.effect
+                {
                     // (1) unknown/empty id
                     if id.is_empty() || !treatments::is_registered(id) {
                         let message = if id.is_empty() {

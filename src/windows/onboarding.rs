@@ -108,10 +108,7 @@ mod tests {
         let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("target")
             .join("test-tmp")
-            .join(format!(
-                "ui_flags_round_trip_{}.json",
-                std::process::id()
-            ));
+            .join(format!("ui_flags_round_trip_{}.json", std::process::id()));
 
         // Start: flag absent — read should return default (false).
         // Remove any leftover from a prior run.
@@ -120,10 +117,15 @@ mod tests {
         assert!(!loaded.look_chain_toast_seen, "default must be false");
 
         // Write true, read back.
-        let flags = UiFlags { look_chain_toast_seen: true };
+        let flags = UiFlags {
+            look_chain_toast_seen: true,
+        };
         write_flags_at(&path, &flags);
         let reloaded = read_flags_at(&path);
-        assert!(reloaded.look_chain_toast_seen, "persisted flag must be true");
+        assert!(
+            reloaded.look_chain_toast_seen,
+            "persisted flag must be true"
+        );
 
         // Cleanup (best effort).
         let _ = std::fs::remove_file(&path);
@@ -134,7 +136,10 @@ mod tests {
     #[test]
     fn flags_path_ends_with_ui_flags_json() {
         if let Some(p) = flags_path() {
-            assert_eq!(p.file_name().and_then(|n| n.to_str()), Some("ui_flags.json"));
+            assert_eq!(
+                p.file_name().and_then(|n| n.to_str()),
+                Some("ui_flags.json")
+            );
         }
         // If HOME is unset in a weird sandbox, the test just passes vacuously.
     }

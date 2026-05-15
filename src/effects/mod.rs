@@ -903,11 +903,7 @@ mod tests {
             brightness: Modulator::Static(0.0),
             contrast: Modulator::Static(1.0),
         };
-        assert_eq!(
-            intent_group(&color),
-            IntentGroup::Color,
-            "Color → Color"
-        );
+        assert_eq!(intent_group(&color), IntentGroup::Color, "Color → Color");
 
         let tint = Effect::Tint {
             rgba: [1.0, 0.0, 0.0, 1.0],

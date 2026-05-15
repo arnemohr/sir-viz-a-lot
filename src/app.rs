@@ -4478,11 +4478,8 @@ fn render_m5_pipeline(
             // ~4332) already ran; the hash gate makes this call a no-op.
             // The second sync after the loop (warp pass) is also hash-gated
             // and becomes a no-op when the geometry hasn't changed.
-            ls.warp_renderer.sync_from_layer(
-                &renderer.gpu.device,
-                &renderer.gpu.queue,
-                cfg,
-            );
+            ls.warp_renderer
+                .sync_from_layer(&renderer.gpu.device, &renderer.gpu.queue, cfg);
             let sdf_view_for_chain = ls.warp_renderer.sdf_view();
 
             // 004-T1.foundation — iterate EffectNode; dispatch via node.effect.
@@ -4507,11 +4504,7 @@ fn render_m5_pipeline(
                     {
                         overlay_tex_opt = overlay_path.as_ref().and_then(|p| {
                             image_texture_cache
-                                .lookup_or_upload(
-                                    &renderer.gpu.device,
-                                    &renderer.gpu.queue,
-                                    p,
-                                )
+                                .lookup_or_upload(&renderer.gpu.device, &renderer.gpu.queue, p)
                                 .ok()
                                 .map(|(t, v, _)| (t, v))
                         });
@@ -4519,11 +4512,7 @@ fn render_m5_pipeline(
                             .iter()
                             .filter_map(|p| {
                                 image_texture_cache
-                                    .lookup_or_upload(
-                                        &renderer.gpu.device,
-                                        &renderer.gpu.queue,
-                                        p,
-                                    )
+                                    .lookup_or_upload(&renderer.gpu.device, &renderer.gpu.queue, p)
                                     .ok()
                                     .map(|(t, v, _)| (t, v))
                             })
@@ -6388,14 +6377,11 @@ impl ApplicationHandler for App {
                 // disk write fails.
                 #[cfg(feature = "v3")]
                 if !running.look_chain_toast_seen {
-                    let mut flags =
-                        crate::windows::onboarding::read_flags();
+                    let mut flags = crate::windows::onboarding::read_flags();
                     if !flags.look_chain_toast_seen {
-                        running.toast_queue.push(
-                            crate::windows::toast::Toast::info(
-                                "Effects merged into the Layers tab as Look chain.",
-                            ),
-                        );
+                        running.toast_queue.push(crate::windows::toast::Toast::info(
+                            "Effects merged into the Layers tab as Look chain.",
+                        ));
                         flags.look_chain_toast_seen = true;
                         crate::windows::onboarding::write_flags(&flags);
                     }
