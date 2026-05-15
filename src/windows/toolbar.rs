@@ -344,13 +344,13 @@ pub fn show(
                         if menu.button("Both projectors").clicked() {
                             action =
                                 Some(ControlPanelAction::RequestEnterGoLive(GoLiveTarget::Both));
-                            menu.close_menu();
+                            menu.close();
                         }
                         if menu.button("Lead only (keep Follow as preview)").clicked() {
                             action = Some(ControlPanelAction::RequestEnterGoLive(
                                 GoLiveTarget::LeadOnly,
                             ));
-                            menu.close_menu();
+                            menu.close();
                         }
                     });
                     if ui.button("Go live").clicked() {

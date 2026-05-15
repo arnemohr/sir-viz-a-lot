@@ -82,6 +82,7 @@ pub fn effective_hold_time(cue: &Cue) -> Option<f32> {
 /// static value when set. Out-time is currently consumed only by future
 /// crossfade-out work (P6.5.x); wired here for completeness and parity
 /// with in-time / hold-time binding behaviour.
+#[allow(dead_code)]
 pub fn effective_out_time(cue: &Cue) -> f32 {
     resolve_osc_binding(&cue.out_time_osc)
         .or_else(|| resolve_cc_binding(&cue.out_time_binding))

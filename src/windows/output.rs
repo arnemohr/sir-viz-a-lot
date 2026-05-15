@@ -262,6 +262,7 @@ impl PreviewWindow {
     /// PCleanup.7.4 — reconfigure the preview surface on resize. The
     /// caller should invoke this from the `WindowEvent::Resized` arm
     /// after updating `self.config.width / height`.
+    #[allow(dead_code)]
     pub fn recreate_surface(&self, device: &wgpu::Device) {
         self.surface.configure(device, &self.config);
     }
