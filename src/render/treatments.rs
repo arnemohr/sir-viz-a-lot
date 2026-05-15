@@ -261,34 +261,22 @@ pub struct ParamDescriptor {
     pub default: f32,
 }
 
-/// PCleanup.2.12 — treatment display group used by the picker to insert a
-/// section separator between source-modifying and generative presets.
-///
-/// Source-modifying presets read `t_source`, warp or modulate the underlying
-/// photo/video, and write the result — the operator is shaping the source.
-/// Generative/utility presets either composite external textures, apply
-/// colour grading, or act as identity helpers.
+// 004-T1.10 follow-up — the v2 Treatment-section picker's binary grouping
+// (source-modifying vs generative/utility) is superseded by the Look chain's
+// six-group `IntentGroup` taxonomy in `src/effects/mod.rs`. The non-test
+// callers died with T1.30; the enum + fn stay only because the per-preset
+// tests below still classify against them. `#[allow(dead_code)]` until
+// those tests migrate to assert `IntentGroup` instead.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TreatmentGroup {
-    /// Reads `t_source` and outputs a spatially warped or modulated version
-    /// (no externally-supplied textures, no palette quantisation). These are
-    /// the highest-value presets for new operators: they let you reshape the
-    /// underlying photo without switching to FX layers.
     SourceModifier,
-    /// Colour-grading helpers, identity passthrough, and texture-compositing
-    /// presets. Skilled operators reach for these after the source shape is
-    /// locked.
     GenerativeOrUtility,
 }
 
-/// PCleanup.2.12 — returns the [`TreatmentGroup`] for a preset id.
-///
-/// Returns [`TreatmentGroup::GenerativeOrUtility`] for unknown ids so the
-/// picker degrades gracefully when a project contains a hand-edited or
-/// future preset_id.
+#[allow(dead_code)]
 pub fn treatment_group(preset_id: &str) -> TreatmentGroup {
     match preset_id {
-        // W2 source-modifying siblings + the two pre-W2 spatial warpers.
         FLUID_WARP_PRESET_ID
         | FLUID_WARP_FULL_PRESET_ID
         | RIPPLE_LENS_PRESET_ID

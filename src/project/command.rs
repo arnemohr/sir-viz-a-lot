@@ -960,77 +960,10 @@ impl ReverseStorage for SetLayerKind {
     }
 }
 
-/// P1.2.1 — Payload for [`Mutation::SetLayerTreatment`].
-///
-/// Whole-`Option` Reverse so a `None ↔ Some(Treatment)` toggle
-/// round-trips byte-equally. This is the mutation that handles
-/// preset switches AND `overlay_path` / `collage_paths` edits — the
-/// UI constructs a new `Treatment` with the desired field values and
-/// dispatches this. Per-field path mutations would risk silently
-/// dropping unrelated fields on the `None → Some` direction.
-#[derive(Debug, Clone)]
-pub struct SetLayerTreatment {
-    /// Index into `Project.layers`.
-    pub layer_idx: usize,
-    /// Value to write (`None` removes the treatment).
-    pub new: Option<crate::project::schema::Treatment>,
-    /// Pre-mutation value.
-    pub old: Option<crate::project::schema::Treatment>,
-}
-
-impl ReverseStorage for SetLayerTreatment {
-    fn apply(self, _project: &mut Project) -> Self {
-        // 004-T1.foundation stub — `LayerConfig.treatment` is gone (T1.3).
-        // T1.10 deletes this mutation entirely once T1.30 has removed the
-        // six controls.rs callers. Until then, apply is a no-op that just
-        // returns the reverse so the proptest round-trip still compiles.
-        SetLayerTreatment {
-            layer_idx: self.layer_idx,
-            new: self.old,
-            old: self.new,
-        }
-    }
-}
-
-/// P1.2.1 — Payload for [`Mutation::SetLayerTreatmentParams`].
-///
-/// Whole-`HashMap` snapshot Reverse (parallels `SetFxLayerParams`
-/// from P0.5.1). Per-key Reverse would lose unrelated keys silently
-/// when a preset switch races a param edit. Only touches the
-/// `params` field — `preset_id`, `overlay_path`, and `collage_paths`
-/// flow through [`SetLayerTreatment`].
-///
-/// **Apply contract:** the layer's `treatment` must be `Some` at
-/// apply time. The mutation panics with a clear message otherwise —
-/// the UI dispatch site is responsible for guarding (param sliders
-/// only render when treatment is active).
-#[derive(Debug, Clone)]
-pub struct SetLayerTreatmentParams {
-    /// Index into `Project.layers`. Layer must have `treatment.is_some()`.
-    pub layer_idx: usize,
-    /// Replacement params HashMap (replaces the whole map, not per-key).
-    pub new: std::collections::HashMap<String, f32>,
-    /// Pre-mutation params (snapshot; `apply` `debug_assert!`s match).
-    pub old: std::collections::HashMap<String, f32>,
-}
-
-impl ReverseStorage for SetLayerTreatmentParams {
-    fn apply(self, _project: &mut Project) -> Self {
-        // 004-T1.foundation stub — `LayerConfig.treatment` is gone (T1.3).
-        // T1.10 deletes this mutation entirely once T1.30 has removed the
-        // six controls.rs callers. Until then, apply is a no-op.
-        SetLayerTreatmentParams {
-            layer_idx: self.layer_idx,
-            new: self.old,
-            old: self.new,
-        }
-    }
-}
-
 /// P2.5.6 — Payload for [`Mutation::SetFxLayerParams`].
 ///
 /// Whole-`HashMap` snapshot Reverse (rule 1) for `FxLayer.params`.
-/// Mirrors `SetLayerTreatmentParams`. Preset switches still go through
+/// Preset switches still go through
 /// `SetLayerKind`; this variant handles lightweight per-param slider
 /// edits without churning the whole `LayerKind`.
 ///
@@ -2457,17 +2390,6 @@ pub enum Mutation {
     /// [`SetLayerKind`].
     SetLayerKind(SetLayerKind),
 
-    /// P1.2.1 — replace a layer's `treatment` (whole-`Option`
-    /// snapshot Reverse). Delegates to [`SetLayerTreatment`].
-    /// Handles preset switches, `overlay_path` edits, and
-    /// `collage_paths` edits.
-    SetLayerTreatment(SetLayerTreatment),
-
-    /// P1.2.1 — replace a layer's `treatment.params` map (whole-
-    /// `HashMap` snapshot Reverse). Delegates to
-    /// [`SetLayerTreatmentParams`].
-    SetLayerTreatmentParams(SetLayerTreatmentParams),
-
     /// P2.5.6 — replace a `FxLayer`'s `params` map (whole-`HashMap`
     /// snapshot Reverse). Delegates to [`SetFxLayerParams`].
     /// Budget violations refuse without mutating the project (see
@@ -2649,10 +2571,6 @@ impl Mutation {
             Mutation::SwapLayers(s) => Mutation::SwapLayers(s.apply(project)),
             Mutation::RelinkAssetPath(s) => Mutation::RelinkAssetPath(s.apply(project)),
             Mutation::SetLayerKind(s) => Mutation::SetLayerKind(s.apply(project)),
-            Mutation::SetLayerTreatment(s) => Mutation::SetLayerTreatment(s.apply(project)),
-            Mutation::SetLayerTreatmentParams(s) => {
-                Mutation::SetLayerTreatmentParams(s.apply(project))
-            }
             Mutation::SetFxLayerParams(s) => Mutation::SetFxLayerParams(s.apply(project)),
             Mutation::SetOutputRgbMatrix(s) => Mutation::SetOutputRgbMatrix(s.apply(project)),
             // PCleanup.7.3 — per-output tone-override mutations.
@@ -2855,8 +2773,6 @@ impl Mutation {
             | Mutation::SetEdgeBlend(_)
             | Mutation::RelinkAssetPath(_)
             | Mutation::SetLayerKind(_)
-            | Mutation::SetLayerTreatment(_)
-            | Mutation::SetLayerTreatmentParams(_)
             | Mutation::SetFxLayerParams(_)
             | Mutation::SetOutputRgbMatrix(_)
             // PCleanup.7.3 — per-output trim overrides; same undo
@@ -2985,46 +2901,6 @@ impl Project {
         Mutation::SetEdgeBlend(SetEdgeBlend {
             new,
             old: self.edge_blend,
-        })
-    }
-
-    /// P1.2.1 — build a `SetLayerTreatment` mutation for the given
-    /// layer index.
-    ///
-    /// 004-T1.foundation stub — `LayerConfig.treatment` is gone (T1.3).
-    /// This constructor stays alive until T1.10 deletes it (after T1.30
-    /// removes the six controls.rs callers). The stub constructs a
-    /// no-op mutation (old == new == None) so call sites still compile.
-    pub fn set_layer_treatment_mutation(
-        &self,
-        layer_idx: usize,
-        new: Option<crate::project::schema::Treatment>,
-    ) -> Mutation {
-        // Treatment field is gone; construct a no-op stub mutation.
-        Mutation::SetLayerTreatment(SetLayerTreatment {
-            layer_idx,
-            new: new.clone(),
-            old: new,
-        })
-    }
-
-    /// P1.2.1 — build a `SetLayerTreatmentParams` mutation for the
-    /// given layer index.
-    ///
-    /// 004-T1.foundation stub — `LayerConfig.treatment` is gone (T1.3).
-    /// Previously panicked when treatment was None; now returns a no-op
-    /// stub so the proptest harness compiles without hitting the deleted
-    /// field. T1.10 deletes this entirely.
-    pub fn set_layer_treatment_params_mutation(
-        &self,
-        layer_idx: usize,
-        new: std::collections::HashMap<String, f32>,
-    ) -> Mutation {
-        // Treatment field is gone; construct a no-op stub mutation.
-        Mutation::SetLayerTreatmentParams(SetLayerTreatmentParams {
-            layer_idx,
-            new: new.clone(),
-            old: new,
         })
     }
 
@@ -3874,66 +3750,6 @@ mod tests {
         };
         assert!(!p.set_edge_blend_mutation(Some(cfg)).needs_layer_rebuild());
         assert!(!p.set_edge_blend_mutation(None).needs_layer_rebuild());
-    }
-
-    /// P1.2.1 — `SetLayerTreatment` round-trip across the four state transitions.
-    ///
-    /// 004-T1.foundation — `LayerConfig.treatment` removed (T1.3). These tests
-    /// reference the deleted field and cannot run until T1.10 deletes the
-    /// mutation entirely. Body is statically-false-gated so it type-checks
-    /// but never executes.
-    #[test]
-    #[ignore = "T1.10 deletes this mutation entirely"]
-    fn set_layer_treatment_round_trips() {
-        // Treatment field removed — test body statically disabled.
-        if cfg!(any()) {
-            use crate::project::schema::Treatment;
-            let _t = Treatment {
-                preset_id: "tone_map".into(),
-                params: std::collections::HashMap::new(),
-                overlay_path: None,
-                collage_paths: vec![],
-            };
-        }
-    }
-
-    /// P1.2.1 — `SetLayerTreatmentParams` round-trip.
-    ///
-    /// 004-T1.foundation — `LayerConfig.treatment` removed (T1.3).
-    /// Statically-false-gated so it type-checks but never executes.
-    #[test]
-    #[ignore = "T1.10 deletes this mutation entirely"]
-    fn set_layer_treatment_params_round_trips() {
-        // Treatment field removed — test body statically disabled.
-        if cfg!(any()) {
-            let _p = fresh_project();
-        }
-    }
-
-    /// P1.2.1 — both treatment mutations are undoable + don't trigger rebuild.
-    ///
-    /// 004-T1.foundation — `LayerConfig.treatment` removed (T1.3).
-    /// Statically-false-gated so it type-checks but never executes.
-    #[test]
-    #[ignore = "T1.10 deletes this mutation entirely"]
-    fn treatment_mutations_are_undoable_and_no_rebuild() {
-        // Treatment field removed — test body statically disabled.
-        if cfg!(any()) {
-            let _p = fresh_project();
-        }
-    }
-
-    /// P1.2.1 — builder panics on a layer without a treatment.
-    ///
-    /// 004-T1.foundation — The constructor no longer panics (T1.foundation
-    /// stub makes it a no-op). Test disabled until T1.10 deletes everything.
-    #[test]
-    #[ignore = "T1.10 deletes this mutation entirely"]
-    fn set_layer_treatment_params_mutation_panics_on_no_treatment() {
-        // Treatment field removed — test body statically disabled.
-        if cfg!(any()) {
-            let _p = fresh_project();
-        }
     }
 
     // -----------------------------------------------------------------------
@@ -5132,19 +4948,6 @@ mod tests {
             /// Falls back to a no-op when neither variant is present
             /// in the project.
             LayerFocal([f32; 2]),
-            /// P1.2.1 — set / clear a layer's treatment. `None` clears;
-            /// `Some(preset_pick)` selects one of two preset_ids (toggle).
-            /// Always targets layer index 0 (fresh_project has one layer).
-            SetLayerTreatment(Option<bool>),
-            /// P1.2.1 — set the treatment params HashMap. The strategy
-            /// generates one or two key/value pairs; `to_mutation` falls
-            /// back to a no-op if the layer's treatment is None (the
-            /// builder panics otherwise — we don't want spurious test
-            /// failures when the preceding step cleared the treatment).
-            SetLayerTreatmentParams {
-                exposure: f32,
-                contrast: f32,
-            },
             /// P2.9.1 — set a `RIPPLE_WASH_PRESET_ID` FxLayer's params HashMap.
             /// Targets layer 1 (the FxLayer appended by `fresh_project`),
             /// overwriting `wavelength` with a value in `[10.0, 400.0]` —
@@ -5594,18 +5397,6 @@ mod tests {
                         None => project.set_gamma_mutation(project.gamma),
                     }
                 }
-                // P1.2.1 — Treatment mutations. 004-T1.foundation: LayerConfig.treatment
-                // is gone; emit no-op gamma so the harness can still enumerate these
-                // MutationKind variants without hitting the deleted field. T1.10 deletes
-                // these arms entirely.
-                MutationKind::SetLayerTreatment(_preset_pick) => {
-                    // 004-T1.foundation stub — treatment field gone, emit no-op gamma.
-                    project.set_gamma_mutation(project.gamma)
-                }
-                MutationKind::SetLayerTreatmentParams { exposure: _, contrast: _ } => {
-                    // 004-T1.foundation stub — treatment field gone, emit no-op gamma.
-                    project.set_gamma_mutation(project.gamma)
-                }
                 MutationKind::SetFxLayerParams { wavelength } => {
                     // P2.9.1 — target layer 1 (the RIPPLE_WASH FxLayer
                     // appended by fresh_project). Guard: the layer must
@@ -5945,16 +5736,6 @@ mod tests {
                 // P1.2.4 — focal point in [0, 1]².
                 (0.0_f32..=1.0_f32, 0.0_f32..=1.0_f32)
                     .prop_map(|(x, y)| { MutationKind::LayerFocal([x, y]) }),
-                // P1.2.1 — Treatment toggle (None / Some(tone_map | blur_mask))
-                // and params edit. The params variant falls back to a no-op
-                // when treatment is None (set_layer_treatment_params_mutation
-                // panics otherwise — the fallback keeps proptest sequences
-                // valid even when a preceding step cleared the treatment).
-                proptest::option::weighted(0.5, any::<bool>())
-                    .prop_map(MutationKind::SetLayerTreatment),
-                (-2.0_f32..=2.0_f32, 0.5_f32..=1.5_f32).prop_map(|(exposure, contrast)| {
-                    MutationKind::SetLayerTreatmentParams { exposure, contrast }
-                },),
                 // P2.9.1 — FxLayer params targeting layer 1 (RIPPLE_WASH).
                 // `wavelength` spans the full descriptor range [10, 400] —
                 // RIPPLE_WASH has no `max_particle_count` on any descriptor

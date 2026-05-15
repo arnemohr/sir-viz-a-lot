@@ -1,10 +1,8 @@
 //! 004-T1.25–T1.29, T1.32 — Look chain section: unified per-layer effect
 //! chain UI. Replaces the T1.24 stub.
 //!
-//! Gated on `#[cfg(feature = "v3")]` throughout — the module is only
-//! registered in `windows/mod.rs` under v3.
-
-#![cfg(feature = "v3")]
+//! Gated on `#[cfg(feature = "v3")]` at the module-registration site in
+//! `windows/mod.rs`; no inner attribute needed.
 
 use egui::{Color32, RichText, Sense, Ui, Vec2};
 
@@ -725,11 +723,11 @@ fn intent_group_name(g: IntentGroup) -> &'static str {
     }
 }
 
+/// One Effect variant entry in the add-picker. `(display_label, hover_text, factory_fn)`.
+type EffectPickerEntry = (&'static str, &'static str, Box<dyn Fn() -> Effect>);
+
 /// Non-Treatment Effect variants belonging to a given IntentGroup.
-/// Returns a vec of `(display_label, hover_text, factory_fn)`.
-fn non_treatment_variants_for_group(
-    group: IntentGroup,
-) -> Vec<(&'static str, &'static str, Box<dyn Fn() -> Effect>)> {
+fn non_treatment_variants_for_group(group: IntentGroup) -> Vec<EffectPickerEntry> {
     match group {
         IntentGroup::Warp => vec![(
             "Transform",

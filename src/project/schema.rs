@@ -215,6 +215,7 @@ pub enum LoopMode {
 /// with `#[serde(default)]` so existing projects load with
 /// `treatment == None`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[allow(dead_code)] // T1.10: treatment mutation deleted; struct retained for schema/migration completeness.
 pub struct Treatment {
     /// Registered preset id (e.g. `"tone_map"`). Unknown ids are
     /// audit-warned and render as no-ops at frame time.
