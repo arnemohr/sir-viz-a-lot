@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use egui::Ui;
 use serde::Deserialize;
 
-use crate::effects::Effect;
+use crate::effects::{Effect, EffectNode};
 use crate::modulators::Modulator;
 #[cfg(feature = "v3")]
 use crate::project::command::{ModulatorField, Mutation};
@@ -235,7 +235,7 @@ pub(super) fn bpm_divisor_combo_direct(ui: &mut Ui, id: &str, divisor: &mut f32)
 #[derive(Debug, Clone, Deserialize)]
 pub struct Preset {
     pub name: String,
-    pub effects: Vec<Effect>,
+    pub effects: Vec<EffectNode>, // 004-T1.16
 }
 
 /// Discover presets by scanning `assets/presets/*.json` relative to the
@@ -3200,5 +3200,36 @@ mod bpm_divisor_tests {
         assert_eq!(bpm_divisor_preset_label(1.4), "1 (every beat)");
         assert_eq!(bpm_divisor_preset_label(3.0), "2 (half-time)");
         assert_eq!(bpm_divisor_preset_label(8.0), "4 (quarter-time)");
+    }
+}
+
+/// 004-T1.16 — Preset.effects migrated from Vec<Effect> to Vec<EffectNode>.
+/// Verifies each bundled preset JSON parses correctly and every node is enabled.
+#[cfg(test)]
+mod preset_t1_16_tests {
+    use super::Preset;
+
+    #[test]
+    fn presets_round_trip_after_t1_16_migration() {
+        for name in ["architectural_wash", "candle_flicker", "soft_pulse"] {
+            let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("assets/presets")
+                .join(format!("{name}.json"));
+            let text = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("read {name}: {e}"));
+            let preset: Preset = serde_json::from_str(&text)
+                .unwrap_or_else(|e| panic!("parse {name}: {e}"));
+            assert_eq!(
+                preset.effects.len(),
+                3,
+                "{name} should have 3 effects after T1.16 migration"
+            );
+            for (i, node) in preset.effects.iter().enumerate() {
+                assert!(
+                    node.enabled,
+                    "{name} effects[{i}].enabled must be true by default"
+                );
+            }
+        }
     }
 }

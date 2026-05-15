@@ -1049,13 +1049,8 @@ fn show_effect_chain(
                     }
                 });
             if ui.button("Apply").clicked() {
-                // 004-T1.15 — Preset.effects is Vec<Effect>; wrap in EffectNode until
-                // T1.16 migrates Preset.effects to Vec<EffectNode>.
-                let new: Vec<crate::effects::EffectNode> = st.presets[st.preset_picker_index]
-                    .effects
-                    .iter()
-                    .map(|e| crate::effects::EffectNode { enabled: true, effect: e.clone() })
-                    .collect();
+                // 004-T1.16 — Preset.effects is now Vec<EffectNode>; clone directly.
+                let new = st.presets[st.preset_picker_index].effects.clone();
                 st.pending_mutations
                     .push(project.set_layer_effects_mutation(layer_idx, new));
             }
