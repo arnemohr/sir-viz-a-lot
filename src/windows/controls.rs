@@ -910,7 +910,23 @@ fn show_treatment_section(
                 {
                     staged_change = Some(None);
                 }
+                // PCleanup.2.12 — insert a non-clickable section label when
+                // the group changes. registry() is ordered source-modifying
+                // first, so the separator appears exactly once.
+                let mut last_group: Option<crate::render::treatments::TreatmentGroup> = None;
                 for (preset_id, label) in registry {
+                    let group = crate::render::treatments::treatment_group(preset_id);
+                    if last_group != Some(group) {
+                        match group {
+                            crate::render::treatments::TreatmentGroup::SourceModifier => {
+                                ui.weak("— source-modifying —");
+                            }
+                            crate::render::treatments::TreatmentGroup::GenerativeOrUtility => {
+                                ui.weak("— generative / utility —");
+                            }
+                        }
+                        last_group = Some(group);
+                    }
                     let is_current = current_preset_id.as_deref() == Some(*preset_id);
                     if ui.selectable_label(is_current, *label).clicked() && !is_current {
                         staged_change = Some(Some((*preset_id).to_string()));

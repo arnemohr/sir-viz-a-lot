@@ -185,10 +185,75 @@ pub struct ParamDescriptor {
     pub default: f32,
 }
 
+/// PCleanup.2.12 — treatment display group used by the picker to insert a
+/// section separator between source-modifying and generative presets.
+///
+/// Source-modifying presets read `t_source`, warp or modulate the underlying
+/// photo/video, and write the result — the operator is shaping the source.
+/// Generative/utility presets either composite external textures, apply
+/// colour grading, or act as identity helpers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TreatmentGroup {
+    /// Reads `t_source` and outputs a spatially warped or modulated version
+    /// (no externally-supplied textures, no palette quantisation). These are
+    /// the highest-value presets for new operators: they let you reshape the
+    /// underlying photo without switching to FX layers.
+    SourceModifier,
+    /// Colour-grading helpers, identity passthrough, and texture-compositing
+    /// presets. Skilled operators reach for these after the source shape is
+    /// locked.
+    GenerativeOrUtility,
+}
+
+/// PCleanup.2.12 — returns the [`TreatmentGroup`] for a preset id.
+///
+/// Returns [`TreatmentGroup::GenerativeOrUtility`] for unknown ids so the
+/// picker degrades gracefully when a project contains a hand-edited or
+/// future preset_id.
+pub fn treatment_group(preset_id: &str) -> TreatmentGroup {
+    match preset_id {
+        // W2 source-modifying siblings + the two pre-W2 spatial warpers.
+        FLUID_WARP_PRESET_ID
+        | FLUID_WARP_FULL_PRESET_ID
+        | RIPPLE_LENS_PRESET_ID
+        | EDGE_LENS_PRESET_ID
+        | FIELD_ADVECT_PRESET_ID
+        | ZONE_BRIGHTEN_PRESET_ID
+        | ZONE_LENS_PRESET_ID
+        | DISPLACEMENT_RIPPLE_PRESET_ID
+        | REFRACTION_PRESET_ID => TreatmentGroup::SourceModifier,
+        _ => TreatmentGroup::GenerativeOrUtility,
+    }
+}
+
 /// `(preset_id, display_label)` pairs for every preset registered with the
 /// renderer. The Selected-layer UI sources its combobox options from this.
+///
+/// PCleanup.2.12 — source-modifying presets are listed first so the picker
+/// can insert a visual separator without sorting. Use [`treatment_group`] to
+/// query which group a preset belongs to.
 pub fn registry() -> &'static [(&'static str, &'static str)] {
     &[
+        // --- Source-modifying treatments (warp / modulate the source photo) ---
+        // PCleanup.1.2 — bounded-fluid velocity warp.
+        (FLUID_WARP_PRESET_ID, "Fluid warp (velocity field)"),
+        // PCleanup.2.3 — unbounded fluid warp; works on any source.
+        (FLUID_WARP_FULL_PRESET_ID, "Fluid warp (full)"),
+        // PCleanup.2.1 — concentric-ring ripple warp of the source.
+        (RIPPLE_LENS_PRESET_ID, "Ripple lens (source warp)"),
+        // PCleanup.2.2 — N traveling refraction bumps along the source edge.
+        (EDGE_LENS_PRESET_ID, "Edge lens (orbiting refraction)"),
+        // PCleanup.2.7 — vector-field advection of the source.
+        (FIELD_ADVECT_PRESET_ID, "Field advect (source drift)"),
+        // PCleanup.2.9 — luminance boost inside the zone window.
+        (ZONE_BRIGHTEN_PRESET_ID, "Zone brighten (luminance boost)"),
+        // PCleanup.2.10 — UV lens warp at the zone window edge.
+        (ZONE_LENS_PRESET_ID, "Zone lens (source warp at edge)"),
+        // P2.4.1 — displacement-map ripple warp (pre-W2).
+        (DISPLACEMENT_RIPPLE_PRESET_ID, "Displacement ripple"),
+        // P2.4.2 — refraction warp (pre-W2).
+        (REFRACTION_PRESET_ID, "Refraction"),
+        // --- Generative / utility treatments ---
         (IDENTITY_PRESET_ID, "Identity (no-op)"),
         (TONE_MAP_PRESET_ID, "Tone map"),
         (LUMINANCE_REVEAL_PRESET_ID, "Luminance reveal"),
@@ -196,22 +261,6 @@ pub fn registry() -> &'static [(&'static str, &'static str)] {
         (TEXTURE_OVERLAY_PRESET_ID, "Texture overlay"),
         (PALETTE_EXTRACT_PRESET_ID, "Palette / posterize"),
         (COLLAGE_PRESET_ID, "Collage (2×2)"),
-        (DISPLACEMENT_RIPPLE_PRESET_ID, "Displacement ripple"),
-        (REFRACTION_PRESET_ID, "Refraction"),
-        // PCleanup.2.1 — first W2 sibling treatment.
-        (RIPPLE_LENS_PRESET_ID, "Ripple lens (source warp)"),
-        // PCleanup.2.2 — second W2 sibling treatment.
-        (EDGE_LENS_PRESET_ID, "Edge lens (orbiting refraction)"),
-        // PCleanup.2.7 — third W2 sibling treatment.
-        (FIELD_ADVECT_PRESET_ID, "Field advect (source drift)"),
-        // PCleanup.1.2 — fluid_warp (bounded-fluid velocity warp).
-        (FLUID_WARP_PRESET_ID, "Fluid warp (velocity field)"),
-        // PCleanup.2.3 — fluid_warp_full (unbounded; works on any source).
-        (FLUID_WARP_FULL_PRESET_ID, "Fluid warp (full)"),
-        // PCleanup.2.9 — fifth W2 sibling: luminance boost inside ZONE_WINDOW.
-        (ZONE_BRIGHTEN_PRESET_ID, "Zone brighten (luminance boost)"),
-        // PCleanup.2.10 — sixth W2 sibling: UV lens warp at ZONE_WINDOW edge.
-        (ZONE_LENS_PRESET_ID, "Zone lens (source warp at edge)"),
     ]
 }
 
