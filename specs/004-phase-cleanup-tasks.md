@@ -63,7 +63,9 @@ Companion task spec for [`004-phase-cleanup.md`](004-phase-cleanup.md). Each tas
 ### W8 — Treatments per-layer + `v3` flag
 - [x] PCleanup.8.1 — Flip `v3` feature to default at M3 (gate-flip + pre-flip audit) — `default = ["osc", "midi", "video", "v3"]`; `make ci` 1126/1126 passing; required prerequisite `MoveBezierAnchor` Reverse-storage fix landed in `004-PCleanup.bezier-handle-reverse`
 - [x] PCleanup.8.2 — Treatments per-layer — **tracking-only**; close when PCleanup.1.3 lands. Not a separate PR.
-- [ ] PCleanup.8.3 — Treatment-specific reimagining (palette_extract zone-aware, collage kaleidoscope/mosaic, blur_mask distance-driven) — optional
+- [x] PCleanup.8.3a — `palette_extract` zone-aware reimagining (zone_mode 0=ignore/1=strict/2=dual_quant; outside_levels for mode 2) — optional
+- [x] PCleanup.8.3b — `collage` kaleidoscope + mosaic modes (mode 0=grid default, 1=kaleidoscope mirror-fold, 2=mosaic per-tile region sampling) — optional
+- [x] PCleanup.8.3c — `blur_mask` distance-driven radius (radius_mode 0=edge-band default, 1=distance-driven sharp-at-edge) — optional
 
 ### W9 — Release housekeeping (ship last)
 - [x] PCleanup.9.1 — Version bump (1.0.x → 1.1.0)
