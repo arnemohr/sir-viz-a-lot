@@ -83,7 +83,7 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     // First-frame spawn: age == 0.0 means the SSBO was just zero-initialised.
     if p.age == 0.0 {
         p.pos = find_spawn_pos(seed_bits, idx);
-        p.vel = vec2<f32>(0.0, 0.0);  // spotlights don't use vel
+        p.vel = vec2<f32>(0.0, 0.0);  // no motion yet on first frame
         p.age = max(t_local, 0.001);  // avoid re-triggering spawn next frame
         p._pad = 0.0;
         particles[idx] = p;
@@ -91,19 +91,25 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     // Drift in a deterministic random direction (seed + index → angle).
-    let dir     = tp_rand_dir(seed_bits, idx);
-    let new_pos = p.pos + dir * drift_speed * DT;
+    let dir = tp_rand_dir(seed_bits, idx);
+    // PCleanup.2.5b — instantaneous velocity in UV/s.  Spotlights ignores
+    // this; drift_brushstrokes reads it to elongate its Gaussian along the
+    // motion direction.  Storing UV/s (not the per-frame DT displacement)
+    // keeps the magnitude frame-rate independent.
+    let vel = dir * drift_speed;
+    let new_pos = p.pos + vel * DT;
 
     // Outside mask → respawn inside using a time-varied seed to prevent
     // all ejected particles clustering at the same spot.
     if sample_sdf_bilinear(t_sdf, new_pos) >= 0.0 {
         let respawn_seed = seed_bits ^ (u32(t_local * 1000.0) + idx * 31u);
         p.pos = find_spawn_pos(respawn_seed, idx);
+        p.vel = vec2<f32>(0.0, 0.0); // velocity resets on respawn
         p.age = t_local;
     } else {
         p.pos = new_pos;
+        p.vel = vel;
         p.age = t_local;
     }
-    // vel and _pad stay at 0 for spotlights.
     particles[idx] = p;
 }

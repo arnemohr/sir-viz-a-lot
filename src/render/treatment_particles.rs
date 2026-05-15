@@ -637,6 +637,25 @@ impl TreatmentParticlePipeline {
         )
     }
 
+    /// PCleanup.2.5b — Construct a `TreatmentParticlePipeline` for the
+    /// `drift_brushstrokes` preset.
+    ///
+    /// Same compute pass as [`Self::new_drift_pinholes`]; the compute shader
+    /// populates `Particle.vel` (UV/s) each frame which this fragment shader
+    /// reads to render elongated motion-blur strokes trailing each particle.
+    /// `opacity = 0.0` is bit-exact passthrough.
+    pub fn new_drift_brushstrokes(
+        device: &wgpu::Device,
+        target_format: wgpu::TextureFormat,
+    ) -> Self {
+        Self::new_with_frag_shader(
+            device,
+            target_format,
+            include_str!("shaders/treat_drift_brushstrokes.wgsl"),
+            "treat_drift_brushstrokes",
+        )
+    }
+
     /// PCleanup.2.5a — Shared constructor body, parameterised by the
     /// fragment-shader source and label prefix.
     ///
@@ -954,6 +973,93 @@ impl TreatmentParticlePipeline {
 
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("treat_drift_pinholes render pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: dst,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&self.render_pipeline);
+        pass.set_bind_group(0, &render_bg, &[]);
+        pass.draw(0..6, 0..1);
+    }
+
+    /// PCleanup.2.5b — Fragment pass for the `drift_brushstrokes` preset.
+    ///
+    /// Reads `params["opacity"]` (default 0.0 — identity passthrough),
+    /// `params["radius"]` (default 0.05 — brush thickness in UV), and
+    /// `params["smear_duration"]` (default 0.5 — seconds of motion that
+    /// trails behind each particle).  Uploads them in the 32-byte layout
+    /// `treat_drift_brushstrokes.wgsl` expects.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_drift_brushstrokes(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        dst: &wgpu::TextureView,
+        source: &wgpu::TextureView,
+        params: &HashMap<String, f32>,
+        n_particles: u32,
+    ) {
+        let n = n_particles.min(MAX_SPOTLIGHTS);
+        let opacity = params.get("opacity").copied().unwrap_or(0.0);
+        let radius = params.get("radius").copied().unwrap_or(0.05);
+        let smear_duration = params.get("smear_duration").copied().unwrap_or(0.5);
+
+        // DriftBrushstrokesParams: 8 × f32 = 32 bytes.
+        // Layout: [opacity, radius, n_particles, smear_duration, _pad0..3]
+        let mut frag_bytes = [0u8; 32];
+        let frag_floats = [
+            opacity,
+            radius,
+            n as f32,
+            smear_duration,
+            0.0f32,
+            0.0,
+            0.0,
+            0.0,
+        ];
+        for (i, f) in frag_floats.iter().enumerate() {
+            frag_bytes[i * 4..(i + 1) * 4].copy_from_slice(&f.to_le_bytes());
+        }
+        queue.write_buffer(&self.frag_params_buf, 0, &frag_bytes);
+
+        let read_idx = 1 - self.write_idx.get();
+
+        let render_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("treat_drift_brushstrokes render bg"),
+            layout: &self.render_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(source),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: self.frag_params_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: self.ssbo[read_idx].as_entire_binding(),
+                },
+            ],
+        });
+
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("treat_drift_brushstrokes render pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: dst,
                 depth_slice: None,

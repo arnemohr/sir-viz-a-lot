@@ -122,6 +122,15 @@ pub const SPOTLIGHTS_PRESET_ID: &str = "spotlights";
 /// fully masked.
 pub const DRIFT_PINHOLES_PRESET_ID: &str = "drift_pinholes";
 
+/// PCleanup.2.5b — `drift_brushstrokes` preset id. Ninth W2 sibling treatment.
+/// Companion of `drift_pinholes` — same particle compute pass (which now
+/// writes per-particle velocity in UV/s), different fragment math.  Each
+/// particle leaves a motion-blurred brushstroke trailing along its velocity
+/// vector; source is visible inside the brushstroke and fades to black
+/// elsewhere.  `opacity = 0.0` is bit-exact passthrough.  `smear_duration`
+/// (seconds) controls how long the trail extends behind each particle.
+pub const DRIFT_BRUSHSTROKES_PRESET_ID: &str = "drift_brushstrokes";
+
 /// Number of collage slots supported by the v0.5 `collage` preset.
 /// Fixed at 4 (a 2×2 grid) — true variable-N collage requires either
 /// dynamically-built bind groups or a texture array binding, deferred
@@ -261,6 +270,7 @@ pub fn treatment_group(preset_id: &str) -> TreatmentGroup {
         | ZONE_LENS_PRESET_ID
         | SPOTLIGHTS_PRESET_ID
         | DRIFT_PINHOLES_PRESET_ID
+        | DRIFT_BRUSHSTROKES_PRESET_ID
         | DISPLACEMENT_RIPPLE_PRESET_ID
         | REFRACTION_PRESET_ID => TreatmentGroup::SourceModifier,
         _ => TreatmentGroup::GenerativeOrUtility,
@@ -296,6 +306,11 @@ pub fn registry() -> &'static [(&'static str, &'static str)] {
         (
             DRIFT_PINHOLES_PRESET_ID,
             "Drift pinholes (particle source mask)",
+        ),
+        // PCleanup.2.5b — motion-blurred brushstrokes trailing each particle.
+        (
+            DRIFT_BRUSHSTROKES_PRESET_ID,
+            "Drift brushstrokes (motion-blur source mask)",
         ),
         // P2.4.1 — displacement-map ripple warp (pre-W2).
         (DISPLACEMENT_RIPPLE_PRESET_ID, "Displacement ripple"),
@@ -351,6 +366,8 @@ pub fn param_descriptors(preset_id: &str) -> &'static [ParamDescriptor] {
         SPOTLIGHTS_PRESET_ID => SPOTLIGHTS_DESCRIPTORS,
         // PCleanup.2.5a — drift_pinholes treatment.
         DRIFT_PINHOLES_PRESET_ID => DRIFT_PINHOLES_DESCRIPTORS,
+        // PCleanup.2.5b — drift_brushstrokes treatment.
+        DRIFT_BRUSHSTROKES_PRESET_ID => DRIFT_BRUSHSTROKES_DESCRIPTORS,
         _ => &[],
     }
 }
@@ -807,6 +824,54 @@ const DRIFT_PINHOLES_DESCRIPTORS: &[ParamDescriptor] = &[
     },
 ];
 
+/// PCleanup.2.5b — Static descriptors for the `drift_brushstrokes` preset.
+///
+/// Identity at `opacity = 0.0`: the fragment `mix(src, brush, 0.0)` collapses
+/// to `src` regardless of velocity vectors, so a freshly-added Treatment is
+/// a bit-exact passthrough until the operator pulls opacity up.
+///
+/// `smear_duration` controls how many seconds of motion the brushstroke
+/// trails behind each particle.  At `drift_speed = 0` (no motion), the
+/// stroke degrades to a circular Gaussian matching drift_pinholes.
+#[allow(dead_code)] // referenced only through `param_descriptors` (v3 UI)
+const DRIFT_BRUSHSTROKES_DESCRIPTORS: &[ParamDescriptor] = &[
+    ParamDescriptor {
+        key: "particle_count",
+        label: "Brush count (1–512)",
+        min: 1.0,
+        max: 512.0,
+        default: 32.0,
+    },
+    ParamDescriptor {
+        key: "opacity",
+        label: "Brush opacity (0 = no effect, 1 = fully masked)",
+        min: 0.0,
+        max: 1.0,
+        default: 0.0,
+    },
+    ParamDescriptor {
+        key: "radius",
+        label: "Brush thickness (normalised UV)",
+        min: 0.01,
+        max: 0.3,
+        default: 0.05,
+    },
+    ParamDescriptor {
+        key: "drift_speed",
+        label: "Drift speed (UV/s) — drives brush direction and trail length",
+        min: 0.0,
+        max: 1.0,
+        default: 0.3,
+    },
+    ParamDescriptor {
+        key: "smear_duration",
+        label: "Trail length (seconds of motion behind each brush)",
+        min: 0.0,
+        max: 2.0,
+        default: 0.5,
+    },
+];
+
 /// Static descriptors for the `refraction` preset (P2.4.2).
 /// Identity at default ior = 1.0 — the operator sees no change until they
 /// increase the ior slider. edge_width controls the SDF-distance band around
@@ -860,6 +925,8 @@ pub struct TreatmentPipeline {
     spotlights: crate::render::treatment_particles::TreatmentParticlePipeline,
     // PCleanup.2.5a — eighth W2 sibling: particle-based source mask.
     drift_pinholes: crate::render::treatment_particles::TreatmentParticlePipeline,
+    // PCleanup.2.5b — ninth W2 sibling: motion-blurred brushstrokes (reads vel).
+    drift_brushstrokes: crate::render::treatment_particles::TreatmentParticlePipeline,
 }
 
 impl TreatmentPipeline {
@@ -900,6 +967,13 @@ impl TreatmentPipeline {
             // different fragment shader from spotlights).
             drift_pinholes:
                 crate::render::treatment_particles::TreatmentParticlePipeline::new_drift_pinholes(
+                    device,
+                    target_format,
+                ),
+            // PCleanup.2.5b — drift_brushstrokes particle pipeline (shares
+            // compute pass; fragment shader reads particle velocity).
+            drift_brushstrokes:
+                crate::render::treatment_particles::TreatmentParticlePipeline::new_drift_brushstrokes(
                     device,
                     target_format,
                 ),
@@ -1115,6 +1189,33 @@ impl TreatmentPipeline {
                     inputs.sdf,
                 );
                 self.drift_pinholes.render_drift_pinholes(
+                    device,
+                    queue,
+                    encoder,
+                    dst,
+                    inputs.source,
+                    inputs.params,
+                    n,
+                );
+                true
+            }
+            // PCleanup.2.5b — drift_brushstrokes. Same compute pass (now
+            // writing per-particle vel); fragment shader reads vel and draws
+            // elongated motion-blur strokes trailing each particle.
+            DRIFT_BRUSHSTROKES_PRESET_ID => {
+                let n = inputs.params.get("particle_count").copied().unwrap_or(32.0) as u32;
+                self.drift_brushstrokes.dispatch_compute(
+                    queue,
+                    device,
+                    encoder,
+                    n,
+                    inputs.seed,
+                    inputs.clock_secs,
+                    inputs.t_layer_added_secs,
+                    inputs.params,
+                    inputs.sdf,
+                );
+                self.drift_brushstrokes.render_drift_brushstrokes(
                     device,
                     queue,
                     encoder,
@@ -5442,6 +5543,61 @@ mod tests {
     fn drift_pinholes_is_source_modifier_group() {
         assert_eq!(
             treatment_group(DRIFT_PINHOLES_PRESET_ID),
+            TreatmentGroup::SourceModifier
+        );
+    }
+
+    // ----- PCleanup.2.5b — drift_brushstrokes treatment ------------------
+
+    #[test]
+    fn drift_brushstrokes_is_registered() {
+        assert!(
+            is_registered(DRIFT_BRUSHSTROKES_PRESET_ID),
+            "drift_brushstrokes must appear in treatments::registry()"
+        );
+    }
+
+    #[test]
+    fn drift_brushstrokes_descriptors_present() {
+        let descriptors = param_descriptors(DRIFT_BRUSHSTROKES_PRESET_ID);
+        assert_eq!(
+            descriptors.len(),
+            5,
+            "drift_brushstrokes exposes 5 params (adds smear_duration over drift_pinholes)"
+        );
+        for d in descriptors {
+            assert!(d.min < d.max, "{}: min < max", d.key);
+            assert!(
+                d.default >= d.min && d.default <= d.max,
+                "{}: default in [min, max]",
+                d.key
+            );
+        }
+    }
+
+    #[test]
+    fn drift_brushstrokes_opacity_default_is_zero() {
+        let descriptors = param_descriptors(DRIFT_BRUSHSTROKES_PRESET_ID);
+        let opacity_desc = descriptors
+            .iter()
+            .find(|d| d.key == "opacity")
+            .expect("opacity descriptor must be present");
+        assert_eq!(opacity_desc.default, 0.0, "opacity identity default = 0.0");
+    }
+
+    #[test]
+    fn drift_brushstrokes_has_smear_duration() {
+        let descriptors = param_descriptors(DRIFT_BRUSHSTROKES_PRESET_ID);
+        assert!(
+            descriptors.iter().any(|d| d.key == "smear_duration"),
+            "drift_brushstrokes must expose smear_duration"
+        );
+    }
+
+    #[test]
+    fn drift_brushstrokes_is_source_modifier_group() {
+        assert_eq!(
+            treatment_group(DRIFT_BRUSHSTROKES_PRESET_ID),
             TreatmentGroup::SourceModifier
         );
     }
