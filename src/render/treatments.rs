@@ -98,6 +98,14 @@ pub const FLUID_WARP_FULL_PRESET_ID: &str = "fluid_warp_full";
 /// unchanged. `intensity = 0.0` is a bit-exact passthrough.
 pub const ZONE_BRIGHTEN_PRESET_ID: &str = "zone_brighten";
 
+/// PCleanup.2.10 — `zone_lens` preset id. Sixth W2 sibling treatment.
+/// Displaces the source image's UV coordinates in a thin band around the
+/// ZONE_WINDOW mask edge, creating a lens / refraction effect at the zone
+/// perimeter. Mirrors `fx_zone_edge_ripple`'s spatial band shape but reads
+/// `t_source` instead of generating new pixels. `amplitude = 0.0` is a
+/// bit-exact passthrough.
+pub const ZONE_LENS_PRESET_ID: &str = "zone_lens";
+
 /// Number of collage slots supported by the v0.5 `collage` preset.
 /// Fixed at 4 (a 2×2 grid) — true variable-N collage requires either
 /// dynamically-built bind groups or a texture array binding, deferred
@@ -153,9 +161,9 @@ pub struct TreatmentInputs<'a> {
     pub intermediate: Option<&'a wgpu::TextureView>,
 
     /// Layer's zone role (from `cfg.warp.zone_role`). Used by zone-aware
-    /// treatments (`zone_brighten`, and future W2.10 `zone_lens`). Other
-    /// treatments ignore this field. `None` maps to `ZONE_NONE` (u32 0)
-    /// in the shader uniform, which triggers the passthrough branch.
+    /// treatments (`zone_brighten`, `zone_lens`). Other treatments ignore
+    /// this field. `None` maps to `ZONE_NONE` (u32 0) in the shader
+    /// uniform, which triggers the passthrough branch.
     pub zone_role: Option<crate::project::schema::ZoneRole>,
 }
 
@@ -202,6 +210,8 @@ pub fn registry() -> &'static [(&'static str, &'static str)] {
         (FLUID_WARP_FULL_PRESET_ID, "Fluid warp (full)"),
         // PCleanup.2.9 — fifth W2 sibling: luminance boost inside ZONE_WINDOW.
         (ZONE_BRIGHTEN_PRESET_ID, "Zone brighten (luminance boost)"),
+        // PCleanup.2.10 — sixth W2 sibling: UV lens warp at ZONE_WINDOW edge.
+        (ZONE_LENS_PRESET_ID, "Zone lens (source warp at edge)"),
     ]
 }
 
@@ -238,6 +248,8 @@ pub fn param_descriptors(preset_id: &str) -> &'static [ParamDescriptor] {
         FLUID_WARP_FULL_PRESET_ID => FLUID_WARP_FULL_DESCRIPTORS,
         // PCleanup.2.9 — zone_brighten treatment.
         ZONE_BRIGHTEN_PRESET_ID => ZONE_BRIGHTEN_DESCRIPTORS,
+        // PCleanup.2.10 — zone_lens treatment.
+        ZONE_LENS_PRESET_ID => ZONE_LENS_DESCRIPTORS,
         _ => &[],
     }
 }
@@ -575,6 +587,45 @@ const ZONE_BRIGHTEN_DESCRIPTORS: &[ParamDescriptor] = &[
     },
 ];
 
+/// PCleanup.2.10 — Static descriptors for the `zone_lens` treatment.
+/// Identity at default `amplitude = 0.0` — displacement vector is
+/// `normal * sin(...) * amplitude * band_weight` which is zero everywhere
+/// when amplitude = 0, so the output is bit-identical to the source (mirrors
+/// the established identity-default rule for all W2 sibling treatments).
+/// `band_width` controls the exponential decay constant; `frequency` and
+/// `speed` control the spatial and temporal animation of the sine ripple.
+#[allow(dead_code)] // referenced through `param_descriptors`
+const ZONE_LENS_DESCRIPTORS: &[ParamDescriptor] = &[
+    ParamDescriptor {
+        key: "amplitude",
+        label: "Lens amplitude (0 = no effect)",
+        min: 0.0,
+        max: 0.05,
+        default: 0.0,
+    },
+    ParamDescriptor {
+        key: "speed",
+        label: "Animation speed (cycles/sec)",
+        min: 0.0,
+        max: 3.0,
+        default: 1.0,
+    },
+    ParamDescriptor {
+        key: "band_width",
+        label: "Edge band width (exp decay constant)",
+        min: 0.0,
+        max: 0.3,
+        default: 0.05,
+    },
+    ParamDescriptor {
+        key: "frequency",
+        label: "Ripple frequency along band",
+        min: 0.0,
+        max: 40.0,
+        default: 10.0,
+    },
+];
+
 /// Static descriptors for the `refraction` preset (P2.4.2).
 /// Identity at default ior = 1.0 — the operator sees no change until they
 /// increase the ior slider. edge_width controls the SDF-distance band around
@@ -622,6 +673,8 @@ pub struct TreatmentPipeline {
     fluid_warp_full: FluidWarpFullTreatmentPipeline,
     // PCleanup.2.9 — fifth W2 sibling: luminance boost inside ZONE_WINDOW.
     zone_brighten: ZoneBrightenTreatmentPipeline,
+    // PCleanup.2.10 — sixth W2 sibling: UV lens warp at ZONE_WINDOW edge.
+    zone_lens: ZoneLensTreatmentPipeline,
 }
 
 impl TreatmentPipeline {
@@ -650,6 +703,8 @@ impl TreatmentPipeline {
             fluid_warp_full: FluidWarpFullTreatmentPipeline::new(device, target_format),
             // PCleanup.2.9 — zone_brighten.
             zone_brighten: ZoneBrightenTreatmentPipeline::new(device, target_format),
+            // PCleanup.2.10 — zone_lens.
+            zone_lens: ZoneLensTreatmentPipeline::new(device, target_format),
         }
     }
 
@@ -800,6 +855,19 @@ impl TreatmentPipeline {
                     return false;
                 };
                 self.zone_brighten
+                    .render(device, queue, encoder, dst, inputs, sdf);
+                true
+            }
+            // PCleanup.2.10 — zone_lens. Requires SDF (edge-band shape is
+            // driven by unsigned distance-to-edge). Without a zone_role of
+            // ZONE_WINDOW the shader passes source through unchanged; the
+            // dispatch still runs so the caller sees `true` and doesn't
+            // fall back to a blank blit. Skip when no SDF is present.
+            ZONE_LENS_PRESET_ID => {
+                let Some(sdf) = inputs.sdf else {
+                    return false;
+                };
+                self.zone_lens
                     .render(device, queue, encoder, dst, inputs, sdf);
                 true
             }
@@ -4274,6 +4342,268 @@ impl ZoneBrightenTreatmentPipeline {
     }
 }
 
+// PCleanup.2.10 — `zone_lens` treatment pipeline
+// ---------------------------------------------------------------------------
+//
+// Single-pass fragment shader. Reads `source` and the layer SDF, samples the
+// zone-tag uniform (slot 6), and displaces source UV coordinates in a thin
+// exponential band around the ZONE_WINDOW polygon edge, creating a lens /
+// refraction effect. Mirrors the spatial band shape of `fx_zone_edge_ripple`;
+// outside ZONE_WINDOW the shader passes source through unchanged.
+//
+// Pipeline fields:
+//   `params_buf`  — 32-byte uniform (amplitude, speed, band_width, frequency,
+//                   clock_secs, pad×3). Written per render call.
+//   `zone_tag_buf` — 16-byte ZoneTagUniform (zone_tag u32 + 3×u32 pad).
+//                   Written from `inputs.zone_role` per render call.
+//   Slot 6 follows the zone-aware slot table from P3.3.2, matching
+//   ZoneBrightenTreatmentPipeline exactly.
+//
+// Blend mode: ALPHA_BLENDING — same as zone_brighten / ripple_lens.
+
+struct ZoneLensTreatmentPipeline {
+    pipeline: wgpu::RenderPipeline,
+    bind_group_layout: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
+    params_buf: wgpu::Buffer,
+    zone_tag_buf: wgpu::Buffer,
+}
+
+impl ZoneLensTreatmentPipeline {
+    fn new(device: &wgpu::Device, target_format: wgpu::TextureFormat) -> Self {
+        // PCleanup.2.10: prepend SDF helper + zone-tag helper at module-create
+        // time (same pattern as ZoneBrightenTreatmentPipeline::new).
+        // build.rs also prepends these for standalone naga validation.
+        let src = format!(
+            "{}\n{}\n{}",
+            crate::render::sdf::SDF_HELPER_WGSL,
+            crate::render::sdf::ZONE_TAG_WGSL,
+            include_str!("shaders/treat_zone_lens.wgsl")
+        );
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("treat_zone_lens.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(src.into()),
+        });
+
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("treat_zone_lens bgl"),
+            entries: &[
+                // binding 0: source texture (filterable — RGBA8 / Bgra8)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    },
+                    count: None,
+                },
+                // binding 1: source sampler (filtering)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                // binding 2: params uniform (32 bytes — ZoneLensParams struct)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: std::num::NonZeroU64::new(32),
+                    },
+                    count: None,
+                },
+                // binding 3: SDF texture (R32Float, non-filterable; textureLoad only)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                    },
+                    count: None,
+                },
+                // binding 6: ZoneTagUniform (16 bytes; P3.3.2 slot contract)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 6,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: std::num::NonZeroU64::new(16),
+                    },
+                    count: None,
+                },
+            ],
+        });
+
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("treat_zone_lens pipeline layout"),
+            bind_group_layouts: &[Some(&bind_group_layout)],
+            immediate_size: 0,
+        });
+
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("treat_zone_lens pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: target_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("treat_zone_lens sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
+        });
+
+        // 32-byte params uniform: ZoneLensParams struct (8 × f32).
+        let params_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("treat_zone_lens params"),
+            size: 32,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        // 16-byte zone-tag uniform: ZoneTagUniform (u32 zone_tag + 3 × u32 padding).
+        let zone_tag_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("treat_zone_lens zone_tag"),
+            size: 16,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        Self {
+            pipeline,
+            bind_group_layout,
+            sampler,
+            params_buf,
+            zone_tag_buf,
+        }
+    }
+
+    fn render(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        dst: &wgpu::TextureView,
+        inputs: &TreatmentInputs<'_>,
+        sdf: &wgpu::TextureView,
+    ) {
+        let amplitude = inputs.params.get("amplitude").copied().unwrap_or(0.0);
+        let speed = inputs.params.get("speed").copied().unwrap_or(1.0);
+        let band_width = inputs.params.get("band_width").copied().unwrap_or(0.05);
+        let frequency = inputs.params.get("frequency").copied().unwrap_or(10.0);
+        let clock_secs = inputs.clock_secs;
+
+        // Write ZoneLensParams: 8 × f32 = 32 bytes, little-endian.
+        // Layout: [amplitude, speed, band_width, frequency, clock_secs, pad, pad, pad]
+        let mut params_bytes = [0u8; 32];
+        let floats = [
+            amplitude, speed, band_width, frequency, clock_secs, 0.0f32, 0.0, 0.0,
+        ];
+        for (i, f) in floats.iter().enumerate() {
+            params_bytes[i * 4..(i + 1) * 4].copy_from_slice(&f.to_le_bytes());
+        }
+        queue.write_buffer(&self.params_buf, 0, &params_bytes);
+
+        // Write ZoneTagUniform: u32 zone_tag + 3 × u32 padding = 16 bytes.
+        let zone_tag = crate::project::schema::zone_role_to_u32(inputs.zone_role);
+        let zone_bytes = [
+            zone_tag.to_le_bytes(),
+            [0u8; 4], // _pad0
+            [0u8; 4], // _pad1
+            [0u8; 4], // _pad2
+        ]
+        .concat();
+        queue.write_buffer(&self.zone_tag_buf, 0, &zone_bytes);
+
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("treat_zone_lens bg"),
+            layout: &self.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(inputs.source),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: self.params_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(sdf),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: self.zone_tag_buf.as_entire_binding(),
+                },
+            ],
+        });
+
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("treat_zone_lens pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: dst,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.draw(0..6, 0..1);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4768,6 +5098,53 @@ mod tests {
         assert_eq!(
             intensity_desc.default, 0.0,
             "intensity identity default = 0.0"
+        );
+    }
+
+    // ----- PCleanup.2.10 — zone_lens treatment ---------------------------
+
+    /// PCleanup.2.10 — `zone_lens` is registered in the treatment list so
+    /// the operator can apply it from the picker on a ZONE_WINDOW layer.
+    #[test]
+    fn zone_lens_is_registered() {
+        assert!(
+            is_registered(ZONE_LENS_PRESET_ID),
+            "zone_lens must appear in treatments::registry()"
+        );
+    }
+
+    /// PCleanup.2.10 — `zone_lens` exposes exactly 4 operator params
+    /// (amplitude, speed, band_width, frequency) each with a valid
+    /// min/max/default range.
+    #[test]
+    fn zone_lens_descriptors_present() {
+        let descriptors = param_descriptors(ZONE_LENS_PRESET_ID);
+        assert_eq!(descriptors.len(), 4, "zone_lens exposes exactly 4 params");
+        for d in descriptors {
+            assert!(d.min < d.max, "{}: min < max", d.key);
+            assert!(
+                d.default >= d.min && d.default <= d.max,
+                "{}: default in [min, max]",
+                d.key
+            );
+        }
+    }
+
+    /// PCleanup.2.10 — `zone_lens` `amplitude` default = 0.0 satisfies the
+    /// identity-default rule: displacement = normal × sin(…) × amplitude ×
+    /// band_weight = 0 everywhere → output equals source unchanged. Bit-exact
+    /// passthrough on freshly-added Treatment (structural in the shader:
+    /// any value × 0.0 amplitude = 0 displacement).
+    #[test]
+    fn zone_lens_amplitude_default_is_zero() {
+        let descriptors = param_descriptors(ZONE_LENS_PRESET_ID);
+        let amplitude_desc = descriptors
+            .iter()
+            .find(|d| d.key == "amplitude")
+            .expect("amplitude descriptor must be present");
+        assert_eq!(
+            amplitude_desc.default, 0.0,
+            "amplitude identity default = 0.0"
         );
     }
 }
