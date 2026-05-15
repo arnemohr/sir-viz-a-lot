@@ -30,6 +30,9 @@ pub mod layer_strip;
 // 004-T1.24 — Look chain section: unified per-layer effect chain UI.
 #[cfg(feature = "v3")]
 pub mod look_chain;
+// 004-T1.33 — once-per-machine onboarding toasts + UiFlags persistence.
+#[cfg(feature = "v3")]
+pub mod onboarding;
 pub mod output;
 #[cfg(feature = "v3")]
 pub mod output_panel;

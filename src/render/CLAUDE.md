@@ -22,7 +22,15 @@ The plan-document signature `Renderer::new(surface)` is **impossible** against `
 Per `EditingState`, every frame:
 
 1. Each `LayerState` rasters/uploads its source (SVG via off-thread worker; image direct).
-2. Layer's `effects: Vec<Effect>` runs as a ping-pong chain (`pipeline.rs`, `RenderCtx { source_view, dst_view, intermediate_view }`). The third `intermediate_view` is for multi-pass effects (currently only `Blur`).
+2. Layer's `effects: Vec<EffectNode>` runs as a ping-pong chain (`pipeline.rs`, `RenderCtx { source_view, dst_view, intermediate_view, sdf_view, zone_role, seed, t_layer_added_secs, overlay_view, collage_views }`). The third `intermediate_view` is for multi-pass effects (currently only `Blur`). The six new fields supply per-layer context to `Effect::Treatment` nodes:
+   - `sdf_view` — signed-distance-field texture view computed once by `WarpRenderer::sync_from_layer` before the loop; reused by every node.
+   - `zone_role` — `Option<ZoneRole>` from `cfg.warp.zone_role`; zone-keyed presets (`zone_brighten`, `zone_lens`) use this.
+   - `seed` — `layer_id.0` as `u64`; drives per-layer randomisation in particle/noise treatments.
+   - `t_layer_added_secs` — seconds since layer was added; `0.0` for Image/Video (not meaningful), non-zero for generative FX layers.
+   - `overlay_view` — texture view of `Effect::Treatment.overlay_path`, uploaded via `image_texture_cache.lookup_or_upload`; `None` when path absent.
+   - `collage_views` — slice of texture views for `Effect::Treatment.collage_paths`; length 0-4.
+
+   **`identity_fit_uniform` invariant:** `svg_pipeline` owns layer fit (Cover/Contain/Stretch + focal point) and writes the fitted source into the ping-pong buffer. Chain effects (including `Effect::Treatment`) always receive an identity fit uniform — they operate on the already-fitted pixels and must not re-apply Cover/Contain, which would double-apply the fit transform.
 3. `Compositor` blends layers in order with their `BlendMode` and `opacity`.
 4. One or more `WarpRenderer`s render into the shared `warp_rt`. **First uses `LoadOp::Clear`; subsequent use `LoadOp::Load`** so multiple non-overlapping `source_rect` regions co-exist on one projector. (Roadmap defers true multi-output until single-surface UX is mature.)
 5. `GammaPipeline` master pass.

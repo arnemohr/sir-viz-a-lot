@@ -20,7 +20,7 @@ The undo system has three **mandatory Reverse-storage rules**. Get them wrong an
 
 1. **Whole-enum Reverse.** Variant replacements (`Modulator`, `BlendMode`, `Effect`, `LayerKind`, `FitMode`) store the *full* old enum value, not just the field that "looks" different. Variant-replacement loses unrelated fields silently otherwise.
 
-2. **Effects-Vec Reverse.** Anything touching `LayerConfig.effects` snapshots the entire `Vec<Effect>`, not just the changed effect. Reason: the `mutate_transform_effect` helper in `windows/scene_editor.rs` *appends* a default `Effect::Transform` to layers that don't have one — a per-field Reverse would leave a stray effect on undo.
+2. **Effects-Vec Reverse.** Anything touching `LayerConfig.effects` snapshots the entire `Vec<EffectNode>`, not just the changed node. Reason: the `mutate_transform_effect` helper in `windows/scene_editor.rs` *appends* `EffectNode { enabled: true, effect: Effect::Transform {…} }` to layers that don't have one — a per-field Reverse would leave a stray node on undo.
 
 3. **Snapshot Reverse.** Scene recall and crossfade tick replace the entire project from a `serde_json::Value`. They emit `Mutation::ApplyProjectSnapshot { new, old, non_undoable }`. Crossfade ticks fire ~60×/s and **must** set `non_undoable: true` so they never enter the user-facing undo stack.
 

@@ -609,6 +609,11 @@ struct EditingState {
     /// preview never registers (e.g. `--monitor 99`).
     #[cfg(feature = "v3")]
     connecting_toast_emitted: bool,
+    /// 004-T1.33: session-only latch so the "Effects merged into the
+    /// Layers tab as Look chain" onboarding toast fires at most once
+    /// per session even if the disk write of `ui_flags.json` fails.
+    #[cfg(feature = "v3")]
+    look_chain_toast_seen: bool,
     /// 003-T4.6: `true` when the project has mutations since the last save
     /// or autosave write. Flipped `true` on every undoable `undo_stack.push`;
     /// cleared on save / autosave write. Also set on successful undo / redo
@@ -2378,6 +2383,8 @@ fn assemble_editing_state(
         session_started_at: std::time::Instant::now(),
         #[cfg(feature = "v3")]
         connecting_toast_emitted: false,
+        #[cfg(feature = "v3")]
+        look_chain_toast_seen: false,
         #[cfg(feature = "v3")]
         dirty: false,
         #[cfg(feature = "v3")]
@@ -6371,6 +6378,28 @@ impl ApplicationHandler for App {
                     running
                         .toast_queue
                         .push(crate::windows::toast::Toast::new(kind, finding.message));
+                }
+                // 004-T1.33 — once-per-machine "Effects moved to Look
+                // chain" onboarding toast. Reads `ui_flags.json` from
+                // `~/Library/Application Support/rmap/`; writes `true`
+                // after pushing so subsequent launches are silent. The
+                // session latch on `running.look_chain_toast_seen`
+                // ensures the toast fires at most once even when the
+                // disk write fails.
+                #[cfg(feature = "v3")]
+                if !running.look_chain_toast_seen {
+                    let mut flags =
+                        crate::windows::onboarding::read_flags();
+                    if !flags.look_chain_toast_seen {
+                        running.toast_queue.push(
+                            crate::windows::toast::Toast::info(
+                                "Effects merged into the Layers tab as Look chain.",
+                            ),
+                        );
+                        flags.look_chain_toast_seen = true;
+                        crate::windows::onboarding::write_flags(&flags);
+                    }
+                    running.look_chain_toast_seen = true;
                 }
                 // 003-T1.45 — session_start fires once per Editing
                 // lifetime, after init succeeds and toasts are queued.

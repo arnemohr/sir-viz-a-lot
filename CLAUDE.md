@@ -13,7 +13,7 @@ A spec-driven workflow is in active use. Numbered task IDs in commit messages (`
 Nested `CLAUDE.md` files live next to the code they govern; Claude Code auto-loads them when working in those areas. **Read them before editing — they cover silent-corruption traps that the type system can't catch.**
 
 - **`src/project/CLAUDE.md`** — scene snapshot invariants (`restore_scene` ≠ `restore`, `snapshots_share_layer_topology` gating); v3 `Mutation` Reverse-storage rules (whole-enum, effects-vec, snapshot); the `Command` vs `Mutation` separation.
-- **`src/render/CLAUDE.md`** — GPU bring-up split (device before surface), per-frame render-graph order, surface-acquisition outcome mapping, the `panic_restore` frame wrapper, build-time WGSL validation.
+- **`src/render/CLAUDE.md`** — GPU bring-up split (device before surface), per-frame render-graph order (including the Look chain — the per-layer `Vec<EffectNode>` that is the unified treatment + effects surface), surface-acquisition outcome mapping, the `panic_restore` frame wrapper, build-time WGSL validation.
 
 ## Commands
 
