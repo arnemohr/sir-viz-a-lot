@@ -389,6 +389,11 @@ pub struct ControlPanelState {
     /// collapsed (36 px icon bar). Toggled by the chevron button. Session-only.
     #[cfg(feature = "v3")]
     pub audio_bands_expanded: bool,
+    /// T1.9 — when true, the per-layer effect chain is skipped entirely
+    /// (all nodes bypass). Session-only; not in project snapshot, not undoable.
+    /// T1.29 adds the UI toggle; for now this defaults false and the render
+    /// path reads it so the wiring is complete.
+    pub ab_compare: bool,
 }
 
 pub enum ControlPanelAction {

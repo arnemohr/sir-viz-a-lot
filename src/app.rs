@@ -1601,7 +1601,6 @@ struct LayerState {
     /// per-layer effect chain (T1.8) passes this to the treatment pipeline
     /// instead of `fit_uniform` so fit is not double-applied when
     /// `Effect::Treatment` runs after `svg_pipeline` has already applied fit.
-    #[allow(dead_code)] // T1.8 wires this into RenderCtx
     identity_fit_uniform: wgpu::Buffer,
     /// Cached texture aspect (`width / height`) for the most recent upload.
     /// Image layers learn it from `image_layer::upload_image_rgba8`; SVG
@@ -4270,6 +4269,7 @@ fn render_m5_pipeline(
     fx_pipelines: &crate::render::fx_presets::FxPipelines,
     treatment_pipeline: &crate::render::treatments::TreatmentPipeline,
     image_texture_cache: &crate::image_layer::ImageTextureCache,
+    ab_compare: bool,
 ) -> std::result::Result<(), RenderError> {
     crate::show_day::panic_restore::run_frame_assert_unwind_safe(|| {
         // --- Passes 1-4: raster / effects / warp / composite into warp_rt ---
@@ -4466,11 +4466,69 @@ fn render_m5_pipeline(
                     &ls.fit_uniform,
                 );
             }
+            // T1.8 — sync SDF once before the chain loop so every Treatment
+            // node sees up-to-date geometry. For FxLayer the sync above (line
+            // ~4332) already ran; the hash gate makes this call a no-op.
+            // The second sync after the loop (warp pass) is also hash-gated
+            // and becomes a no-op when the geometry hasn't changed.
+            ls.warp_renderer.sync_from_layer(
+                &renderer.gpu.device,
+                &renderer.gpu.queue,
+                cfg,
+            );
+            let sdf_view_for_chain = ls.warp_renderer.sdf_view();
+
             // 004-T1.foundation — iterate EffectNode; dispatch via node.effect.
-            // T1.9 adds per-node bypass (enabled check) later.
+            // T1.9: skip disabled nodes and bypass entire chain when ab_compare.
             for node in &cfg.effects {
+                if !node.enabled || ab_compare {
+                    // Disabled node: do not flip ping-pong; prior pixels pass
+                    // through automatically. ab_compare skips the whole chain.
+                    continue;
+                }
                 let effect = &node.effect;
                 {
+                    // T1.8 — hoist overlay/collage texture loading for Treatment
+                    // nodes only; non-Treatment nodes get nullary ctx fields.
+                    let overlay_tex_opt: Option<(wgpu::Texture, wgpu::TextureView)>;
+                    let collage_textures: Vec<(wgpu::Texture, wgpu::TextureView)>;
+                    if let crate::effects::Effect::Treatment {
+                        overlay_path,
+                        collage_paths,
+                        ..
+                    } = effect
+                    {
+                        overlay_tex_opt = overlay_path.as_ref().and_then(|p| {
+                            image_texture_cache
+                                .lookup_or_upload(
+                                    &renderer.gpu.device,
+                                    &renderer.gpu.queue,
+                                    p,
+                                )
+                                .ok()
+                                .map(|(t, v, _)| (t, v))
+                        });
+                        collage_textures = collage_paths
+                            .iter()
+                            .filter_map(|p| {
+                                image_texture_cache
+                                    .lookup_or_upload(
+                                        &renderer.gpu.device,
+                                        &renderer.gpu.queue,
+                                        p,
+                                    )
+                                    .ok()
+                                    .map(|(t, v, _)| (t, v))
+                            })
+                            .collect();
+                    } else {
+                        overlay_tex_opt = None;
+                        collage_textures = Vec::new();
+                    }
+                    let overlay_view_ref = overlay_tex_opt.as_ref().map(|(_, v)| v);
+                    let collage_views: Vec<&wgpu::TextureView> =
+                        collage_textures.iter().map(|(_, v)| v).collect();
+
                     let (src, dst) = ls.effect_pipeline.current_pair();
                     let mut ctx = RenderCtx {
                         device: &renderer.gpu.device,
@@ -4491,19 +4549,22 @@ fn render_m5_pipeline(
                         // PCleanup.1.3 — per-layer Effect::Treatment dispatch
                         // reuses the same TreatmentPipeline as the global pass.
                         treatment_pipeline,
-                        fit_uniform: &ls.fit_uniform,
+                        // T1.8 — identity_fit_uniform prevents double-apply of
+                        // fit when Effect::Treatment runs after svg_pipeline has
+                        // already applied fit. The svg_pipeline.render() call
+                        // above uses ls.fit_uniform (correct for that blit).
+                        fit_uniform: &ls.identity_fit_uniform,
                         // PCleanup.1.4 — per-layer Effect::Feedback dispatch.
                         feedback,
                         feedback_uniform: &ls.feedback_uniform,
                         history_view: &ls.history_view,
-                        // 004-T1.5 — nullary defaults until T1.8 wires full
-                        // SDF/zone/seed/overlay/collage plumbing.
-                        sdf_view: None,
-                        zone_role: None,
-                        seed: 0,
+                        // T1.8 — real per-layer values (SDF, zone, seed, overlay, collage).
+                        sdf_view: Some(sdf_view_for_chain),
+                        zone_role: cfg.warp.zone_role,
+                        seed: ls.layer_id.0,
                         t_layer_added_secs: 0.0,
-                        overlay_view: None,
-                        collage_views: &[],
+                        overlay_view: overlay_view_ref,
+                        collage_views: &collage_views,
                     };
                     if effect.render(&mut ctx, clock) {
                         ls.effect_pipeline.flip();
@@ -6006,6 +6067,10 @@ fn handle_editing_window_event(
                     &state.fx_pipelines,
                     &state.treatment_pipeline,
                     &state.image_texture_cache,
+                    // T1.9 — ab_compare bypasses the effect chain when true.
+                    // T1.29 adds the UI toggle; field exists on ControlPanelState
+                    // and defaults false so the chain runs normally until then.
+                    state.control_panel.ab_compare,
                 )
             } else {
                 // Empty project — render a blank frame for each output.

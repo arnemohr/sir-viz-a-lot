@@ -178,39 +178,26 @@ pub struct RenderCtx<'a> {
     /// in-place at the end of `Effect::Feedback::render`.
     pub history_view: &'a wgpu::TextureView,
     // ---- 004-T1.5: six new fields for full Treatment plumbing -----------
-    // These fields are populated with null defaults at the call site in
-    // app.rs until T1.8 wires the real values. The `#[allow(dead_code)]`
-    // annotations suppress warnings while the fields await T1.7/T1.8.
+    // T1.8 wires all six fields with real per-layer values in app.rs.
     /// 004-T1.5 — per-layer SDF texture view (R32Float). Populated after
     /// `WarpRenderer::sync_from_layer`; used by SDF-keyed treatments
-    /// (`ripple_lens`, `blur_mask`, `displacement_ripple`, etc.). `None`
-    /// until T1.8 wires it at the call site in `app.rs`.
-    #[allow(dead_code)] // consumed by Effect::Treatment arm in T1.7
+    /// (`ripple_lens`, `blur_mask`, `displacement_ripple`, etc.).
     pub sdf_view: Option<&'a wgpu::TextureView>,
     /// 004-T1.5 — semantic zone role of this layer's mask polygon (from
     /// `cfg.warp.zone_role`). Used by `zone_brighten` / `zone_lens`.
-    /// `None` until T1.8 wires it.
-    #[allow(dead_code)] // consumed by Effect::Treatment arm in T1.7
     pub zone_role: Option<crate::project::schema::ZoneRole>,
-    /// 004-T1.5 — stable per-layer RNG seed (e.g. `LayerState::layer_id.0`).
+    /// 004-T1.5 — stable per-layer RNG seed (`LayerState::layer_id.0`).
     /// Used by particle-based treatments (`spotlights`, `drift_pinholes`, …).
-    /// `0` until T1.8 wires it.
-    #[allow(dead_code)] // consumed by Effect::Treatment arm in T1.7
     pub seed: u64,
     /// 004-T1.5 — seconds (project clock) at which this layer was added.
     /// Used with `clock_secs` to compute per-layer local time for particle
-    /// animation. `0.0` until T1.8 wires it.
-    #[allow(dead_code)] // consumed by Effect::Treatment arm in T1.7
+    /// animation.
     pub t_layer_added_secs: f32,
     /// 004-T1.5 — optional overlay texture view for overlay-style presets
     /// (`texture_overlay`). Loaded from `Effect::Treatment.overlay_path`.
-    /// `None` until T1.8 hoists the overlay-loader into the per-node loop.
-    #[allow(dead_code)] // consumed by Effect::Treatment arm in T1.7
     pub overlay_view: Option<&'a wgpu::TextureView>,
     /// 004-T1.5 — collage slot texture views for `collage`-style presets.
-    /// Loaded from `Effect::Treatment.collage_paths`. Empty slice until
-    /// T1.8 hoists the collage-loader into the per-node loop.
-    #[allow(dead_code)] // consumed by Effect::Treatment arm in T1.7
+    /// Loaded from `Effect::Treatment.collage_paths`.
     pub collage_views: &'a [&'a wgpu::TextureView],
 }
 
