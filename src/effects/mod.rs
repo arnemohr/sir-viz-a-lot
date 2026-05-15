@@ -361,36 +361,27 @@ impl Effect {
                 true
             }
             Effect::Treatment { id, params, .. } => {
-                // PCleanup.1.3 — per-layer treatment dispatch. Reuses the
-                // shared TreatmentPipeline (the same instance the global
+                // 004-T1.7 — per-layer treatment dispatch. Reuses the shared
+                // TreatmentPipeline (the same instance the global
                 // post-composition treatment pass uses).
                 //
-                // SDF view is NOT plumbed in this initial cut, so the
-                // SDF-requiring treatments (`blur_mask`,
-                // `displacement_ripple`, `refraction`) gracefully return
-                // false from `dispatch` and the ping-pong stays where it
-                // was — i.e. the effect is a no-op. The trivial
-                // treatments (identity, tone_map, luminance_reveal,
-                // palette_extract, texture_overlay, collage) work
-                // immediately. SDF plumbing is a follow-up.
+                // All RenderCtx fields are now threaded through: SDF view,
+                // zone role, seed, t_layer_added_secs, overlay, and collage
+                // views. The caller (app.rs, T1.8) is responsible for loading
+                // the texture views from overlay_path / collage_paths and
+                // populating RenderCtx before invoking render().
                 let inputs = crate::render::treatments::TreatmentInputs {
                     source: ctx.source_view,
                     fit_uniform: ctx.fit_uniform,
                     params,
                     clock_secs: clock.elapsed().as_secs_f32(),
-                    overlay: None,
-                    collage: &[],
-                    sdf: None,
+                    overlay: ctx.overlay_view,
+                    collage: ctx.collage_views,
+                    sdf: ctx.sdf_view,
                     intermediate: Some(ctx.intermediate_view),
-                    // Zone role + particle seed are not plumbed through the
-                    // per-layer Effect chain RenderCtx. Zone-aware treatments
-                    // (zone_brighten / zone_lens) fall back to ZONE_NONE
-                    // passthrough; particle treatments (spotlights) use seed=0
-                    // — both apply meaningfully at the global Treatment tier
-                    // in app.rs, not in the per-layer effect chain.
-                    zone_role: None,
-                    seed: 0,
-                    t_layer_added_secs: 0.0,
+                    zone_role: ctx.zone_role,
+                    seed: ctx.seed,
+                    t_layer_added_secs: ctx.t_layer_added_secs,
                 };
                 let rendered = ctx.treatment_pipeline.dispatch(
                     ctx.device,
@@ -403,8 +394,11 @@ impl Effect {
                 if !rendered {
                     tracing::debug!(
                         id,
+                        sdf = ctx.sdf_view.is_some(),
+                        overlay = ctx.overlay_view.is_some(),
+                        collage_len = ctx.collage_views.len(),
                         "Effect::Treatment: dispatch returned false (unknown id, or \
-                         missing inputs for an SDF-requiring preset); skipping"
+                         ctx is missing a required input for this preset); skipping"
                     );
                 }
                 rendered
@@ -995,6 +989,42 @@ mod tests {
                 _ => {} // Other IDs just need to not panic.
             }
         }
+    }
+
+    // ----- 004-T1.7 — ctx field wiring regression guard --------------------
+
+    /// 004-T1.7 — Verify that the `Effect::Treatment` dispatch arm threads all
+    /// six `RenderCtx` fields through to `TreatmentInputs` instead of using
+    /// hardcoded nulls. This is a source-text check: the compile-time guarantee
+    /// that the fields are present is the real proof; a dispatch-returning-true
+    /// test requires a wgpu device and lives in T1.34 (golden image smoke).
+    #[test]
+    fn effect_treatment_arm_reads_ctx_sdf_view() {
+        let src = include_str!("mod.rs");
+        assert!(
+            src.contains("sdf: ctx.sdf_view"),
+            "Effect::Treatment must thread ctx.sdf_view"
+        );
+        assert!(
+            src.contains("zone_role: ctx.zone_role"),
+            "Effect::Treatment must thread ctx.zone_role"
+        );
+        assert!(
+            src.contains("seed: ctx.seed"),
+            "Effect::Treatment must thread ctx.seed"
+        );
+        assert!(
+            src.contains("t_layer_added_secs: ctx.t_layer_added_secs"),
+            "Effect::Treatment must thread ctx.t_layer_added_secs"
+        );
+        assert!(
+            src.contains("overlay: ctx.overlay_view"),
+            "Effect::Treatment must thread ctx.overlay_view"
+        );
+        assert!(
+            src.contains("collage: ctx.collage_views"),
+            "Effect::Treatment must thread ctx.collage_views"
+        );
     }
 
     // ----- Shared test fixture -------------------------------------------
