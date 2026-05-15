@@ -6627,6 +6627,9 @@ impl ApplicationHandler for App {
                         self.state = enter_scene_wizard(editing);
                     }
                     EditingTransition::ExitGoLive => {
+                        // `mut` is only needed in v3 builds where the lighting
+                        // path mutates the state; suppress the non-v3 warning.
+                        #[allow(unused_mut)]
                         let AppState::GoLive(mut editing) = prev else {
                             // Already in Editing (double-click race); restore.
                             tracing::warn!("ExitGoLive received in non-GoLive state; ignoring");
@@ -7513,9 +7516,24 @@ mod tests {
             &env,
             Some(demo_path.as_path()),
         );
+        // Filter out `TemplateZonesMissing` — that fires as a proactive
+        // Warn for any zone-aware scene template in the registry the project
+        // doesn't tag for, and the ripple-wash demo intentionally doesn't
+        // use the W5 zone templates (Window Reveal, Architectural Wash).
+        // We only assert there are no other findings.
+        let blocking: Vec<_> = findings
+            .iter()
+            .filter(|f| {
+                !matches!(
+                    f.kind,
+                    crate::project::audit::AuditKind::TemplateZonesMissing { .. }
+                )
+            })
+            .collect();
         assert!(
-            findings.is_empty(),
-            "fx-ripple-wash demo should audit clean, got: {findings:?}"
+            blocking.is_empty(),
+            "fx-ripple-wash demo should audit clean (ignoring TemplateZonesMissing hints), \
+             got: {blocking:?}"
         );
 
         // Shape: 1 FxLayer with the ripple-wash preset + polygon mask.

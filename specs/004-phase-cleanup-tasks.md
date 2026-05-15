@@ -61,7 +61,7 @@ Companion task spec for [`004-phase-cleanup.md`](004-phase-cleanup.md). Each tas
 - [x] PCleanup.7.6 — Multi-output 2-projector limit documentation (launcher hint + roadmap)
 
 ### W8 — Treatments per-layer + `v3` flag
-- [ ] PCleanup.8.1 — Flip `v3` feature to default at M3 (gate-flip + pre-flip audit)
+- [x] PCleanup.8.1 — Flip `v3` feature to default at M3 (gate-flip + pre-flip audit) — `default = ["osc", "midi", "video", "v3"]`; `make ci` 1126/1126 passing; required prerequisite `MoveBezierAnchor` Reverse-storage fix landed in `004-PCleanup.bezier-handle-reverse`
 - [x] PCleanup.8.2 — Treatments per-layer — **tracking-only**; close when PCleanup.1.3 lands. Not a separate PR.
 - [ ] PCleanup.8.3 — Treatment-specific reimagining (palette_extract zone-aware, collage kaleidoscope/mosaic, blur_mask distance-driven) — optional
 
