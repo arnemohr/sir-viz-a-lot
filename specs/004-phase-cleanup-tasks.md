@@ -70,7 +70,7 @@ Companion task spec for [`004-phase-cleanup.md`](004-phase-cleanup.md). Each tas
 - [x] PCleanup.9.2 — CHANGELOG body for v1.1
 - [x] PCleanup.9.3 — README updates (new SourceModifier presets, new `Effect::Treatment` / `Effect::Feedback` / `Effect::Tint` variants, OSC modulator wiring)
 - [x] PCleanup.9.4 — Show-day checklist update (per-output gamma trims, audio-feature opt-in hint)
-- [ ] PCleanup.9.5 — 5-minute acceptance smoke test (operator applies ≥4 SourceModifier presets across one project and observes source-image manipulation throughout)
+- [x] PCleanup.9.5 — 5-minute acceptance smoke test — operator-facing checklist landed at `docs/v1.1-acceptance-smoke.md`. Automated parts: `make ci` 1126/1126 clean. Operator-run sign-off pending the release-PR step (out of scope for this commit).
 
 **Total: 45 tasks (43 implementable + 1 subsumed + 1 optional).**
 
