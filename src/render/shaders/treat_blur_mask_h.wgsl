@@ -8,17 +8,27 @@
 // result back to `src_view` so downstream effects/warp consume it
 // unchanged.
 //
-// Radius derivation: `r = max_radius * shape`, where `shape` is a
-// smoothstepped distance-from-edge curve. The SDF returns negative
-// inside the polygon, positive outside, zero on edge — `abs(d)` gives
-// "distance from edge" in normalised units regardless of side.
+// Radius derivation (mode 0 — edge-band, current default):
+//   `r = max_radius * shape`, where `shape` is a smoothstepped
+//   distance-from-edge curve.  The SDF returns negative inside the
+//   polygon, positive outside, zero on edge — `abs(d)` gives "distance
+//   from edge" in normalised units regardless of side. Blurry at edge,
+//   sharp far away.
+//
+// Radius derivation (mode 1 — distance-driven, PCleanup.8.3c):
+//   `r = base_radius * smoothstep(0, distance_falloff, abs(sdf))`.
+//   Sharp at the mask edge (abs(sdf)=0 → r=0), blurry toward the interior
+//   (abs(sdf)→distance_falloff → r=base_radius). Inverse of mode 0.
+//
+// PCleanup.8.3c adds `radius_mode` (u_params.w, default 0) and
+// `distance_falloff` (u_params[1].x) to the 32-byte uniform.
 //
 // build.rs prepends `sdf_helper.wgsl` because this file's basename
 // starts with `treat_blur` (see SDF_CONSUMERS in build.rs).
 
 @group(0) @binding(0) var t_diffuse: texture_2d<f32>;
 @group(0) @binding(1) var s_diffuse: sampler;
-@group(0) @binding(2) var<uniform> u_params: vec4<f32>;
+@group(0) @binding(2) var<uniform> u_params: array<vec4<f32>, 2>;
 @group(0) @binding(3) var t_sdf: texture_2d<f32>;
 
 struct VsOut {
@@ -41,21 +51,30 @@ fn vs_main(@builtin(vertex_index) idx: u32) -> VsOut {
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    let max_radius_px = max(u_params.x, 0.0);
-    let edge_band    = max(u_params.y, 1e-4);
-    let falloff      = clamp(u_params.z, 0.0, 1.0);
+    let max_radius_px    = max(u_params[0].x, 0.0);
+    let edge_band        = max(u_params[0].y, 1e-4);
+    let falloff          = clamp(u_params[0].z, 0.0, 1.0);
+    let radius_mode      = i32(u_params[0].w + 0.5);  // 0=edge-band (default), 1=distance-driven
+    let distance_falloff = max(u_params[1].x, 1e-4);  // meaningful at radius_mode=1
 
-    // Distance to mask edge (normalised polygon units), unsigned.
+    // Unsigned distance from mask edge.
     let d = abs(sample_sdf_bilinear(t_sdf, in.uv));
 
-    // 1.0 at edge → 0.0 deep inside / outside.
-    let proximity = 1.0 - smoothstep(0.0, edge_band, d);
+    var r: f32;
+    if (radius_mode == 1) {
+        // Distance-driven: sharp at edge, blurry toward the interior.
+        // r = 0 at the edge (d=0), rises to max_radius_px at d=distance_falloff.
+        r = max_radius_px * smoothstep(0.0, distance_falloff, d);
+    } else {
+        // Edge-band (mode 0, current default behaviour — preserved exactly):
+        // 1.0 at edge → 0.0 deep inside / outside.
+        let proximity = 1.0 - smoothstep(0.0, edge_band, d);
+        // falloff = 0 → very steep (hard cutoff at edge_band)
+        // falloff = 1 → smooth gradient
+        let shape = pow(proximity, mix(8.0, 1.0, falloff));
+        r = max_radius_px * shape;
+    }
 
-    // falloff = 0 → very steep (hard cutoff at edge_band)
-    // falloff = 1 → smooth gradient
-    let shape = pow(proximity, mix(8.0, 1.0, falloff));
-
-    let r = max_radius_px * shape;
     let dims = textureDimensions(t_diffuse, 0);
     let texel_x = 1.0 / f32(dims.x);
 

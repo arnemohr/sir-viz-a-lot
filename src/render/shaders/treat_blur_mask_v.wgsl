@@ -2,12 +2,16 @@
 // horizontally-blurred intermediate, writes the final result to dst.
 // Per-fragment radius matches the H pass (same SDF math, same params).
 //
+// PCleanup.8.3c: uniform expanded to 32 bytes (array<vec4<f32>, 2>);
+// adds `radius_mode` (w component of params[0]) and `distance_falloff`
+// (x component of params[1]). Mirrors treat_blur_mask_h.wgsl exactly.
+//
 // build.rs prepends `sdf_helper.wgsl` because the basename starts with
 // `treat_blur`.
 
 @group(0) @binding(0) var t_diffuse: texture_2d<f32>;
 @group(0) @binding(1) var s_diffuse: sampler;
-@group(0) @binding(2) var<uniform> u_params: vec4<f32>;
+@group(0) @binding(2) var<uniform> u_params: array<vec4<f32>, 2>;
 @group(0) @binding(3) var t_sdf: texture_2d<f32>;
 
 struct VsOut {
@@ -30,15 +34,25 @@ fn vs_main(@builtin(vertex_index) idx: u32) -> VsOut {
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    let max_radius_px = max(u_params.x, 0.0);
-    let edge_band    = max(u_params.y, 1e-4);
-    let falloff      = clamp(u_params.z, 0.0, 1.0);
+    let max_radius_px    = max(u_params[0].x, 0.0);
+    let edge_band        = max(u_params[0].y, 1e-4);
+    let falloff          = clamp(u_params[0].z, 0.0, 1.0);
+    let radius_mode      = i32(u_params[0].w + 0.5);  // 0=edge-band (default), 1=distance-driven
+    let distance_falloff = max(u_params[1].x, 1e-4);  // meaningful at radius_mode=1
 
     let d = abs(sample_sdf_bilinear(t_sdf, in.uv));
-    let proximity = 1.0 - smoothstep(0.0, edge_band, d);
-    let shape = pow(proximity, mix(8.0, 1.0, falloff));
 
-    let r = max_radius_px * shape;
+    var r: f32;
+    if (radius_mode == 1) {
+        // Distance-driven: sharp at edge, blurry toward interior.
+        r = max_radius_px * smoothstep(0.0, distance_falloff, d);
+    } else {
+        // Edge-band (mode 0, current default — preserved exactly).
+        let proximity = 1.0 - smoothstep(0.0, edge_band, d);
+        let shape = pow(proximity, mix(8.0, 1.0, falloff));
+        r = max_radius_px * shape;
+    }
+
     let dims = textureDimensions(t_diffuse, 0);
     let texel_y = 1.0 / f32(dims.y);
 
