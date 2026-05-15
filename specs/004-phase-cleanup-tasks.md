@@ -21,7 +21,7 @@ Companion task spec for [`004-phase-cleanup.md`](004-phase-cleanup.md). Each tas
 - [x] PCleanup.2.4 — `spotlights` (sibling of `particles_identity`) — particle SSBO infra in `src/render/treatment_particles.rs`; Gaussian luminance boost from drifting particles (commit `6470acc`)
 - [x] PCleanup.2.5a — `drift_pinholes` (sibling of `mask_constrained_drift`) — particle SSBO mask, fragment shader inverts spotlights' luminance lift
 - [x] PCleanup.2.5b — `drift_brushstrokes` (sibling of `mask_constrained_drift`) — motion-blurred strokes trailing each particle; compute shader now writes per-particle velocity (vel slot in the locked Particle layout)
-- [ ] PCleanup.2.6 — `edge_sparks` (sibling of `mask_edge_emission`) — deferred (particles)
+- [x] PCleanup.2.6 — `edge_sparks` (sibling of `mask_edge_emission`) — particle compute spawns at the mask edge along the SDF gradient, fragment fades each spark over a configurable lifetime
 - [x] PCleanup.2.7 — `field_advect_source` (sibling of `mask_field_flow`)
 - [ ] PCleanup.2.8 — `collision_ripples` (sibling of `mask_collision_reflection`) — deferred (compute + readback)
 - [x] PCleanup.2.9 — `zone_brighten` (sibling of `fx_zone_light_spill`) — finished by commit `b0fa79b`

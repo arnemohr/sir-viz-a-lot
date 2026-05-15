@@ -656,6 +656,25 @@ impl TreatmentParticlePipeline {
         )
     }
 
+    /// PCleanup.2.6 — Construct a `TreatmentParticlePipeline` for the
+    /// `edge_sparks` preset.
+    ///
+    /// Different compute shader from the rest of the W2 particle Treatments:
+    /// spawns particles at the mask edge (SDF ≈ 0 from the interior side),
+    /// drifts them outward along the SDF gradient, and tracks per-particle
+    /// spawn time in `_pad` so the fragment can fade over a configurable
+    /// lifetime.  Fragment math is the same additive Gaussian luminance lift
+    /// as spotlights, scaled by remaining life-fraction.
+    pub fn new_edge_sparks(device: &wgpu::Device, target_format: wgpu::TextureFormat) -> Self {
+        Self::new_with_shaders(
+            device,
+            target_format,
+            include_str!("shaders/treat_edge_sparks_compute.wgsl"),
+            include_str!("shaders/treat_edge_sparks.wgsl"),
+            "treat_edge_sparks",
+        )
+    }
+
     /// PCleanup.2.5a — Shared constructor body, parameterised by the
     /// fragment-shader source and label prefix.
     ///
@@ -671,12 +690,31 @@ impl TreatmentParticlePipeline {
         frag_wgsl: &'static str,
         label_prefix: &str,
     ) -> Self {
-        // --- Compute shader (position-update; shared across siblings) ---
+        Self::new_with_shaders(
+            device,
+            target_format,
+            include_str!("shaders/treat_spotlights_compute.wgsl"),
+            frag_wgsl,
+            label_prefix,
+        )
+    }
+
+    /// PCleanup.2.6 — Lowest-level constructor: both compute and fragment WGSL
+    /// sources are caller-supplied.  Used by `edge_sparks` whose compute
+    /// shader spawns particles at the mask edge instead of the interior.
+    fn new_with_shaders(
+        device: &wgpu::Device,
+        target_format: wgpu::TextureFormat,
+        compute_wgsl: &'static str,
+        frag_wgsl: &'static str,
+        label_prefix: &str,
+    ) -> Self {
+        // --- Compute shader ---
         let compute_src = format!(
             "{}\n{}\n{}",
             crate::render::sdf::SDF_HELPER_WGSL,
             TREATMENT_PARTICLE_SIM_WGSL,
-            include_str!("shaders/treat_spotlights_compute.wgsl"),
+            compute_wgsl,
         );
         let compute_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some(&format!("{label_prefix} compute")),
@@ -1077,6 +1115,196 @@ impl TreatmentParticlePipeline {
         pass.set_pipeline(&self.render_pipeline);
         pass.set_bind_group(0, &render_bg, &[]);
         pass.draw(0..6, 0..1);
+    }
+
+    /// PCleanup.2.6 — Fragment pass for the `edge_sparks` preset.
+    ///
+    /// Reads `params["brightness_gain"]` (default 0.0 — identity), `radius`
+    /// (default 0.05 — spark glow size), and `lifetime_s` (default 1.5 —
+    /// seconds a spark glows before respawning).  `clock_secs` is taken
+    /// from the same `t_local` the compute pass sees so spark ages line up.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_edge_sparks(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        dst: &wgpu::TextureView,
+        source: &wgpu::TextureView,
+        params: &HashMap<String, f32>,
+        n_particles: u32,
+        clock_secs: f32,
+    ) {
+        let n = n_particles.min(MAX_SPOTLIGHTS);
+        let brightness_gain = params.get("brightness_gain").copied().unwrap_or(0.0);
+        let radius = params.get("radius").copied().unwrap_or(0.05);
+        let lifetime_s = params.get("lifetime_s").copied().unwrap_or(1.5);
+
+        // EdgeSparksFragParams: 8 × f32 = 32 bytes.
+        // Layout: [brightness_gain, radius, n, clock, lifetime, _pad0..2]
+        let mut frag_bytes = [0u8; 32];
+        let frag_floats = [
+            brightness_gain,
+            radius,
+            n as f32,
+            clock_secs,
+            lifetime_s,
+            0.0f32,
+            0.0,
+            0.0,
+        ];
+        for (i, f) in frag_floats.iter().enumerate() {
+            frag_bytes[i * 4..(i + 1) * 4].copy_from_slice(&f.to_le_bytes());
+        }
+        queue.write_buffer(&self.frag_params_buf, 0, &frag_bytes);
+
+        let read_idx = 1 - self.write_idx.get();
+
+        let render_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("treat_edge_sparks render bg"),
+            layout: &self.render_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(source),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: self.frag_params_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: self.ssbo[read_idx].as_entire_binding(),
+                },
+            ],
+        });
+
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("treat_edge_sparks render pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: dst,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&self.render_pipeline);
+        pass.set_bind_group(0, &render_bg, &[]);
+        pass.draw(0..6, 0..1);
+    }
+
+    /// PCleanup.2.6 — Wrapper around `dispatch_compute` that uploads the
+    /// edge-sparks-specific compute params (drift_speed + lifetime_s).  The
+    /// shared `dispatch_compute` only knows about `drift_speed`; lifetime
+    /// goes into the second f32 slot of the compute params buffer here.
+    #[allow(clippy::too_many_arguments)]
+    pub fn dispatch_compute_edge_sparks(
+        &self,
+        queue: &wgpu::Queue,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        n_particles: u32,
+        seed: u64,
+        clock_secs: f32,
+        t_layer_added_secs: f32,
+        params: &HashMap<String, f32>,
+        sdf_view: Option<&wgpu::TextureView>,
+    ) {
+        // Overwrite the compute_params buffer with edge-sparks-specific
+        // layout BEFORE calling dispatch_compute (which uploads its own
+        // drift_speed-only layout). We can't reuse dispatch_compute as-is
+        // because edge_sparks needs `lifetime_s` in slot .y.
+        let n = n_particles.min(MAX_SPOTLIGHTS);
+        let t_local = clock_secs - t_layer_added_secs;
+        let seed_f = (seed as u32 & 0x7f_ffff) as f32;
+
+        let drift_speed = params.get("drift_speed").copied().unwrap_or(0.15);
+        let lifetime_s = params.get("lifetime_s").copied().unwrap_or(1.5);
+
+        let mut compute_bytes = [0u8; 32];
+        let compute_floats = [drift_speed, lifetime_s, 0.0f32, 0.0, 0.0, 0.0, 0.0, 0.0];
+        for (i, f) in compute_floats.iter().enumerate() {
+            compute_bytes[i * 4..(i + 1) * 4].copy_from_slice(&f.to_le_bytes());
+        }
+        queue.write_buffer(&self.compute_params_buf, 0, &compute_bytes);
+
+        let mut clock_bytes = [0u8; 16];
+        clock_bytes[0..4].copy_from_slice(&clock_secs.to_le_bytes());
+        clock_bytes[4..8].copy_from_slice(&t_local.to_le_bytes());
+        clock_bytes[8..12].copy_from_slice(&seed_f.to_le_bytes());
+        clock_bytes[12..16].copy_from_slice(&(n as f32).to_le_bytes());
+        queue.write_buffer(&self.clock_buf, 0, &clock_bytes);
+
+        // Upload dummy SDF when no real one is bound.
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.dummy_sdf,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &0.5f32.to_le_bytes(),
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(4),
+                rows_per_image: Some(1),
+            },
+            wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+        );
+
+        let w_idx = self.write_idx.get();
+        let active_sdf = sdf_view.unwrap_or(&self.dummy_sdf_view);
+
+        let compute_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("treat_edge_sparks compute bg"),
+            layout: &self.compute_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: self.compute_params_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: self.clock_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(active_sdf),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: self.ssbo[w_idx].as_entire_binding(),
+                },
+            ],
+        });
+
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("treat_edge_sparks compute pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.compute_pipeline);
+            pass.set_bind_group(0, &compute_bg, &[]);
+            let groups = n.div_ceil(64);
+            pass.dispatch_workgroups(groups, 1, 1);
+        }
+
+        self.write_idx.set(1 - w_idx);
     }
 }
 

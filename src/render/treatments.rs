@@ -131,7 +131,14 @@ pub const DRIFT_PINHOLES_PRESET_ID: &str = "drift_pinholes";
 /// (seconds) controls how long the trail extends behind each particle.
 pub const DRIFT_BRUSHSTROKES_PRESET_ID: &str = "drift_brushstrokes";
 
-/// Number of collage slots supported by the v0.5 `collage` preset.
+/// PCleanup.2.6 — `edge_sparks` preset id. Tenth W2 sibling treatment.
+/// Sibling of `mask_edge_emission` — particles spawn at the mask edge,
+/// drift outward along the SDF gradient, and additively brighten the
+/// source pixels they pass over (no opaque dots; underlying detail still
+/// visible).  Each spark has a finite lifetime (`lifetime_s`) and respawns
+/// at a new edge point after expiring.  `brightness_gain = 0.0` is a
+/// bit-exact passthrough.
+pub const EDGE_SPARKS_PRESET_ID: &str = "edge_sparks";
 /// Fixed at 4 (a 2×2 grid) — true variable-N collage requires either
 /// dynamically-built bind groups or a texture array binding, deferred
 /// to Phase 7.
@@ -271,6 +278,7 @@ pub fn treatment_group(preset_id: &str) -> TreatmentGroup {
         | SPOTLIGHTS_PRESET_ID
         | DRIFT_PINHOLES_PRESET_ID
         | DRIFT_BRUSHSTROKES_PRESET_ID
+        | EDGE_SPARKS_PRESET_ID
         | DISPLACEMENT_RIPPLE_PRESET_ID
         | REFRACTION_PRESET_ID => TreatmentGroup::SourceModifier,
         _ => TreatmentGroup::GenerativeOrUtility,
@@ -312,6 +320,8 @@ pub fn registry() -> &'static [(&'static str, &'static str)] {
             DRIFT_BRUSHSTROKES_PRESET_ID,
             "Drift brushstrokes (motion-blur source mask)",
         ),
+        // PCleanup.2.6 — sparks at the mask edge fading over their lifetime.
+        (EDGE_SPARKS_PRESET_ID, "Edge sparks (mask-edge embers)"),
         // P2.4.1 — displacement-map ripple warp (pre-W2).
         (DISPLACEMENT_RIPPLE_PRESET_ID, "Displacement ripple"),
         // P2.4.2 — refraction warp (pre-W2).
@@ -368,6 +378,8 @@ pub fn param_descriptors(preset_id: &str) -> &'static [ParamDescriptor] {
         DRIFT_PINHOLES_PRESET_ID => DRIFT_PINHOLES_DESCRIPTORS,
         // PCleanup.2.5b — drift_brushstrokes treatment.
         DRIFT_BRUSHSTROKES_PRESET_ID => DRIFT_BRUSHSTROKES_DESCRIPTORS,
+        // PCleanup.2.6 — edge_sparks treatment.
+        EDGE_SPARKS_PRESET_ID => EDGE_SPARKS_DESCRIPTORS,
         _ => &[],
     }
 }
@@ -872,6 +884,52 @@ const DRIFT_BRUSHSTROKES_DESCRIPTORS: &[ParamDescriptor] = &[
     },
 ];
 
+/// PCleanup.2.6 — Static descriptors for the `edge_sparks` preset.
+///
+/// Identity at `brightness_gain = 0.0`: the additive multiplier collapses
+/// to `1.0` everywhere → source unchanged. Sparks spawn at the mask edge,
+/// drift outward along the SDF gradient over `lifetime_s` seconds, and
+/// brighten source pixels they pass over by a Gaussian falloff scaled by
+/// remaining life-fraction.
+#[allow(dead_code)] // referenced only through `param_descriptors` (v3 UI)
+const EDGE_SPARKS_DESCRIPTORS: &[ParamDescriptor] = &[
+    ParamDescriptor {
+        key: "particle_count",
+        label: "Spark count (1–512)",
+        min: 1.0,
+        max: 512.0,
+        default: 64.0,
+    },
+    ParamDescriptor {
+        key: "brightness_gain",
+        label: "Spark brightness (0 = no effect)",
+        min: 0.0,
+        max: 2.0,
+        default: 0.0,
+    },
+    ParamDescriptor {
+        key: "radius",
+        label: "Spark glow radius (normalised UV)",
+        min: 0.01,
+        max: 0.3,
+        default: 0.04,
+    },
+    ParamDescriptor {
+        key: "drift_speed",
+        label: "Outward drift speed (UV/s along SDF normal)",
+        min: 0.0,
+        max: 1.0,
+        default: 0.15,
+    },
+    ParamDescriptor {
+        key: "lifetime_s",
+        label: "Spark lifetime (seconds before respawn)",
+        min: 0.1,
+        max: 4.0,
+        default: 1.5,
+    },
+];
+
 /// Static descriptors for the `refraction` preset (P2.4.2).
 /// Identity at default ior = 1.0 — the operator sees no change until they
 /// increase the ior slider. edge_width controls the SDF-distance band around
@@ -927,6 +985,8 @@ pub struct TreatmentPipeline {
     drift_pinholes: crate::render::treatment_particles::TreatmentParticlePipeline,
     // PCleanup.2.5b — ninth W2 sibling: motion-blurred brushstrokes (reads vel).
     drift_brushstrokes: crate::render::treatment_particles::TreatmentParticlePipeline,
+    // PCleanup.2.6 — tenth W2 sibling: edge-spawning sparks with lifetime fade.
+    edge_sparks: crate::render::treatment_particles::TreatmentParticlePipeline,
 }
 
 impl TreatmentPipeline {
@@ -974,6 +1034,13 @@ impl TreatmentPipeline {
             // compute pass; fragment shader reads particle velocity).
             drift_brushstrokes:
                 crate::render::treatment_particles::TreatmentParticlePipeline::new_drift_brushstrokes(
+                    device,
+                    target_format,
+                ),
+            // PCleanup.2.6 — edge_sparks (different compute shader: spawns
+            // particles at the mask edge and tracks per-particle lifetime).
+            edge_sparks:
+                crate::render::treatment_particles::TreatmentParticlePipeline::new_edge_sparks(
                     device,
                     target_format,
                 ),
@@ -1223,6 +1290,34 @@ impl TreatmentPipeline {
                     inputs.source,
                     inputs.params,
                     n,
+                );
+                true
+            }
+            // PCleanup.2.6 — edge_sparks. Different compute (spawns at mask
+            // edge, tracks per-particle lifetime). Fragment fades each spark
+            // over its lifetime.
+            EDGE_SPARKS_PRESET_ID => {
+                let n = inputs.params.get("particle_count").copied().unwrap_or(64.0) as u32;
+                self.edge_sparks.dispatch_compute_edge_sparks(
+                    queue,
+                    device,
+                    encoder,
+                    n,
+                    inputs.seed,
+                    inputs.clock_secs,
+                    inputs.t_layer_added_secs,
+                    inputs.params,
+                    inputs.sdf,
+                );
+                self.edge_sparks.render_edge_sparks(
+                    device,
+                    queue,
+                    encoder,
+                    dst,
+                    inputs.source,
+                    inputs.params,
+                    n,
+                    inputs.clock_secs - inputs.t_layer_added_secs,
                 );
                 true
             }
@@ -5598,6 +5693,64 @@ mod tests {
     fn drift_brushstrokes_is_source_modifier_group() {
         assert_eq!(
             treatment_group(DRIFT_BRUSHSTROKES_PRESET_ID),
+            TreatmentGroup::SourceModifier
+        );
+    }
+
+    // ----- PCleanup.2.6 — edge_sparks treatment --------------------------
+
+    #[test]
+    fn edge_sparks_is_registered() {
+        assert!(
+            is_registered(EDGE_SPARKS_PRESET_ID),
+            "edge_sparks must appear in treatments::registry()"
+        );
+    }
+
+    #[test]
+    fn edge_sparks_descriptors_present() {
+        let descriptors = param_descriptors(EDGE_SPARKS_PRESET_ID);
+        assert_eq!(
+            descriptors.len(),
+            5,
+            "edge_sparks exposes 5 params (adds lifetime_s over spotlights)"
+        );
+        for d in descriptors {
+            assert!(d.min < d.max, "{}: min < max", d.key);
+            assert!(
+                d.default >= d.min && d.default <= d.max,
+                "{}: default in [min, max]",
+                d.key
+            );
+        }
+    }
+
+    #[test]
+    fn edge_sparks_brightness_gain_default_is_zero() {
+        let descriptors = param_descriptors(EDGE_SPARKS_PRESET_ID);
+        let gain_desc = descriptors
+            .iter()
+            .find(|d| d.key == "brightness_gain")
+            .expect("brightness_gain descriptor must be present");
+        assert_eq!(
+            gain_desc.default, 0.0,
+            "brightness_gain identity default = 0.0"
+        );
+    }
+
+    #[test]
+    fn edge_sparks_has_lifetime() {
+        let descriptors = param_descriptors(EDGE_SPARKS_PRESET_ID);
+        assert!(
+            descriptors.iter().any(|d| d.key == "lifetime_s"),
+            "edge_sparks must expose lifetime_s"
+        );
+    }
+
+    #[test]
+    fn edge_sparks_is_source_modifier_group() {
+        assert_eq!(
+            treatment_group(EDGE_SPARKS_PRESET_ID),
             TreatmentGroup::SourceModifier
         );
     }
