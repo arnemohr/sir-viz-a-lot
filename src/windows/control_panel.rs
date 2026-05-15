@@ -1767,6 +1767,8 @@ fn show_effects_tab(ui: &mut Ui, project: &mut Project, st: &mut ControlPanelSta
                 let new_effect = crate::effects::Effect::Treatment {
                     id: "identity".to_string(),
                     params: std::collections::HashMap::new(),
+                    overlay_path: None,
+                    collage_paths: vec![],
                 };
                 let mut new = project.layers[layer_idx].effects.clone();
                 new.push(new_effect);
@@ -2584,7 +2586,7 @@ pub(super) fn show_effect(
                 );
             });
         }
-        Effect::Treatment { id, params } => {
+        Effect::Treatment { id, params, .. } => {
             // PCleanup.1.3 — per-layer treatment dispatch. Inline editor
             // is read-only in this first cut; PCleanup.1.3.2 will add the
             // treatment-picker dropdown + per-param sliders sourced from

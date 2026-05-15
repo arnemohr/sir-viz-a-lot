@@ -772,6 +772,62 @@ impl ReverseStorage for SetLayerEffects {
     }
 }
 
+/// 004-T1.13 — Payload for [`Mutation::SetLayerEffectsAndMask`].
+///
+/// Symmetric combined snapshot: replaces both `LayerConfig.effects`
+/// and `LayerConfig.warp.mask_polygon` atomically. Used by smart-fill
+/// on add (spec D): when the operator adds an SDF-keyed preset to a
+/// layer with empty `warp.mask_polygon`, the same mutation also
+/// seeds a full-quad mask. Single undo step.
+///
+/// Both `new`/`old` pairs are full snapshots (Reverse rules 1 + 2:
+/// whole-Vec mask polygon + whole-Vec effect chain).
+#[derive(Debug, Clone)]
+pub struct SetLayerEffectsAndMask {
+    /// Index into `Project.layers`.
+    pub layer_idx: usize,
+    /// Effect chain to install.
+    pub new_effects: Vec<crate::effects::Effect>,
+    /// Pre-mutation snapshot of the effect chain.
+    pub old_effects: Vec<crate::effects::Effect>,
+    /// Mask polygon to install.
+    pub new_mask_polygon: Vec<[f32; 2]>,
+    /// Pre-mutation snapshot of the mask polygon.
+    pub old_mask_polygon: Vec<[f32; 2]>,
+}
+
+impl ReverseStorage for SetLayerEffectsAndMask {
+    fn apply(self, project: &mut Project) -> Self {
+        let layer = project
+            .layers
+            .get_mut(self.layer_idx)
+            .expect("SetLayerEffectsAndMask: layer_idx out of range");
+        debug_assert!(
+            layer.effects.len() == self.old_effects.len(),
+            "SetLayerEffectsAndMask stale Reverse: effects.len()={}, expected old.len()={}",
+            layer.effects.len(),
+            self.old_effects.len()
+        );
+        debug_assert!(
+            layer.warp.mask_polygon.len() == self.old_mask_polygon.len(),
+            "SetLayerEffectsAndMask stale Reverse: mask_polygon.len()={}, expected old.len()={}",
+            layer.warp.mask_polygon.len(),
+            self.old_mask_polygon.len()
+        );
+        let post_effects = self.new_effects;
+        let post_mask = self.new_mask_polygon;
+        layer.effects = post_effects.clone();
+        layer.warp.mask_polygon = post_mask.clone();
+        SetLayerEffectsAndMask {
+            layer_idx: self.layer_idx,
+            new_effects: self.old_effects,
+            old_effects: post_effects,
+            new_mask_polygon: self.old_mask_polygon,
+            old_mask_polygon: post_mask,
+        }
+    }
+}
+
 /// Payload for [`Mutation::SwapLayers`]. Self-reverse.
 #[derive(Debug, Clone)]
 pub struct SwapLayers {
@@ -2361,6 +2417,9 @@ pub enum Mutation {
     SetLayerBlendMode(SetLayerBlendMode),
     /// Replace a layer's effect chain wholesale. Delegates to [`SetLayerEffects`].
     SetLayerEffects(SetLayerEffects),
+    /// 004-T1.13 — Replace a layer's effect chain AND mask polygon in a single
+    /// undo step (smart-fill on add). Delegates to [`SetLayerEffectsAndMask`].
+    SetLayerEffectsAndMask(SetLayerEffectsAndMask),
 
     /// P0.4.3 — replace `LayerKind::Video { speed, .. }` for a layer.
     /// Delegates to [`SetVideoSpeed`].
@@ -2592,6 +2651,9 @@ impl Mutation {
             Mutation::SetQuantizeBars(s) => Mutation::SetQuantizeBars(s.apply(project)),
             Mutation::SetLayerBlendMode(s) => Mutation::SetLayerBlendMode(s.apply(project)),
             Mutation::SetLayerEffects(s) => Mutation::SetLayerEffects(s.apply(project)),
+            Mutation::SetLayerEffectsAndMask(s) => {
+                Mutation::SetLayerEffectsAndMask(s.apply(project))
+            }
             Mutation::SetVideoSpeed(s) => Mutation::SetVideoSpeed(s.apply(project)),
             Mutation::SetVideoLoopMode(s) => Mutation::SetVideoLoopMode(s.apply(project)),
             Mutation::SetVideoClipRange(s) => Mutation::SetVideoClipRange(s.apply(project)),
@@ -2780,6 +2842,7 @@ impl Mutation {
             | Mutation::SetQuantizeBars(_)
             | Mutation::SetLayerBlendMode(_)
             | Mutation::SetLayerEffects(_)
+            | Mutation::SetLayerEffectsAndMask(_)
             | Mutation::SetModulator(_)
             | Mutation::AddLayer { .. }
             | Mutation::RemoveLayer { .. }
@@ -3473,6 +3536,27 @@ impl Project {
             layer_idx,
             new,
             old: layer.effects.clone(),
+        })
+    }
+
+    /// 004-T1.13 — Build a `SetLayerEffectsAndMask` mutation. Captures the
+    /// current effect chain and mask polygon as `old_*` for Effects-Vec
+    /// Reverse (rule 2) and whole-Vec mask Reverse (rule 2). Both `new_*`
+    /// arguments are moved into the mutation. Panics if `layer_idx` is out
+    /// of range.
+    pub fn set_layer_effects_and_mask_mutation(
+        &self,
+        layer_idx: usize,
+        new_effects: Vec<crate::effects::Effect>,
+        new_mask_polygon: Vec<[f32; 2]>,
+    ) -> Mutation {
+        let layer = &self.layers[layer_idx];
+        Mutation::SetLayerEffectsAndMask(SetLayerEffectsAndMask {
+            layer_idx,
+            new_effects,
+            old_effects: layer.effects.clone(),
+            new_mask_polygon,
+            old_mask_polygon: layer.warp.mask_polygon.clone(),
         })
     }
 
@@ -5175,6 +5259,12 @@ mod tests {
             /// P7.5.1/P7.6.1 — set the MaskGraph to an identity mask (Some)
             /// or clear it (None). Targets layer 0 (always present).
             SetMaskGraph(bool),
+            /// 004-T1.13 — replace both the effect chain and mask polygon in
+            /// one step. `new_mask_polygon` is the polygon to install; effect
+            /// chain is always the default chain (keeps the harness tractable).
+            SetLayerEffectsAndMask {
+                new_mask_polygon: Vec<[f32; 2]>,
+            },
         }
 
         fn to_mutation(kind: &MutationKind, project: &Project) -> Mutation {
@@ -5694,6 +5784,20 @@ mod tests {
                     };
                     project.set_layer_mask_graph_mutation(0, new)
                 }
+                // 004-T1.13 — SetLayerEffectsAndMask: install a fresh default
+                // effect chain alongside a new mask polygon.
+                MutationKind::SetLayerEffectsAndMask { new_mask_polygon } => {
+                    if project.layers.is_empty() {
+                        project.set_gamma_mutation(project.gamma) // no-op fallback
+                    } else {
+                        use crate::effects::default_effect_chain;
+                        project.set_layer_effects_and_mask_mutation(
+                            0,
+                            default_effect_chain(),
+                            new_mask_polygon.clone(),
+                        )
+                    }
+                }
             }
         }
 
@@ -5971,6 +6075,15 @@ mod tests {
                     .prop_map(|(dir_h, pos)| MutationKind::SetBezierHandle { dir_h, pos }),
                 // P7.5.1/P7.6.1 — SetMaskGraph: identity MaskGraph or clear.
                 any::<bool>().prop_map(MutationKind::SetMaskGraph),
+                // 004-T1.13 — SetLayerEffectsAndMask: new mask polygon (0..6 vertices);
+                // effect chain is always `default_effect_chain()` in `to_mutation`.
+                proptest::collection::vec(
+                    (0.0_f32..=1.0, 0.0_f32..=1.0).prop_map(|(x, y)| [x, y]),
+                    0..6,
+                )
+                .prop_map(|new_mask_polygon| MutationKind::SetLayerEffectsAndMask {
+                    new_mask_polygon,
+                }),
             ]
         }
 
@@ -6293,6 +6406,91 @@ mod tests {
         assert_eq!(
             after_undo, original_val,
             "after undo: effect chain should be restored to empty"
+        );
+    }
+
+    // --- 004-T1.13 SetLayerEffectsAndMask tests ---
+
+    /// 004-T1.13 — `SetLayerEffectsAndMask` apply → reverse → re-apply
+    /// restores both `effects` and `mask_polygon` identically.
+    ///
+    /// Verifies Reverse rules 1+2 (whole-Vec effect chain + whole-Vec mask
+    /// polygon). Starts with non-trivial values on BOTH fields so a stub
+    /// that only swaps one field would fail the assertion.
+    #[test]
+    fn set_layer_effects_and_mask_round_trips() {
+        use crate::effects::{Effect, default_effect_chain};
+        use crate::modulators::Modulator;
+
+        let mut p = fresh_project();
+
+        // Install a distinct, non-trivial starting state on both fields.
+        let initial_effects = vec![Effect::Blur {
+            radius_px: Modulator::Static(5.0),
+        }];
+        let initial_mask = vec![[0.1_f32, 0.2], [0.8, 0.2], [0.8, 0.8], [0.1, 0.8]];
+        p.layers[0].effects = initial_effects.clone();
+        p.layers[0].warp.mask_polygon = initial_mask.clone();
+
+        // Snapshot the whole-layer before the mutation.
+        let before_layer = serde_json::to_value(&p.layers[0]).unwrap();
+
+        // New values: default chain (3 entries) + a different polygon.
+        let new_effects = default_effect_chain();
+        let new_mask = vec![[0.0_f32, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+
+        // Apply: installs new_effects + new_mask.
+        let m = p.set_layer_effects_and_mask_mutation(0, new_effects.clone(), new_mask.clone());
+        let reverse = m.apply(&mut p);
+
+        // Post-apply: both fields must match the new values.
+        assert_eq!(
+            p.layers[0].effects.len(),
+            new_effects.len(),
+            "after apply: effects len should match new_effects"
+        );
+        assert_eq!(
+            p.layers[0].warp.mask_polygon,
+            new_mask,
+            "after apply: mask_polygon should match new_mask"
+        );
+
+        // Undo (apply the reverse): should restore both fields to initial state.
+        let re_apply = reverse.apply(&mut p);
+        let after_undo_layer = serde_json::to_value(&p.layers[0]).unwrap();
+        assert_eq!(
+            before_layer, after_undo_layer,
+            "after undo: whole layer must be byte-equal to pre-mutation state"
+        );
+
+        // Re-apply (redo): should restore both fields to the new values.
+        let _ = re_apply.apply(&mut p);
+        assert_eq!(
+            p.layers[0].effects.len(),
+            new_effects.len(),
+            "after redo: effects len should match new_effects"
+        );
+        assert_eq!(
+            p.layers[0].warp.mask_polygon,
+            new_mask,
+            "after redo: mask_polygon should match new_mask"
+        );
+    }
+
+    /// 004-T1.13 — `SetLayerEffectsAndMask` is undoable (not non-undoable).
+    #[test]
+    fn set_layer_effects_and_mask_is_undoable() {
+        use crate::effects::default_effect_chain;
+
+        let p = fresh_project();
+        let m = p.set_layer_effects_and_mask_mutation(
+            0,
+            default_effect_chain(),
+            vec![[0.0_f32, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+        );
+        assert!(
+            !m.is_non_undoable(),
+            "SetLayerEffectsAndMask must be undoable (is_non_undoable must return false)"
         );
     }
 

@@ -9,10 +9,33 @@ pub mod tint;
 pub mod transform;
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
 use crate::modulators::Modulator;
+
+/// 004-T1.1 — A single node in the per-layer Look chain.
+///
+/// Wraps one `Effect` with an `enabled` flag so operators can bypass a node
+/// without deleting it. The `#[serde(default = "default_enabled_true")]`
+/// attribute is **load-bearing**: plain `#[serde(default)]` on a bool evaluates
+/// to `false`, which would silently bypass every effect in any pre-v12 save and
+/// every `assets/presets/*.json`. The named helper is the single highest-impact
+/// line of code in this module — do not change it to `#[serde(default)]`.
+#[allow(dead_code)] // consumed by Wave 2 foundation cluster (T1.3 schema change)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EffectNode {
+    #[serde(default = "default_enabled_true")]
+    pub enabled: bool,
+    pub effect: Effect,
+}
+
+/// Named default-fn for `EffectNode::enabled`. Must be a named function; see
+/// the `EffectNode` doc comment for why `#[serde(default)]` alone is unsafe.
+fn default_enabled_true() -> bool {
+    true
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Effect {
@@ -70,6 +93,16 @@ pub enum Effect {
         id: String,
         #[serde(default)]
         params: HashMap<String, f32>,
+        /// 004-T1.2 — optional overlay texture path for overlay-style
+        /// presets (`texture_overlay`). `None` for presets that don't use
+        /// an overlay. `#[serde(default)]` keeps pre-T1.2 saves loading.
+        #[serde(default)]
+        overlay_path: Option<PathBuf>,
+        /// 004-T1.2 — collage slot paths for `collage`-style presets.
+        /// Empty for presets that don't use collage. `#[serde(default)]`
+        /// keeps pre-T1.2 saves loading.
+        #[serde(default)]
+        collage_paths: Vec<PathBuf>,
     },
     /// PCleanup.1.4 — feedback / trails / motion smear. Blends the
     /// current-frame source with the previous frame's output of this
@@ -144,6 +177,41 @@ pub struct RenderCtx<'a> {
     /// frame's output of the Feedback effect. The pass updates it
     /// in-place at the end of `Effect::Feedback::render`.
     pub history_view: &'a wgpu::TextureView,
+    // ---- 004-T1.5: six new fields for full Treatment plumbing -----------
+    // These fields are populated with null defaults at the call site in
+    // app.rs until T1.8 wires the real values. The `#[allow(dead_code)]`
+    // annotations suppress warnings while the fields await T1.7/T1.8.
+    /// 004-T1.5 — per-layer SDF texture view (R32Float). Populated after
+    /// `WarpRenderer::sync_from_layer`; used by SDF-keyed treatments
+    /// (`ripple_lens`, `blur_mask`, `displacement_ripple`, etc.). `None`
+    /// until T1.8 wires it at the call site in `app.rs`.
+    #[allow(dead_code)] // consumed by Effect::Treatment arm in T1.7
+    pub sdf_view: Option<&'a wgpu::TextureView>,
+    /// 004-T1.5 — semantic zone role of this layer's mask polygon (from
+    /// `cfg.warp.zone_role`). Used by `zone_brighten` / `zone_lens`.
+    /// `None` until T1.8 wires it.
+    #[allow(dead_code)] // consumed by Effect::Treatment arm in T1.7
+    pub zone_role: Option<crate::project::schema::ZoneRole>,
+    /// 004-T1.5 — stable per-layer RNG seed (e.g. `LayerState::layer_id.0`).
+    /// Used by particle-based treatments (`spotlights`, `drift_pinholes`, …).
+    /// `0` until T1.8 wires it.
+    #[allow(dead_code)] // consumed by Effect::Treatment arm in T1.7
+    pub seed: u64,
+    /// 004-T1.5 — seconds (project clock) at which this layer was added.
+    /// Used with `clock_secs` to compute per-layer local time for particle
+    /// animation. `0.0` until T1.8 wires it.
+    #[allow(dead_code)] // consumed by Effect::Treatment arm in T1.7
+    pub t_layer_added_secs: f32,
+    /// 004-T1.5 — optional overlay texture view for overlay-style presets
+    /// (`texture_overlay`). Loaded from `Effect::Treatment.overlay_path`.
+    /// `None` until T1.8 hoists the overlay-loader into the per-node loop.
+    #[allow(dead_code)] // consumed by Effect::Treatment arm in T1.7
+    pub overlay_view: Option<&'a wgpu::TextureView>,
+    /// 004-T1.5 — collage slot texture views for `collage`-style presets.
+    /// Loaded from `Effect::Treatment.collage_paths`. Empty slice until
+    /// T1.8 hoists the collage-loader into the per-node loop.
+    #[allow(dead_code)] // consumed by Effect::Treatment arm in T1.7
+    pub collage_views: &'a [&'a wgpu::TextureView],
 }
 
 impl Effect {
@@ -292,7 +360,7 @@ impl Effect {
                 );
                 true
             }
-            Effect::Treatment { id, params } => {
+            Effect::Treatment { id, params, .. } => {
                 // PCleanup.1.3 — per-layer treatment dispatch. Reuses the
                 // shared TreatmentPipeline (the same instance the global
                 // post-composition treatment pass uses).
@@ -341,6 +409,127 @@ impl Effect {
                 }
                 rendered
             }
+        }
+    }
+}
+
+// ============================================================
+// 004-T1.23 — Intent groups
+// ============================================================
+
+/// 004-T1.23 — Semantic intent category for an `Effect` node. Drives the
+/// intent-grouped Add picker in the Look chain UI and the per-row glyph color.
+#[allow(dead_code)] // consumed by look_chain UI (Phase 1 T1.25-T1.27)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IntentGroup {
+    /// Warps or spatially displaces the source (fluid_warp, ripple_lens, …).
+    Warp,
+    /// Color grading / tone shaping (tone_map, luminance_reveal, …).
+    Color,
+    /// Texture compositing / blur-based masking (texture_overlay, blur_mask).
+    Texture,
+    /// Composition helpers and passthrough (collage, identity).
+    Compose,
+    /// Particle-driven animation over the source (spotlights, drift_pinholes, …).
+    Animate,
+    /// Fully generative / external (Effect::External).
+    Generative,
+}
+
+/// 004-T1.23 — Maps an `Effect` variant to its `IntentGroup`.
+///
+/// For `Effect::Treatment`, delegates to
+/// `crate::render::treatments::intent_group_for_preset`.
+#[allow(dead_code)] // consumed by look_chain UI (Phase 1 T1.25-T1.27)
+pub fn intent_group(effect: &Effect) -> IntentGroup {
+    match effect {
+        Effect::Color { .. } | Effect::Tint { .. } => IntentGroup::Color,
+        Effect::Blur { .. } => IntentGroup::Texture,
+        Effect::Transform { .. } => IntentGroup::Warp,
+        Effect::Feedback { .. } => IntentGroup::Animate,
+        Effect::External { .. } => IntentGroup::Generative,
+        Effect::Treatment { id, .. } => crate::render::treatments::intent_group_for_preset(id),
+    }
+}
+
+// ============================================================
+// 004-T1.22 — No-op detection
+// ============================================================
+
+/// 004-T1.22 — Returns `Some(reason)` when the node is an identity
+/// no-op (e.g. Blur radius = 0), `None` when the effect actively
+/// modifies pixels.
+///
+/// `layer` is required so the `Effect::Treatment` branch can delegate to
+/// `treatments::treatment_is_no_op`, which checks SDF/zone/overlay
+/// prerequisites from `LayerConfig`.
+///
+/// Note: disabled nodes (`!node.enabled`) are not "no-ops" in this sense —
+/// they are bypassed at the render-loop level, not here. Callers that want
+/// to show a "bypassed" status dot should check `node.enabled` separately.
+#[allow(dead_code)] // consumed by look_chain UI (Phase 1 T1.25-T1.28)
+pub fn effect_is_no_op(
+    node: &EffectNode,
+    layer: &crate::project::schema::LayerConfig,
+) -> Option<&'static str> {
+    match &node.effect {
+        Effect::Color {
+            hue,
+            saturation,
+            brightness,
+            contrast,
+        } => {
+            let identity = matches!(hue, Modulator::Static(v) if v.abs() < 1e-4)
+                && matches!(saturation, Modulator::Static(v) if (v - 1.0).abs() < 1e-4)
+                && matches!(brightness, Modulator::Static(v) if v.abs() < 1e-4)
+                && matches!(contrast, Modulator::Static(v) if (v - 1.0).abs() < 1e-4);
+            if identity {
+                Some("Color effect at identity")
+            } else {
+                None
+            }
+        }
+        Effect::Tint { amount, .. } => {
+            if matches!(amount, Modulator::Static(v) if v.abs() < 1e-4) {
+                Some("Tint amount at 0")
+            } else {
+                None
+            }
+        }
+        Effect::Blur { radius_px } => {
+            if matches!(radius_px, Modulator::Static(v) if v.abs() < 1e-4) {
+                Some("Blur radius at 0")
+            } else {
+                None
+            }
+        }
+        Effect::Transform {
+            translate,
+            rotate_deg,
+            scale_x,
+            scale_y,
+        } => {
+            let identity = translate[0].abs() < 1e-4
+                && translate[1].abs() < 1e-4
+                && matches!(rotate_deg, Modulator::Static(v) if v.abs() < 1e-4)
+                && matches!(scale_x, Modulator::Static(v) if (v - 1.0).abs() < 1e-4)
+                && matches!(scale_y, Modulator::Static(v) if (v - 1.0).abs() < 1e-4);
+            if identity {
+                Some("Transform at identity")
+            } else {
+                None
+            }
+        }
+        Effect::Feedback { decay, .. } => {
+            if matches!(decay, Modulator::Static(v) if v.abs() < 1e-4) {
+                Some("Feedback decay at 0")
+            } else {
+                None
+            }
+        }
+        Effect::External { .. } => None,
+        Effect::Treatment { id, params, .. } => {
+            crate::render::treatments::treatment_is_no_op(id, params, layer)
         }
     }
 }
@@ -406,9 +595,11 @@ mod tests {
         let e = Effect::Treatment {
             id: "tone_map".to_string(),
             params,
+            overlay_path: None,
+            collage_paths: vec![],
         };
         match e {
-            Effect::Treatment { id, params } => {
+            Effect::Treatment { id, params, .. } => {
                 assert_eq!(id, "tone_map");
                 assert!((params["exposure"] - 0.25).abs() < 1e-6);
             }
@@ -426,11 +617,13 @@ mod tests {
         let e = Effect::Treatment {
             id: "tone_map".to_string(),
             params,
+            overlay_path: None,
+            collage_paths: vec![],
         };
         let json = serde_json::to_string(&e).unwrap();
         let back: Effect = serde_json::from_str(&json).unwrap();
         match back {
-            Effect::Treatment { id, params } => {
+            Effect::Treatment { id, params, .. } => {
                 assert_eq!(id, "tone_map");
                 assert!((params["contrast"] - 1.2).abs() < 1e-6);
                 assert!((params["shoulder"] - 0.5).abs() < 1e-6);
@@ -453,7 +646,7 @@ mod tests {
         let e: Effect = serde_json::from_str(legacy)
             .expect("Treatment without params must deserialise via serde default");
         match e {
-            Effect::Treatment { id, params } => {
+            Effect::Treatment { id, params, .. } => {
                 assert_eq!(id, "identity");
                 assert!(params.is_empty(), "missing params field → empty map");
             }
@@ -480,6 +673,339 @@ mod tests {
                 Effect::Tint { mode, .. } => assert_eq!(mode, m, "mode lost for {m:?}"),
                 other => panic!("round-trip changed variant: {other:?}"),
             }
+        }
+    }
+
+    // ----- 004-T1.1 — EffectNode default_enabled_true -------------------
+
+    /// 004-T1.1 — Deserializing `{"effect": {"Color": {…}}}` (no `enabled`
+    /// field) must produce `enabled: true`. Catches accidental removal of the
+    /// `default_enabled_true` helper or accidental change to `#[serde(default)]`
+    /// on the `enabled` field, which would return `false` and silently bypass
+    /// every effect in pre-v12 saves.
+    #[test]
+    fn effect_node_missing_enabled_defaults_to_true() {
+        let json = r#"{
+            "effect": {
+                "Color": {
+                    "hue": {"Static": 0.0},
+                    "saturation": {"Static": 1.0},
+                    "brightness": {"Static": 0.0},
+                    "contrast": {"Static": 1.0}
+                }
+            }
+        }"#;
+        let node: EffectNode =
+            serde_json::from_str(json).expect("EffectNode without enabled must deserialise");
+        assert!(
+            node.enabled,
+            "missing enabled field must default to true (not false)"
+        );
+    }
+
+    // ----- 004-T1.2 — Effect::Treatment overlay_path / collage_paths -----
+
+    /// 004-T1.2 — Treatment with overlay_path Some and 2 collage_paths
+    /// round-trips through serde with both new fields preserved.
+    #[test]
+    fn effect_treatment_overlay_and_collage_round_trip() {
+        use std::path::PathBuf;
+        let e = Effect::Treatment {
+            id: "texture_overlay".to_string(),
+            params: HashMap::new(),
+            overlay_path: Some(PathBuf::from("/assets/textures/grunge.png")),
+            collage_paths: vec![
+                PathBuf::from("/assets/a.jpg"),
+                PathBuf::from("/assets/b.jpg"),
+            ],
+        };
+        let json = serde_json::to_string(&e).unwrap();
+        let back: Effect = serde_json::from_str(&json).unwrap();
+        match back {
+            Effect::Treatment {
+                id,
+                overlay_path,
+                collage_paths,
+                ..
+            } => {
+                assert_eq!(id, "texture_overlay");
+                assert_eq!(
+                    overlay_path,
+                    Some(PathBuf::from("/assets/textures/grunge.png"))
+                );
+                assert_eq!(collage_paths.len(), 2);
+                assert_eq!(collage_paths[0], PathBuf::from("/assets/a.jpg"));
+                assert_eq!(collage_paths[1], PathBuf::from("/assets/b.jpg"));
+            }
+            other => panic!("round-trip changed variant: {other:?}"),
+        }
+    }
+
+    // ----- 004-T1.22 — effect_is_no_op -----------------------------------
+
+    /// 004-T1.22 — Color effect at identity (hue=0, sat=1, bright=0,
+    /// contrast=1) returns Some(reason).
+    #[test]
+    fn effect_is_no_op_color_identity() {
+        let layer = dummy_layer();
+        let node = EffectNode {
+            enabled: true,
+            effect: Effect::Color {
+                hue: Modulator::Static(0.0),
+                saturation: Modulator::Static(1.0),
+                brightness: Modulator::Static(0.0),
+                contrast: Modulator::Static(1.0),
+            },
+        };
+        assert!(
+            effect_is_no_op(&node, &layer).is_some(),
+            "identity Color must be detected as no-op"
+        );
+        // Non-identity: hue shifted.
+        let non_id = EffectNode {
+            enabled: true,
+            effect: Effect::Color {
+                hue: Modulator::Static(45.0),
+                saturation: Modulator::Static(1.0),
+                brightness: Modulator::Static(0.0),
+                contrast: Modulator::Static(1.0),
+            },
+        };
+        assert!(
+            effect_is_no_op(&non_id, &layer).is_none(),
+            "non-identity Color must not be detected as no-op"
+        );
+    }
+
+    /// 004-T1.22 — Tint at amount=0 is a no-op; amount>0 is not.
+    #[test]
+    fn effect_is_no_op_tint_amount_zero() {
+        let layer = dummy_layer();
+        let node = EffectNode {
+            enabled: true,
+            effect: Effect::Tint {
+                rgba: [1.0, 0.0, 0.0, 1.0],
+                amount: Modulator::Static(0.0),
+                mode: tint::TintMode::Multiply,
+            },
+        };
+        assert!(
+            effect_is_no_op(&node, &layer).is_some(),
+            "Tint amount=0 must be no-op"
+        );
+        let active = EffectNode {
+            enabled: true,
+            effect: Effect::Tint {
+                rgba: [1.0, 0.0, 0.0, 1.0],
+                amount: Modulator::Static(0.5),
+                mode: tint::TintMode::Multiply,
+            },
+        };
+        assert!(
+            effect_is_no_op(&active, &layer).is_none(),
+            "Tint amount=0.5 must not be no-op"
+        );
+    }
+
+    /// 004-T1.22 — Blur at radius_px=0 is a no-op; radius_px>0 is not.
+    #[test]
+    fn effect_is_no_op_blur_radius_zero() {
+        let layer = dummy_layer();
+        let node = EffectNode {
+            enabled: true,
+            effect: Effect::Blur {
+                radius_px: Modulator::Static(0.0),
+            },
+        };
+        assert!(
+            effect_is_no_op(&node, &layer).is_some(),
+            "Blur radius=0 must be no-op"
+        );
+        let active = EffectNode {
+            enabled: true,
+            effect: Effect::Blur {
+                radius_px: Modulator::Static(5.0),
+            },
+        };
+        assert!(
+            effect_is_no_op(&active, &layer).is_none(),
+            "Blur radius=5 must not be no-op"
+        );
+    }
+
+    /// 004-T1.22 — Transform at identity (translate=[0,0], rotate=0,
+    /// scale=[1,1]) is a no-op; any deviation is not.
+    #[test]
+    fn effect_is_no_op_transform_identity() {
+        let layer = dummy_layer();
+        let node = EffectNode {
+            enabled: true,
+            effect: Effect::Transform {
+                translate: [0.0, 0.0],
+                rotate_deg: Modulator::Static(0.0),
+                scale_x: Modulator::Static(1.0),
+                scale_y: Modulator::Static(1.0),
+            },
+        };
+        assert!(
+            effect_is_no_op(&node, &layer).is_some(),
+            "identity Transform must be no-op"
+        );
+        let active = EffectNode {
+            enabled: true,
+            effect: Effect::Transform {
+                translate: [0.1, 0.0],
+                rotate_deg: Modulator::Static(0.0),
+                scale_x: Modulator::Static(1.0),
+                scale_y: Modulator::Static(1.0),
+            },
+        };
+        assert!(
+            effect_is_no_op(&active, &layer).is_none(),
+            "translated Transform must not be no-op"
+        );
+    }
+
+    /// 004-T1.22 — Feedback at decay=0 is a no-op; decay>0 is not.
+    #[test]
+    fn effect_is_no_op_feedback_decay_zero() {
+        let layer = dummy_layer();
+        let node = EffectNode {
+            enabled: true,
+            effect: Effect::Feedback {
+                decay: Modulator::Static(0.0),
+                offset: [0.0, 0.0],
+            },
+        };
+        assert!(
+            effect_is_no_op(&node, &layer).is_some(),
+            "Feedback decay=0 must be no-op"
+        );
+        let active = EffectNode {
+            enabled: true,
+            effect: Effect::Feedback {
+                decay: Modulator::Static(0.9),
+                offset: [0.0, 0.0],
+            },
+        };
+        assert!(
+            effect_is_no_op(&active, &layer).is_none(),
+            "Feedback decay=0.9 must not be no-op"
+        );
+    }
+
+    // ----- 004-T1.23 — intent_group mapping ------------------------------
+
+    /// 004-T1.23 — Every Effect variant and every registered treatment
+    /// preset_id maps to a well-defined IntentGroup. This test ensures no
+    /// variant is accidentally unmapped (i.e., falls through to a panic).
+    #[test]
+    fn intent_group_covers_all_variants_and_presets() {
+        use crate::render::treatments::registry;
+
+        // Check the raw Effect variants.
+        let color = Effect::Color {
+            hue: Modulator::Static(0.0),
+            saturation: Modulator::Static(1.0),
+            brightness: Modulator::Static(0.0),
+            contrast: Modulator::Static(1.0),
+        };
+        assert_eq!(
+            intent_group(&color),
+            IntentGroup::Color,
+            "Color → Color"
+        );
+
+        let tint = Effect::Tint {
+            rgba: [1.0, 0.0, 0.0, 1.0],
+            amount: Modulator::Static(0.5),
+            mode: tint::TintMode::Multiply,
+        };
+        assert_eq!(intent_group(&tint), IntentGroup::Color, "Tint → Color");
+
+        let blur = Effect::Blur {
+            radius_px: Modulator::Static(5.0),
+        };
+        assert_eq!(intent_group(&blur), IntentGroup::Texture, "Blur → Texture");
+
+        let transform = Effect::Transform {
+            translate: [0.0, 0.0],
+            rotate_deg: Modulator::Static(0.0),
+            scale_x: Modulator::Static(1.0),
+            scale_y: Modulator::Static(1.0),
+        };
+        assert_eq!(
+            intent_group(&transform),
+            IntentGroup::Warp,
+            "Transform → Warp"
+        );
+
+        let feedback = Effect::Feedback {
+            decay: Modulator::Static(0.9),
+            offset: [0.0, 0.0],
+        };
+        assert_eq!(
+            intent_group(&feedback),
+            IntentGroup::Animate,
+            "Feedback → Animate"
+        );
+
+        let external = Effect::External {
+            id: "some_ext".to_string(),
+            params: serde_json::Value::Null,
+        };
+        assert_eq!(
+            intent_group(&external),
+            IntentGroup::Generative,
+            "External → Generative"
+        );
+
+        // Check every registered treatment preset_id returns a valid group.
+        for (preset_id, _label) in registry() {
+            let treatment = Effect::Treatment {
+                id: preset_id.to_string(),
+                params: HashMap::new(),
+                overlay_path: None,
+                collage_paths: vec![],
+            };
+            // Just calling intent_group must not panic; all registered IDs
+            // must map to a concrete group (the function is total).
+            let group = intent_group(&treatment);
+            // Spot-check a few expected mappings.
+            match *preset_id {
+                "identity" => assert_eq!(group, IntentGroup::Compose, "identity → Compose"),
+                "tone_map" => assert_eq!(group, IntentGroup::Color, "tone_map → Color"),
+                "blur_mask" => assert_eq!(group, IntentGroup::Texture, "blur_mask → Texture"),
+                "fluid_warp" => assert_eq!(group, IntentGroup::Warp, "fluid_warp → Warp"),
+                "spotlights" => {
+                    assert_eq!(group, IntentGroup::Animate, "spotlights → Animate")
+                }
+                _ => {} // Other IDs just need to not panic.
+            }
+        }
+    }
+
+    // ----- Shared test fixture -------------------------------------------
+
+    /// Minimal [`crate::project::schema::LayerConfig`] for unit tests that
+    /// need a `layer` argument but don't exercise schema fields.
+    fn dummy_layer() -> crate::project::schema::LayerConfig {
+        use crate::project::schema::{LayerConfig, LayerKind};
+        LayerConfig {
+            id: "test-layer".to_string(),
+            kind: LayerKind::Svg {
+                svg_path: std::path::PathBuf::from("test.svg"),
+            },
+            enabled: true,
+            transform: Default::default(),
+            effects: vec![],
+            blend_mode: Default::default(),
+            opacity: 1.0,
+            warp: crate::project::schema::WarpMesh::identity(),
+            muted: false,
+            treatment: None,
+            bezier_mesh: None,
+            mask_graph: None,
         }
     }
 }

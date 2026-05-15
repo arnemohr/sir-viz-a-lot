@@ -1596,6 +1596,13 @@ struct LayerState {
     /// Image layers write per `LayerKind::Image` fields plus the texture's
     /// actual aspect (T-M8-04).
     fit_uniform: wgpu::Buffer,
+    /// T1.6 — identity fit-mode uniform: always `[mode=0, aspect=1, focal_x=0.5,
+    /// focal_y=0.5]`, written once at layer init and never updated. The
+    /// per-layer effect chain (T1.8) passes this to the treatment pipeline
+    /// instead of `fit_uniform` so fit is not double-applied when
+    /// `Effect::Treatment` runs after `svg_pipeline` has already applied fit.
+    #[allow(dead_code)] // T1.8 wires this into RenderCtx
+    identity_fit_uniform: wgpu::Buffer,
     /// Cached texture aspect (`width / height`) for the most recent upload.
     /// Image layers learn it from `image_layer::upload_image_rgba8`; SVG
     /// layers stay at `1.0` (resvg renders a square pixmap).
@@ -1672,6 +1679,7 @@ fn create_layer_uniform_buffers(
     wgpu::Buffer,
     wgpu::Buffer,
     wgpu::Buffer,
+    wgpu::Buffer,
 ) {
     let mk = |label: &'static str, size: u64| {
         device.create_buffer(&wgpu::BufferDescriptor {
@@ -1681,6 +1689,22 @@ fn create_layer_uniform_buffers(
             mapped_at_creation: false,
         })
     };
+    // T1.6 — identity fit uniform: [mode=0, aspect=1, focal_x=0.5, focal_y=0.5].
+    // Written once at creation via create_buffer_init; never updated per-frame.
+    let identity_fit_bytes: [u8; 16] = {
+        let mut b = [0u8; 16];
+        b[0..4].copy_from_slice(&0.0_f32.to_le_bytes());
+        b[4..8].copy_from_slice(&1.0_f32.to_le_bytes());
+        b[8..12].copy_from_slice(&0.5_f32.to_le_bytes());
+        b[12..16].copy_from_slice(&0.5_f32.to_le_bytes());
+        b
+    };
+    use wgpu::util::DeviceExt as _;
+    let identity_fit_uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("layer identity fit uniform"),
+        contents: &identity_fit_bytes,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+    });
     (
         mk("layer color uniform", 16),
         mk("layer blur uniform", 16),
@@ -1691,6 +1715,7 @@ fn create_layer_uniform_buffers(
         mk("layer feedback uniform", 16),
         mk("layer compositor uniform", 16),
         mk("layer fit uniform", 16),
+        identity_fit_uniform,
     )
 }
 
@@ -3516,6 +3541,7 @@ fn rebuild_layers(
                 feedback_uniform,
                 compositor_uniform,
                 fit_uniform,
+                identity_fit_uniform,
             ) = create_layer_uniform_buffers(device);
             // PCleanup.1.4 — per-layer feedback history texture.
             let (_history_texture, history_view) =
@@ -3548,6 +3574,7 @@ fn rebuild_layers(
                 history_view,
                 compositor_uniform,
                 fit_uniform,
+                identity_fit_uniform,
                 texture_aspect: 1.0,
                 warp_renderer,
                 _warp_texture: warp_texture,
@@ -3680,6 +3707,7 @@ fn rebuild_layers(
             feedback_uniform,
             compositor_uniform,
             fit_uniform,
+            identity_fit_uniform,
         ) = create_layer_uniform_buffers(device);
         // PCleanup.1.4 — per-layer feedback history texture.
         let (_history_texture, history_view) =
@@ -3707,6 +3735,7 @@ fn rebuild_layers(
             history_view,
             compositor_uniform,
             fit_uniform,
+            identity_fit_uniform,
             texture_aspect,
             warp_renderer,
             _warp_texture: warp_texture,
@@ -4585,6 +4614,14 @@ fn render_m5_pipeline(
                         feedback,
                         feedback_uniform: &ls.feedback_uniform,
                         history_view: &ls.history_view,
+                        // 004-T1.5 — nullary defaults until T1.8 wires full
+                        // SDF/zone/seed/overlay/collage plumbing.
+                        sdf_view: None,
+                        zone_role: None,
+                        seed: 0,
+                        t_layer_added_secs: 0.0,
+                        overlay_view: None,
+                        collage_views: &[],
                     };
                     if effect.render(&mut ctx, clock) {
                         ls.effect_pipeline.flip();

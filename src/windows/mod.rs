@@ -27,6 +27,9 @@ pub mod inspector;
 pub mod launcher;
 #[cfg(feature = "v3")]
 pub mod layer_strip;
+// 004-T1.24 — Look chain section: unified per-layer effect chain UI.
+#[cfg(feature = "v3")]
+pub mod look_chain;
 pub mod output;
 #[cfg(feature = "v3")]
 pub mod output_panel;

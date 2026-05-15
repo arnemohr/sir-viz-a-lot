@@ -131,8 +131,22 @@ pub enum AuditKind {
     UnknownTreatment {
         /// Index into `Project.layers`.
         layer_idx: usize,
+        /// Index into the layer's effect chain (0 for the single-slot pre-Wave-2 schema).
+        effect_idx: usize,
         /// The preset_id string that had no registered entry (may be empty).
         preset_id: String,
+    },
+    /// P1.2.1 — A treatment effect references an asset path (overlay or
+    /// collage slot) that doesn't exist on disk. `Severity::Warn`.
+    /// Separate from `MissingAsset` so the layer-asset relink toast
+    /// (`app.rs`) is not triggered for treatment-internal assets.
+    MissingTreatmentAsset {
+        /// Index into `Project.layers`.
+        layer_idx: usize,
+        /// Index into the layer's effect chain (0 for the single-slot pre-Wave-2 schema).
+        effect_idx: usize,
+        /// The path that didn't resolve.
+        path: PathBuf,
     },
     /// The saved monitor index exceeds the available monitor count
     /// on this machine.
@@ -530,8 +544,8 @@ impl ProjectAudit {
             // P1.2.1 — Treatment audit. Three checks per layer that
             // carries `treatment.is_some()`:
             //   (1) unknown preset_id  → Warn UnknownTreatment
-            //   (2) missing overlay_path file        → Warn MissingAsset
-            //   (3) missing collage_paths[i] file    → Warn MissingAsset
+            //   (2) missing overlay_path file        → Warn MissingTreatmentAsset
+            //   (3) missing collage_paths[i] file    → Warn MissingTreatmentAsset
             if let Some(treatment) = layer.treatment.as_ref() {
                 // (1) unknown/empty preset_id — both cases emit
                 // UnknownTreatment (Warn). Empty string: operator
@@ -558,6 +572,7 @@ impl ProjectAudit {
                     findings.push(AuditFinding {
                         kind: AuditKind::UnknownTreatment {
                             layer_idx,
+                            effect_idx: 0,
                             preset_id: treatment.preset_id.clone(),
                         },
                         severity: Severity::Warn,
@@ -574,8 +589,9 @@ impl ProjectAudit {
                     };
                     if !resolved.exists() {
                         findings.push(AuditFinding {
-                            kind: AuditKind::MissingAsset {
+                            kind: AuditKind::MissingTreatmentAsset {
                                 layer_idx,
+                                effect_idx: 0,
                                 path: overlay.clone(),
                             },
                             severity: Severity::Warn,
@@ -599,8 +615,9 @@ impl ProjectAudit {
                     };
                     if !resolved.exists() {
                         findings.push(AuditFinding {
-                            kind: AuditKind::MissingAsset {
+                            kind: AuditKind::MissingTreatmentAsset {
                                 layer_idx,
+                                effect_idx: 0,
                                 path: collage.clone(),
                             },
                             severity: Severity::Warn,
@@ -1158,7 +1175,7 @@ mod tests {
     }
 
     /// P1.2.1 — a missing treatment `overlay_path` surfaces a Warn
-    /// `MissingAsset` finding (mirrors the missing-image-asset path).
+    /// `MissingTreatmentAsset` finding.
     #[test]
     fn audit_missing_treatment_overlay_emits_warning() {
         use crate::project::schema::Treatment;
@@ -1177,11 +1194,11 @@ mod tests {
             .find(|f| {
                 matches!(
                     &f.kind,
-                    AuditKind::MissingAsset { layer_idx: 0, path }
+                    AuditKind::MissingTreatmentAsset { layer_idx: 0, effect_idx: 0, path }
                         if path.ends_with("grain.png")
                 )
             })
-            .expect("expected MissingAsset for treatment overlay path");
+            .expect("expected MissingTreatmentAsset for treatment overlay path");
         assert_eq!(f.severity, Severity::Warn);
     }
 
@@ -1206,7 +1223,7 @@ mod tests {
             .filter(|f| {
                 matches!(
                     &f.kind,
-                    AuditKind::MissingAsset { layer_idx: 0, path }
+                    AuditKind::MissingTreatmentAsset { layer_idx: 0, effect_idx: 0, path }
                         if path.starts_with("/nonexistent/")
                 )
             })

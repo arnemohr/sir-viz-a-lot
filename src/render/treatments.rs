@@ -5559,6 +5559,279 @@ impl ZoneLensTreatmentPipeline {
     }
 }
 
+// ---------------------------------------------------------------------------
+// B.1 — Preset capability metadata
+// ---------------------------------------------------------------------------
+
+/// T1.20 — Capability flags and headline parameter for a treatment preset.
+///
+/// Used by the Look-chain UI to show status dots, autofix chips, and
+/// headline-param-on-row without needing a `match` at every call site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PresetCapability {
+    /// True when the preset reads the layer's SDF texture and produces a
+    /// passthrough when `warp.mask_polygon` is empty.
+    pub requires_sdf: bool,
+    /// True when the preset reads `warp.zone_role` and is a no-op when it
+    /// is `None`.
+    pub requires_zone: bool,
+    /// True when the preset runs a particle compute pass (spotlights family
+    /// and edge-spawning siblings).
+    pub is_particle: bool,
+    /// The most operator-relevant tunable parameter key, shown on the chain
+    /// row as a compact slider. `None` for identity and presets with no
+    /// obvious single headline (e.g. pure multi-param presets where no one
+    /// param dominates).
+    pub headline_param: Option<&'static str>,
+}
+
+/// T1.20 — Returns the [`PresetCapability`] for the given `preset_id`.
+///
+/// Returns all-defaults (no SDF/zone/particle, no headline) for unknown
+/// preset ids so callers degrade gracefully on hand-edited or future presets.
+#[allow(dead_code)] // consumed by look_chain UI (Phase 1 C)
+pub fn capability(preset_id: &str) -> PresetCapability {
+    match preset_id {
+        // ---- SDF-keyed source modifiers ----
+        RIPPLE_LENS_PRESET_ID => PresetCapability {
+            requires_sdf: true,
+            requires_zone: false,
+            is_particle: false,
+            headline_param: Some("amplitude"),
+        },
+        DISPLACEMENT_RIPPLE_PRESET_ID => PresetCapability {
+            requires_sdf: true,
+            requires_zone: false,
+            is_particle: false,
+            headline_param: Some("amplitude"),
+        },
+        EDGE_LENS_PRESET_ID => PresetCapability {
+            requires_sdf: true,
+            requires_zone: false,
+            is_particle: false,
+            headline_param: Some("amplitude"),
+        },
+        FIELD_ADVECT_PRESET_ID => PresetCapability {
+            requires_sdf: true,
+            requires_zone: false,
+            is_particle: false,
+            headline_param: Some("flow_speed"),
+        },
+        REFRACTION_PRESET_ID => PresetCapability {
+            requires_sdf: true,
+            requires_zone: false,
+            is_particle: false,
+            headline_param: Some("ior"),
+        },
+        BLUR_MASK_PRESET_ID => PresetCapability {
+            requires_sdf: true,
+            requires_zone: false,
+            is_particle: false,
+            headline_param: Some("max_radius_px"),
+        },
+        FLUID_WARP_PRESET_ID => PresetCapability {
+            requires_sdf: true,
+            requires_zone: false,
+            is_particle: false,
+            headline_param: Some("amplitude"),
+        },
+        // ---- SDF + zone ----
+        ZONE_BRIGHTEN_PRESET_ID => PresetCapability {
+            requires_sdf: true,
+            requires_zone: true,
+            is_particle: false,
+            headline_param: Some("intensity"),
+        },
+        ZONE_LENS_PRESET_ID => PresetCapability {
+            requires_sdf: true,
+            requires_zone: true,
+            is_particle: false,
+            headline_param: Some("amplitude"),
+        },
+        // ---- SDF + particle ----
+        SPOTLIGHTS_PRESET_ID => PresetCapability {
+            requires_sdf: true,
+            requires_zone: false,
+            is_particle: true,
+            headline_param: Some("particle_count"),
+        },
+        DRIFT_PINHOLES_PRESET_ID => PresetCapability {
+            requires_sdf: true,
+            requires_zone: false,
+            is_particle: true,
+            headline_param: Some("particle_count"),
+        },
+        DRIFT_BRUSHSTROKES_PRESET_ID => PresetCapability {
+            requires_sdf: true,
+            requires_zone: false,
+            is_particle: true,
+            headline_param: Some("particle_count"),
+        },
+        EDGE_SPARKS_PRESET_ID => PresetCapability {
+            requires_sdf: true,
+            requires_zone: false,
+            is_particle: true,
+            headline_param: Some("particle_count"),
+        },
+        COLLISION_RIPPLES_PRESET_ID => PresetCapability {
+            requires_sdf: true,
+            requires_zone: false,
+            is_particle: true,
+            headline_param: Some("particle_count"),
+        },
+        PORTAL_WARP_PRESET_ID => PresetCapability {
+            requires_sdf: true,
+            requires_zone: false,
+            is_particle: false,
+            headline_param: Some("particle_count"),
+        },
+        // ---- Non-SDF: utility / colour-grading ----
+        FLUID_WARP_FULL_PRESET_ID => PresetCapability {
+            requires_sdf: false,
+            requires_zone: false,
+            is_particle: false,
+            headline_param: Some("amplitude"),
+        },
+        TONE_MAP_PRESET_ID => PresetCapability {
+            requires_sdf: false,
+            requires_zone: false,
+            is_particle: false,
+            headline_param: Some("exposure"),
+        },
+        LUMINANCE_REVEAL_PRESET_ID => PresetCapability {
+            requires_sdf: false,
+            requires_zone: false,
+            is_particle: false,
+            headline_param: Some("threshold"),
+        },
+        TEXTURE_OVERLAY_PRESET_ID => PresetCapability {
+            requires_sdf: false,
+            requires_zone: false,
+            is_particle: false,
+            headline_param: Some("mix"),
+        },
+        PALETTE_EXTRACT_PRESET_ID => PresetCapability {
+            requires_sdf: false,
+            requires_zone: false,
+            is_particle: false,
+            headline_param: Some("levels"),
+        },
+        COLLAGE_PRESET_ID => PresetCapability {
+            requires_sdf: false,
+            requires_zone: false,
+            is_particle: false,
+            headline_param: Some("mix"),
+        },
+        // identity and any unknown preset
+        _ => PresetCapability {
+            requires_sdf: false,
+            requires_zone: false,
+            is_particle: false,
+            headline_param: None,
+        },
+    }
+}
+
+// ---------------------------------------------------------------------------
+// B.2 — No-op detection
+// ---------------------------------------------------------------------------
+
+/// T1.21 — Returns a human-readable reason string when applying `preset_id`
+/// with the given `params` to `layer` will produce a no-op (passthrough)
+/// output.  Returns `None` when the combination looks useful.
+///
+/// This function only covers the cases detectable from `(preset_id, params,
+/// LayerConfig)`.  The `texture_overlay` "Overlay file missing" case requires
+/// `Effect::Treatment.overlay_path` which is not visible here; that check
+/// lives in `effect_is_no_op` in `src/effects/mod.rs`.
+///
+/// # Cases covered
+/// - `requires_sdf(preset) && layer.warp.mask_polygon.is_empty()` → `"Needs a mask polygon"`
+/// - `requires_zone(preset) && layer.warp.zone_role.is_none()` → `"Needs a zone role"`
+/// - `ripple_lens` with `|amplitude| < 1e-4` → `"Amplitude at 0"`
+/// - `tone_map` at identity params → `"All params at identity"`
+#[allow(dead_code)] // wired by look_chain UI (Phase 1 C)
+pub fn treatment_is_no_op(
+    preset_id: &str,
+    params: &HashMap<String, f32>,
+    layer: &crate::project::schema::LayerConfig,
+) -> Option<&'static str> {
+    let cap = capability(preset_id);
+
+    if cap.requires_sdf && layer.warp.mask_polygon.is_empty() {
+        return Some("Needs a mask polygon");
+    }
+
+    if cap.requires_zone && layer.warp.zone_role.is_none() {
+        return Some("Needs a zone role");
+    }
+
+    if preset_id == RIPPLE_LENS_PRESET_ID {
+        let amplitude = params.get("amplitude").copied().unwrap_or(0.0);
+        if amplitude.abs() < 1e-4 {
+            return Some("Amplitude at 0");
+        }
+    }
+
+    if preset_id == TONE_MAP_PRESET_ID {
+        let exposure = params.get("exposure").copied().unwrap_or(0.0);
+        let contrast = params.get("contrast").copied().unwrap_or(1.0);
+        let shoulder = params.get("shoulder").copied().unwrap_or(0.0);
+        if exposure.abs() < 1e-6 && (contrast - 1.0).abs() < 1e-6 && shoulder.abs() < 1e-6 {
+            return Some("All params at identity");
+        }
+    }
+
+    None
+}
+
+// ---------------------------------------------------------------------------
+// 004-T1.23 — Intent group per preset
+// ---------------------------------------------------------------------------
+
+/// 004-T1.23 — Maps a treatment `preset_id` to its [`crate::effects::IntentGroup`].
+///
+/// Returns `IntentGroup::Compose` for unknown preset ids so the picker
+/// degrades gracefully when a project contains a hand-edited or future preset.
+///
+/// Mapping rationale (from spec 004-treatment-overhaul.md §B.3):
+/// - **Warp**: spatially displaces the source UV coordinates.
+/// - **Color**: tone/luminance grading, palette shaping.
+/// - **Texture**: composites external textures or uses the SDF as a blur mask.
+/// - **Compose**: utility / passthrough.
+/// - **Animate**: particle-driven motion effects that modulate source pixels.
+#[allow(dead_code)] // consumed by effects::intent_group (Phase 1 T1.23)
+pub fn intent_group_for_preset(preset_id: &str) -> crate::effects::IntentGroup {
+    use crate::effects::IntentGroup;
+    match preset_id {
+        // Warp — displaces source UVs
+        FLUID_WARP_PRESET_ID
+        | FLUID_WARP_FULL_PRESET_ID
+        | RIPPLE_LENS_PRESET_ID
+        | EDGE_LENS_PRESET_ID
+        | FIELD_ADVECT_PRESET_ID
+        | DISPLACEMENT_RIPPLE_PRESET_ID
+        | REFRACTION_PRESET_ID
+        | ZONE_LENS_PRESET_ID
+        | PORTAL_WARP_PRESET_ID => IntentGroup::Warp,
+        // Color — tone / luminance / palette grading
+        TONE_MAP_PRESET_ID | LUMINANCE_REVEAL_PRESET_ID | PALETTE_EXTRACT_PRESET_ID
+        | ZONE_BRIGHTEN_PRESET_ID => IntentGroup::Color,
+        // Texture — external texture compositing or SDF-gated blur
+        TEXTURE_OVERLAY_PRESET_ID | BLUR_MASK_PRESET_ID => IntentGroup::Texture,
+        // Compose — passthrough / collage utilities
+        IDENTITY_PRESET_ID | COLLAGE_PRESET_ID => IntentGroup::Compose,
+        // Animate — particle-driven source modulation
+        SPOTLIGHTS_PRESET_ID
+        | DRIFT_PINHOLES_PRESET_ID
+        | DRIFT_BRUSHSTROKES_PRESET_ID
+        | EDGE_SPARKS_PRESET_ID
+        | COLLISION_RIPPLES_PRESET_ID => IntentGroup::Animate,
+        // Unknown / future presets fall back to Compose (visible but neutral).
+        _ => IntentGroup::Compose,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -6349,5 +6622,150 @@ mod tests {
             treatment_group(PORTAL_WARP_PRESET_ID),
             TreatmentGroup::SourceModifier
         );
+    }
+
+    // ----- T1.20 — PresetCapability tests -----------------------------------
+
+    /// Every preset in registry() must have a non-zero-value PresetCapability
+    /// (at least one of requires_sdf/requires_zone/is_particle is true, OR
+    /// headline_param is Some), except identity which is deliberately all-default.
+    #[test]
+    fn capability_every_registered_preset_is_non_default_except_identity() {
+        let zero_value = PresetCapability {
+            requires_sdf: false,
+            requires_zone: false,
+            is_particle: false,
+            headline_param: None,
+        };
+        for (id, _label) in registry() {
+            let cap = capability(id);
+            if *id == IDENTITY_PRESET_ID {
+                // Identity is the one allowed all-default exception.
+                assert_eq!(
+                    cap, zero_value,
+                    "identity must return all-default PresetCapability"
+                );
+            } else {
+                assert!(
+                    cap.requires_sdf
+                        || cap.requires_zone
+                        || cap.is_particle
+                        || cap.headline_param.is_some(),
+                    "preset {id} must have at least one non-default capability field"
+                );
+            }
+        }
+    }
+
+    /// Zone-keyed presets set both requires_sdf and requires_zone.
+    #[test]
+    fn capability_zone_presets_require_both_sdf_and_zone() {
+        for id in &[ZONE_BRIGHTEN_PRESET_ID, ZONE_LENS_PRESET_ID] {
+            let cap = capability(id);
+            assert!(cap.requires_sdf, "{id}: requires_sdf must be true");
+            assert!(cap.requires_zone, "{id}: requires_zone must be true");
+        }
+    }
+
+    /// Particle presets are flagged is_particle.
+    #[test]
+    fn capability_particle_presets_are_flagged() {
+        for id in &[
+            SPOTLIGHTS_PRESET_ID,
+            DRIFT_PINHOLES_PRESET_ID,
+            DRIFT_BRUSHSTROKES_PRESET_ID,
+            EDGE_SPARKS_PRESET_ID,
+            COLLISION_RIPPLES_PRESET_ID,
+        ] {
+            let cap = capability(id);
+            assert!(cap.is_particle, "{id}: is_particle must be true");
+        }
+    }
+
+    /// blur_mask headline_param is the actual descriptor key (max_radius_px).
+    #[test]
+    fn capability_blur_mask_headline_is_max_radius_px() {
+        let cap = capability(BLUR_MASK_PRESET_ID);
+        assert_eq!(cap.headline_param, Some("max_radius_px"));
+    }
+
+    // ----- T1.21 — treatment_is_no_op tests ---------------------------------
+
+    /// Positive case: ripple_lens with a non-zero amplitude and a mask polygon
+    /// returns None (not a no-op).
+    #[test]
+    fn no_op_healthy_ripple_lens_returns_none() {
+        let mut layer =
+            crate::project::schema::layer_from_image_path("t", std::path::PathBuf::from("x.png"));
+        layer.warp.mask_polygon = vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+        let mut params = HashMap::new();
+        params.insert("amplitude".to_string(), 0.05_f32);
+        assert_eq!(treatment_is_no_op(RIPPLE_LENS_PRESET_ID, &params, &layer), None);
+    }
+
+    /// SDF-keyed preset with empty mask_polygon reports "Needs a mask polygon".
+    #[test]
+    fn no_op_sdf_preset_empty_mask_polygon() {
+        let layer =
+            crate::project::schema::layer_from_image_path("t", std::path::PathBuf::from("x.png"));
+        // WarpMesh::identity() has an empty mask_polygon by default.
+        assert!(layer.warp.mask_polygon.is_empty());
+        let params = HashMap::new();
+        assert_eq!(
+            treatment_is_no_op(RIPPLE_LENS_PRESET_ID, &params, &layer),
+            Some("Needs a mask polygon")
+        );
+    }
+
+    /// Zone-keyed preset with no zone_role reports "Needs a zone role"
+    /// (given that the mask_polygon is populated so requires_sdf passes first).
+    #[test]
+    fn no_op_zone_preset_no_zone_role() {
+        let mut layer =
+            crate::project::schema::layer_from_image_path("t", std::path::PathBuf::from("x.png"));
+        layer.warp.mask_polygon = vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+        layer.warp.zone_role = None;
+        let params = HashMap::new();
+        assert_eq!(
+            treatment_is_no_op(ZONE_BRIGHTEN_PRESET_ID, &params, &layer),
+            Some("Needs a zone role")
+        );
+    }
+
+    /// ripple_lens with amplitude ≈ 0 (and a mask) reports "Amplitude at 0".
+    #[test]
+    fn no_op_ripple_lens_amplitude_zero() {
+        let mut layer =
+            crate::project::schema::layer_from_image_path("t", std::path::PathBuf::from("x.png"));
+        layer.warp.mask_polygon = vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+        let mut params = HashMap::new();
+        params.insert("amplitude".to_string(), 0.0_f32);
+        assert_eq!(
+            treatment_is_no_op(RIPPLE_LENS_PRESET_ID, &params, &layer),
+            Some("Amplitude at 0")
+        );
+    }
+
+    /// tone_map at all-identity params reports "All params at identity".
+    #[test]
+    fn no_op_tone_map_identity_params() {
+        let layer =
+            crate::project::schema::layer_from_image_path("t", std::path::PathBuf::from("x.png"));
+        // Default params: exposure=0, contrast=1, shoulder=0 → identity.
+        let params = HashMap::new();
+        assert_eq!(
+            treatment_is_no_op(TONE_MAP_PRESET_ID, &params, &layer),
+            Some("All params at identity")
+        );
+    }
+
+    /// tone_map with a non-identity param is not flagged as no-op.
+    #[test]
+    fn no_op_tone_map_non_identity_returns_none() {
+        let layer =
+            crate::project::schema::layer_from_image_path("t", std::path::PathBuf::from("x.png"));
+        let mut params = HashMap::new();
+        params.insert("exposure".to_string(), 0.5_f32);
+        assert_eq!(treatment_is_no_op(TONE_MAP_PRESET_ID, &params, &layer), None);
     }
 }
