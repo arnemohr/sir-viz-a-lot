@@ -26,7 +26,7 @@ Companion task spec for [`004-phase-cleanup.md`](004-phase-cleanup.md). Each tas
 - [x] PCleanup.2.9 — `zone_brighten` (sibling of `fx_zone_light_spill`) — finished by commit `b0fa79b`
 - [x] PCleanup.2.10 — `zone_lens` (sibling of `fx_zone_edge_ripple`) — finished by commit `8aa944a`
 - [ ] PCleanup.2.11 — `portal_warp` (sibling of `fx_zone_portal_drift`) — deferred (closes Phase 4 zone-compute deferral)
-- [x] PCleanup.2.12 — Treatment picker UI: source-modifying presets grouped first with section separator — shipped as Option A (section labels in ComboBox) per Treatment routing; see commit below
+- [x] PCleanup.2.12 — Treatment picker UI: source-modifying presets grouped first with section separator — finished by commit `683b36a`
 
 **Deferral rationale:** PCleanup.2.1 (ripple_lens) shipped as the proof of pattern; the W2 architecture is fully validated through it. The remaining 10 sibling treatments are each a self-contained shader-body swap following the same four-file pattern (shader + struct + descriptor + dispatch arm + 3 unit tests, ~300 LOC of pipeline boilerplate per preset). They land as standalone follow-up PRs when operator demand or scheduling warrants — none block other phase work, and the SourceModifier-as-Treatment routing they all share (PCleanup.1.3) is already complete. Glossary entries (PCleanup.0.1) and reserved registry IDs (PCleanup.1.1) are also already in place.
 
