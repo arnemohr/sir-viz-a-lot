@@ -17,7 +17,7 @@ Companion task spec for [`004-phase-cleanup.md`](004-phase-cleanup.md). Each tas
 ### W2 — Source-modifying FX preset siblings (now ship as Treatments per `004-PCleanup.decision`)
 - [x] PCleanup.2.1 — `ripple_lens` (sibling of `mask_edge_ripple_wash`)
 - [x] PCleanup.2.2 — `edge_lens` (sibling of `mask_edge_wave_wash`)
-- [ ] PCleanup.2.3 — `fluid_warp_full` (sibling of `fluid_identity`) — deferred (needs compute prelude)
+- [x] PCleanup.2.3 — `fluid_warp_full` (sibling of `fluid_identity`)
 - [ ] PCleanup.2.4 — `spotlights` (sibling of `particles_identity`) — deferred (needs particle SSBO)
 - [ ] PCleanup.2.5 — `drift_pinholes` OR `drift_brushstrokes` (sibling of `mask_constrained_drift`) — deferred (particles)
 - [ ] PCleanup.2.6 — `edge_sparks` (sibling of `mask_edge_emission`) — deferred (particles)
