@@ -325,18 +325,14 @@ pub fn show(
                     ui.add_space(4.0);
 
                     // --------------------------------------------------------
-                    // P1.2.3 — Treatment picker. Sits between Blend mode and
-                    // the Video section so the operator's mental model is
-                    // "treat then effect". Visible only for Image / Video
-                    // layers; SVG / FxLayer get an explanatory placeholder.
+                    // T1.30 — Look chain. Replaces the Treatment picker;
+                    // show_look_chain_section is the T1.25-T1.32 body.
                     // --------------------------------------------------------
-                    egui::CollapsingHeader::new("Treatment")
+                    egui::CollapsingHeader::new("Look chain")
                         .id_salt(HDR_TREATMENT)
-                        .default_open(false)
+                        .default_open(true)
                         .show(ui, |ui| {
-                            glossary_label(ui, GlossaryTerm::Treatment);
-                            ui.add_space(4.0);
-                            show_treatment_section(ui, project, st, layer_idx);
+                            crate::windows::look_chain::show_look_chain_section(ui, project, st, layer_idx);
                         });
 
                     ui.add_space(4.0);
@@ -842,45 +838,6 @@ fn show_placement_section(ui: &mut Ui, project: &Project, layer_idx: usize) {
         }
     });
 }
-
-// ---------------------------------------------------------------------------
-// Treatment section body (P1.2.3)
-// ---------------------------------------------------------------------------
-/// Render the Treatment picker for the selected layer.
-///
-/// - Image / Video: combobox of registered presets + "None"; per-param
-///   sliders for the active preset. Edits dispatch `SetLayerTreatment` /
-///   `SetLayerTreatmentParams` on drag-release (matches the Video speed
-///   slider pattern so mid-drag jitter does not flood the undo stack).
-/// - SVG / FxLayer: explanatory label; no controls. Treatments are an
-///   image-grammar concept; FxLayer carries its own preset library.
-/// 004-T1.foundation stub — `LayerConfig.treatment` removed (T1.3).
-/// The full body is replaced with a placeholder; T1.30 splices in the
-/// Look-chain UI and deletes this function + its six call sites entirely.
-///
-/// The `cfg!(any())` gate is statically-false so the compiler type-checks
-/// the six `set_layer_treatment_mutation` / `set_layer_treatment_params_mutation`
-/// calls inside it without executing them at runtime. This maintains
-/// referential integrity until T1.10 deletes those constructors.
-fn show_treatment_section(
-    ui: &mut Ui,
-    project: &mut Project,
-    st: &mut ControlPanelState,
-    layer_idx: usize,
-) {
-    ui.weak("(Treatment section deprecated — see Look chain. T1.30 deletes this.)");
-    // Keep call sites of set_layer_treatment_mutation / set_layer_treatment_params_mutation
-    // alive for compile-time referential integrity until T1.10 deletes those constructors.
-    // The branch is statically false so this block never executes; the compiler still
-    // type-checks every call inside it.
-    if cfg!(any()) {
-        let _ = project.set_layer_treatment_mutation(layer_idx, None);
-        let _ = project.set_layer_treatment_params_mutation(layer_idx, std::collections::HashMap::new());
-        let _ = st;
-    }
-}
-
-// (original show_treatment_section body deleted by 004-T1.foundation; T1.30 finalizes)
 
 // ---------------------------------------------------------------------------
 // FX preset parameter sliders (P2.5.6)

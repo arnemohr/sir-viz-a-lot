@@ -3013,8 +3013,8 @@ impl Project {
     ///
     /// 004-T1.foundation stub — `LayerConfig.treatment` is gone (T1.3).
     /// Previously panicked when treatment was None; now returns a no-op
-    /// stub so the proptest harness and show_treatment_section compile
-    /// without hitting the deleted field. T1.10 deletes this entirely.
+    /// stub so the proptest harness compiles without hitting the deleted
+    /// field. T1.10 deletes this entirely.
     pub fn set_layer_treatment_params_mutation(
         &self,
         layer_idx: usize,

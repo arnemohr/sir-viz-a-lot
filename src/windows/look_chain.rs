@@ -5,9 +5,6 @@
 //! registered in `windows/mod.rs` under v3.
 
 #![cfg(feature = "v3")]
-// The public entry-point `show_look_chain_section` is wired in T1.30 (a
-// follow-up agent). Until then the whole module is "never used" from outside.
-#![allow(dead_code)]
 
 use egui::{Color32, RichText, Sense, Ui, Vec2};
 
@@ -16,7 +13,7 @@ use crate::modulators::Modulator;
 use crate::project::command::{ModulatorField, Mutation};
 use crate::project::schema::Project;
 use crate::windows::control_panel::{
-    ControlPanelState, EffectChange, modulator_slider,
+    ControlPanelState, EffectChange, load_presets_from_disk, modulator_slider,
 };
 
 // ---------------------------------------------------------------------------
@@ -283,6 +280,41 @@ pub fn show_look_chain_section(
         }
     });
     ui.separator();
+
+    // ---- C.2 — Preset apply control (folded above the chain rail) ----------
+    // Load preset list lazily (same pattern as the old Effects tab).
+    if !st.presets_loaded {
+        st.presets = load_presets_from_disk();
+        st.presets_loaded = true;
+    }
+    if !st.presets.is_empty() {
+        ui.horizontal(|ui| {
+            ui.label("Preset:");
+            st.preset_picker_index = st.preset_picker_index.min(st.presets.len() - 1);
+            egui::ComboBox::from_id_salt("look_chain_preset_pick")
+                .selected_text(st.presets[st.preset_picker_index].name.clone())
+                .show_ui(ui, |ui| {
+                    for (i, preset) in st.presets.iter().enumerate() {
+                        if ui
+                            .selectable_label(st.preset_picker_index == i, &preset.name)
+                            .clicked()
+                        {
+                            st.preset_picker_index = i;
+                        }
+                    }
+                });
+            if ui.button("Apply").clicked() {
+                let new = st.presets[st.preset_picker_index].effects.clone();
+                st.pending_mutations
+                    .push(project.set_layer_effects_mutation(layer_idx, new));
+            }
+            if ui.button("Reload").clicked() {
+                st.presets = load_presets_from_disk();
+                st.preset_picker_index = 0;
+            }
+        });
+        ui.add_space(2.0);
+    }
 
     // ---- Collect the effects length before borrowing ----------------------
     let effects_len = project.layers[layer_idx].effects.len();
