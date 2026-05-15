@@ -4523,10 +4523,19 @@ fn render_m5_pipeline(
                             sdf: Some(sdf_v),
                             intermediate: Some(&ls.intermediate_view),
                             // PCleanup.2.9 — zone role for zone-aware treatments
-                            // (zone_brighten and future W2.10 zone_lens). Sourced
-                            // from the same field used by zone-aware FX presets
-                            // (line 4334). Non-zone treatments ignore this field.
+                            // (zone_brighten, zone_lens). Sourced from the same field
+                            // used by zone-aware FX presets (line 4334). Non-zone
+                            // treatments ignore this field.
                             zone_role: cfg.warp.zone_role,
+                            // PCleanup.2.4 — particle seed + layer-local time for
+                            // the spotlights Treatment. LayerId.0 is a stable u64
+                            // that uniquely identifies this layer instance within
+                            // the session, giving each layer its own particle layout.
+                            // Image/Video layers don't track their add-time so
+                            // t_layer_added_secs defaults to 0.0 (particles animate
+                            // from project start). Non-particle treatments ignore both.
+                            seed: ls.layer_id.0,
+                            t_layer_added_secs: 0.0,
                         };
                         treatment_pipeline.dispatch(
                             &renderer.gpu.device,

@@ -14,6 +14,15 @@
 //! P3.3.1: zone-aware presets (`fx_zone_` prefix) need BOTH `sdf_helper.wgsl`
 //! AND `zone_tag_helper.wgsl` prepended, in that order. `ZONE_CONSUMERS` lists
 //! these prefixes; they are also in `SDF_CONSUMERS` so both helpers are added.
+//!
+//! PCleanup.2.4: Treatment-particle compute shaders need BOTH `sdf_helper.wgsl`
+//! AND `treatment_particles_helper.wgsl` prepended, in that order (SDF first so
+//! `sample_sdf_bilinear` is defined before the particle helper references it;
+//! the particle helper itself is function-only and references SDF helpers
+//! indirectly through compute shaders). `TREATMENT_PARTICLE_CONSUMERS` lists
+//! shaders that need all three layers: SDF + particle helper + shader source.
+//! The fragment shader (`treat_spotlights.wgsl`) only needs the particle
+//! helper (not the SDF helper) — it is listed in `PARTICLE_ONLY_CONSUMERS`.
 
 use std::fs;
 use std::path::Path;
@@ -51,6 +60,16 @@ const SDF_CONSUMERS: &[&str] = &[
 /// `treat_zone_brighten.wgsl` (and future zone-aware treatment siblings)
 /// get both helpers prepended during build-time validation.
 const ZONE_CONSUMERS: &[&str] = &["fx_zone_", "treat_zone_"];
+
+/// PCleanup.2.4 — Treatment compute shaders that need SDF helper +
+/// treatment_particles_helper.wgsl prepended (in that order, SDF first).
+/// These are compute shaders that both call `sample_sdf_bilinear` AND use
+/// the `Particle` struct from the particle helper.
+const TREATMENT_PARTICLE_COMPUTE_CONSUMERS: &[&str] = &["treat_spotlights_compute"];
+
+/// PCleanup.2.4 — Treatment fragment shaders that need ONLY the particle
+/// helper prepended (no SDF calls in the fragment pass).
+const TREATMENT_PARTICLE_FRAG_CONSUMERS: &[&str] = &["treat_spotlights"];
 
 fn main() {
     // P7.2.1 — Syphon.framework linkage scaffold.
@@ -98,6 +117,14 @@ fn main() {
         String::new()
     };
 
+    // PCleanup.2.4 — treatment-particle helper (Particle struct + hash fns).
+    let tp_helper_path = shader_dir.join("treatment_particles_helper.wgsl");
+    let tp_helper_src = if tp_helper_path.exists() {
+        fs::read_to_string(&tp_helper_path).expect("read treatment_particles_helper.wgsl")
+    } else {
+        String::new()
+    };
+
     for entry in fs::read_dir(shader_dir).expect("read shader dir") {
         let path = entry.expect("dir entry").path();
         if path.extension().and_then(|e| e.to_str()) != Some("wgsl") {
@@ -110,9 +137,10 @@ fn main() {
             .and_then(|n| n.to_str())
             .unwrap_or_default();
 
-        // sdf_helper.wgsl and zone_tag_helper.wgsl are function-only modules
-        // (no entry points). Validate them standalone; consumer shaders get
-        // them prepended.
+        // sdf_helper.wgsl, zone_tag_helper.wgsl, and
+        // treatment_particles_helper.wgsl are function-only modules (no entry
+        // points). Validate them standalone; consumer shaders get them
+        // prepended.
         let src = fs::read_to_string(&path).expect("read shader source");
 
         let is_sdf_consumer = SDF_CONSUMERS
@@ -123,14 +151,31 @@ fn main() {
             .iter()
             .any(|prefix| basename.starts_with(prefix));
 
-        // Build the validated source: SDF helper first, then zone helper (if
-        // needed), then the shader's own source. Order matches runtime concat.
-        let validated_src = match (is_sdf_consumer, is_zone_consumer) {
-            (true, true) => format!("{}\n{}\n{}", sdf_helper_src, zone_helper_src, src),
-            (true, false) if !sdf_helper_src.is_empty() => {
-                format!("{}\n{}", sdf_helper_src, src)
+        // PCleanup.2.4 — treatment-particle consumers.
+        let is_tp_compute_consumer = TREATMENT_PARTICLE_COMPUTE_CONSUMERS
+            .iter()
+            .any(|prefix| basename.starts_with(prefix));
+        let is_tp_frag_consumer = TREATMENT_PARTICLE_FRAG_CONSUMERS
+            .iter()
+            .any(|&name| basename == format!("{name}.wgsl"));
+
+        // Build the validated source. Order: SDF helper → zone helper (if
+        // needed) → particle helper (if needed) → shader source.
+        // Matches the runtime concat order.
+        let validated_src = if is_tp_compute_consumer {
+            // SDF + particle helper + compute shader source.
+            format!("{}\n{}\n{}", sdf_helper_src, tp_helper_src, src)
+        } else if is_tp_frag_consumer {
+            // Particle helper only + fragment shader source.
+            format!("{}\n{}", tp_helper_src, src)
+        } else {
+            match (is_sdf_consumer, is_zone_consumer) {
+                (true, true) => format!("{}\n{}\n{}", sdf_helper_src, zone_helper_src, src),
+                (true, false) if !sdf_helper_src.is_empty() => {
+                    format!("{}\n{}", sdf_helper_src, src)
+                }
+                _ => src,
             }
-            _ => src,
         };
 
         let module = match naga::front::wgsl::parse_str(&validated_src) {

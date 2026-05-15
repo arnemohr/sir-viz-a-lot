@@ -314,11 +314,15 @@ impl Effect {
                     collage: &[],
                     sdf: None,
                     intermediate: Some(ctx.intermediate_view),
-                    // Zone role is not plumbed through the per-layer Effect
-                    // chain RenderCtx. Zone-aware treatments (zone_brighten)
-                    // fall back to ZONE_NONE passthrough when applied via
-                    // Effect::Treatment rather than the primary Treatment slot.
+                    // Zone role + particle seed are not plumbed through the
+                    // per-layer Effect chain RenderCtx. Zone-aware treatments
+                    // (zone_brighten / zone_lens) fall back to ZONE_NONE
+                    // passthrough; particle treatments (spotlights) use seed=0
+                    // — both apply meaningfully at the global Treatment tier
+                    // in app.rs, not in the per-layer effect chain.
                     zone_role: None,
+                    seed: 0,
+                    t_layer_added_secs: 0.0,
                 };
                 let rendered = ctx.treatment_pipeline.dispatch(
                     ctx.device,

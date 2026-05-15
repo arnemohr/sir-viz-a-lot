@@ -44,6 +44,8 @@ pub mod overlay;
 pub mod pipeline;
 pub mod sdf;
 pub mod texture_upload;
+// PCleanup.2.4 — Treatment-owned particle compute infrastructure.
+pub mod treatment_particles;
 pub mod treatments;
 pub mod warp;
 

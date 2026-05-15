@@ -43,5 +43,9 @@ pub mod render {
     pub mod fx_fluid;
     pub mod fx_presets;
     pub mod sdf;
+    // PCleanup.2.4 — Treatment-owned particle compute infrastructure.
+    // Added here so that treatments.rs (which references TreatmentParticlePipeline)
+    // can compile in the library crate (lib.rs) as well as the binary (main.rs).
+    pub mod treatment_particles;
     pub mod treatments;
 }

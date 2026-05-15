@@ -106,6 +106,14 @@ pub const ZONE_BRIGHTEN_PRESET_ID: &str = "zone_brighten";
 /// bit-exact passthrough.
 pub const ZONE_LENS_PRESET_ID: &str = "zone_lens";
 
+/// PCleanup.2.4 — `spotlights` preset id. Seventh W2 sibling treatment.
+/// Particles drift slowly inside the layer's mask (or over the full layer
+/// rect when no mask is present) and boost source luminance with a Gaussian
+/// falloff around each particle position.  The SourceModifier sibling of
+/// the generative `particles_identity` FX preset.
+/// `brightness_gain = 0.0` is a bit-exact passthrough.
+pub const SPOTLIGHTS_PRESET_ID: &str = "spotlights";
+
 /// Number of collage slots supported by the v0.5 `collage` preset.
 /// Fixed at 4 (a 2×2 grid) — true variable-N collage requires either
 /// dynamically-built bind groups or a texture array binding, deferred
@@ -165,6 +173,29 @@ pub struct TreatmentInputs<'a> {
     /// this field. `None` maps to `ZONE_NONE` (u32 0) in the shader
     /// uniform, which triggers the passthrough branch.
     pub zone_role: Option<crate::project::schema::ZoneRole>,
+
+    /// PCleanup.2.4 — RNG seed for particle-based Treatments (spotlights
+    /// and future W2.5/W2.6 siblings). Callers pass the layer's stable
+    /// identifier (e.g. `LayerState::layer_id.0`) so particles seed
+    /// deterministically per-layer. Non-particle treatments ignore this.
+    ///
+    /// Packing convention: `(seed as u32 & 0x7f_ffff) as f32` (lower 23
+    /// bits → f32 mantissa). Mirrors `FxComputePipeline` convention.
+    ///
+    /// Bind-group slot 7 is reserved for the particle SSBO consumed by
+    /// compute Treatments; slots 0–6 are taken by the existing layout
+    /// (source, sampler, fit, params, sdf, sdf_sampler, zone). Future
+    /// compute Treatments must use slot 7 to coexist with the others.
+    #[allow(dead_code)] // consumed by spotlights; non-particle presets ignore
+    pub seed: u64,
+
+    /// PCleanup.2.4 — seconds since the project clock at which this
+    /// layer was added. Used with `clock_secs` to compute per-layer
+    /// local time for particle animation. For Image/Video layers this
+    /// defaults to `0.0` (particles animate from project start).
+    /// Non-particle treatments ignore this.
+    #[allow(dead_code)] // consumed by spotlights; non-particle presets ignore
+    pub t_layer_added_secs: f32,
 }
 
 /// Static descriptor for a tunable preset parameter. The Selected-layer UI
@@ -220,6 +251,7 @@ pub fn treatment_group(preset_id: &str) -> TreatmentGroup {
         | FIELD_ADVECT_PRESET_ID
         | ZONE_BRIGHTEN_PRESET_ID
         | ZONE_LENS_PRESET_ID
+        | SPOTLIGHTS_PRESET_ID
         | DISPLACEMENT_RIPPLE_PRESET_ID
         | REFRACTION_PRESET_ID => TreatmentGroup::SourceModifier,
         _ => TreatmentGroup::GenerativeOrUtility,
@@ -249,6 +281,8 @@ pub fn registry() -> &'static [(&'static str, &'static str)] {
         (ZONE_BRIGHTEN_PRESET_ID, "Zone brighten (luminance boost)"),
         // PCleanup.2.10 — UV lens warp at the zone window edge.
         (ZONE_LENS_PRESET_ID, "Zone lens (source warp at edge)"),
+        // PCleanup.2.4 — particle-based luminance boost (Gaussian dot).
+        (SPOTLIGHTS_PRESET_ID, "Spotlights (particle luminance lift)"),
         // P2.4.1 — displacement-map ripple warp (pre-W2).
         (DISPLACEMENT_RIPPLE_PRESET_ID, "Displacement ripple"),
         // P2.4.2 — refraction warp (pre-W2).
@@ -299,6 +333,8 @@ pub fn param_descriptors(preset_id: &str) -> &'static [ParamDescriptor] {
         ZONE_BRIGHTEN_PRESET_ID => ZONE_BRIGHTEN_DESCRIPTORS,
         // PCleanup.2.10 — zone_lens treatment.
         ZONE_LENS_PRESET_ID => ZONE_LENS_DESCRIPTORS,
+        // PCleanup.2.4 — spotlights treatment.
+        SPOTLIGHTS_PRESET_ID => SPOTLIGHTS_DESCRIPTORS,
         _ => &[],
     }
 }
@@ -675,6 +711,46 @@ const ZONE_LENS_DESCRIPTORS: &[ParamDescriptor] = &[
     },
 ];
 
+/// PCleanup.2.4 — Static descriptors for the `spotlights` preset.
+///
+/// Identity at `brightness_gain = 0.0`: gain=0 → weight × 0 = 0 lift →
+/// multiplier = 1.0 everywhere → source passes through unchanged.
+///
+/// Particle count: 1..=512; default 32 (per the spec).
+/// Radius: normalised UV radius of each spotlight's Gaussian influence area.
+/// Drift speed: UV/s; 0 = static particles (useful for spatial accents).
+#[allow(dead_code)] // referenced only through `param_descriptors` (v3 UI)
+const SPOTLIGHTS_DESCRIPTORS: &[ParamDescriptor] = &[
+    ParamDescriptor {
+        key: "particle_count",
+        label: "Spotlight count (1–512)",
+        min: 1.0,
+        max: 512.0,
+        default: 32.0,
+    },
+    ParamDescriptor {
+        key: "brightness_gain",
+        label: "Brightness gain (0 = no effect)",
+        min: 0.0,
+        max: 2.0,
+        default: 0.0,
+    },
+    ParamDescriptor {
+        key: "radius",
+        label: "Spotlight radius (normalised UV)",
+        min: 0.01,
+        max: 0.3,
+        default: 0.05,
+    },
+    ParamDescriptor {
+        key: "drift_speed",
+        label: "Drift speed (UV/s)",
+        min: 0.0,
+        max: 1.0,
+        default: 0.1,
+    },
+];
+
 /// Static descriptors for the `refraction` preset (P2.4.2).
 /// Identity at default ior = 1.0 — the operator sees no change until they
 /// increase the ior slider. edge_width controls the SDF-distance band around
@@ -724,6 +800,8 @@ pub struct TreatmentPipeline {
     zone_brighten: ZoneBrightenTreatmentPipeline,
     // PCleanup.2.10 — sixth W2 sibling: UV lens warp at ZONE_WINDOW edge.
     zone_lens: ZoneLensTreatmentPipeline,
+    // PCleanup.2.4 — seventh W2 sibling: particle-based luminance boost.
+    spotlights: crate::render::treatment_particles::TreatmentParticlePipeline,
 }
 
 impl TreatmentPipeline {
@@ -754,6 +832,12 @@ impl TreatmentPipeline {
             zone_brighten: ZoneBrightenTreatmentPipeline::new(device, target_format),
             // PCleanup.2.10 — zone_lens.
             zone_lens: ZoneLensTreatmentPipeline::new(device, target_format),
+            // PCleanup.2.4 — spotlights particle pipeline.
+            spotlights:
+                crate::render::treatment_particles::TreatmentParticlePipeline::new_spotlights(
+                    device,
+                    target_format,
+                ),
         }
     }
 
@@ -918,6 +1002,35 @@ impl TreatmentPipeline {
                 };
                 self.zone_lens
                     .render(device, queue, encoder, dst, inputs, sdf);
+                true
+            }
+            // PCleanup.2.4 — spotlights. Two-pass: compute (particle
+            // position-update) then fragment (Gaussian luminance boost).
+            // SDF is optional: `None` → particles spawn uniformly in [0,1]²
+            // (no mask constraint). Dispatches even without SDF so the preset
+            // remains useful on layers that have no mask.
+            SPOTLIGHTS_PRESET_ID => {
+                let n = inputs.params.get("particle_count").copied().unwrap_or(32.0) as u32;
+                self.spotlights.dispatch_compute(
+                    queue,
+                    device,
+                    encoder,
+                    n,
+                    inputs.seed,
+                    inputs.clock_secs,
+                    inputs.t_layer_added_secs,
+                    inputs.params,
+                    inputs.sdf,
+                );
+                self.spotlights.render(
+                    device,
+                    queue,
+                    encoder,
+                    dst,
+                    inputs.source,
+                    inputs.params,
+                    n,
+                );
                 true
             }
             _ => false,
@@ -4989,10 +5102,7 @@ mod tests {
     }
 
     /// PCleanup.2.7 — `field_advect_source` `flow_speed` default = 0.0
-    /// satisfies the identity-default rule: offset = gradient × 0 × clock
-    /// = vec2(0) everywhere → bit-identical passthrough on freshly-added
-    /// Treatment (no GPU test needed; the passthrough is structural in the
-    /// shader formula, not dependent on texture values).
+    /// satisfies the identity-default rule.
     #[test]
     fn field_advect_flow_speed_default_is_zero() {
         let descriptors = param_descriptors(FIELD_ADVECT_PRESET_ID);
@@ -5005,8 +5115,6 @@ mod tests {
 
     // ----- PCleanup.1.2 — fluid_warp treatment ---------------------------
 
-    /// PCleanup.1.2 — `fluid_warp` is registered in the treatment list so
-    /// the operator can apply it from the picker.
     #[test]
     fn fluid_warp_is_registered() {
         assert!(
@@ -5015,8 +5123,6 @@ mod tests {
         );
     }
 
-    /// PCleanup.1.2 — `fluid_warp` exposes exactly one operator param
-    /// (`amplitude`) with a valid min/max/default range.
     #[test]
     fn fluid_warp_descriptors_present() {
         let descriptors = param_descriptors(FLUID_WARP_PRESET_ID);
@@ -5031,11 +5137,6 @@ mod tests {
         }
     }
 
-    /// PCleanup.1.2 — `fluid_warp` `amplitude` default = 0.0 satisfies the
-    /// identity-default rule: offset = vel × 0 = vec2(0) everywhere →
-    /// bit-identical passthrough on freshly-added Treatment.
-    /// (Structural: `vel * 0.0` collapses to `vec2(0,0)` regardless of
-    /// velocity field content — no GPU test needed.)
     #[test]
     fn fluid_warp_amplitude_default_is_zero() {
         let descriptors = param_descriptors(FLUID_WARP_PRESET_ID);
@@ -5051,8 +5152,6 @@ mod tests {
 
     // ----- PCleanup.2.3 — fluid_warp_full treatment -----------------------
 
-    /// PCleanup.2.3 — `fluid_warp_full` is registered in the treatment list
-    /// so the operator can apply it from the picker.
     #[test]
     fn fluid_warp_full_is_registered() {
         assert!(
@@ -5061,8 +5160,6 @@ mod tests {
         );
     }
 
-    /// PCleanup.2.3 — `fluid_warp_full` exposes exactly one operator param
-    /// (`amplitude`) with a valid min/max/default range.
     #[test]
     fn fluid_warp_full_descriptors_present() {
         let descriptors = param_descriptors(FLUID_WARP_FULL_PRESET_ID);
@@ -5081,11 +5178,6 @@ mod tests {
         }
     }
 
-    /// PCleanup.2.3 — `fluid_warp_full` `amplitude` default = 0.0 satisfies
-    /// the identity-default rule: offset = vel × 0 = vec2(0) everywhere →
-    /// bit-identical passthrough on freshly-added Treatment.
-    /// (Structural: `vel * 0.0` collapses to `vec2(0,0)` regardless of
-    /// velocity field content — no GPU test needed.)
     #[test]
     fn fluid_warp_full_amplitude_default_is_zero() {
         let descriptors = param_descriptors(FLUID_WARP_FULL_PRESET_ID);
@@ -5101,8 +5193,6 @@ mod tests {
 
     // ----- PCleanup.2.9 — zone_brighten treatment ------------------------
 
-    /// PCleanup.2.9 — `zone_brighten` is registered in the treatment list
-    /// so the operator can apply it from the picker on a ZONE_WINDOW layer.
     #[test]
     fn zone_brighten_is_registered() {
         assert!(
@@ -5111,9 +5201,6 @@ mod tests {
         );
     }
 
-    /// PCleanup.2.9 — `zone_brighten` exposes exactly 4 operator params
-    /// (intensity, falloff, spill_radius, speed) each with a valid
-    /// min/max/default range.
     #[test]
     fn zone_brighten_descriptors_present() {
         let descriptors = param_descriptors(ZONE_BRIGHTEN_PRESET_ID);
@@ -5132,11 +5219,6 @@ mod tests {
         }
     }
 
-    /// PCleanup.2.9 — `zone_brighten` `intensity` default = 0.0 satisfies
-    /// the identity-default rule: boost = intensity × exp(…) = 0 everywhere
-    /// → multiplier = 1.0 + 0.0 = 1.0 → source unchanged. Bit-identical
-    /// passthrough on freshly-added Treatment (structural in the shader:
-    /// `0.0 * exp(…) = 0.0` regardless of falloff/spill_radius values).
     #[test]
     fn zone_brighten_intensity_default_is_zero() {
         let descriptors = param_descriptors(ZONE_BRIGHTEN_PRESET_ID);
@@ -5152,8 +5234,6 @@ mod tests {
 
     // ----- PCleanup.2.10 — zone_lens treatment ---------------------------
 
-    /// PCleanup.2.10 — `zone_lens` is registered in the treatment list so
-    /// the operator can apply it from the picker on a ZONE_WINDOW layer.
     #[test]
     fn zone_lens_is_registered() {
         assert!(
@@ -5162,9 +5242,6 @@ mod tests {
         );
     }
 
-    /// PCleanup.2.10 — `zone_lens` exposes exactly 4 operator params
-    /// (amplitude, speed, band_width, frequency) each with a valid
-    /// min/max/default range.
     #[test]
     fn zone_lens_descriptors_present() {
         let descriptors = param_descriptors(ZONE_LENS_PRESET_ID);
@@ -5179,11 +5256,6 @@ mod tests {
         }
     }
 
-    /// PCleanup.2.10 — `zone_lens` `amplitude` default = 0.0 satisfies the
-    /// identity-default rule: displacement = normal × sin(…) × amplitude ×
-    /// band_weight = 0 everywhere → output equals source unchanged. Bit-exact
-    /// passthrough on freshly-added Treatment (structural in the shader:
-    /// any value × 0.0 amplitude = 0 displacement).
     #[test]
     fn zone_lens_amplitude_default_is_zero() {
         let descriptors = param_descriptors(ZONE_LENS_PRESET_ID);
@@ -5194,6 +5266,43 @@ mod tests {
         assert_eq!(
             amplitude_desc.default, 0.0,
             "amplitude identity default = 0.0"
+        );
+    }
+
+    // ----- PCleanup.2.4 — spotlights treatment ---------------------------
+
+    #[test]
+    fn spotlights_is_registered() {
+        assert!(
+            is_registered(SPOTLIGHTS_PRESET_ID),
+            "spotlights must appear in treatments::registry()"
+        );
+    }
+
+    #[test]
+    fn spotlights_descriptors_present() {
+        let descriptors = param_descriptors(SPOTLIGHTS_PRESET_ID);
+        assert_eq!(descriptors.len(), 4, "spotlights exposes exactly 4 params");
+        for d in descriptors {
+            assert!(d.min < d.max, "{}: min < max", d.key);
+            assert!(
+                d.default >= d.min && d.default <= d.max,
+                "{}: default in [min, max]",
+                d.key
+            );
+        }
+    }
+
+    #[test]
+    fn spotlights_brightness_gain_default_is_zero() {
+        let descriptors = param_descriptors(SPOTLIGHTS_PRESET_ID);
+        let gain_desc = descriptors
+            .iter()
+            .find(|d| d.key == "brightness_gain")
+            .expect("brightness_gain descriptor must be present");
+        assert_eq!(
+            gain_desc.default, 0.0,
+            "brightness_gain identity default = 0.0"
         );
     }
 }
