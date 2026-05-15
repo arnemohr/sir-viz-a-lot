@@ -342,9 +342,8 @@ pub fn show(
                     // right of the primary "Go live" button.
                     ui.menu_button("\u{25BE}", |menu| {
                         if menu.button("Both projectors").clicked() {
-                            action = Some(ControlPanelAction::RequestEnterGoLive(
-                                GoLiveTarget::Both,
-                            ));
+                            action =
+                                Some(ControlPanelAction::RequestEnterGoLive(GoLiveTarget::Both));
                             menu.close_menu();
                         }
                         if menu.button("Lead only (keep Follow as preview)").clicked() {
@@ -355,14 +354,10 @@ pub fn show(
                         }
                     });
                     if ui.button("Go live").clicked() {
-                        action = Some(ControlPanelAction::RequestEnterGoLive(
-                            GoLiveTarget::Both,
-                        ));
+                        action = Some(ControlPanelAction::RequestEnterGoLive(GoLiveTarget::Both));
                     }
                 } else if ui.button("Go live").clicked() {
-                    action = Some(ControlPanelAction::RequestEnterGoLive(
-                        GoLiveTarget::Both,
-                    ));
+                    action = Some(ControlPanelAction::RequestEnterGoLive(GoLiveTarget::Both));
                 }
             }
             // 003-T4.16a: Preview button. Opens / closes the child preview window.

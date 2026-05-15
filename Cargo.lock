@@ -3317,7 +3317,7 @@ dependencies = [
 
 [[package]]
 name = "rmap"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "artnet_protocol",
