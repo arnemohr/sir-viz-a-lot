@@ -219,13 +219,14 @@ pub struct SceneEditorState {
 /// Returns identity (translate 0, scale 1, rotate 0) when the chain has
 /// no Transform effect — matches what the renderer would do.
 pub fn effective_static_transform(layer: &LayerConfig) -> ([f32; 2], [f32; 2], f32) {
-    for e in layer.effects.iter() {
+    // 004-T1.14 — iterate EffectNode, match on .effect
+    for node in layer.effects.iter() {
         if let Effect::Transform {
             translate,
             scale_x,
             scale_y,
             rotate_deg,
-        } = e
+        } = &node.effect
         {
             let s_x = match scale_x {
                 Modulator::Static(v) => *v,
@@ -253,25 +254,29 @@ pub fn mutate_transform_effect<F>(layer: &mut LayerConfig, mutate: F)
 where
     F: FnOnce(&mut [f32; 2], &mut Modulator, &mut Modulator, &mut Modulator),
 {
+    // 004-T1.14 — match on EffectNode.effect; push EffectNode { enabled: true, effect: ... }
     if !layer
         .effects
         .iter()
-        .any(|e| matches!(e, Effect::Transform { .. }))
+        .any(|n| matches!(n.effect, Effect::Transform { .. }))
     {
-        layer.effects.push(Effect::Transform {
-            translate: [0.0, 0.0],
-            rotate_deg: Modulator::Static(0.0),
-            scale_x: Modulator::Static(1.0),
-            scale_y: Modulator::Static(1.0),
+        layer.effects.push(crate::effects::EffectNode {
+            enabled: true,
+            effect: Effect::Transform {
+                translate: [0.0, 0.0],
+                rotate_deg: Modulator::Static(0.0),
+                scale_x: Modulator::Static(1.0),
+                scale_y: Modulator::Static(1.0),
+            },
         });
     }
-    for e in layer.effects.iter_mut() {
+    for node in layer.effects.iter_mut() {
         if let Effect::Transform {
             translate,
             rotate_deg,
             scale_x,
             scale_y,
-        } = e
+        } = &mut node.effect
         {
             mutate(translate, rotate_deg, scale_x, scale_y);
             return;
@@ -1490,17 +1495,20 @@ mod tests {
             },
             enabled: true,
             transform: Transform2D::default(),
-            effects: vec![Effect::Transform {
-                translate,
-                rotate_deg: Modulator::Static(0.0),
-                scale_x: Modulator::Static(scale[0]),
-                scale_y: Modulator::Static(scale[1]),
+            // 004-T1.15 — wrap Effect in EffectNode.
+            effects: vec![crate::effects::EffectNode {
+                enabled: true,
+                effect: Effect::Transform {
+                    translate,
+                    rotate_deg: Modulator::Static(0.0),
+                    scale_x: Modulator::Static(scale[0]),
+                    scale_y: Modulator::Static(scale[1]),
+                },
             }],
             blend_mode: BlendMode::Normal,
             opacity: 1.0,
             warp: WarpMesh::identity(),
             muted: false,
-            treatment: None,
             bezier_mesh: None,
             mask_graph: None,
         }
@@ -1568,7 +1576,6 @@ mod tests {
             opacity: 1.0,
             warp: WarpMesh::identity(),
             muted: false,
-            treatment: None,
             bezier_mesh: None,
             mask_graph: None,
         };
@@ -1576,7 +1583,8 @@ mod tests {
             *t = [0.25, 0.0];
         });
         assert_eq!(layer.effects.len(), 1);
-        match &layer.effects[0] {
+        // 004-T1.14 — match on EffectNode.effect
+        match &layer.effects[0].effect {
             Effect::Transform { translate, .. } => assert_eq!(*translate, [0.25, 0.0]),
             other => panic!("expected Transform, got {other:?}"),
         }

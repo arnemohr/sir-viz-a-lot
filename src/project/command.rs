@@ -739,15 +739,16 @@ impl ReverseStorage for SetLayerBlendMode {
 /// Payload for [`Mutation::SetLayerEffects`].
 ///
 /// Replaces a layer's effect chain wholesale (Reverse rule 2: Effects-Vec
-/// Reverse). Both `new` and `old` are full `Vec<Effect>` snapshots.
+/// Reverse). Both `new` and `old` are full `Vec<EffectNode>` snapshots.
+/// 004-T1.11 — changed from `Vec<Effect>` to `Vec<EffectNode>`.
 #[derive(Debug, Clone)]
 pub struct SetLayerEffects {
     /// Index into `Project.layers`.
     pub layer_idx: usize,
     /// Effect chain to install.
-    pub new: Vec<crate::effects::Effect>,
+    pub new: Vec<crate::effects::EffectNode>,
     /// Pre-mutation snapshot of the chain.
-    pub old: Vec<crate::effects::Effect>,
+    pub old: Vec<crate::effects::EffectNode>,
 }
 
 impl ReverseStorage for SetLayerEffects {
@@ -782,14 +783,15 @@ impl ReverseStorage for SetLayerEffects {
 ///
 /// Both `new`/`old` pairs are full snapshots (Reverse rules 1 + 2:
 /// whole-Vec mask polygon + whole-Vec effect chain).
+/// 004-T1.11/T1.13 — changed from `Vec<Effect>` to `Vec<EffectNode>`.
 #[derive(Debug, Clone)]
 pub struct SetLayerEffectsAndMask {
     /// Index into `Project.layers`.
     pub layer_idx: usize,
     /// Effect chain to install.
-    pub new_effects: Vec<crate::effects::Effect>,
+    pub new_effects: Vec<crate::effects::EffectNode>,
     /// Pre-mutation snapshot of the effect chain.
-    pub old_effects: Vec<crate::effects::Effect>,
+    pub old_effects: Vec<crate::effects::EffectNode>,
     /// Mask polygon to install.
     pub new_mask_polygon: Vec<[f32; 2]>,
     /// Pre-mutation snapshot of the mask polygon.
@@ -977,17 +979,11 @@ pub struct SetLayerTreatment {
 }
 
 impl ReverseStorage for SetLayerTreatment {
-    fn apply(self, project: &mut Project) -> Self {
-        let layer = project
-            .layers
-            .get_mut(self.layer_idx)
-            .expect("SetLayerTreatment: layer_idx out of range");
-        debug_assert_eq!(
-            layer.treatment, self.old,
-            "SetLayerTreatment stale Reverse for layer_idx={}",
-            self.layer_idx,
-        );
-        layer.treatment = self.new.clone();
+    fn apply(self, _project: &mut Project) -> Self {
+        // 004-T1.foundation stub — `LayerConfig.treatment` is gone (T1.3).
+        // T1.10 deletes this mutation entirely once T1.30 has removed the
+        // six controls.rs callers. Until then, apply is a no-op that just
+        // returns the reverse so the proptest round-trip still compiles.
         SetLayerTreatment {
             layer_idx: self.layer_idx,
             new: self.old,
@@ -1019,21 +1015,10 @@ pub struct SetLayerTreatmentParams {
 }
 
 impl ReverseStorage for SetLayerTreatmentParams {
-    fn apply(self, project: &mut Project) -> Self {
-        let layer = project
-            .layers
-            .get_mut(self.layer_idx)
-            .expect("SetLayerTreatmentParams: layer_idx out of range");
-        let treatment = layer.treatment.as_mut().expect(
-            "SetLayerTreatmentParams: layer has no treatment — \
-             dispatch site must guard via `treatment.is_some()`",
-        );
-        debug_assert_eq!(
-            treatment.params, self.old,
-            "SetLayerTreatmentParams stale Reverse for layer_idx={}",
-            self.layer_idx,
-        );
-        treatment.params = self.new.clone();
+    fn apply(self, _project: &mut Project) -> Self {
+        // 004-T1.foundation stub — `LayerConfig.treatment` is gone (T1.3).
+        // T1.10 deletes this mutation entirely once T1.30 has removed the
+        // six controls.rs callers. Until then, apply is a no-op.
         SetLayerTreatmentParams {
             layer_idx: self.layer_idx,
             new: self.old,
@@ -1157,10 +1142,12 @@ impl ReverseStorage for SetModulator {
             .layers
             .get_mut(self.layer_idx)
             .expect("SetModulator: layer_idx out of range");
-        let effect = layer
+        let node = layer
             .effects
             .get_mut(self.effect_idx)
             .expect("SetModulator: effect_idx out of range");
+        // 004-T1.12 — dereference EffectNode.effect before passing to modulator_at_mut.
+        let effect = &mut node.effect;
         let slot = modulator_at_mut(effect, self.field)
             .expect("SetModulator: field does not apply to this effect variant");
         *slot = self.new.clone();
@@ -3002,48 +2989,42 @@ impl Project {
     }
 
     /// P1.2.1 — build a `SetLayerTreatment` mutation for the given
-    /// layer index. Captures the layer's current `treatment` as `old`.
-    /// Pass `None` to remove the treatment; `Some(t)` to set / replace
-    /// it. Panics if `layer_idx` is out of range — callers must guard
-    /// first (the UI dispatch site has `layer_idx < layers.len()` as
-    /// an invariant).
+    /// layer index.
+    ///
+    /// 004-T1.foundation stub — `LayerConfig.treatment` is gone (T1.3).
+    /// This constructor stays alive until T1.10 deletes it (after T1.30
+    /// removes the six controls.rs callers). The stub constructs a
+    /// no-op mutation (old == new == None) so call sites still compile.
     pub fn set_layer_treatment_mutation(
         &self,
         layer_idx: usize,
         new: Option<crate::project::schema::Treatment>,
     ) -> Mutation {
-        let old = self.layers[layer_idx].treatment.clone();
+        // Treatment field is gone; construct a no-op stub mutation.
         Mutation::SetLayerTreatment(SetLayerTreatment {
             layer_idx,
-            new,
-            old,
+            new: new.clone(),
+            old: new,
         })
     }
 
     /// P1.2.1 — build a `SetLayerTreatmentParams` mutation for the
-    /// given layer index. Captures the layer's current
-    /// `treatment.params` as `old`. **Panics** if the layer has no
-    /// treatment — the UI dispatch site must only call this when the
-    /// preset is active (param sliders render only when
-    /// `treatment.is_some()`).
+    /// given layer index.
+    ///
+    /// 004-T1.foundation stub — `LayerConfig.treatment` is gone (T1.3).
+    /// Previously panicked when treatment was None; now returns a no-op
+    /// stub so the proptest harness and show_treatment_section compile
+    /// without hitting the deleted field. T1.10 deletes this entirely.
     pub fn set_layer_treatment_params_mutation(
         &self,
         layer_idx: usize,
         new: std::collections::HashMap<String, f32>,
     ) -> Mutation {
-        let old = self.layers[layer_idx]
-            .treatment
-            .as_ref()
-            .expect(
-                "set_layer_treatment_params_mutation called on a \
-                 layer with no treatment — UI dispatch site must guard",
-            )
-            .params
-            .clone();
+        // Treatment field is gone; construct a no-op stub mutation.
         Mutation::SetLayerTreatmentParams(SetLayerTreatmentParams {
             layer_idx,
-            new,
-            old,
+            new: new.clone(),
+            old: new,
         })
     }
 
@@ -3526,10 +3507,11 @@ impl Project {
     /// as `old` for the Effects-Vec Reverse (rule 2). `new` is moved into
     /// the mutation; the caller will not be able to use it afterwards.
     /// Panics if `layer_idx` is out of range.
+    /// 004-T1.11 — `new` is now `Vec<EffectNode>`.
     pub fn set_layer_effects_mutation(
         &self,
         layer_idx: usize,
-        new: Vec<crate::effects::Effect>,
+        new: Vec<crate::effects::EffectNode>,
     ) -> Mutation {
         let layer = &self.layers[layer_idx];
         Mutation::SetLayerEffects(SetLayerEffects {
@@ -3544,10 +3526,11 @@ impl Project {
     /// Reverse (rule 2) and whole-Vec mask Reverse (rule 2). Both `new_*`
     /// arguments are moved into the mutation. Panics if `layer_idx` is out
     /// of range.
+    /// 004-T1.11 — `new_effects` is now `Vec<EffectNode>`.
     pub fn set_layer_effects_and_mask_mutation(
         &self,
         layer_idx: usize,
-        new_effects: Vec<crate::effects::Effect>,
+        new_effects: Vec<crate::effects::EffectNode>,
         new_mask_polygon: Vec<[f32; 2]>,
     ) -> Mutation {
         let layer = &self.layers[layer_idx];
@@ -3573,7 +3556,8 @@ impl Project {
         new: crate::modulators::Modulator,
     ) -> Mutation {
         let layer = &self.layers[layer_idx];
-        let effect = &layer.effects[effect_idx];
+        // 004-T1.12 — dereference EffectNode.effect before passing to modulator_at_ref.
+        let effect = &layer.effects[effect_idx].effect;
         let old = modulator_at_ref(effect, field)
             .expect("set_modulator_mutation: field does not apply to effect variant")
             .clone();
@@ -3741,7 +3725,6 @@ mod tests {
                 opacity: 1.0,
                 warp: crate::project::schema::WarpMesh::default_placement(),
                 muted: false,
-                treatment: None,
                 bezier_mesh: None,
                 mask_graph: None,
             });
@@ -3893,130 +3876,64 @@ mod tests {
         assert!(!p.set_edge_blend_mutation(None).needs_layer_rebuild());
     }
 
-    /// P1.2.1 — `SetLayerTreatment` round-trip across the four
-    /// state transitions:
-    ///   None → Some(t1) → None  (enable then disable)
-    ///   Some(a) → Some(b)        (switch preset / params atomically)
+    /// P1.2.1 — `SetLayerTreatment` round-trip across the four state transitions.
+    ///
+    /// 004-T1.foundation — `LayerConfig.treatment` removed (T1.3). These tests
+    /// reference the deleted field and cannot run until T1.10 deletes the
+    /// mutation entirely. Body is statically-false-gated so it type-checks
+    /// but never executes.
     #[test]
+    #[ignore = "T1.10 deletes this mutation entirely"]
     fn set_layer_treatment_round_trips() {
-        use crate::project::schema::Treatment;
-
-        let mut p = fresh_project();
-        assert!(p.layers[0].treatment.is_none());
-
-        let t1 = Treatment {
-            preset_id: "tone_map".into(),
-            params: {
-                let mut m = std::collections::HashMap::new();
-                m.insert("exposure".to_string(), 0.5);
-                m
-            },
-            overlay_path: None,
-            collage_paths: vec![],
-        };
-
-        // None → Some(t1)
-        let m = p.set_layer_treatment_mutation(0, Some(t1.clone()));
-        let reverse = m.apply(&mut p);
-        assert_eq!(p.layers[0].treatment, Some(t1.clone()));
-
-        // Some(t1) → None (via reverse)
-        let _ = reverse.apply(&mut p);
-        assert!(p.layers[0].treatment.is_none());
-
-        // Some(a) → Some(b)
-        p.layers[0].treatment = Some(t1.clone());
-        let t2 = Treatment {
-            preset_id: "blur_mask".into(),
-            params: std::collections::HashMap::new(),
-            overlay_path: None,
-            collage_paths: vec![],
-        };
-        let m = p.set_layer_treatment_mutation(0, Some(t2.clone()));
-        let reverse = m.apply(&mut p);
-        assert_eq!(p.layers[0].treatment, Some(t2));
-        let _ = reverse.apply(&mut p);
-        assert_eq!(p.layers[0].treatment, Some(t1));
+        // Treatment field removed — test body statically disabled.
+        if cfg!(any()) {
+            use crate::project::schema::Treatment;
+            let _t = Treatment {
+                preset_id: "tone_map".into(),
+                params: std::collections::HashMap::new(),
+                overlay_path: None,
+                collage_paths: vec![],
+            };
+        }
     }
 
-    /// P1.2.1 — `SetLayerTreatmentParams` snapshots the whole map so
-    /// a preset switch racing a param edit doesn't lose keys silently.
+    /// P1.2.1 — `SetLayerTreatmentParams` round-trip.
+    ///
+    /// 004-T1.foundation — `LayerConfig.treatment` removed (T1.3).
+    /// Statically-false-gated so it type-checks but never executes.
     #[test]
+    #[ignore = "T1.10 deletes this mutation entirely"]
     fn set_layer_treatment_params_round_trips() {
-        use crate::project::schema::Treatment;
-
-        let mut p = fresh_project();
-        p.layers[0].treatment = Some(Treatment {
-            preset_id: "tone_map".into(),
-            params: {
-                let mut m = std::collections::HashMap::new();
-                m.insert("exposure".to_string(), 0.0);
-                m.insert("contrast".to_string(), 1.0);
-                m
-            },
-            overlay_path: None,
-            collage_paths: vec![],
-        });
-
-        let mut new_params = std::collections::HashMap::new();
-        new_params.insert("exposure".to_string(), 0.5);
-        new_params.insert("contrast".to_string(), 1.2);
-        new_params.insert("shoulder".to_string(), 0.7);
-
-        let m = p.set_layer_treatment_params_mutation(0, new_params.clone());
-        let reverse = m.apply(&mut p);
-        assert_eq!(p.layers[0].treatment.as_ref().unwrap().params, new_params);
-
-        // Reverse restores the original 2-key map (including dropping
-        // the new `shoulder` key — whole-map snapshot, not merge).
-        let _ = reverse.apply(&mut p);
-        let restored = &p.layers[0].treatment.as_ref().unwrap().params;
-        assert_eq!(restored.len(), 2);
-        assert!(restored.contains_key("exposure"));
-        assert!(restored.contains_key("contrast"));
-        assert!(
-            !restored.contains_key("shoulder"),
-            "whole-map Reverse must drop keys not present pre-mutation"
-        );
+        // Treatment field removed — test body statically disabled.
+        if cfg!(any()) {
+            let _p = fresh_project();
+        }
     }
 
-    /// P1.2.1 — both treatment mutations are undoable + don't trigger
-    /// a layer-GPU rebuild (the treatment runs inside the existing
-    /// per-layer render pipeline; no layer-Vec reshape).
+    /// P1.2.1 — both treatment mutations are undoable + don't trigger rebuild.
+    ///
+    /// 004-T1.foundation — `LayerConfig.treatment` removed (T1.3).
+    /// Statically-false-gated so it type-checks but never executes.
     #[test]
+    #[ignore = "T1.10 deletes this mutation entirely"]
     fn treatment_mutations_are_undoable_and_no_rebuild() {
-        use crate::project::schema::Treatment;
-        let mut p = fresh_project();
-
-        let t = Treatment {
-            preset_id: "tone_map".into(),
-            params: std::collections::HashMap::new(),
-            overlay_path: None,
-            collage_paths: vec![],
-        };
-
-        let m1 = p.set_layer_treatment_mutation(0, Some(t.clone()));
-        assert!(!m1.is_non_undoable());
-        assert!(!m1.needs_layer_rebuild());
-
-        // Need a populated treatment for set_layer_treatment_params_mutation.
-        p.layers[0].treatment = Some(t);
-        let m2 = p.set_layer_treatment_params_mutation(0, std::collections::HashMap::new());
-        assert!(!m2.is_non_undoable());
-        assert!(!m2.needs_layer_rebuild());
+        // Treatment field removed — test body statically disabled.
+        if cfg!(any()) {
+            let _p = fresh_project();
+        }
     }
 
-    /// P1.2.1 — builder panics on a layer without a treatment when
-    /// asked for `set_layer_treatment_params_mutation`. The UI must
-    /// guard this; the panic catches contract violations in tests.
+    /// P1.2.1 — builder panics on a layer without a treatment.
+    ///
+    /// 004-T1.foundation — The constructor no longer panics (T1.foundation
+    /// stub makes it a no-op). Test disabled until T1.10 deletes everything.
     #[test]
-    #[should_panic(
-        expected = "set_layer_treatment_params_mutation called on a layer with no treatment"
-    )]
+    #[ignore = "T1.10 deletes this mutation entirely"]
     fn set_layer_treatment_params_mutation_panics_on_no_treatment() {
-        let p = fresh_project();
-        // `fresh_project`'s layer has treatment: None — panic expected.
-        let _ = p.set_layer_treatment_params_mutation(0, std::collections::HashMap::new());
+        // Treatment field removed — test body statically disabled.
+        if cfg!(any()) {
+            let _p = fresh_project();
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -4438,7 +4355,8 @@ mod tests {
             phase: 1.0,
             offset: 0.5,
         };
-        if let crate::effects::Effect::Color { hue, .. } = &mut p.layers[0].effects[0] {
+        // 004-T1.12 — dereference EffectNode.effect
+        if let crate::effects::Effect::Color { hue, .. } = &mut p.layers[0].effects[0].effect {
             *hue = sine.clone();
         } else {
             panic!("fresh_project layer 0 effect 0 should be Color");
@@ -4449,7 +4367,7 @@ mod tests {
             p.set_modulator_mutation(0, 0, ModulatorField::ColorHue, Modulator::Static(0.7));
         let reverse = mutation.apply(&mut p);
         // Sanity: hue is now Static(0.7).
-        if let crate::effects::Effect::Color { hue, .. } = &p.layers[0].effects[0] {
+        if let crate::effects::Effect::Color { hue, .. } = &p.layers[0].effects[0].effect {
             assert!(
                 matches!(hue, Modulator::Static(v) if (v - 0.7).abs() < 1e-6),
                 "after apply, hue should be Static(0.7)"
@@ -4479,32 +4397,37 @@ mod tests {
     /// asserts the chain is back to its original length and contents.
     #[test]
     fn effects_vec_reverse_no_stray_transform_after_undo() {
-        use crate::effects::Effect;
+        use crate::effects::{Effect, EffectNode};
         use crate::modulators::Modulator;
         let mut p = fresh_project();
         // Strip the default Transform from the seeded layer so the drag
         // append-or-mutate path takes the *append* branch.
+        // 004-T1.11 — match on EffectNode.effect
         p.layers[0]
             .effects
-            .retain(|e| !matches!(e, Effect::Transform { .. }));
+            .retain(|n| !matches!(n.effect, Effect::Transform { .. }));
         let pre_drag_len = p.layers[0].effects.len();
         let pre_drag = p.layers[0].effects.clone();
         assert!(
             !pre_drag
                 .iter()
-                .any(|e| matches!(e, Effect::Transform { .. })),
+                .any(|n| matches!(n.effect, Effect::Transform { .. })),
             "fixture should not contain Transform pre-drag"
         );
         let before = serde_json::to_value(&p).unwrap();
 
         // Simulate what handle_scene_input does for an alt-drag rotate:
         // append a default Transform, set rotate_deg, ship as new.
+        // 004-T1.11 — wrap Effect in EffectNode.
         let mut new = pre_drag.clone();
-        new.push(Effect::Transform {
-            translate: [0.0, 0.0],
-            rotate_deg: Modulator::Static(45.0),
-            scale_x: Modulator::Static(1.0),
-            scale_y: Modulator::Static(1.0),
+        new.push(EffectNode {
+            enabled: true,
+            effect: Effect::Transform {
+                translate: [0.0, 0.0],
+                rotate_deg: Modulator::Static(45.0),
+                scale_x: Modulator::Static(1.0),
+                scale_y: Modulator::Static(1.0),
+            },
         });
         let mutation = Mutation::SetLayerEffects(SetLayerEffects {
             layer_idx: 0,
@@ -4531,7 +4454,7 @@ mod tests {
             !p.layers[0]
                 .effects
                 .iter()
-                .any(|e| matches!(e, Effect::Transform { .. })),
+                .any(|n| matches!(n.effect, Effect::Transform { .. })),
             "after undo, chain must contain no Transform effect"
         );
         assert_eq!(before, after, "byte-equal restoration of full project");
@@ -5353,8 +5276,9 @@ mod tests {
                         project.set_gamma_mutation(project.gamma) // no-op fallback
                     } else {
                         let mut new = project.layers[0].effects.clone();
-                        for effect in new.iter_mut() {
-                            if let crate::effects::Effect::Transform { translate, .. } = effect {
+                        // 004-T1.12 — dereference EffectNode.effect
+                        for node in new.iter_mut() {
+                            if let crate::effects::Effect::Transform { translate, .. } = &mut node.effect {
                                 translate[0] = *x;
                                 translate[1] = *y;
                                 break;
@@ -5381,23 +5305,28 @@ mod tests {
                     if project.layers.is_empty() {
                         project.set_gamma_mutation(project.gamma) // no-op fallback
                     } else {
+                        use crate::effects::EffectNode;
                         let old = project.layers[0].effects.clone();
                         let mut new = old.clone();
+                        // 004-T1.12 — match on EffectNode.effect
                         // Append a default Transform if the chain lacks one —
                         // the same thing `mutate_transform_effect` does.
                         if !new
                             .iter()
-                            .any(|e| matches!(e, crate::effects::Effect::Transform { .. }))
+                            .any(|n| matches!(n.effect, crate::effects::Effect::Transform { .. }))
                         {
-                            new.push(crate::effects::Effect::Transform {
-                                translate: [0.0, 0.0],
-                                rotate_deg: crate::modulators::Modulator::Static(0.0),
-                                scale_x: crate::modulators::Modulator::Static(1.0),
-                                scale_y: crate::modulators::Modulator::Static(1.0),
+                            new.push(EffectNode {
+                                enabled: true,
+                                effect: crate::effects::Effect::Transform {
+                                    translate: [0.0, 0.0],
+                                    rotate_deg: crate::modulators::Modulator::Static(0.0),
+                                    scale_x: crate::modulators::Modulator::Static(1.0),
+                                    scale_y: crate::modulators::Modulator::Static(1.0),
+                                },
                             });
                         }
-                        for e in new.iter_mut() {
-                            if let crate::effects::Effect::Transform { translate, .. } = e {
+                        for node in new.iter_mut() {
+                            if let crate::effects::Effect::Transform { translate, .. } = &mut node.effect {
                                 translate[0] += dx;
                                 translate[1] += dy;
                                 break;
@@ -5417,21 +5346,26 @@ mod tests {
                     if project.layers.is_empty() {
                         project.set_gamma_mutation(project.gamma) // no-op fallback
                     } else {
+                        use crate::effects::EffectNode;
                         let old = project.layers[0].effects.clone();
                         let mut new = old.clone();
+                        // 004-T1.12 — match on EffectNode.effect
                         if !new
                             .iter()
-                            .any(|e| matches!(e, crate::effects::Effect::Transform { .. }))
+                            .any(|n| matches!(n.effect, crate::effects::Effect::Transform { .. }))
                         {
-                            new.push(crate::effects::Effect::Transform {
-                                translate: [0.0, 0.0],
-                                rotate_deg: crate::modulators::Modulator::Static(0.0),
-                                scale_x: crate::modulators::Modulator::Static(1.0),
-                                scale_y: crate::modulators::Modulator::Static(1.0),
+                            new.push(EffectNode {
+                                enabled: true,
+                                effect: crate::effects::Effect::Transform {
+                                    translate: [0.0, 0.0],
+                                    rotate_deg: crate::modulators::Modulator::Static(0.0),
+                                    scale_x: crate::modulators::Modulator::Static(1.0),
+                                    scale_y: crate::modulators::Modulator::Static(1.0),
+                                },
                             });
                         }
-                        for e in new.iter_mut() {
-                            if let crate::effects::Effect::Transform { rotate_deg, .. } = e {
+                        for node in new.iter_mut() {
+                            if let crate::effects::Effect::Transform { rotate_deg, .. } = &mut node.effect {
                                 *rotate_deg = crate::modulators::Modulator::Static(*degrees);
                                 break;
                             }
@@ -5660,41 +5594,17 @@ mod tests {
                         None => project.set_gamma_mutation(project.gamma),
                     }
                 }
-                // P1.2.1 — Treatment mutations target layer 0
-                // (fresh_project has exactly one layer). The harness
-                // exercises None ↔ Some toggles + the whole-HashMap
-                // params replacement.
-                MutationKind::SetLayerTreatment(preset_pick) => {
-                    if project.layers.is_empty() {
-                        project.set_gamma_mutation(project.gamma) // no-op
-                    } else {
-                        let new =
-                            preset_pick.map(|use_tone_map| crate::project::schema::Treatment {
-                                preset_id: if use_tone_map {
-                                    "tone_map".into()
-                                } else {
-                                    "blur_mask".into()
-                                },
-                                params: std::collections::HashMap::new(),
-                                overlay_path: None,
-                                collage_paths: vec![],
-                            });
-                        project.set_layer_treatment_mutation(0, new)
-                    }
+                // P1.2.1 — Treatment mutations. 004-T1.foundation: LayerConfig.treatment
+                // is gone; emit no-op gamma so the harness can still enumerate these
+                // MutationKind variants without hitting the deleted field. T1.10 deletes
+                // these arms entirely.
+                MutationKind::SetLayerTreatment(_preset_pick) => {
+                    // 004-T1.foundation stub — treatment field gone, emit no-op gamma.
+                    project.set_gamma_mutation(project.gamma)
                 }
-                MutationKind::SetLayerTreatmentParams { exposure, contrast } => {
-                    if project.layers.is_empty() || project.layers[0].treatment.is_none() {
-                        // The builder panics on no-treatment; emit a
-                        // no-op gamma instead. The harness will reach
-                        // this branch after a preceding step cleared
-                        // the treatment, which is a valid sequence.
-                        project.set_gamma_mutation(project.gamma)
-                    } else {
-                        let mut new = std::collections::HashMap::new();
-                        new.insert("exposure".to_string(), *exposure);
-                        new.insert("contrast".to_string(), *contrast);
-                        project.set_layer_treatment_params_mutation(0, new)
-                    }
+                MutationKind::SetLayerTreatmentParams { exposure: _, contrast: _ } => {
+                    // 004-T1.foundation stub — treatment field gone, emit no-op gamma.
+                    project.set_gamma_mutation(project.gamma)
                 }
                 MutationKind::SetFxLayerParams { wavelength } => {
                     // P2.9.1 — target layer 1 (the RIPPLE_WASH FxLayer
@@ -6306,16 +6216,17 @@ mod tests {
         p.layers[0].effects = default_effect_chain();
         let original = p.layers[0].effects.clone();
         assert_eq!(original.len(), 3, "default chain should have 3 effects");
+        // 004-T1.11 — match on EffectNode.effect
         assert!(
-            matches!(original[0], Effect::Color { .. }),
+            matches!(original[0].effect, Effect::Color { .. }),
             "original[0] should be Color"
         );
         assert!(
-            matches!(original[1], Effect::Blur { .. }),
+            matches!(original[1].effect, Effect::Blur { .. }),
             "original[1] should be Blur"
         );
         assert!(
-            matches!(original[2], Effect::Transform { .. }),
+            matches!(original[2].effect, Effect::Transform { .. }),
             "original[2] should be Transform"
         );
 
@@ -6324,15 +6235,15 @@ mod tests {
         let item = reordered.remove(1); // remove Blur
         reordered.insert(0, item); // insert before Color
         assert!(
-            matches!(reordered[0], Effect::Blur { .. }),
+            matches!(reordered[0].effect, Effect::Blur { .. }),
             "reordered[0] should be Blur"
         );
         assert!(
-            matches!(reordered[1], Effect::Color { .. }),
+            matches!(reordered[1].effect, Effect::Color { .. }),
             "reordered[1] should be Color"
         );
         assert!(
-            matches!(reordered[2], Effect::Transform { .. }),
+            matches!(reordered[2].effect, Effect::Transform { .. }),
             "reordered[2] should be Transform"
         );
 
@@ -6342,15 +6253,15 @@ mod tests {
 
         // After apply: chain should match the reordered order.
         assert!(
-            matches!(p.layers[0].effects[0], Effect::Blur { .. }),
+            matches!(p.layers[0].effects[0].effect, Effect::Blur { .. }),
             "after apply: effects[0] should be Blur"
         );
         assert!(
-            matches!(p.layers[0].effects[1], Effect::Color { .. }),
+            matches!(p.layers[0].effects[1].effect, Effect::Color { .. }),
             "after apply: effects[1] should be Color"
         );
         assert!(
-            matches!(p.layers[0].effects[2], Effect::Transform { .. }),
+            matches!(p.layers[0].effects[2].effect, Effect::Transform { .. }),
             "after apply: effects[2] should be Transform"
         );
 
@@ -6369,7 +6280,7 @@ mod tests {
     /// original empty-effects list (Effects-Vec Reverse rule 2).
     #[test]
     fn set_layer_effects_append_default_blur_round_trips() {
-        use crate::effects::Effect;
+        use crate::effects::{Effect, EffectNode};
         use crate::modulators::Modulator;
 
         let mut p = fresh_project();
@@ -6379,8 +6290,12 @@ mod tests {
         assert_eq!(original.len(), 0, "starting chain should be empty");
 
         // Build a chain with a single default Blur (matches default_effect_chain defaults).
-        let default_blur = Effect::Blur {
-            radius_px: Modulator::Static(0.0),
+        // 004-T1.11 — wrap Effect in EffectNode.
+        let default_blur = EffectNode {
+            enabled: true,
+            effect: Effect::Blur {
+                radius_px: Modulator::Static(0.0),
+            },
         };
         let new_chain = vec![default_blur];
 
@@ -6395,7 +6310,7 @@ mod tests {
             "after apply: chain should have 1 effect"
         );
         assert!(
-            matches!(p.layers[0].effects[0], Effect::Blur { .. }),
+            matches!(p.layers[0].effects[0].effect, Effect::Blur { .. }),
             "after apply: effects[0] should be Blur"
         );
 
@@ -6419,14 +6334,18 @@ mod tests {
     /// that only swaps one field would fail the assertion.
     #[test]
     fn set_layer_effects_and_mask_round_trips() {
-        use crate::effects::{Effect, default_effect_chain};
+        use crate::effects::{Effect, EffectNode, default_effect_chain};
         use crate::modulators::Modulator;
 
         let mut p = fresh_project();
 
         // Install a distinct, non-trivial starting state on both fields.
-        let initial_effects = vec![Effect::Blur {
-            radius_px: Modulator::Static(5.0),
+        // 004-T1.11 — wrap Effect in EffectNode.
+        let initial_effects = vec![EffectNode {
+            enabled: true,
+            effect: Effect::Blur {
+                radius_px: Modulator::Static(5.0),
+            },
         }];
         let initial_mask = vec![[0.1_f32, 0.2], [0.8, 0.2], [0.8, 0.8], [0.1, 0.8]];
         p.layers[0].effects = initial_effects.clone();

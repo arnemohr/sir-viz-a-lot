@@ -4455,139 +4455,21 @@ fn render_m5_pipeline(
                 // are not Image / Video carry no treatment by audit/UI
                 // construction, but the layer-kind gate is belt-and-braces
                 // against a hand-edited JSON file.
-                let treatment_handled = match (&cfg.treatment, &cfg.kind) {
-                    (
-                        Some(treatment),
-                        schema::LayerKind::Image { .. } | schema::LayerKind::Video { .. },
-                    ) => {
-                        // P1.3.2 — multi-pass presets (`blur_mask`) need
-                        // the layer's SDF + scratch texture. Sync the SDF
-                        // up front (hash-gated, so this is a no-op when
-                        // warp geometry hasn't changed); the second sync
-                        // later in the warp pass collapses to the same
-                        // hash check. Single-pass presets ignore both
-                        // fields.
-                        ls.warp_renderer.sync_from_layer(
-                            &renderer.gpu.device,
-                            &renderer.gpu.queue,
-                            cfg,
-                        );
-                        let sdf_v = ls.warp_renderer.sdf_view();
-
-                        // P1.3.4 — texture_overlay loads `overlay_path`
-                        // through the shared `ImageTextureCache`. The
-                        // cache returns a clone of the underlying
-                        // wgpu::Texture (Arc-counted internally) so
-                        // repeated frames are zero-cost after the first
-                        // upload. Failure to load (missing file, decode
-                        // error) logs a warn and leaves `overlay` as
-                        // None — the dispatch arm then returns false
-                        // and the caller's default blit renders the
-                        // source unaltered.
-                        let overlay_tex_opt: Option<(wgpu::Texture, wgpu::TextureView)> = treatment
-                            .overlay_path
-                            .as_ref()
-                            .and_then(|p| {
-                                match image_texture_cache.lookup_or_upload(
-                                    &renderer.gpu.device,
-                                    &renderer.gpu.queue,
-                                    p,
-                                ) {
-                                    Ok((tex, view, _dims)) => Some((tex, view)),
-                                    Err(err) => {
-                                        tracing::warn!(
-                                            target: "rmap::ux",
-                                            event = "treatment_overlay_load_failed",
-                                            path = %p.display(),
-                                            err = %err,
-                                            "texture_overlay: failed to load overlay; rendering source unaltered",
-                                        );
-                                        None
-                                    }
-                                }
-                            });
-                        let overlay_view_ref: Option<&wgpu::TextureView> =
-                            overlay_tex_opt.as_ref().map(|(_, v)| v);
-
-                        // P1.3.6 — collage paths load through the same
-                        // ImageTextureCache. We bound the load to the
-                        // shader's 4-slot limit (`COLLAGE_SLOTS`). The
-                        // `collage_textures` vec OWNS the (Texture, View)
-                        // pairs for the duration of the dispatch so the
-                        // bind group's TextureView borrows stay valid.
-                        let mut collage_textures: Vec<(wgpu::Texture, wgpu::TextureView)> =
-                            Vec::new();
-                        for p in treatment
-                            .collage_paths
-                            .iter()
-                            .take(crate::render::treatments::COLLAGE_SLOTS)
-                        {
-                            match image_texture_cache.lookup_or_upload(
-                                &renderer.gpu.device,
-                                &renderer.gpu.queue,
-                                p,
-                            ) {
-                                Ok((tex, view, _dims)) => collage_textures.push((tex, view)),
-                                Err(err) => {
-                                    tracing::warn!(
-                                        target: "rmap::ux",
-                                        event = "treatment_collage_load_failed",
-                                        path = %p.display(),
-                                        err = %err,
-                                        "collage: failed to load slot; cell falls back to source",
-                                    );
-                                }
-                            }
-                        }
-                        let collage_views: Vec<&wgpu::TextureView> =
-                            collage_textures.iter().map(|(_, v)| v).collect();
-
-                        let inputs = crate::render::treatments::TreatmentInputs {
-                            source: tex_view,
-                            fit_uniform: &ls.fit_uniform,
-                            params: &treatment.params,
-                            clock_secs: clock.elapsed().as_secs_f32(),
-                            overlay: overlay_view_ref,
-                            collage: &collage_views,
-                            sdf: Some(sdf_v),
-                            intermediate: Some(&ls.intermediate_view),
-                            // PCleanup.2.9 — zone role for zone-aware treatments
-                            // (zone_brighten, zone_lens). Sourced from the same field
-                            // used by zone-aware FX presets (line 4334). Non-zone
-                            // treatments ignore this field.
-                            zone_role: cfg.warp.zone_role,
-                            // PCleanup.2.4 — particle seed + layer-local time for
-                            // the spotlights Treatment. LayerId.0 is a stable u64
-                            // that uniquely identifies this layer instance within
-                            // the session, giving each layer its own particle layout.
-                            // Image/Video layers don't track their add-time so
-                            // t_layer_added_secs defaults to 0.0 (particles animate
-                            // from project start). Non-particle treatments ignore both.
-                            seed: ls.layer_id.0,
-                            t_layer_added_secs: 0.0,
-                        };
-                        treatment_pipeline.dispatch(
-                            &renderer.gpu.device,
-                            &renderer.gpu.queue,
-                            &mut encoder,
-                            src_view,
-                            &inputs,
-                            &treatment.preset_id,
-                        )
-                    }
-                    _ => false,
-                };
-                if !treatment_handled {
-                    svg_pipeline.render(
-                        &renderer.gpu.device,
-                        &mut encoder,
-                        src_view,
-                        tex_view,
-                        &ls.fit_uniform,
-                    );
-                }
+                // 004-T1.foundation — primary treatment dispatch deleted; treatment is now
+                // just the first Effect::Treatment in the per-layer chain (runs through
+                // the same loop a few lines down). svg_pipeline now runs unconditionally.
+                svg_pipeline.render(
+                    &renderer.gpu.device,
+                    &mut encoder,
+                    src_view,
+                    tex_view,
+                    &ls.fit_uniform,
+                );
             }
-            for effect in &cfg.effects {
+            // 004-T1.foundation — iterate EffectNode; dispatch via node.effect.
+            // T1.9 adds per-node bypass (enabled check) later.
+            for node in &cfg.effects {
+                let effect = &node.effect;
                 {
                     let (src, dst) = ls.effect_pipeline.current_pair();
                     let mut ctx = RenderCtx {

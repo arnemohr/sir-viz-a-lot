@@ -45,7 +45,7 @@ pub fn migrate(mut value: Value) -> Result<(Value, MigrationOutcome), ProjectErr
         // layer's new `warp` field. `Project.warps` is preserved during
         // T3.0a so the renderer + audit + mutations keep compiling; T3.0b
         // deletes it once the render graph reads per-layer warps.
-        0..=10 => {
+        0..=11 => {
             if version <= 2 {
                 migrate_v2_to_v3_layers(&mut value);
             }
@@ -116,6 +116,15 @@ pub fn migrate(mut value: Value) -> Result<(Value, MigrationOutcome), ProjectErr
             //     by `mask_graph` for rendering.
             if version <= 10 {
                 migrate_v10_to_v11_mask_graph(&mut value);
+            }
+            // v11 → v12 (004-T1.3/T1.4):
+            //   • Drops `LayerConfig.treatment` — the optional Treatment
+            //     object is folded into the per-layer `effects` chain as the
+            //     first element (if `preset_id` is non-empty).
+            //   • Each existing `effects[i]` plain-effect is wrapped in
+            //     `{"enabled": true, "effect": <old>}` (EffectNode shape).
+            if version <= 11 {
+                migrate_v11_to_v12_fold_treatment_into_effects(&mut value);
             }
             value["schema_version"] = serde_json::json!(CURRENT_SCHEMA_VERSION);
             Ok((value, outcome))
@@ -701,6 +710,99 @@ fn migrate_v2_to_v3_layers(value: &mut Value) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// 004-T1.4 — v11 → v12: fold `treatment` into `effects` as the first node
+// ---------------------------------------------------------------------------
+
+/// 004-T1.4 — Migrate a project from schema v11 to v12.
+///
+/// For each layer:
+///   1. Read `treatment` (default `null`) and `effects` (default `[]`).
+///   2. If `treatment` is an object with a non-empty `preset_id`, prepend
+///      `{"enabled": true, "effect": {"Treatment": {"id": <preset_id>,
+///      "params": <params or {}>, "overlay_path": <overlay_path or null>,
+///      "collage_paths": <collage_paths or []>}}}` to the new effects vec.
+///   3. Wrap each existing effect as `{"enabled": true, "effect": <existing>}`.
+///   4. Replace `layer["effects"]` with the new vec; remove `layer["treatment"]`.
+///
+/// The migrator is disk-blind: it does not read any files referenced by
+/// `overlay_path` or `collage_paths`. Missing or invalid paths are carried
+/// verbatim into the EffectNode and will surface as audit findings at load time.
+///
+/// Idempotent on v12 input (effects already have the `enabled`/`effect` shape;
+/// `treatment` key is absent; the step is a no-op).
+fn migrate_v11_to_v12_fold_treatment_into_effects(value: &mut Value) {
+    let Some(layers) = value.get_mut("layers").and_then(|v| v.as_array_mut()) else {
+        return;
+    };
+    for layer in layers.iter_mut() {
+        let Some(obj) = layer.as_object_mut() else {
+            continue;
+        };
+
+        // Extract treatment (may be null, absent, or an object).
+        let treatment = obj.remove("treatment").unwrap_or(Value::Null);
+
+        // Extract existing effects array (may be absent → treat as empty).
+        let old_effects = obj
+            .remove("effects")
+            .and_then(|v| if v.is_array() { Some(v) } else { None })
+            .unwrap_or_else(|| Value::Array(vec![]));
+        let old_effects_arr = old_effects.as_array().expect("checked above");
+
+        let mut new_effects: Vec<Value> = Vec::new();
+
+        // Step 2 — prepend Treatment node if treatment.preset_id is non-empty.
+        if let Some(t_obj) = treatment.as_object() {
+            let preset_id = t_obj
+                .get("preset_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if !preset_id.is_empty() {
+                let params = t_obj
+                    .get("params")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!({}));
+                let overlay_path = t_obj.get("overlay_path").cloned().unwrap_or(Value::Null);
+                let collage_paths = t_obj
+                    .get("collage_paths")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!([]));
+                new_effects.push(serde_json::json!({
+                    "enabled": true,
+                    "effect": {
+                        "Treatment": {
+                            "id": preset_id,
+                            "params": params,
+                            "overlay_path": overlay_path,
+                            "collage_paths": collage_paths
+                        }
+                    }
+                }));
+            }
+        }
+
+        // Step 3 — wrap each existing effect as EffectNode.
+        // Skip effects that already look like EffectNode (have "enabled" + "effect" keys)
+        // so the migration is idempotent on v12 projects that happen to round-trip through
+        // this path.
+        for eff in old_effects_arr {
+            if eff.get("enabled").is_some() && eff.get("effect").is_some() {
+                // Already in EffectNode shape — copy verbatim (idempotent path).
+                new_effects.push(eff.clone());
+            } else {
+                new_effects.push(serde_json::json!({
+                    "enabled": true,
+                    "effect": eff
+                }));
+            }
+        }
+
+        obj.insert("effects".into(), Value::Array(new_effects));
+        // `treatment` was already removed by obj.remove("treatment") above.
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::migrate;
@@ -935,7 +1037,7 @@ mod tests {
 
         // Transform's translate / scale reset to identity; the rest
         // (rotate, anchor) preserved.
-        let eff = &p.layers[0].effects[0];
+        let eff = &p.layers[0].effects[0].effect;
         let crate::effects::Effect::Transform {
             translate,
             scale_x,
@@ -1312,12 +1414,12 @@ mod tests {
 
     // --- P3.2.2 schema migration v7 → v8 tests ---
 
-    /// P7.4.1 — `CURRENT_SCHEMA_VERSION == 11` (bumped from 10 by P7.4.1).
+    /// 004-T1.3 — `CURRENT_SCHEMA_VERSION == 12` (bumped from 11 by 004-T1.3).
     #[test]
-    fn current_schema_version_is_11() {
+    fn current_schema_version_is_12() {
         assert_eq!(
-            CURRENT_SCHEMA_VERSION, 11,
-            "CURRENT_SCHEMA_VERSION must be 11 after P7.4.1"
+            CURRENT_SCHEMA_VERSION, 12,
+            "CURRENT_SCHEMA_VERSION must be 12 after 004-T1.3"
         );
     }
 
@@ -1807,5 +1909,129 @@ mod tests {
         } else {
             panic!("identity must have a Polygon node");
         }
+    }
+
+    // ---------------------------------------------------------------------------
+    // 004-T1.4 — v11 → v12 migration tests
+    // ---------------------------------------------------------------------------
+
+    /// 004-T1.4 test 1 — a v11 layer with `treatment: {preset_id: "tone_map", …}`
+    /// and two raw effects migrates to 3 EffectNodes, treatment first, all enabled.
+    #[test]
+    fn migrate_v11_to_v12_folds_treatment_in_front_of_effects() {
+        let v11 = serde_json::json!({
+            "schema_version": 11,
+            "layers": [{
+                "id": "a",
+                "kind": { "Svg": { "svg_path": "/tmp/a.svg" } },
+                "enabled": true,
+                "transform": { "translate": [0.0, 0.0], "rotate_deg": 0.0, "scale": [1.0, 1.0], "anchor": [0.0, 0.0] },
+                "blend_mode": "Normal",
+                "opacity": 1.0,
+                // v11 effects are plain Effect objects (not EffectNode)
+                "effects": [
+                    { "Color": { "hue": { "Static": 0.0 }, "saturation": { "Static": 1.0 }, "brightness": { "Static": 0.0 }, "contrast": { "Static": 1.0 } } },
+                    { "Blur": { "radius_px": { "Static": 0.0 } } }
+                ],
+                "treatment": {
+                    "preset_id": "tone_map",
+                    "params": { "exposure": 0.5 },
+                    "overlay_path": null,
+                    "collage_paths": []
+                }
+            }]
+        });
+
+        let (migrated, _) = migrate(v11).expect("migrate v11 → v12");
+        let effects = &migrated["layers"][0]["effects"];
+        let arr = effects.as_array().expect("effects must be an array");
+        assert_eq!(arr.len(), 3, "3 nodes: Treatment + Color + Blur");
+
+        // First node: Treatment
+        let first = &arr[0];
+        assert_eq!(first["enabled"], serde_json::json!(true), "enabled must be true");
+        let treatment_variant = &first["effect"]["Treatment"];
+        assert!(treatment_variant.is_object(), "first effect must be Treatment");
+        assert_eq!(treatment_variant["id"], serde_json::json!("tone_map"));
+        assert!((treatment_variant["params"]["exposure"].as_f64().unwrap() - 0.5).abs() < 1e-6);
+
+        // Second and third nodes: Color and Blur — all enabled.
+        assert_eq!(arr[1]["enabled"], serde_json::json!(true));
+        assert!(arr[1]["effect"].get("Color").is_some(), "second must be Color");
+        assert_eq!(arr[2]["enabled"], serde_json::json!(true));
+        assert!(arr[2]["effect"].get("Blur").is_some(), "third must be Blur");
+
+        // Full typed deserialise must succeed at v12.
+        let _project: crate::project::Project =
+            serde_json::from_value(migrated).expect("deserialize migrated v11");
+    }
+
+    /// 004-T1.4 test 2 — feeding a v12 value (already migrated) is idempotent:
+    /// the output is byte-equal to the input (no double-wrap).
+    #[test]
+    fn migrate_v11_to_v12_idempotent_on_v12() {
+        // Build a v12 project (post-migration shape): effects already have EffectNode form.
+        let v12 = serde_json::json!({
+            "schema_version": 12,
+            "layers": [{
+                "id": "b",
+                "kind": { "Svg": { "svg_path": "/tmp/b.svg" } },
+                "enabled": true,
+                "transform": { "translate": [0.0, 0.0], "rotate_deg": 0.0, "scale": [1.0, 1.0], "anchor": [0.0, 0.0] },
+                "blend_mode": "Normal",
+                "opacity": 1.0,
+                "effects": [
+                    { "enabled": true, "effect": { "Color": { "hue": { "Static": 0.0 }, "saturation": { "Static": 1.0 }, "brightness": { "Static": 0.0 }, "contrast": { "Static": 1.0 } } } }
+                ]
+            }]
+        });
+
+        let (migrated, _) = migrate(v12.clone()).expect("migrate v12");
+        // schema_version is updated to CURRENT (also 12) — that's fine.
+        // The effects array must be unchanged: still 1 node, not double-wrapped.
+        let effects = &migrated["layers"][0]["effects"];
+        let arr = effects.as_array().expect("effects must be array");
+        assert_eq!(arr.len(), 1, "idempotent: still 1 node after re-migration");
+        assert_eq!(arr[0]["enabled"], serde_json::json!(true));
+        assert!(arr[0]["effect"].get("Color").is_some(), "Color node preserved");
+    }
+
+    /// 004-T1.4 test 3 — treatment with `overlay_path` pointing to a non-existent
+    /// file migrates without reading the filesystem: the path is carried verbatim.
+    #[test]
+    fn migrate_v11_to_v12_byte_for_byte_with_missing_overlay() {
+        let nonexistent = "/nonexistent/does/not/exist/overlay.png";
+        let v11 = serde_json::json!({
+            "schema_version": 11,
+            "layers": [{
+                "id": "c",
+                "kind": { "Svg": { "svg_path": "/tmp/c.svg" } },
+                "enabled": true,
+                "transform": { "translate": [0.0, 0.0], "rotate_deg": 0.0, "scale": [1.0, 1.0], "anchor": [0.0, 0.0] },
+                "blend_mode": "Normal",
+                "opacity": 1.0,
+                "effects": [],
+                "treatment": {
+                    "preset_id": "texture_overlay",
+                    "params": {},
+                    "overlay_path": nonexistent,
+                    "collage_paths": []
+                }
+            }]
+        });
+
+        // Must not panic, must not try to open the file.
+        let (migrated, _) = migrate(v11).expect("migrate v11 with missing overlay — must succeed");
+        let effects = &migrated["layers"][0]["effects"];
+        let arr = effects.as_array().expect("effects must be array");
+        assert_eq!(arr.len(), 1, "one EffectNode (the Treatment)");
+        let treatment = &arr[0]["effect"]["Treatment"];
+        assert_eq!(treatment["id"], serde_json::json!("texture_overlay"));
+        // overlay_path carried verbatim — no filesystem access.
+        assert_eq!(
+            treatment["overlay_path"].as_str().unwrap(),
+            nonexistent,
+            "overlay_path must be preserved byte-for-byte"
+        );
     }
 }

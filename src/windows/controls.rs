@@ -854,271 +854,33 @@ fn show_placement_section(ui: &mut Ui, project: &Project, layer_idx: usize) {
 ///   slider pattern so mid-drag jitter does not flood the undo stack).
 /// - SVG / FxLayer: explanatory label; no controls. Treatments are an
 ///   image-grammar concept; FxLayer carries its own preset library.
+/// 004-T1.foundation stub — `LayerConfig.treatment` removed (T1.3).
+/// The full body is replaced with a placeholder; T1.30 splices in the
+/// Look-chain UI and deletes this function + its six call sites entirely.
+///
+/// The `cfg!(any())` gate is statically-false so the compiler type-checks
+/// the six `set_layer_treatment_mutation` / `set_layer_treatment_params_mutation`
+/// calls inside it without executing them at runtime. This maintains
+/// referential integrity until T1.10 deletes those constructors.
 fn show_treatment_section(
     ui: &mut Ui,
     project: &mut Project,
     st: &mut ControlPanelState,
     layer_idx: usize,
 ) {
-    let kind_str = match project.layers[layer_idx].kind {
-        LayerKind::Image { .. } | LayerKind::Video { .. } => None,
-        LayerKind::Svg { .. } => Some("SVG"),
-        LayerKind::FxLayer { .. } => Some("FX"),
-        LayerKind::Ndi { .. } => Some("NDI"),
-    };
-    if let Some(label) = kind_str {
-        ui.colored_label(
-            ui.visuals().warn_fg_color,
-            format!("Treatments apply to image and video layers — this is a {label} layer."),
-        );
-        if label == "FX" {
-            ui.weak("FX layers use their own preset library (see the FX preset picker).");
-        }
-        return;
-    }
-
-    // ----- Preset combobox -----
-    let current_preset_id: Option<String> = project.layers[layer_idx]
-        .treatment
-        .as_ref()
-        .map(|t| t.preset_id.clone());
-    let registry = crate::render::treatments::registry();
-
-    // Label rendered in the combobox selected slot.
-    let current_label: &str = match &current_preset_id {
-        None => "None",
-        Some(id) => registry
-            .iter()
-            .find(|(rid, _)| *rid == id.as_str())
-            .map(|(_, label)| *label)
-            // Unknown preset (hand-edited project) — surface the raw id so
-            // the operator notices and the audit hint maps cleanly.
-            .unwrap_or(id.as_str()),
-    };
-
-    let mut staged_change: Option<Option<String>> = None;
-    ui.horizontal(|ui| {
-        ui.label("Preset");
-        egui::ComboBox::from_id_salt(("adv_treatment_preset", layer_idx))
-            .selected_text(current_label)
-            .show_ui(ui, |ui| {
-                // "None" option — clears the treatment.
-                if ui
-                    .selectable_label(current_preset_id.is_none(), "None")
-                    .clicked()
-                    && current_preset_id.is_some()
-                {
-                    staged_change = Some(None);
-                }
-                // PCleanup.2.12 — insert a non-clickable section label when
-                // the group changes. registry() is ordered source-modifying
-                // first, so the separator appears exactly once.
-                let mut last_group: Option<crate::render::treatments::TreatmentGroup> = None;
-                for (preset_id, label) in registry {
-                    let group = crate::render::treatments::treatment_group(preset_id);
-                    if last_group != Some(group) {
-                        match group {
-                            crate::render::treatments::TreatmentGroup::SourceModifier => {
-                                ui.weak("— source-modifying —");
-                            }
-                            crate::render::treatments::TreatmentGroup::GenerativeOrUtility => {
-                                ui.weak("— generative / utility —");
-                            }
-                        }
-                        last_group = Some(group);
-                    }
-                    let is_current = current_preset_id.as_deref() == Some(*preset_id);
-                    if ui.selectable_label(is_current, *label).clicked() && !is_current {
-                        staged_change = Some(Some((*preset_id).to_string()));
-                    }
-                }
-            });
-    });
-
-    if let Some(new_preset) = staged_change {
-        // Build new Treatment by carrying over params keys that the new
-        // preset documents; missing keys are filled with descriptor
-        // defaults. This means switching presets does not lose the
-        // operator's earlier slider tweaks for shared parameter names
-        // (intentional: identity → tone_map → identity round-trips
-        // common params like "exposure").
-        let next: Option<crate::project::schema::Treatment> = match new_preset {
-            None => None,
-            Some(preset_id) => {
-                let descriptors = crate::render::treatments::param_descriptors(preset_id.as_str());
-                let mut params: std::collections::HashMap<String, f32> =
-                    std::collections::HashMap::new();
-                let old_params = project.layers[layer_idx]
-                    .treatment
-                    .as_ref()
-                    .map(|t| t.params.clone())
-                    .unwrap_or_default();
-                for d in descriptors {
-                    let v = old_params.get(d.key).copied().unwrap_or(d.default);
-                    params.insert(d.key.to_string(), v);
-                }
-                Some(crate::project::schema::Treatment {
-                    preset_id,
-                    params,
-                    overlay_path: None,
-                    collage_paths: Vec::new(),
-                })
-            }
-        };
-        st.pending_mutations
-            .push(project.set_layer_treatment_mutation(layer_idx, next));
-    }
-
-    // ----- Per-param sliders (only when a preset is active) -----
-    let preset_id_for_params = project.layers[layer_idx]
-        .treatment
-        .as_ref()
-        .map(|t| t.preset_id.clone());
-    if let Some(preset_id) = preset_id_for_params {
-        let descriptors = crate::render::treatments::param_descriptors(preset_id.as_str());
-        if descriptors.is_empty() {
-            ui.add_space(2.0);
-            ui.weak("This preset has no tunable parameters.");
-        } else {
-            ui.add_space(4.0);
-            // Read current params HashMap; we'll write a new map on
-            // drag-release and dispatch the mutation. Reading via clone
-            // keeps the borrow on `project` short.
-            let current_params: std::collections::HashMap<String, f32> = project.layers[layer_idx]
-                .treatment
-                .as_ref()
-                .expect("treatment is_some — guarded by preset_id_for_params")
-                .params
-                .clone();
-            for d in descriptors {
-                let cur = current_params.get(d.key).copied().unwrap_or(d.default);
-                let mut edit = cur;
-                let resp = ui.add(egui::Slider::new(&mut edit, d.min..=d.max).text(d.label));
-                // Dispatch on drag-release / focus-loss so the mutation
-                // history records one undoable step per gesture rather
-                // than one per drag tick.
-                if (resp.drag_stopped() || resp.lost_focus()) && (edit - cur).abs() > 1e-6 {
-                    let mut next_params = current_params.clone();
-                    next_params.insert(d.key.to_string(), edit);
-                    st.pending_mutations
-                        .push(project.set_layer_treatment_params_mutation(layer_idx, next_params));
-                    // After dispatch, stop iterating: the next frame
-                    // will read the freshly-written params. Continuing
-                    // here would compare subsequent sliders against a
-                    // stale `current_params` clone.
-                    break;
-                }
-            }
-        }
-    }
-
-    // ----- P1.3.4 — Texture-overlay path picker -----
-    // Only relevant for the `texture_overlay` preset; other presets
-    // don't read `overlay_path`. Picking a file dispatches a fresh
-    // `SetLayerTreatment` mutation with the new path (since
-    // `overlay_path` is part of the Treatment struct, we replace the
-    // whole struct via the existing builder; the params HashMap is
-    // preserved).
-    let current_overlay_path = project.layers[layer_idx]
-        .treatment
-        .as_ref()
-        .and_then(|t| t.overlay_path.clone());
-    let active_preset = project.layers[layer_idx]
-        .treatment
-        .as_ref()
-        .map(|t| t.preset_id.clone());
-    if matches!(
-        active_preset.as_deref(),
-        Some(crate::render::treatments::TEXTURE_OVERLAY_PRESET_ID)
-    ) {
-        ui.add_space(4.0);
-        ui.label("Overlay image");
-        ui.horizontal(|ui| {
-            let display = current_overlay_path
-                .as_ref()
-                .map(|p| p.display().to_string())
-                .unwrap_or_else(|| "(none — click Pick to choose a file)".to_string());
-            ui.weak(display);
-        });
-        if ui.button("Pick overlay file…").clicked() {
-            if let Some(path) = crate::windows::file_dialogs::pick_overlay_file() {
-                let mut new_treatment = project.layers[layer_idx]
-                    .treatment
-                    .clone()
-                    .expect("texture_overlay preset is active");
-                new_treatment.overlay_path = Some(path);
-                st.pending_mutations
-                    .push(project.set_layer_treatment_mutation(layer_idx, Some(new_treatment)));
-            }
-        }
-        if current_overlay_path.is_some() && ui.button("Clear overlay").clicked() {
-            let mut new_treatment = project.layers[layer_idx]
-                .treatment
-                .clone()
-                .expect("texture_overlay preset is active");
-            new_treatment.overlay_path = None;
-            st.pending_mutations
-                .push(project.set_layer_treatment_mutation(layer_idx, Some(new_treatment)));
-        }
-    }
-
-    // ----- P1.3.6 — collage slot pickers (up to COLLAGE_SLOTS) -----
-    if matches!(
-        active_preset.as_deref(),
-        Some(crate::render::treatments::COLLAGE_PRESET_ID)
-    ) {
-        ui.add_space(4.0);
-        ui.label(format!(
-            "Collage slots (up to {}; empty slots fall back to source)",
-            crate::render::treatments::COLLAGE_SLOTS
-        ));
-        let current_paths = project.layers[layer_idx]
-            .treatment
-            .as_ref()
-            .map(|t| t.collage_paths.clone())
-            .unwrap_or_default();
-        for slot in 0..crate::render::treatments::COLLAGE_SLOTS {
-            ui.horizontal(|ui| {
-                ui.label(format!("Slot {slot}"));
-                let display = current_paths
-                    .get(slot)
-                    .map(|p| {
-                        p.file_name()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or("(invalid path)")
-                            .to_string()
-                    })
-                    .unwrap_or_else(|| "(empty)".to_string());
-                ui.weak(display);
-                if ui.button("Pick…").clicked()
-                    && let Some(path) = crate::windows::file_dialogs::pick_overlay_file()
-                {
-                    let mut new_treatment = project.layers[layer_idx]
-                        .treatment
-                        .clone()
-                        .expect("collage preset is active");
-                    while new_treatment.collage_paths.len() <= slot {
-                        new_treatment.collage_paths.push(std::path::PathBuf::new());
-                    }
-                    new_treatment.collage_paths[slot] = path;
-                    st.pending_mutations
-                        .push(project.set_layer_treatment_mutation(layer_idx, Some(new_treatment)));
-                }
-                if current_paths.get(slot).is_some() && ui.button("✕").clicked() {
-                    let mut new_treatment = project.layers[layer_idx]
-                        .treatment
-                        .clone()
-                        .expect("collage preset is active");
-                    if slot < new_treatment.collage_paths.len() {
-                        new_treatment.collage_paths.remove(slot);
-                    }
-                    st.pending_mutations
-                        .push(project.set_layer_treatment_mutation(layer_idx, Some(new_treatment)));
-                }
-            });
-        }
+    ui.weak("(Treatment section deprecated — see Look chain. T1.30 deletes this.)");
+    // Keep call sites of set_layer_treatment_mutation / set_layer_treatment_params_mutation
+    // alive for compile-time referential integrity until T1.10 deletes those constructors.
+    // The branch is statically false so this block never executes; the compiler still
+    // type-checks every call inside it.
+    if cfg!(any()) {
+        let _ = project.set_layer_treatment_mutation(layer_idx, None);
+        let _ = project.set_layer_treatment_params_mutation(layer_idx, std::collections::HashMap::new());
+        let _ = st;
     }
 }
+
+// (original show_treatment_section body deleted by 004-T1.foundation; T1.30 finalizes)
 
 // ---------------------------------------------------------------------------
 // FX preset parameter sliders (P2.5.6)
@@ -1287,7 +1049,13 @@ fn show_effect_chain(
                     }
                 });
             if ui.button("Apply").clicked() {
-                let new = st.presets[st.preset_picker_index].effects.clone();
+                // 004-T1.15 — Preset.effects is Vec<Effect>; wrap in EffectNode until
+                // T1.16 migrates Preset.effects to Vec<EffectNode>.
+                let new: Vec<crate::effects::EffectNode> = st.presets[st.preset_picker_index]
+                    .effects
+                    .iter()
+                    .map(|e| crate::effects::EffectNode { enabled: true, effect: e.clone() })
+                    .collect();
                 st.pending_mutations
                     .push(project.set_layer_effects_mutation(layer_idx, new));
             }
@@ -1308,7 +1076,9 @@ fn show_effect_chain(
 
     let mut staged_changes: Vec<(usize, EffectChange)> = Vec::new();
     for idx in 0..effects_len {
-        let effect = &mut project.layers[layer_idx].effects[idx];
+        // 004-T1.12 — dereference EffectNode.effect before passing to show_effect/effect_label
+        let node = &mut project.layers[layer_idx].effects[idx];
+        let effect = &mut node.effect;
         egui::CollapsingHeader::new(effect_label(effect))
             .id_salt(("adv_eff", layer_idx, idx))
             .default_open(true)
@@ -1340,8 +1110,9 @@ fn show_effect_chain(
             let old = project.layers[layer_idx].effects.clone();
             let mut new = old.clone();
             for (effect_idx, change) in field_changes {
+                // 004-T1.12 — dereference EffectNode.effect
                 if let Some(crate::effects::Effect::Transform { translate, .. }) =
-                    new.get_mut(effect_idx)
+                    new.get_mut(effect_idx).map(|n| &mut n.effect)
                 {
                     match change {
                         EffectChange::TransformTranslateX(v) => translate[0] = v,
@@ -1832,7 +1603,9 @@ fn show_osc_bindings_summary(ui: &mut Ui, project: &Project) {
     let mut any_binding = false;
 
     for (layer_idx, layer) in project.layers.iter().enumerate() {
-        for (effect_idx, effect) in layer.effects.iter().enumerate() {
+        // 004-T1.12 — dereference EffectNode.effect
+        for (effect_idx, node) in layer.effects.iter().enumerate() {
+            let effect = &node.effect;
             // Walk every Modulator field on every effect type. Each
             // (effect_kind, field_name) pair gets a row when the
             // modulator is `OscBound`.

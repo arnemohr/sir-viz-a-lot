@@ -471,7 +471,7 @@ mod tests {
                 unknown_zone_role_raw: None,
             },
             muted: false,
-            treatment: None,
+
             bezier_mesh: None,
             mask_graph: None,
         });
@@ -514,7 +514,7 @@ mod tests {
                 unknown_zone_role_raw: None,
             },
             muted: false,
-            treatment: None,
+
             bezier_mesh: None,
             mask_graph: None,
         });
@@ -546,6 +546,7 @@ mod tests {
         use crate::modulators::Modulator;
 
         let mut p = Project::default();
+        use crate::effects::EffectNode;
         p.layers.push(LayerConfig {
             id: "a".into(),
             kind: LayerKind::Svg {
@@ -553,17 +554,19 @@ mod tests {
             },
             enabled: true,
             transform: crate::project::schema::Transform2D::default(),
-            effects: vec![Effect::Transform {
-                translate: [0.1, 0.0],
-                rotate_deg: Modulator::Static(0.0),
-                scale_x: Modulator::Static(1.0),
-                scale_y: Modulator::Static(1.0),
+            effects: vec![EffectNode {
+                enabled: true,
+                effect: Effect::Transform {
+                    translate: [0.1, 0.0],
+                    rotate_deg: Modulator::Static(0.0),
+                    scale_x: Modulator::Static(1.0),
+                    scale_y: Modulator::Static(1.0),
+                },
             }],
             blend_mode: BlendMode::Normal,
             opacity: 1.0,
             warp: WarpMesh::identity(),
             muted: false,
-            treatment: None,
             bezier_mesh: None,
             mask_graph: None,
         });
@@ -571,7 +574,7 @@ mod tests {
         p.cues[0].snapshot = snapshot(&p);
 
         // Move
-        if let Effect::Transform { translate, .. } = &mut p.layers[0].effects[0] {
+        if let Effect::Transform { translate, .. } = &mut p.layers[0].effects[0].effect {
             *translate = [0.5, 0.0];
         }
         p.cues.push(Cue::new("2", serde_json::json!({}), None));
@@ -580,7 +583,7 @@ mod tests {
         // Recall scene 1
         let target = p.cues[0].snapshot.clone();
         restore(&mut p, &target).expect("restore");
-        match &p.layers[0].effects[0] {
+        match &p.layers[0].effects[0].effect {
             Effect::Transform { translate, .. } => assert_eq!(*translate, [0.1, 0.0]),
             other => panic!("expected Transform, got {other:?}"),
         }
@@ -595,6 +598,7 @@ mod tests {
         use crate::modulators::Modulator;
 
         let mut p = Project::default();
+        use crate::effects::EffectNode;
         p.layers.push(LayerConfig {
             id: "a".into(),
             kind: LayerKind::Svg {
@@ -602,17 +606,19 @@ mod tests {
             },
             enabled: true,
             transform: crate::project::schema::Transform2D::default(),
-            effects: vec![Effect::Transform {
-                translate: [0.1, 0.0],
-                rotate_deg: Modulator::Static(0.0),
-                scale_x: Modulator::Static(1.0),
-                scale_y: Modulator::Static(1.0),
+            effects: vec![EffectNode {
+                enabled: true,
+                effect: Effect::Transform {
+                    translate: [0.1, 0.0],
+                    rotate_deg: Modulator::Static(0.0),
+                    scale_x: Modulator::Static(1.0),
+                    scale_y: Modulator::Static(1.0),
+                },
             }],
             blend_mode: BlendMode::Normal,
             opacity: 1.0,
             warp: WarpMesh::identity(),
             muted: false,
-            treatment: None,
             bezier_mesh: None,
             mask_graph: None,
         });
@@ -620,7 +626,7 @@ mod tests {
         p.cues.push(Cue::new("1", serde_json::json!({}), None));
         p.cues[0].snapshot = snapshot(&p);
         // Modify + save slot 1
-        if let Effect::Transform { translate, .. } = &mut p.layers[0].effects[0] {
+        if let Effect::Transform { translate, .. } = &mut p.layers[0].effects[0].effect {
             *translate = [0.5, 0.0];
         }
         p.cues.push(Cue::new("2", serde_json::json!({}), None));
@@ -632,7 +638,7 @@ mod tests {
         restore_scene(&mut p, &target).expect("restore_scene");
 
         // Layer state restored.
-        match &p.layers[0].effects[0] {
+        match &p.layers[0].effects[0].effect {
             crate::effects::Effect::Transform { translate, .. } => {
                 assert_eq!(*translate, [0.1, 0.0]);
             }
@@ -669,7 +675,7 @@ mod tests {
             opacity: 1.0,
             warp: WarpMesh::identity(),
             muted: false,
-            treatment: None,
+
             bezier_mesh: None,
             mask_graph: None,
         });
@@ -731,7 +737,7 @@ mod tests {
             opacity: 1.0,
             warp: WarpMesh::identity(),
             muted: false,
-            treatment: None,
+
             bezier_mesh: None,
             mask_graph: None,
         });
@@ -778,7 +784,7 @@ mod tests {
             opacity: 1.0,
             warp: WarpMesh::identity(),
             muted: false,
-            treatment: None,
+
             bezier_mesh: None,
             mask_graph: None,
         });
@@ -798,7 +804,7 @@ mod tests {
             opacity: 0.5,
             warp: WarpMesh::identity(),
             muted: false,
-            treatment: None,
+
             bezier_mesh: None,
             mask_graph: None,
         });
@@ -845,7 +851,7 @@ mod tests {
             opacity: 1.0,
             warp: WarpMesh::identity(),
             muted: false,
-            treatment: None,
+
             bezier_mesh: None,
             mask_graph: None,
         });
@@ -1010,7 +1016,7 @@ mod tests {
             opacity: 1.0,
             warp: WarpMesh::identity(),
             muted: false,
-            treatment: None,
+
             bezier_mesh: None,
             mask_graph: None,
         });
@@ -1084,7 +1090,7 @@ mod tests {
             opacity: 1.0,
             warp: WarpMesh::identity(),
             muted: false,
-            treatment: None,
+
             bezier_mesh: None,
             mask_graph: None,
         });
@@ -1298,7 +1304,7 @@ mod tests {
             opacity: 1.0,
             warp: WarpMesh::identity(),
             muted: false,
-            treatment: None,
+
             bezier_mesh: None,
             mask_graph: None,
         });
@@ -1319,7 +1325,7 @@ mod tests {
             opacity: 1.0,
             warp: WarpMesh::identity(),
             muted: false,
-            treatment: None,
+
             bezier_mesh: None,
             mask_graph: None,
         });
@@ -1345,7 +1351,7 @@ mod tests {
             opacity: 1.0,
             warp: WarpMesh::identity(),
             muted: false,
-            treatment: None,
+
             bezier_mesh: None,
             mask_graph: None,
         });
@@ -1375,7 +1381,7 @@ mod tests {
             opacity: 1.0,
             warp: WarpMesh::identity(),
             muted: false,
-            treatment: None,
+
             bezier_mesh: None,
             mask_graph: None,
         });
@@ -1407,7 +1413,7 @@ mod tests {
             opacity: 1.0,
             warp: WarpMesh::identity(),
             muted: false,
-            treatment: None,
+
             bezier_mesh: None,
             mask_graph: None,
         });
@@ -1454,7 +1460,7 @@ mod tests {
             opacity: 1.0,
             warp: WarpMesh::identity(),
             muted: false,
-            treatment: None,
+
             bezier_mesh: None,
             mask_graph: None,
         });

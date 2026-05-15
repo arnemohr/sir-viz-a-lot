@@ -271,13 +271,14 @@ fn layer_color(idx: usize) -> [f32; 4] {
 /// Mirrors `windows::scene_editor::effective_static_transform` — kept in
 /// this module to avoid the windows → render dependency direction.
 fn effective_static_transform(layer: &LayerConfig) -> ([f32; 2], [f32; 2], f32) {
-    for e in layer.effects.iter() {
+    // 004-T1.14 — iterate EffectNode, match on .effect
+    for node in layer.effects.iter() {
         if let Effect::Transform {
             translate,
             scale_x,
             scale_y,
             rotate_deg,
-        } = e
+        } = &node.effect
         {
             let s_x = match scale_x {
                 Modulator::Static(v) => *v,

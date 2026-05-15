@@ -199,7 +199,8 @@ pub fn project_audio_modulator_count(project: &crate::project::schema::Project) 
     use crate::effects::Effect;
     let mut n = 0;
     for layer in &project.layers {
-        for effect in &layer.effects {
+        for node in &layer.effects {
+            let effect = &node.effect;
             match effect {
                 Effect::Color {
                     hue,
@@ -354,32 +355,39 @@ mod tests {
         // identity layer and rewrite its effects.
         let proto = project.layers.first().cloned();
         if let Some(mut layer) = proto {
+            use crate::effects::EffectNode;
             layer.effects = vec![
-                Effect::Color {
-                    hue: Modulator::Audio {
-                        band: 0,
-                        smoothing: 0.5,
-                        amp: 1.0,
-                        offset: 0.0,
+                EffectNode {
+                    enabled: true,
+                    effect: Effect::Color {
+                        hue: Modulator::Audio {
+                            band: 0,
+                            smoothing: 0.5,
+                            amp: 1.0,
+                            offset: 0.0,
+                        },
+                        saturation: Modulator::Static(1.0),
+                        brightness: Modulator::Audio {
+                            band: 1,
+                            smoothing: 0.5,
+                            amp: 1.0,
+                            offset: 0.0,
+                        },
+                        contrast: Modulator::Static(1.0),
                     },
-                    saturation: Modulator::Static(1.0),
-                    brightness: Modulator::Audio {
-                        band: 1,
-                        smoothing: 0.5,
-                        amp: 1.0,
-                        offset: 0.0,
-                    },
-                    contrast: Modulator::Static(1.0),
                 },
-                Effect::Tint {
-                    rgba: [1.0, 0.5, 0.25, 1.0],
-                    amount: Modulator::Audio {
-                        band: 2,
-                        smoothing: 0.5,
-                        amp: 1.0,
-                        offset: 0.0,
+                EffectNode {
+                    enabled: true,
+                    effect: Effect::Tint {
+                        rgba: [1.0, 0.5, 0.25, 1.0],
+                        amount: Modulator::Audio {
+                            band: 2,
+                            smoothing: 0.5,
+                            amp: 1.0,
+                            offset: 0.0,
+                        },
+                        mode: crate::effects::tint::TintMode::Multiply,
                     },
-                    mode: crate::effects::tint::TintMode::Multiply,
                 },
             ];
             project.layers.push(layer);

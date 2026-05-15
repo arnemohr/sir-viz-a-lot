@@ -541,94 +541,90 @@ impl ProjectAudit {
                 }
             }
 
-            // P1.2.1 — Treatment audit. Three checks per layer that
-            // carries `treatment.is_some()`:
-            //   (1) unknown preset_id  → Warn UnknownTreatment
-            //   (2) missing overlay_path file        → Warn MissingTreatmentAsset
-            //   (3) missing collage_paths[i] file    → Warn MissingTreatmentAsset
-            if let Some(treatment) = layer.treatment.as_ref() {
-                // (1) unknown/empty preset_id — both cases emit
-                // UnknownTreatment (Warn). Empty string: operator
-                // dispatched SetLayerTreatment with no preset selected.
-                // Non-empty but unregistered: project was written by a
-                // newer build or mistyped id. Either way the layer will
-                // fall back to the default blit. The message distinguishes
-                // the two sub-cases so the operator gets actionable text.
-                if treatment.preset_id.is_empty()
-                    || !treatments::is_registered(&treatment.preset_id)
-                {
-                    let message = if treatment.preset_id.is_empty() {
-                        format!(
-                            "Layer {} has a treatment with no preset_id; it will render as a no-op.",
-                            layer.id,
-                        )
-                    } else {
-                        format!(
-                            "Layer {} has an unknown treatment preset '{}'; \
-                             the layer will render as-is (no treatment applied).",
-                            layer.id, treatment.preset_id,
-                        )
-                    };
-                    findings.push(AuditFinding {
-                        kind: AuditKind::UnknownTreatment {
-                            layer_idx,
-                            effect_idx: 0,
-                            preset_id: treatment.preset_id.clone(),
-                        },
-                        severity: Severity::Warn,
-                        message,
-                        autofix: None,
-                    });
-                }
-
-                // (2) missing overlay_path
-                if let Some(overlay) = treatment.overlay_path.as_ref() {
-                    let resolved = match project_path.and_then(|p| p.parent()) {
-                        Some(dir) if overlay.is_relative() => dir.join(overlay),
-                        _ => overlay.to_path_buf(),
-                    };
-                    if !resolved.exists() {
+            // 004-T1.17 — Treatment audit. Walk `layer.effects` and match on
+            // `EffectNode.effect == Effect::Treatment { id, params, overlay_path, collage_paths }`.
+            // Three checks per Treatment node:
+            //   (1) unknown/empty id       → Warn UnknownTreatment
+            //   (2) missing overlay_path   → Warn MissingTreatmentAsset
+            //   (3) missing collage_paths[i] → Warn MissingTreatmentAsset
+            // `effect_idx` is the position in the chain (not always 0).
+            for (effect_idx, node) in layer.effects.iter().enumerate() {
+                if let crate::effects::Effect::Treatment { id, overlay_path, collage_paths, .. } = &node.effect {
+                    // (1) unknown/empty id
+                    if id.is_empty() || !treatments::is_registered(id) {
+                        let message = if id.is_empty() {
+                            format!(
+                                "Layer {} has a Treatment effect with no id; it will render as a no-op.",
+                                layer.id,
+                            )
+                        } else {
+                            format!(
+                                "Layer {} has an unknown Treatment preset '{}'; \
+                                 the effect will be skipped.",
+                                layer.id, id,
+                            )
+                        };
                         findings.push(AuditFinding {
-                            kind: AuditKind::MissingTreatmentAsset {
+                            kind: AuditKind::UnknownTreatment {
                                 layer_idx,
-                                effect_idx: 0,
-                                path: overlay.clone(),
+                                effect_idx,
+                                preset_id: id.clone(),
                             },
                             severity: Severity::Warn,
-                            message: format!(
-                                "Layer {}: treatment overlay '{}' is missing. The overlay will be skipped.",
-                                layer.id,
-                                overlay.display(),
-                            ),
+                            message,
                             autofix: None,
                         });
                     }
-                }
 
-                // (3) missing collage_paths entries — one finding per
-                // missing entry, indexed in the message so the operator
-                // can find which slot is broken.
-                for (entry_idx, collage) in treatment.collage_paths.iter().enumerate() {
-                    let resolved = match project_path.and_then(|p| p.parent()) {
-                        Some(dir) if collage.is_relative() => dir.join(collage),
-                        _ => collage.to_path_buf(),
-                    };
-                    if !resolved.exists() {
-                        findings.push(AuditFinding {
-                            kind: AuditKind::MissingTreatmentAsset {
-                                layer_idx,
-                                effect_idx: 0,
-                                path: collage.clone(),
-                            },
-                            severity: Severity::Warn,
-                            message: format!(
-                                "Layer {}: collage slot {} ('{}') is missing.",
-                                layer.id,
-                                entry_idx,
-                                collage.display(),
-                            ),
-                            autofix: None,
-                        });
+                    // (2) missing overlay_path
+                    if let Some(overlay) = overlay_path.as_ref() {
+                        let resolved = match project_path.and_then(|p| p.parent()) {
+                            Some(dir) if overlay.is_relative() => dir.join(overlay),
+                            _ => overlay.to_path_buf(),
+                        };
+                        if !resolved.exists() {
+                            findings.push(AuditFinding {
+                                kind: AuditKind::MissingTreatmentAsset {
+                                    layer_idx,
+                                    effect_idx,
+                                    path: overlay.clone(),
+                                },
+                                severity: Severity::Warn,
+                                message: format!(
+                                    "Layer {}: Treatment[{}] overlay '{}' is missing. The overlay will be skipped.",
+                                    layer.id,
+                                    effect_idx,
+                                    overlay.display(),
+                                ),
+                                autofix: None,
+                            });
+                        }
+                    }
+
+                    // (3) missing collage_paths entries
+                    for (entry_idx, collage) in collage_paths.iter().enumerate() {
+                        let resolved = match project_path.and_then(|p| p.parent()) {
+                            Some(dir) if collage.is_relative() => dir.join(collage),
+                            _ => collage.to_path_buf(),
+                        };
+                        if !resolved.exists() {
+                            findings.push(AuditFinding {
+                                kind: AuditKind::MissingTreatmentAsset {
+                                    layer_idx,
+                                    effect_idx,
+                                    path: collage.clone(),
+                                },
+                                severity: Severity::Warn,
+                                message: format!(
+                                    "Layer {}: Treatment[{}] collage slot {} ('{}') is missing.",
+                                    layer.id,
+                                    effect_idx,
+                                    entry_idx,
+                                    collage.display(),
+                                ),
+                                autofix: None,
+                            });
+                        }
                     }
                 }
             }
@@ -855,10 +851,11 @@ fn zero_scale_autofix_for_layer(
     layer: &LayerConfig,
     layer_idx: usize,
 ) -> Option<Mutation> {
-    let has_zero_scale = layer.effects.iter().any(|e| {
+    // 004-T1.12 — dereference EffectNode.effect
+    let has_zero_scale = layer.effects.iter().any(|node| {
         if let Effect::Transform {
             scale_x, scale_y, ..
-        } = e
+        } = &node.effect
         {
             let sx_zero = matches!(scale_x, Modulator::Static(v) if v.abs() < 1e-6);
             let sy_zero = matches!(scale_y, Modulator::Static(v) if v.abs() < 1e-6);
@@ -872,10 +869,10 @@ fn zero_scale_autofix_for_layer(
     }
 
     let mut new_effects = layer.effects.clone();
-    for e in new_effects.iter_mut() {
+    for node in new_effects.iter_mut() {
         if let Effect::Transform {
             scale_x, scale_y, ..
-        } = e
+        } = &mut node.effect
         {
             if matches!(scale_x, Modulator::Static(v) if v.abs() < 1e-6)
                 && matches!(scale_y, Modulator::Static(v) if v.abs() < 1e-6)
@@ -908,17 +905,20 @@ mod tests {
             kind: crate::project::schema::LayerKind::Svg { svg_path: asset },
             enabled: true,
             transform: crate::project::schema::Transform2D::default(),
-            effects: vec![crate::effects::Effect::Transform {
-                translate: [0.0, 0.0],
-                rotate_deg: crate::modulators::Modulator::Static(0.0),
-                scale_x: crate::modulators::Modulator::Static(1.0),
-                scale_y: crate::modulators::Modulator::Static(1.0),
+            // 004-T1.15/T1.19 — wrap Effect in EffectNode; no treatment field.
+            effects: vec![crate::effects::EffectNode {
+                enabled: true,
+                effect: crate::effects::Effect::Transform {
+                    translate: [0.0, 0.0],
+                    rotate_deg: crate::modulators::Modulator::Static(0.0),
+                    scale_x: crate::modulators::Modulator::Static(1.0),
+                    scale_y: crate::modulators::Modulator::Static(1.0),
+                },
             }],
             blend_mode: crate::project::schema::BlendMode::Normal,
             opacity: 1.0,
             warp: crate::project::schema::WarpMesh::identity(),
             muted: false,
-            treatment: None,
             bezier_mesh: None,
             mask_graph: None,
         });
@@ -962,17 +962,20 @@ mod tests {
             },
             enabled: true,
             transform: crate::project::schema::Transform2D::default(),
-            effects: vec![Effect::Transform {
-                translate: [0.0, 0.0],
-                rotate_deg: Modulator::Static(0.0),
-                scale_x: Modulator::Static(0.0),
-                scale_y: Modulator::Static(0.0),
+            // 004-T1.15 — wrap Effect in EffectNode.
+            effects: vec![crate::effects::EffectNode {
+                enabled: true,
+                effect: Effect::Transform {
+                    translate: [0.0, 0.0],
+                    rotate_deg: Modulator::Static(0.0),
+                    scale_x: Modulator::Static(0.0),
+                    scale_y: Modulator::Static(0.0),
+                },
             }],
             blend_mode: crate::project::schema::BlendMode::Normal,
             opacity: 1.0,
             warp: crate::project::schema::WarpMesh::identity(),
             muted: false,
-            treatment: None,
             bezier_mesh: None,
             mask_graph: None,
         });
@@ -989,9 +992,10 @@ mod tests {
         let mutation = zero.autofix.clone().unwrap();
         let _reverse = mutation.apply(&mut p);
         let layer = p.layers.last().expect("layer present");
+        // 004-T1.12 — dereference EffectNode.effect
         if let Effect::Transform {
             scale_x, scale_y, ..
-        } = &layer.effects[0]
+        } = &layer.effects[0].effect
         {
             assert!(
                 matches!(scale_x, Modulator::Static(v) if (v - 1.0).abs() < 1e-6),
@@ -1174,48 +1178,58 @@ mod tests {
         }
     }
 
-    /// P1.2.1 — a missing treatment `overlay_path` surfaces a Warn
-    /// `MissingTreatmentAsset` finding.
+    /// 004-T1.19 — a missing Treatment overlay_path in the effects chain
+    /// surfaces a Warn `MissingTreatmentAsset` finding.
     #[test]
     fn audit_missing_treatment_overlay_emits_warning() {
-        use crate::project::schema::Treatment;
         let mut p = fresh_project();
-        p.layers[0].treatment = Some(Treatment {
-            preset_id: "texture_overlay".into(),
-            params: std::collections::HashMap::new(),
-            overlay_path: Some(std::path::PathBuf::from(
-                "/definitely/does/not/exist/grain.png",
-            )),
-            collage_paths: vec![],
+        // 004-T1.19 — push Effect::Treatment into effects chain (treatment field gone).
+        p.layers[0].effects.push(crate::effects::EffectNode {
+            enabled: true,
+            effect: crate::effects::Effect::Treatment {
+                id: "texture_overlay".into(),
+                params: std::collections::HashMap::new(),
+                overlay_path: Some(std::path::PathBuf::from(
+                    "/definitely/does/not/exist/grain.png",
+                )),
+                collage_paths: vec![],
+            },
         });
+        let effect_idx = p.layers[0].effects.len() - 1;
         let findings = ProjectAudit::run(&p, &AuditEnv::default());
         let f = findings
             .iter()
             .find(|f| {
                 matches!(
                     &f.kind,
-                    AuditKind::MissingTreatmentAsset { layer_idx: 0, effect_idx: 0, path }
+                    AuditKind::MissingTreatmentAsset { layer_idx: 0, path, .. }
                         if path.ends_with("grain.png")
                 )
             })
             .expect("expected MissingTreatmentAsset for treatment overlay path");
         assert_eq!(f.severity, Severity::Warn);
+        // effect_idx must match the chain position.
+        if let AuditKind::MissingTreatmentAsset { effect_idx: ei, .. } = f.kind {
+            assert_eq!(ei, effect_idx, "effect_idx must match chain position");
+        }
     }
 
-    /// P1.2.1 — missing entries in `collage_paths` surface one
-    /// finding each, indexed by slot.
+    /// 004-T1.19 — missing entries in collage_paths surface one finding each.
     #[test]
     fn audit_missing_collage_entries_each_emit_one_finding() {
-        use crate::project::schema::Treatment;
         let mut p = fresh_project();
-        p.layers[0].treatment = Some(Treatment {
-            preset_id: "collage".into(),
-            params: std::collections::HashMap::new(),
-            overlay_path: None,
-            collage_paths: vec![
-                std::path::PathBuf::from("/nonexistent/a.png"),
-                std::path::PathBuf::from("/nonexistent/b.png"),
-            ],
+        // 004-T1.19 — push Effect::Treatment into effects chain.
+        p.layers[0].effects.push(crate::effects::EffectNode {
+            enabled: true,
+            effect: crate::effects::Effect::Treatment {
+                id: "collage".into(),
+                params: std::collections::HashMap::new(),
+                overlay_path: None,
+                collage_paths: vec![
+                    std::path::PathBuf::from("/nonexistent/a.png"),
+                    std::path::PathBuf::from("/nonexistent/b.png"),
+                ],
+            },
         });
         let findings = ProjectAudit::run(&p, &AuditEnv::default());
         let missing: Vec<_> = findings
@@ -1223,7 +1237,7 @@ mod tests {
             .filter(|f| {
                 matches!(
                     &f.kind,
-                    AuditKind::MissingTreatmentAsset { layer_idx: 0, effect_idx: 0, path }
+                    AuditKind::MissingTreatmentAsset { layer_idx: 0, path, .. }
                         if path.starts_with("/nonexistent/")
                 )
             })
@@ -1238,25 +1252,26 @@ mod tests {
         assert!(missing.iter().any(|f| f.message.contains("slot 1")));
     }
 
-    /// P1.2.1 — empty preset_id is a Warn finding (placeholder until
-    /// W3 ships the preset registry; today it's the only detectable
-    /// "unknown preset" failure mode).
+    /// 004-T1.19 — empty id is a Warn finding.
     #[test]
     fn audit_empty_treatment_preset_id_emits_warning() {
-        use crate::project::schema::Treatment;
         let mut p = fresh_project();
-        p.layers[0].treatment = Some(Treatment {
-            preset_id: String::new(),
-            params: std::collections::HashMap::new(),
-            overlay_path: None,
-            collage_paths: vec![],
+        // 004-T1.19 — push Effect::Treatment into effects chain.
+        p.layers[0].effects.push(crate::effects::EffectNode {
+            enabled: true,
+            effect: crate::effects::Effect::Treatment {
+                id: String::new(),
+                params: std::collections::HashMap::new(),
+                overlay_path: None,
+                collage_paths: vec![],
+            },
         });
         let findings = ProjectAudit::run(&p, &AuditEnv::default());
         assert!(
             findings
                 .iter()
-                .any(|f| f.severity == Severity::Warn && f.message.contains("no preset_id")),
-            "expected a Warn finding for an empty preset_id",
+                .any(|f| f.severity == Severity::Warn && f.message.contains("no id")),
+            "expected a Warn finding for an empty id",
         );
     }
 
@@ -1764,17 +1779,20 @@ mod tests {
         );
     }
 
-    /// P2.2.4 — Treatment with an unregistered preset_id emits exactly one
+    /// 004-T1.19 — Treatment with an unregistered id emits exactly one
     /// UnknownTreatment Warn finding.
     #[test]
     fn audit_unknown_treatment_emits_warn() {
-        use crate::project::schema::Treatment;
         let mut p = fresh_project();
-        p.layers[0].treatment = Some(Treatment {
-            preset_id: "definitely_fake".into(),
-            params: std::collections::HashMap::new(),
-            overlay_path: None,
-            collage_paths: vec![],
+        // 004-T1.19 — push Effect::Treatment into effects chain.
+        p.layers[0].effects.push(crate::effects::EffectNode {
+            enabled: true,
+            effect: crate::effects::Effect::Treatment {
+                id: "definitely_fake".into(),
+                params: std::collections::HashMap::new(),
+                overlay_path: None,
+                collage_paths: vec![],
+            },
         });
         let findings = ProjectAudit::run(&p, &AuditEnv::default());
         let unknown: Vec<_> = findings
@@ -1790,17 +1808,19 @@ mod tests {
         assert!(unknown[0].autofix.is_none());
     }
 
-    /// P2.2.4 — Treatment with a registered preset_id (IDENTITY_PRESET_ID)
-    /// produces no UnknownTreatment finding.
+    /// 004-T1.19 — Treatment with a registered id produces no UnknownTreatment finding.
     #[test]
     fn audit_known_treatment_emits_no_unknown_finding() {
-        use crate::project::schema::Treatment;
         let mut p = fresh_project();
-        p.layers[0].treatment = Some(Treatment {
-            preset_id: crate::render::treatments::IDENTITY_PRESET_ID.into(),
-            params: std::collections::HashMap::new(),
-            overlay_path: None,
-            collage_paths: vec![],
+        // 004-T1.19 — push Effect::Treatment into effects chain.
+        p.layers[0].effects.push(crate::effects::EffectNode {
+            enabled: true,
+            effect: crate::effects::Effect::Treatment {
+                id: crate::render::treatments::IDENTITY_PRESET_ID.into(),
+                params: std::collections::HashMap::new(),
+                overlay_path: None,
+                collage_paths: vec![],
+            },
         });
         let findings = ProjectAudit::run(&p, &AuditEnv::default());
         assert!(
@@ -1811,17 +1831,19 @@ mod tests {
         );
     }
 
-    /// P2.2.4 — Treatment with an empty preset_id still emits a Warn finding
-    /// (the operator must see something — empty preset_id is operator error).
+    /// 004-T1.19 — Treatment with an empty id still emits a Warn finding.
     #[test]
     fn audit_empty_treatment_preset_id_still_warns() {
-        use crate::project::schema::Treatment;
         let mut p = fresh_project();
-        p.layers[0].treatment = Some(Treatment {
-            preset_id: String::new(),
-            params: std::collections::HashMap::new(),
-            overlay_path: None,
-            collage_paths: vec![],
+        // 004-T1.19 — push Effect::Treatment into effects chain.
+        p.layers[0].effects.push(crate::effects::EffectNode {
+            enabled: true,
+            effect: crate::effects::Effect::Treatment {
+                id: String::new(),
+                params: std::collections::HashMap::new(),
+                overlay_path: None,
+                collage_paths: vec![],
+            },
         });
         let findings = ProjectAudit::run(&p, &AuditEnv::default());
         let unknown: Vec<_> = findings
@@ -1831,7 +1853,7 @@ mod tests {
         assert_eq!(
             unknown.len(),
             1,
-            "expected exactly one UnknownTreatment finding for empty preset_id, got: {findings:?}"
+            "expected exactly one UnknownTreatment finding for empty id, got: {findings:?}"
         );
         assert_eq!(unknown[0].severity, Severity::Warn);
     }

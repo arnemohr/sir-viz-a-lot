@@ -535,22 +535,34 @@ pub fn effect_is_no_op(
 }
 
 /// Default chain: Color → Blur → Transform (all static / identity).
-pub fn default_effect_chain() -> Vec<Effect> {
+///
+/// 004-T1.3 — returns `Vec<EffectNode>` so callers assign to
+/// `LayerConfig.effects: Vec<EffectNode>` without wrapping at every site.
+pub fn default_effect_chain() -> Vec<EffectNode> {
     vec![
-        Effect::Color {
-            hue: Modulator::Static(0.0),
-            saturation: Modulator::Static(1.0),
-            brightness: Modulator::Static(0.0),
-            contrast: Modulator::Static(1.0),
+        EffectNode {
+            enabled: true,
+            effect: Effect::Color {
+                hue: Modulator::Static(0.0),
+                saturation: Modulator::Static(1.0),
+                brightness: Modulator::Static(0.0),
+                contrast: Modulator::Static(1.0),
+            },
         },
-        Effect::Blur {
-            radius_px: Modulator::Static(0.0),
+        EffectNode {
+            enabled: true,
+            effect: Effect::Blur {
+                radius_px: Modulator::Static(0.0),
+            },
         },
-        Effect::Transform {
-            translate: [0.0, 0.0],
-            rotate_deg: Modulator::Static(0.0),
-            scale_x: Modulator::Static(1.0),
-            scale_y: Modulator::Static(1.0),
+        EffectNode {
+            enabled: true,
+            effect: Effect::Transform {
+                translate: [0.0, 0.0],
+                rotate_deg: Modulator::Static(0.0),
+                scale_x: Modulator::Static(1.0),
+                scale_y: Modulator::Static(1.0),
+            },
         },
     ]
 }
@@ -1003,7 +1015,6 @@ mod tests {
             opacity: 1.0,
             warp: crate::project::schema::WarpMesh::identity(),
             muted: false,
-            treatment: None,
             bezier_mesh: None,
             mask_graph: None,
         }

@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 11;
+pub const CURRENT_SCHEMA_VERSION: u32 = 12;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Transform2D {
@@ -245,7 +245,11 @@ pub struct LayerConfig {
     pub kind: LayerKind,
     pub enabled: bool,
     pub transform: Transform2D,
-    pub effects: Vec<crate::effects::Effect>,
+    /// 004-T1.3 — per-layer Look chain. Each node wraps one `Effect`
+    /// with an `enabled` bypass flag. Changed from `Vec<Effect>` at
+    /// schema v12; the migrator folds the old `treatment` field into
+    /// this vec as a prepended `Effect::Treatment` node.
+    pub effects: Vec<crate::effects::EffectNode>,
     pub blend_mode: BlendMode,
     pub opacity: f32,
     /// v4: per-layer warp + mask. T3.0b consumes this in the render
@@ -262,13 +266,6 @@ pub struct LayerConfig {
     /// fixtures loading unchanged.
     #[serde(default)]
     pub muted: bool,
-    /// P1.2.1 — optional image-grammar treatment applied before the
-    /// effect chain. Only meaningful for `LayerKind::Image` and
-    /// `LayerKind::Video` (FxLayer / NDI / SVG ignore it).
-    /// `#[serde(default)]` keeps v7 projects loading with
-    /// `treatment == None`.
-    #[serde(default)]
-    pub treatment: Option<Treatment>,
     /// P7.3.1 — optional Bezier warp mesh (schema v10+). When `Some`, takes
     /// precedence over the legacy `warp` field in the render graph. `None`
     /// for projects that have not yet been migrated (pre-v10); populated by
@@ -1356,7 +1353,7 @@ pub fn layer_from_svg_path(id: impl Into<String>, svg_path: PathBuf) -> LayerCon
         opacity: 1.0,
         warp: WarpMesh::default_placement(),
         muted: false,
-        treatment: None,
+
         bezier_mesh: None,
         mask_graph: None,
     }
@@ -1390,7 +1387,7 @@ pub fn layer_from_video_path(id: impl Into<String>, path: PathBuf) -> LayerConfi
         opacity: 1.0,
         warp: WarpMesh::default_placement(),
         muted: false,
-        treatment: None,
+
         bezier_mesh: None,
         mask_graph: None,
     }
@@ -1426,7 +1423,7 @@ pub fn layer_from_fx_preset(
         opacity: 1.0,
         warp,
         muted: false,
-        treatment: None,
+
         bezier_mesh: None,
         mask_graph: None,
     }
@@ -1454,7 +1451,7 @@ pub fn layer_from_image_path(id: impl Into<String>, path: PathBuf) -> LayerConfi
         opacity: 1.0,
         warp: WarpMesh::default_placement(),
         muted: false,
-        treatment: None,
+
         bezier_mesh: None,
         mask_graph: None,
     }
