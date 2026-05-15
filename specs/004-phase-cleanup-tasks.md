@@ -10,7 +10,7 @@ Companion task spec for [`004-phase-cleanup.md`](004-phase-cleanup.md). Each tas
 
 ### W1 — Architectural unlocks
 - [x] PCleanup.1.1 — `FxFamily::SourceModifier` variant + dispatch arm
-- [~] PCleanup.1.2 — `fluid_warp` preset (SourceModifier proof; mask-bounded fluid lensing the source) — **partial; pipeline path deferred** (commit `2a30578`)
+- [x] PCleanup.1.2 — `fluid_warp` preset (SourceModifier proof; mask-bounded fluid lensing the source) — finished via Treatment re-path per decision `920c8c2`
 - [x] PCleanup.1.3 — `Effect::Treatment(id, params)` variant (per-layer treatments)
 - [x] PCleanup.1.4 — `Effect::Feedback { decay, offset }` variant (trails / echo)
 

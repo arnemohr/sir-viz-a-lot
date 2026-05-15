@@ -80,6 +80,11 @@ pub const EDGE_LENS_PRESET_ID: &str = "edge_lens";
 /// the generative `mask_field_flow` FX preset.
 pub const FIELD_ADVECT_PRESET_ID: &str = "field_advect_source";
 
+/// PCleanup.1.2 — `fluid_warp` preset id. Warps the source image using a
+/// bounded-fluid velocity field — the SourceModifier re-path of the
+/// originally-deferred FX preset (commit 2a30578, decision 920c8c2).
+pub const FLUID_WARP_PRESET_ID: &str = "fluid_warp";
+
 /// Number of collage slots supported by the v0.5 `collage` preset.
 /// Fixed at 4 (a 2×2 grid) — true variable-N collage requires either
 /// dynamically-built bind groups or a texture array binding, deferred
@@ -172,6 +177,8 @@ pub fn registry() -> &'static [(&'static str, &'static str)] {
         (EDGE_LENS_PRESET_ID, "Edge lens (orbiting refraction)"),
         // PCleanup.2.7 — third W2 sibling treatment.
         (FIELD_ADVECT_PRESET_ID, "Field advect (source drift)"),
+        // PCleanup.1.2 — fluid_warp (bounded-fluid velocity warp).
+        (FLUID_WARP_PRESET_ID, "Fluid warp (velocity field)"),
     ]
 }
 
@@ -202,6 +209,8 @@ pub fn param_descriptors(preset_id: &str) -> &'static [ParamDescriptor] {
         EDGE_LENS_PRESET_ID => EDGE_LENS_DESCRIPTORS,
         // PCleanup.2.7 — third W2 sibling treatment.
         FIELD_ADVECT_PRESET_ID => FIELD_ADVECT_DESCRIPTORS,
+        // PCleanup.1.2 — fluid_warp treatment.
+        FLUID_WARP_PRESET_ID => FLUID_WARP_DESCRIPTORS,
         _ => &[],
     }
 }
@@ -474,6 +483,19 @@ const FIELD_ADVECT_DESCRIPTORS: &[ParamDescriptor] = &[ParamDescriptor {
     default: 0.0,
 }];
 
+/// PCleanup.1.2 — Static descriptors for the `fluid_warp` treatment.
+/// Identity at default `amplitude = 0.0` — adding this treatment without
+/// configuring it is a guaranteed no-op (offset = vel × 0 = vec2(0)).
+/// Higher `amplitude` scales the displacement of the velocity field.
+#[allow(dead_code)] // referenced through `param_descriptors`
+const FLUID_WARP_DESCRIPTORS: &[ParamDescriptor] = &[ParamDescriptor {
+    key: "amplitude",
+    label: "Warp amplitude (UV displacement scale)",
+    min: 0.0,
+    max: 2.0,
+    default: 0.0,
+}];
+
 /// Static descriptors for the `refraction` preset (P2.4.2).
 /// Identity at default ior = 1.0 — the operator sees no change until they
 /// increase the ior slider. edge_width controls the SDF-distance band around
@@ -515,6 +537,8 @@ pub struct TreatmentPipeline {
     // PCleanup.2.7 — third W2 sibling treatment.
     field_advect: FieldAdvectTreatmentPipeline,
     refraction: RefractionTreatmentPipeline,
+    // PCleanup.1.2 — fluid_warp (bounded-fluid velocity warp).
+    fluid_warp: FluidWarpTreatmentPipeline,
 }
 
 impl TreatmentPipeline {
@@ -537,6 +561,8 @@ impl TreatmentPipeline {
             // PCleanup.2.7 — third W2 sibling treatment.
             field_advect: FieldAdvectTreatmentPipeline::new(device, target_format),
             refraction: RefractionTreatmentPipeline::new(device, target_format),
+            // PCleanup.1.2 — fluid_warp.
+            fluid_warp: FluidWarpTreatmentPipeline::new(device, target_format),
         }
     }
 
@@ -657,6 +683,16 @@ impl TreatmentPipeline {
                     return false;
                 };
                 self.refraction
+                    .render(device, queue, encoder, dst, inputs, sdf);
+                true
+            }
+            // PCleanup.1.2 — fluid_warp. Requires layer SDF for the compute
+            // boundary pass; skips when SDF is absent (SVG / FxLayer routes).
+            FLUID_WARP_PRESET_ID => {
+                let Some(sdf) = inputs.sdf else {
+                    return false;
+                };
+                self.fluid_warp
                     .render(device, queue, encoder, dst, inputs, sdf);
                 true
             }
@@ -3133,6 +3169,254 @@ impl FieldAdvectTreatmentPipeline {
     }
 }
 
+/// PCleanup.1.2 — `fluid_warp` treatment pipeline. Two-pass per frame:
+///   1. Compute pre-pass: bounded-fluid advection via an owned `FxFluidPipeline`
+///      (SDF boundary zeroes velocity outside the mask, so warping is naturally
+///      constrained to the masked region).
+///   2. Fragment pass: samples `t_source` at `uv - velocity * amplitude`.
+///
+/// The `FxFluidPipeline` instance here is independent of the one owned by
+/// `FxPipelines::bounded_fluid` in `fx_presets.rs` — they run separate
+/// simulations and do not share state.
+///
+/// Note: multiple layers applying `fluid_warp` in the same frame will each
+/// dispatch their own advect step (one per layer). This is intentional for
+/// this PR; per-layer sim isolation is a separate design conversation.
+///
+/// Bind-group layout for the fragment pass (5 entries):
+///   0 source texture (filterable)
+///   1 filtering sampler (source + velocity — RGBA16Float is filterable)
+///   2 params uniform    (vec4: amplitude, _pad, _pad, clock_secs)
+///   3 fit uniform       (vec4: mode, aspect, focal_x, focal_y)
+///   4 velocity texture  (RGBA16Float, filterable — written by compute pre-pass)
+///
+/// No SDF_CONSUMERS entry in build.rs: the fragment shader does not call
+/// any sdf_helper function; the compute side handles boundary via dispatch.
+struct FluidWarpTreatmentPipeline {
+    /// Owned bounded-fluid simulation; independent from FxPipelines.
+    bounded_fluid: crate::render::fx_fluid::FxFluidPipeline,
+    pipeline: wgpu::RenderPipeline,
+    bind_group_layout: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
+    params_buf: wgpu::Buffer,
+}
+
+impl FluidWarpTreatmentPipeline {
+    fn new(device: &wgpu::Device, target_format: wgpu::TextureFormat) -> Self {
+        let bounded_fluid =
+            crate::render::fx_fluid::FxFluidPipeline::new_bounded_fluid(device, target_format);
+
+        // Fragment shader — does NOT need the SDF helper prepended.
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("treat_fluid_warp.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/treat_fluid_warp.wgsl").into()),
+        });
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("treat_fluid_warp bgl"),
+            entries: &[
+                // binding 0: source texture (filterable)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    },
+                    count: None,
+                },
+                // binding 1: filtering sampler (shared for source + velocity)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                // binding 2: params uniform (amplitude, _pad, _pad, clock_secs)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: std::num::NonZeroU64::new(16),
+                    },
+                    count: None,
+                },
+                // binding 3: fit uniform (mode, aspect, focal_x, focal_y)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: std::num::NonZeroU64::new(16),
+                    },
+                    count: None,
+                },
+                // binding 4: velocity texture (RGBA16Float, filterable)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("treat_fluid_warp pipeline layout"),
+            bind_group_layouts: &[Some(&bind_group_layout)],
+            immediate_size: 0,
+        });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("treat_fluid_warp pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: target_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("treat_fluid_warp sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
+        });
+        let params_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("treat_fluid_warp params"),
+            size: 16,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        Self {
+            bounded_fluid,
+            pipeline,
+            bind_group_layout,
+            sampler,
+            params_buf,
+        }
+    }
+
+    fn render(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        dst: &wgpu::TextureView,
+        inputs: &TreatmentInputs<'_>,
+        sdf: &wgpu::TextureView,
+    ) {
+        let amplitude = inputs.params.get("amplitude").copied().unwrap_or(0.0);
+
+        // --- Compute pre-pass: advance the bounded-fluid sim one step. ---
+        // inject_intensity=0.4 seeds a steady swirl at the mask centre so
+        // there is visible motion when amplitude > 0 (matches the value used
+        // by FxPipelines::bounded_fluid in fx_presets.rs).
+        // dissipation=0.95 — mild energy loss per step (same as bounded_fluid
+        // preset default) so the field stays visually active without diverging.
+        self.bounded_fluid.dispatch_advect(
+            device,
+            queue,
+            encoder,
+            Some(sdf),
+            inputs.clock_secs,
+            0.95,
+            0.4,
+        );
+
+        // After dispatch_advect, `current_velocity_view()` returns the
+        // just-written texture (parity-aware).
+        let vel_view = self.bounded_fluid.current_velocity_view();
+
+        // Pack params uniform: x=amplitude, w=clock_secs (per-frame, not
+        // operator-facing), y/z padding.
+        let mut bytes = [0u8; 16];
+        bytes[0..4].copy_from_slice(&amplitude.to_le_bytes());
+        bytes[12..16].copy_from_slice(&inputs.clock_secs.to_le_bytes());
+        queue.write_buffer(&self.params_buf, 0, &bytes);
+
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("treat_fluid_warp bg"),
+            layout: &self.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(inputs.source),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: self.params_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: inputs.fit_uniform.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(vel_view),
+                },
+            ],
+        });
+
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("treat_fluid_warp pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: dst,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.draw(0..6, 0..1);
+    }
+}
+
 /// Refraction treatment pipeline (P2.4.2). Single pass, SDF-aware.
 /// Bends the source UV along the SDF normal near the mask boundary using a
 /// Snell-like offset, producing a glass-lens refraction effect at the edge.
@@ -3710,5 +3994,51 @@ mod tests {
             .find(|d| d.key == "flow_speed")
             .expect("flow_speed descriptor must be present");
         assert_eq!(speed_desc.default, 0.0, "flow_speed identity default = 0.0");
+    }
+
+    // ----- PCleanup.1.2 — fluid_warp treatment ---------------------------
+
+    /// PCleanup.1.2 — `fluid_warp` is registered in the treatment list so
+    /// the operator can apply it from the picker.
+    #[test]
+    fn fluid_warp_is_registered() {
+        assert!(
+            is_registered(FLUID_WARP_PRESET_ID),
+            "fluid_warp must appear in treatments::registry()"
+        );
+    }
+
+    /// PCleanup.1.2 — `fluid_warp` exposes exactly one operator param
+    /// (`amplitude`) with a valid min/max/default range.
+    #[test]
+    fn fluid_warp_descriptors_present() {
+        let descriptors = param_descriptors(FLUID_WARP_PRESET_ID);
+        assert_eq!(descriptors.len(), 1, "fluid_warp exposes exactly 1 param");
+        for d in descriptors {
+            assert!(d.min < d.max, "{}: min < max", d.key);
+            assert!(
+                d.default >= d.min && d.default <= d.max,
+                "{}: default in [min, max]",
+                d.key
+            );
+        }
+    }
+
+    /// PCleanup.1.2 — `fluid_warp` `amplitude` default = 0.0 satisfies the
+    /// identity-default rule: offset = vel × 0 = vec2(0) everywhere →
+    /// bit-identical passthrough on freshly-added Treatment.
+    /// (Structural: `vel * 0.0` collapses to `vec2(0,0)` regardless of
+    /// velocity field content — no GPU test needed.)
+    #[test]
+    fn fluid_warp_amplitude_default_is_zero() {
+        let descriptors = param_descriptors(FLUID_WARP_PRESET_ID);
+        let amplitude_desc = descriptors
+            .iter()
+            .find(|d| d.key == "amplitude")
+            .expect("amplitude descriptor must be present");
+        assert_eq!(
+            amplitude_desc.default, 0.0,
+            "amplitude identity default = 0.0"
+        );
     }
 }

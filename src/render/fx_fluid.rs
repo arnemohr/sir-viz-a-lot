@@ -654,4 +654,17 @@ impl FxFluidPipeline {
         let size = self.velocity_tex[0].size();
         (size.width, size.height)
     }
+
+    /// Returns a view into the velocity texture that was most recently written
+    /// by `dispatch_advect`.
+    ///
+    /// `dispatch_advect` flips `frame_parity` after writing; the just-written
+    /// texture is therefore at index `1 - frame_parity` immediately after the
+    /// flip.  Callers (e.g. `FluidWarpTreatmentPipeline`) must call
+    /// `dispatch_advect` first in the same encoder, then call this accessor to
+    /// bind the result for a subsequent fragment pass.
+    pub fn current_velocity_view(&self) -> &wgpu::TextureView {
+        let read_idx = 1 - self.frame_parity.get() as usize;
+        &self.velocity_view[read_idx]
+    }
 }
