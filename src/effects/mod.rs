@@ -78,6 +78,7 @@ pub enum Effect {
     ///   * `decay = 0.95` → long trail; the current pixel inherits 95%
     ///     of the previous frame's pixel at the offset location.
     ///   * `decay = 1.0` → infinite hold (history sample only).
+    ///
     /// `offset` shifts the history sample (UV-space), so a non-zero
     /// offset produces directional motion-trail behind the layer.
     ///
@@ -313,6 +314,11 @@ impl Effect {
                     collage: &[],
                     sdf: None,
                     intermediate: Some(ctx.intermediate_view),
+                    // Zone role is not plumbed through the per-layer Effect
+                    // chain RenderCtx. Zone-aware treatments (zone_brighten)
+                    // fall back to ZONE_NONE passthrough when applied via
+                    // Effect::Treatment rather than the primary Treatment slot.
+                    zone_role: None,
                 };
                 let rendered = ctx.treatment_pipeline.dispatch(
                     ctx.device,

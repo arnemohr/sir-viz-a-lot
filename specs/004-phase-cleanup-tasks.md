@@ -23,7 +23,7 @@ Companion task spec for [`004-phase-cleanup.md`](004-phase-cleanup.md). Each tas
 - [ ] PCleanup.2.6 — `edge_sparks` (sibling of `mask_edge_emission`) — deferred (particles)
 - [x] PCleanup.2.7 — `field_advect_source` (sibling of `mask_field_flow`)
 - [ ] PCleanup.2.8 — `collision_ripples` (sibling of `mask_collision_reflection`) — deferred (compute + readback)
-- [ ] PCleanup.2.9 — `zone_brighten` (sibling of `fx_zone_light_spill`) — deferred (zone uniform plumbing)
+- [x] PCleanup.2.9 — `zone_brighten` (sibling of `fx_zone_light_spill`)
 - [ ] PCleanup.2.10 — `zone_lens` (sibling of `fx_zone_edge_ripple`) — deferred (zone uniform plumbing)
 - [ ] PCleanup.2.11 — `portal_warp` (sibling of `fx_zone_portal_drift`) — deferred (closes Phase 4 zone-compute deferral)
 - [ ] PCleanup.2.12 — FX picker UI: group SourceModifier presets above generative overlays — deferred (waits on 6+ siblings)

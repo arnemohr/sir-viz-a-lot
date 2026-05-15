@@ -91,6 +91,13 @@ pub const FLUID_WARP_PRESET_ID: &str = "fluid_warp";
 /// Works on any layer source (Image / Video / SVG / FxLayer).
 pub const FLUID_WARP_FULL_PRESET_ID: &str = "fluid_warp_full";
 
+/// PCleanup.2.9 — `zone_brighten` preset id. Fifth W2 sibling treatment.
+/// Multiplicatively boosts the luminance of the source image inside the
+/// layer's ZONE_WINDOW-tagged area, with the same exponential edge falloff
+/// as `fx_zone_light_spill`. Outside ZONE_WINDOW, source passes through
+/// unchanged. `intensity = 0.0` is a bit-exact passthrough.
+pub const ZONE_BRIGHTEN_PRESET_ID: &str = "zone_brighten";
+
 /// Number of collage slots supported by the v0.5 `collage` preset.
 /// Fixed at 4 (a 2×2 grid) — true variable-N collage requires either
 /// dynamically-built bind groups or a texture array binding, deferred
@@ -144,6 +151,12 @@ pub struct TreatmentInputs<'a> {
     /// treatments may consume it the same way; single-pass presets
     /// leave it `None`.
     pub intermediate: Option<&'a wgpu::TextureView>,
+
+    /// Layer's zone role (from `cfg.warp.zone_role`). Used by zone-aware
+    /// treatments (`zone_brighten`, and future W2.10 `zone_lens`). Other
+    /// treatments ignore this field. `None` maps to `ZONE_NONE` (u32 0)
+    /// in the shader uniform, which triggers the passthrough branch.
+    pub zone_role: Option<crate::project::schema::ZoneRole>,
 }
 
 /// Static descriptor for a tunable preset parameter. The Selected-layer UI
@@ -187,6 +200,8 @@ pub fn registry() -> &'static [(&'static str, &'static str)] {
         (FLUID_WARP_PRESET_ID, "Fluid warp (velocity field)"),
         // PCleanup.2.3 — fluid_warp_full (unbounded; works on any source).
         (FLUID_WARP_FULL_PRESET_ID, "Fluid warp (full)"),
+        // PCleanup.2.9 — fifth W2 sibling: luminance boost inside ZONE_WINDOW.
+        (ZONE_BRIGHTEN_PRESET_ID, "Zone brighten (luminance boost)"),
     ]
 }
 
@@ -221,6 +236,8 @@ pub fn param_descriptors(preset_id: &str) -> &'static [ParamDescriptor] {
         FLUID_WARP_PRESET_ID => FLUID_WARP_DESCRIPTORS,
         // PCleanup.2.3 — fluid_warp_full treatment.
         FLUID_WARP_FULL_PRESET_ID => FLUID_WARP_FULL_DESCRIPTORS,
+        // PCleanup.2.9 — zone_brighten treatment.
+        ZONE_BRIGHTEN_PRESET_ID => ZONE_BRIGHTEN_DESCRIPTORS,
         _ => &[],
     }
 }
@@ -519,6 +536,45 @@ const FLUID_WARP_FULL_DESCRIPTORS: &[ParamDescriptor] = &[ParamDescriptor {
     default: 0.0,
 }];
 
+/// PCleanup.2.9 — Static descriptors for the `zone_brighten` treatment.
+/// Identity at default `intensity = 0.0` — the multiplier is `1.0 + 0.0 *
+/// exp(…) = 1.0` everywhere, so adding the treatment is a guaranteed no-op
+/// until the operator configures it (mirrors the established identity-default
+/// rule for all W2 sibling treatments). `falloff` and `spill_radius` are
+/// shape params matching the fx_zone_light_spill FX sibling's geometry.
+/// `speed` drives the optional breathing pulse (0 = constant, no pulse).
+#[allow(dead_code)] // referenced through `param_descriptors`
+const ZONE_BRIGHTEN_DESCRIPTORS: &[ParamDescriptor] = &[
+    ParamDescriptor {
+        key: "intensity",
+        label: "Brightness boost (0 = no effect)",
+        min: 0.0,
+        max: 2.0,
+        default: 0.0,
+    },
+    ParamDescriptor {
+        key: "falloff",
+        label: "Falloff sharpness (higher = narrower band)",
+        min: 0.0,
+        max: 20.0,
+        default: 8.0,
+    },
+    ParamDescriptor {
+        key: "spill_radius",
+        label: "Reach inside zone (normalised)",
+        min: 0.0,
+        max: 1.0,
+        default: 0.3,
+    },
+    ParamDescriptor {
+        key: "speed",
+        label: "Breathing pulse rate (cycles/sec; 0 = constant)",
+        min: 0.0,
+        max: 2.0,
+        default: 0.0,
+    },
+];
+
 /// Static descriptors for the `refraction` preset (P2.4.2).
 /// Identity at default ior = 1.0 — the operator sees no change until they
 /// increase the ior slider. edge_width controls the SDF-distance band around
@@ -564,6 +620,8 @@ pub struct TreatmentPipeline {
     fluid_warp: FluidWarpTreatmentPipeline,
     // PCleanup.2.3 — fluid_warp_full (unbounded; identity compute; no SDF).
     fluid_warp_full: FluidWarpFullTreatmentPipeline,
+    // PCleanup.2.9 — fifth W2 sibling: luminance boost inside ZONE_WINDOW.
+    zone_brighten: ZoneBrightenTreatmentPipeline,
 }
 
 impl TreatmentPipeline {
@@ -590,6 +648,8 @@ impl TreatmentPipeline {
             fluid_warp: FluidWarpTreatmentPipeline::new(device, target_format),
             // PCleanup.2.3 — fluid_warp_full.
             fluid_warp_full: FluidWarpFullTreatmentPipeline::new(device, target_format),
+            // PCleanup.2.9 — zone_brighten.
+            zone_brighten: ZoneBrightenTreatmentPipeline::new(device, target_format),
         }
     }
 
@@ -728,6 +788,19 @@ impl TreatmentPipeline {
             FLUID_WARP_FULL_PRESET_ID => {
                 self.fluid_warp_full
                     .render(device, queue, encoder, dst, inputs);
+                true
+            }
+            // PCleanup.2.9 — zone_brighten. Requires SDF (distance-to-edge
+            // drives the brightness falloff). Without a zone_role of
+            // ZONE_WINDOW the shader passes source through unchanged; the
+            // dispatch still runs so the caller sees `true` and doesn't
+            // fall back to a blank blit. Skip when no SDF is present.
+            ZONE_BRIGHTEN_PRESET_ID => {
+                let Some(sdf) = inputs.sdf else {
+                    return false;
+                };
+                self.zone_brighten
+                    .render(device, queue, encoder, dst, inputs, sdf);
                 true
             }
             _ => false,
@@ -3929,6 +4002,278 @@ impl RefractionTreatmentPipeline {
     }
 }
 
+// ---------------------------------------------------------------------------
+// PCleanup.2.9 — `zone_brighten` treatment pipeline
+// ---------------------------------------------------------------------------
+//
+// Single-pass fragment shader. Reads `source` and the layer SDF, samples the
+// zone-tag uniform (slot 6), and multiplicatively boosts source luminance
+// inside the ZONE_WINDOW-tagged polygon area with an exponential edge falloff
+// matching `fx_zone_light_spill`. Outside ZONE_WINDOW the shader passes
+// source through unchanged — no crash, no visible effect.
+//
+// Pipeline fields:
+//   `params_buf` — 32-byte uniform (intensity, falloff, spill_radius, speed,
+//                  clock_secs, pad×3). Written per render call.
+//   `zone_tag_buf` — 16-byte ZoneTagUniform (zone_tag u32 + 3×u32 pad).
+//                   Written from `inputs.zone_role` per render call.
+//   Slot 6 is in the bind-group layout — follows the zone-aware slot table
+//   documented in P3.3.2 and mirrored in FxPresetPipeline::new_zone_aware.
+//
+// Blend mode: ALPHA_BLENDING (same as field_advect / ripple_lens). Source
+// pixels whose alpha < 1 will composite correctly; the multiplier is applied
+// before blending.
+
+struct ZoneBrightenTreatmentPipeline {
+    pipeline: wgpu::RenderPipeline,
+    bind_group_layout: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
+    params_buf: wgpu::Buffer,
+    zone_tag_buf: wgpu::Buffer,
+}
+
+impl ZoneBrightenTreatmentPipeline {
+    fn new(device: &wgpu::Device, target_format: wgpu::TextureFormat) -> Self {
+        // PCleanup.2.9: prepend SDF helper + zone-tag helper at module-create
+        // time (same pattern as FxPresetPipeline::new_zone_light_spill).
+        // build.rs also prepends these for standalone naga validation.
+        let src = format!(
+            "{}\n{}\n{}",
+            crate::render::sdf::SDF_HELPER_WGSL,
+            crate::render::sdf::ZONE_TAG_WGSL,
+            include_str!("shaders/treat_zone_brighten.wgsl")
+        );
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("treat_zone_brighten.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(src.into()),
+        });
+
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("treat_zone_brighten bgl"),
+            entries: &[
+                // binding 0: source texture (filterable — RGBA8 / Bgra8)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    },
+                    count: None,
+                },
+                // binding 1: source sampler (filtering)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                // binding 2: params uniform (32 bytes — ZoneBrightenParams struct)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: std::num::NonZeroU64::new(32),
+                    },
+                    count: None,
+                },
+                // binding 3: SDF texture (R32Float, non-filterable; textureLoad only)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                    },
+                    count: None,
+                },
+                // binding 6: ZoneTagUniform (16 bytes; P3.3.2 slot contract)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 6,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: std::num::NonZeroU64::new(16),
+                    },
+                    count: None,
+                },
+            ],
+        });
+
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("treat_zone_brighten pipeline layout"),
+            bind_group_layouts: &[Some(&bind_group_layout)],
+            immediate_size: 0,
+        });
+
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("treat_zone_brighten pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: target_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("treat_zone_brighten sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
+        });
+
+        // 32-byte params uniform: ZoneBrightenParams struct (8 × f32).
+        let params_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("treat_zone_brighten params"),
+            size: 32,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        // 16-byte zone-tag uniform: ZoneTagUniform (u32 zone_tag + 3 × u32 pad).
+        let zone_tag_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("treat_zone_brighten zone_tag"),
+            size: 16,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        Self {
+            pipeline,
+            bind_group_layout,
+            sampler,
+            params_buf,
+            zone_tag_buf,
+        }
+    }
+
+    fn render(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        dst: &wgpu::TextureView,
+        inputs: &TreatmentInputs<'_>,
+        sdf: &wgpu::TextureView,
+    ) {
+        let intensity = inputs.params.get("intensity").copied().unwrap_or(0.0);
+        let falloff = inputs.params.get("falloff").copied().unwrap_or(8.0);
+        let spill_radius = inputs.params.get("spill_radius").copied().unwrap_or(0.3);
+        let speed = inputs.params.get("speed").copied().unwrap_or(0.0);
+        let clock_secs = inputs.clock_secs;
+
+        // Write ZoneBrightenParams: 8 × f32 = 32 bytes, little-endian.
+        // Layout: [intensity, falloff, spill_radius, speed, clock_secs, pad, pad, pad]
+        let mut params_bytes = [0u8; 32];
+        let floats = [
+            intensity,
+            falloff,
+            spill_radius,
+            speed,
+            clock_secs,
+            0.0f32,
+            0.0,
+            0.0,
+        ];
+        for (i, f) in floats.iter().enumerate() {
+            params_bytes[i * 4..(i + 1) * 4].copy_from_slice(&f.to_le_bytes());
+        }
+        queue.write_buffer(&self.params_buf, 0, &params_bytes);
+
+        // Write ZoneTagUniform: u32 zone_tag + 3 × u32 padding = 16 bytes.
+        let zone_tag = crate::project::schema::zone_role_to_u32(inputs.zone_role);
+        let zone_bytes = [
+            zone_tag.to_le_bytes(),
+            [0u8; 4], // _pad0
+            [0u8; 4], // _pad1
+            [0u8; 4], // _pad2
+        ]
+        .concat();
+        queue.write_buffer(&self.zone_tag_buf, 0, &zone_bytes);
+
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("treat_zone_brighten bg"),
+            layout: &self.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(inputs.source),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: self.params_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(sdf),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: self.zone_tag_buf.as_entire_binding(),
+                },
+            ],
+        });
+
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("treat_zone_brighten pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: dst,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.draw(0..6, 0..1);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4372,6 +4717,57 @@ mod tests {
         assert_eq!(
             amplitude_desc.default, 0.0,
             "amplitude identity default = 0.0"
+        );
+    }
+
+    // ----- PCleanup.2.9 — zone_brighten treatment ------------------------
+
+    /// PCleanup.2.9 — `zone_brighten` is registered in the treatment list
+    /// so the operator can apply it from the picker on a ZONE_WINDOW layer.
+    #[test]
+    fn zone_brighten_is_registered() {
+        assert!(
+            is_registered(ZONE_BRIGHTEN_PRESET_ID),
+            "zone_brighten must appear in treatments::registry()"
+        );
+    }
+
+    /// PCleanup.2.9 — `zone_brighten` exposes exactly 4 operator params
+    /// (intensity, falloff, spill_radius, speed) each with a valid
+    /// min/max/default range.
+    #[test]
+    fn zone_brighten_descriptors_present() {
+        let descriptors = param_descriptors(ZONE_BRIGHTEN_PRESET_ID);
+        assert_eq!(
+            descriptors.len(),
+            4,
+            "zone_brighten exposes exactly 4 params"
+        );
+        for d in descriptors {
+            assert!(d.min < d.max, "{}: min < max", d.key);
+            assert!(
+                d.default >= d.min && d.default <= d.max,
+                "{}: default in [min, max]",
+                d.key
+            );
+        }
+    }
+
+    /// PCleanup.2.9 — `zone_brighten` `intensity` default = 0.0 satisfies
+    /// the identity-default rule: boost = intensity × exp(…) = 0 everywhere
+    /// → multiplier = 1.0 + 0.0 = 1.0 → source unchanged. Bit-identical
+    /// passthrough on freshly-added Treatment (structural in the shader:
+    /// `0.0 * exp(…) = 0.0` regardless of falloff/spill_radius values).
+    #[test]
+    fn zone_brighten_intensity_default_is_zero() {
+        let descriptors = param_descriptors(ZONE_BRIGHTEN_PRESET_ID);
+        let intensity_desc = descriptors
+            .iter()
+            .find(|d| d.key == "intensity")
+            .expect("intensity descriptor must be present");
+        assert_eq!(
+            intensity_desc.default, 0.0,
+            "intensity identity default = 0.0"
         );
     }
 }

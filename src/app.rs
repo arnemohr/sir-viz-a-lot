@@ -4522,6 +4522,11 @@ fn render_m5_pipeline(
                             collage: &collage_views,
                             sdf: Some(sdf_v),
                             intermediate: Some(&ls.intermediate_view),
+                            // PCleanup.2.9 — zone role for zone-aware treatments
+                            // (zone_brighten and future W2.10 zone_lens). Sourced
+                            // from the same field used by zone-aware FX presets
+                            // (line 4334). Non-zone treatments ignore this field.
+                            zone_role: cfg.warp.zone_role,
                         };
                         treatment_pipeline.dispatch(
                             &renderer.gpu.device,

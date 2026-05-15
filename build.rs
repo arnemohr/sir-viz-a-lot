@@ -37,13 +37,20 @@ const SDF_CONSUMERS: &[&str] = &[
     // PCleanup.2.7 — `treat_field_advect.wgsl` consumes sample_sdf_gradient
     // to advect the source image along the mask's normal field.
     "treat_field_advect",
+    // PCleanup.2.9 — `treat_zone_brighten.wgsl` consumes sample_sdf_bilinear
+    // to gate the brightness boost by distance-to-edge, and ZoneTagUniform
+    // to restrict the effect to ZONE_WINDOW layers.
+    "treat_zone_",
 ];
 
 /// P3.3.1 — Basename prefixes that additionally need zone_tag_helper.wgsl
 /// prepended after sdf_helper.wgsl. Zone-aware preset shaders declare
 /// `@group(0) @binding(6) var<uniform> u_zone: ZoneTagUniform;` in their
 /// own source; the helper provides the constants and struct.
-const ZONE_CONSUMERS: &[&str] = &["fx_zone_"];
+/// PCleanup.2.9 adds `"treat_zone_"` alongside `"fx_zone_"` so that
+/// `treat_zone_brighten.wgsl` (and future zone-aware treatment siblings)
+/// get both helpers prepended during build-time validation.
+const ZONE_CONSUMERS: &[&str] = &["fx_zone_", "treat_zone_"];
 
 fn main() {
     // P7.2.1 — Syphon.framework linkage scaffold.
