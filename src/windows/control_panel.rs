@@ -2303,7 +2303,7 @@ pub(super) fn effect_label(e: &Effect) -> &'static str {
 /// is not Copy). Existing move semantics are unaffected — push/destructure uses moves.
 #[allow(dead_code)] // populated only under the v3 feature
 #[derive(Debug, Clone)]
-pub(super) enum EffectChange {
+pub(crate) enum EffectChange {
     /// `Effect::Transform.translate[0]` set to `new`.
     TransformTranslateX(f32),
     /// `Effect::Transform.translate[1]` set to `new`.
@@ -2643,7 +2643,7 @@ pub(super) fn show_effect(
 /// Bpm / Audio / OscBound / MidiBound) follow the same `span * 0.5`
 /// amp + midpoint-offset pattern.
 #[cfg(feature = "v3")]
-fn modulator_for_source(
+pub(crate) fn modulator_for_source(
     source: crate::windows::components::binding_picker::BindingSource,
     range: &std::ops::RangeInclusive<f32>,
 ) -> Modulator {
@@ -2699,7 +2699,7 @@ fn modulator_for_source(
 #[cfg(feature = "v3")]
 // P0.2.5 added `layer_idx` for the MIDI-learn context menu; clippy counts 8.
 #[allow(clippy::too_many_arguments)]
-fn modulator_slider(
+pub(crate) fn modulator_slider(
     ui: &mut Ui,
     salt: (usize, &'static str),
     label: &str,
@@ -2785,7 +2785,7 @@ fn modulator_slider(
 
 /// Inner body of `modulator_slider` — non-v3 version. Writes directly to `*m`.
 #[cfg(not(feature = "v3"))]
-fn modulator_slider(
+pub(crate) fn modulator_slider(
     ui: &mut Ui,
     salt: (usize, &'static str),
     label: &str,
