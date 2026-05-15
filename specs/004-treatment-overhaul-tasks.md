@@ -178,12 +178,18 @@ Tick (`- [x]`) on commit landing. Phases roughly correspond to spec sections A�
   - Files: `src/windows/controls.rs` or new `src/windows/onboarding.rs`
   - Accept: toast shows once per machine; subsequent launches silent.
 
-- [x] **004-T1.34** Refresh GPU goldens for the per-layer effect chain. Confirm ripple_lens at chain position 0 produces bit-identical output to v11 primary-slot ripple_lens (the identity-fit fix should make this exact, modulo blit precision).
+- [ ] **004-T1.34** Refresh GPU goldens for the per-layer effect chain. Confirm ripple_lens at chain position 0 produces bit-identical output to v11 primary-slot ripple_lens (the identity-fit fix should make this exact, modulo blit precision).
   - Files: `tests/golden/`, run `UPDATE_GOLDEN=1 cargo nextest run --features gpu-tests`
   - Accept: `make test-gpu` green. Pixel delta < 1 LSB.
+  - **Open**: four GPU tests fail at HEAD — `warp_pass_golden` (shader scope: `sample_sdf_bilinear` unresolved) and three `zone_*_tag_golden` (missing baseline PNGs). All four reproduce at the pre-004 baseline (commit 0613eaf), so they are not regressions from 004. The chain ctx + `identity_fit_uniform` pathway is bit-stable, but the gate cannot land green until these are repaired. Tracked separately as T1.34.followup.
 
-- [x] **004-T1.35** Run the 8-case manual verification from spec §Verification (migration smoke, SDF-anywhere, no-mask autofix, per-node bypass, A/B compare, drag-reorder, picker grouping, render perf within 2% of v11).
+- [ ] **004-T1.34.followup** Repair the four pre-existing `make test-gpu` failures so T1.34 acceptance lands green.
+  - `warp_pass_golden`: the test shader at `tests/headless_gpu.rs:1087` calls `sample_sdf_bilinear` without including the SDF helper module — wire the WGSL import or inline the helper.
+  - Three `zone_*_tag_golden` tests need baseline PNGs generated via `UPDATE_GOLDEN=1` once the shader fix lands.
+
+- [ ] **004-T1.35** Run the 8-case manual verification from spec §Verification (migration smoke, SDF-anywhere, no-mask autofix, per-node bypass, A/B compare, drag-reorder, picker grouping, render perf within 2% of v11).
   - Accept: all 8 pass. Record results in a comment on the final ship commit.
+  - **Open**: the automated layer (`make ci` + release build) is green; the eight visual / perf cases need an interactive session against a projector. Tracked as the operator's next-launch smoke.
 
 - [x] **004-T1.36a** Root docs update: `README.md` schema-version mention (if any); `CLAUDE.md` — remove the Effects-tab reference (line 586 region in the architecture overview) and document the Look chain as the per-layer treatment+effects surface.
   - Files: `README.md`, `CLAUDE.md`
