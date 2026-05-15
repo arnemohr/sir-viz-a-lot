@@ -136,9 +136,10 @@ clear it. Mute the layer briefly (M button in the left rail) to reset.
 1. Drag an SVG or transparent PNG onto the canvas.
 2. Select the layer. In the right panel under **Layer**, change the
    **Opacity** slider's modulator combobox from "fixed value" to **bpm**.
-3. Set `offset = 0.5`, `amp = 0.5`, `divisor = 1` — opacity rides 0 → 1
-   on every beat (`0.5 ± 0.5 · sin(2π·t/beat)`). For double-time, set
-   `divisor = 0.5`; for half-time, `divisor = 2`.
+3. Set `offset = 0.5`, `amp = 0.5`. Pick a **rate** from the dropdown:
+   `1 (every beat)` is the default (`0.5 ± 0.5 · sin(2π·t/beat)`).
+   `1/2 (double-time)` doubles the rate; `2 (half-time)` halves it;
+   `4 (quarter-time)` makes opacity ride once per bar.
 4. Tap tempo via **Space** or sync to MIDI Clock.
 
 **Watch out for:** strobing above ~3 Hz can trigger photosensitive
