@@ -157,6 +157,76 @@ pub(super) fn command_dragvalue_f32(
     None
 }
 
+/// Operator-facing presets for `Modulator::Bpm.divisor`. The underlying
+/// field is `f32` (the period multiplier — see `Modulator::value`); we
+/// expose a small enumerated set instead of a free-form text edit so
+/// operators don't need to know that `divisor=0.5` means "double-time".
+/// Stored as `(divisor, label)`; the label is what the operator sees in
+/// the combo. Order is fastest → slowest to match how operators think
+/// about beat subdivisions.
+const BPM_DIVISOR_PRESETS: &[(f32, &str)] = &[
+    (0.5, "1/2 (double-time)"),
+    (1.0, "1 (every beat)"),
+    (2.0, "2 (half-time)"),
+    (4.0, "4 (quarter-time)"),
+];
+
+/// Pick the closest preset for an arbitrary stored `divisor`. Projects
+/// authored by hand may carry off-preset values (e.g. `1.5`); we snap
+/// the combo's selected-text display to the nearest known preset rather
+/// than reject the value.
+fn bpm_divisor_preset_label(divisor: f32) -> &'static str {
+    BPM_DIVISOR_PRESETS
+        .iter()
+        .min_by(|a, b| {
+            (a.0 - divisor)
+                .abs()
+                .partial_cmp(&(b.0 - divisor).abs())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .map(|(_, label)| *label)
+        .unwrap_or("1 (every beat)")
+}
+
+/// 003-T1.18 / PCleanup.bpm — command-style combo for `Modulator::Bpm.divisor`.
+/// Returns `Some(new_divisor)` when the operator picks a different preset.
+#[cfg(feature = "v3")]
+pub(super) fn bpm_divisor_combo(ui: &mut Ui, id: &str, project_value: f32) -> Option<f32> {
+    let mut picked: Option<f32> = None;
+    egui::ComboBox::from_id_salt(ui.id().with("rmap_bpm_divisor").with(id))
+        .selected_text(bpm_divisor_preset_label(project_value))
+        .show_ui(ui, |ui| {
+            for &(div, label) in BPM_DIVISOR_PRESETS {
+                let is_current = (div - project_value).abs() < 1e-6;
+                if ui.selectable_label(is_current, label).clicked() && !is_current {
+                    picked = Some(div);
+                }
+            }
+        });
+    ui.label("rate");
+    picked
+}
+
+/// Non-v3 sibling of [`bpm_divisor_combo`]. Mutates `divisor` in place
+/// because the non-v3 path doesn't route through the undo stack.
+#[cfg(not(feature = "v3"))]
+pub(super) fn bpm_divisor_combo_direct(ui: &mut Ui, id: &str, divisor: &mut f32) {
+    let initial = *divisor;
+    egui::ComboBox::from_id_salt(ui.id().with("rmap_bpm_divisor_direct").with(id))
+        .selected_text(bpm_divisor_preset_label(*divisor))
+        .show_ui(ui, |ui| {
+            for &(div, label) in BPM_DIVISOR_PRESETS {
+                if ui
+                    .selectable_label((div - initial).abs() < 1e-6, label)
+                    .clicked()
+                {
+                    *divisor = div;
+                }
+            }
+        });
+    ui.label("rate");
+}
+
 /// One named effect-chain bundle authored as JSON in `assets/presets/`.
 ///
 /// Loaded once at startup via [`load_presets_from_disk`] and surfaced in
@@ -2836,7 +2906,41 @@ fn modulator_slider_params(
                 }));
             }
         }
-        Modulator::Triangle { .. } | Modulator::Noise { .. } | Modulator::Bpm { .. } => {
+        Modulator::Bpm {
+            divisor,
+            amp,
+            offset,
+        } => {
+            let span = range.end() - range.start();
+            let cur_divisor = *divisor;
+            let cur_amp = *amp;
+            let cur_offset = *offset;
+            let id_div = format!("mod_{}_{}_divisor", salt.0, salt.1);
+            let id_amp = format!("mod_{}_{}_amp", salt.0, salt.1);
+            let id_offset = format!("mod_{}_{}_offset", salt.0, salt.1);
+            if let Some(new) = bpm_divisor_combo(ui, &id_div, cur_divisor) {
+                new_modulator = Some(Modulator::Bpm {
+                    divisor: new,
+                    amp: cur_amp,
+                    offset: cur_offset,
+                });
+            }
+            if let Some(new) = command_slider(ui, &id_amp, "amp", cur_amp, 0.0..=span) {
+                new_modulator = new_modulator.or(Some(Modulator::Bpm {
+                    divisor: cur_divisor,
+                    amp: new,
+                    offset: cur_offset,
+                }));
+            }
+            if let Some(new) = command_slider(ui, &id_offset, "offset", cur_offset, range.clone()) {
+                new_modulator = new_modulator.or(Some(Modulator::Bpm {
+                    divisor: cur_divisor,
+                    amp: cur_amp,
+                    offset: new,
+                }));
+            }
+        }
+        Modulator::Triangle { .. } | Modulator::Noise { .. } => {
             ui.label("(this modulator variant has no UI in v1)");
         }
         Modulator::OscBound { addr, .. } => {
@@ -2924,7 +3028,20 @@ fn modulator_slider_params(
             ui.add(egui::Slider::new(phase, 0.0..=std::f32::consts::TAU).text("phase"));
             ui.add(egui::Slider::new(offset, range.clone()).text("offset"));
         }
-        Modulator::Triangle { .. } | Modulator::Noise { .. } | Modulator::Bpm { .. } => {
+        Modulator::Bpm {
+            divisor,
+            amp,
+            offset,
+        } => {
+            let span = range.end() - range.start();
+            // Render the divisor preset combo. Drives `*divisor` directly so
+            // the project mutates in-place; no Mutation is constructed here
+            // because the non-v3 path doesn't use the undo stack.
+            bpm_divisor_combo_direct(ui, "bpm_divisor_non_v3", divisor);
+            ui.add(egui::Slider::new(amp, 0.0..=span).text("amp"));
+            ui.add(egui::Slider::new(offset, range.clone()).text("offset"));
+        }
+        Modulator::Triangle { .. } | Modulator::Noise { .. } => {
             ui.label("(this modulator variant has no UI in v1)");
         }
         Modulator::OscBound { addr, .. } => {
@@ -3051,5 +3168,35 @@ mod help_tests {
                 "glossary window: body empty for {term:?}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod bpm_divisor_tests {
+    use super::{BPM_DIVISOR_PRESETS, bpm_divisor_preset_label};
+
+    /// Operator presets cover the spec'd values: 1/2, 1, 2, 4.
+    #[test]
+    fn presets_match_spec() {
+        let values: Vec<f32> = BPM_DIVISOR_PRESETS.iter().map(|(d, _)| *d).collect();
+        assert_eq!(values, vec![0.5, 1.0, 2.0, 4.0]);
+    }
+
+    /// Exact preset value resolves to its own label.
+    #[test]
+    fn exact_preset_labels() {
+        for &(div, label) in BPM_DIVISOR_PRESETS {
+            assert_eq!(bpm_divisor_preset_label(div), label);
+        }
+    }
+
+    /// Off-preset stored values (e.g. hand-edited JSON) snap to the
+    /// closest preset's label rather than producing an empty selected_text.
+    #[test]
+    fn off_preset_snaps_to_nearest() {
+        assert_eq!(bpm_divisor_preset_label(0.6), "1/2 (double-time)");
+        assert_eq!(bpm_divisor_preset_label(1.4), "1 (every beat)");
+        assert_eq!(bpm_divisor_preset_label(3.0), "2 (half-time)");
+        assert_eq!(bpm_divisor_preset_label(8.0), "4 (quarter-time)");
     }
 }
