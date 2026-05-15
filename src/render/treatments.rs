@@ -152,6 +152,14 @@ pub const EDGE_SPARKS_PRESET_ID: &str = "edge_sparks";
 /// the source at the original UV.
 pub const COLLISION_RIPPLES_PRESET_ID: &str = "collision_ripples";
 
+/// PCleanup.2.11 — `portal_warp` preset id. Twelfth (and final) W2 sibling.
+/// Particles drift through the mask (shared spotlights compute) and the
+/// fragment pass smears source UVs toward (or away from) each nearby
+/// particle by a Gaussian magnitude, producing a "ghost through the room"
+/// warp that travels with the particles.  `amplitude = 0.0` is bit-exact
+/// passthrough.
+pub const PORTAL_WARP_PRESET_ID: &str = "portal_warp";
+
 /// Fixed at 4 (a 2×2 grid) — true variable-N collage requires either
 /// dynamically-built bind groups or a texture array binding, deferred
 /// to Phase 7.
@@ -293,6 +301,7 @@ pub fn treatment_group(preset_id: &str) -> TreatmentGroup {
         | DRIFT_BRUSHSTROKES_PRESET_ID
         | EDGE_SPARKS_PRESET_ID
         | COLLISION_RIPPLES_PRESET_ID
+        | PORTAL_WARP_PRESET_ID
         | DISPLACEMENT_RIPPLE_PRESET_ID
         | REFRACTION_PRESET_ID => TreatmentGroup::SourceModifier,
         _ => TreatmentGroup::GenerativeOrUtility,
@@ -340,6 +349,11 @@ pub fn registry() -> &'static [(&'static str, &'static str)] {
         (
             COLLISION_RIPPLES_PRESET_ID,
             "Collision ripples (mask-bounce displacement)",
+        ),
+        // PCleanup.2.11 — drifting particles warp source UVs around them.
+        (
+            PORTAL_WARP_PRESET_ID,
+            "Portal warp (ghost-through-the-room UV smear)",
         ),
         // P2.4.1 — displacement-map ripple warp (pre-W2).
         (DISPLACEMENT_RIPPLE_PRESET_ID, "Displacement ripple"),
@@ -401,6 +415,8 @@ pub fn param_descriptors(preset_id: &str) -> &'static [ParamDescriptor] {
         EDGE_SPARKS_PRESET_ID => EDGE_SPARKS_DESCRIPTORS,
         // PCleanup.2.8 — collision_ripples treatment.
         COLLISION_RIPPLES_PRESET_ID => COLLISION_RIPPLES_DESCRIPTORS,
+        // PCleanup.2.11 — portal_warp treatment.
+        PORTAL_WARP_PRESET_ID => PORTAL_WARP_DESCRIPTORS,
         _ => &[],
     }
 }
@@ -1010,6 +1026,51 @@ const COLLISION_RIPPLES_DESCRIPTORS: &[ParamDescriptor] = &[
     },
 ];
 
+/// PCleanup.2.11 — Static descriptors for the `portal_warp` preset.
+///
+/// Identity at `amplitude = 0.0`: accumulated displacement is zero, source
+/// samples at original UV.  `pull` selects pull-toward (+1) vs push-away
+/// (-1) and intermediate blend.  Same compute as spotlights, so the
+/// particle-count / drift_speed semantics match.
+#[allow(dead_code)] // referenced only through `param_descriptors` (v3 UI)
+const PORTAL_WARP_DESCRIPTORS: &[ParamDescriptor] = &[
+    ParamDescriptor {
+        key: "particle_count",
+        label: "Ghost count (1–512)",
+        min: 1.0,
+        max: 512.0,
+        default: 32.0,
+    },
+    ParamDescriptor {
+        key: "amplitude",
+        label: "Warp amplitude (UV displacement; 0 = no effect)",
+        min: 0.0,
+        max: 0.05,
+        default: 0.0,
+    },
+    ParamDescriptor {
+        key: "radius",
+        label: "Warp falloff radius (normalised UV)",
+        min: 0.01,
+        max: 0.3,
+        default: 0.1,
+    },
+    ParamDescriptor {
+        key: "pull",
+        label: "Pull (+1) vs push (-1) direction",
+        min: -1.0,
+        max: 1.0,
+        default: 1.0,
+    },
+    ParamDescriptor {
+        key: "drift_speed",
+        label: "Ghost drift speed (UV/s)",
+        min: 0.0,
+        max: 1.0,
+        default: 0.2,
+    },
+];
+
 /// Static descriptors for the `refraction` preset (P2.4.2).
 /// Identity at default ior = 1.0 — the operator sees no change until they
 /// increase the ior slider. edge_width controls the SDF-distance band around
@@ -1070,6 +1131,8 @@ pub struct TreatmentPipeline {
     // PCleanup.2.8 — eleventh W2 sibling: particle bounces emit UV-displacing
     // ripples (GPU-only, no CPU readback — state encoded in Particle._pad).
     collision_ripples: crate::render::treatment_particles::TreatmentParticlePipeline,
+    // PCleanup.2.11 — twelfth W2 sibling: drifting particles smear source UVs.
+    portal_warp: crate::render::treatment_particles::TreatmentParticlePipeline,
 }
 
 impl TreatmentPipeline {
@@ -1131,6 +1194,13 @@ impl TreatmentPipeline {
             // state machine; fragment displaces UVs by active ripple sum).
             collision_ripples:
                 crate::render::treatment_particles::TreatmentParticlePipeline::new_collision_ripples(
+                    device,
+                    target_format,
+                ),
+            // PCleanup.2.11 — portal_warp (shared spotlights compute; fragment
+            // smears UVs toward / away from each particle).
+            portal_warp:
+                crate::render::treatment_particles::TreatmentParticlePipeline::new_portal_warp(
                     device,
                     target_format,
                 ),
@@ -1436,6 +1506,32 @@ impl TreatmentPipeline {
                     inputs.params,
                     n,
                     inputs.clock_secs - inputs.t_layer_added_secs,
+                );
+                true
+            }
+            // PCleanup.2.11 — portal_warp. Same compute pass as spotlights
+            // (drift in mask); fragment smears source UVs around each particle.
+            PORTAL_WARP_PRESET_ID => {
+                let n = inputs.params.get("particle_count").copied().unwrap_or(32.0) as u32;
+                self.portal_warp.dispatch_compute(
+                    queue,
+                    device,
+                    encoder,
+                    n,
+                    inputs.seed,
+                    inputs.clock_secs,
+                    inputs.t_layer_added_secs,
+                    inputs.params,
+                    inputs.sdf,
+                );
+                self.portal_warp.render_portal_warp(
+                    device,
+                    queue,
+                    encoder,
+                    dst,
+                    inputs.source,
+                    inputs.params,
+                    n,
                 );
                 true
             }
@@ -5911,6 +6007,48 @@ mod tests {
     fn collision_ripples_is_source_modifier_group() {
         assert_eq!(
             treatment_group(COLLISION_RIPPLES_PRESET_ID),
+            TreatmentGroup::SourceModifier
+        );
+    }
+
+    // ----- PCleanup.2.11 — portal_warp treatment -------------------------
+
+    #[test]
+    fn portal_warp_is_registered() {
+        assert!(
+            is_registered(PORTAL_WARP_PRESET_ID),
+            "portal_warp must appear in treatments::registry()"
+        );
+    }
+
+    #[test]
+    fn portal_warp_descriptors_present() {
+        let descriptors = param_descriptors(PORTAL_WARP_PRESET_ID);
+        assert_eq!(descriptors.len(), 5, "portal_warp exposes 5 params");
+        for d in descriptors {
+            assert!(d.min < d.max, "{}: min < max", d.key);
+            assert!(
+                d.default >= d.min && d.default <= d.max,
+                "{}: default in [min, max]",
+                d.key
+            );
+        }
+    }
+
+    #[test]
+    fn portal_warp_amplitude_default_is_zero() {
+        let descriptors = param_descriptors(PORTAL_WARP_PRESET_ID);
+        let amp_desc = descriptors
+            .iter()
+            .find(|d| d.key == "amplitude")
+            .expect("amplitude descriptor must be present");
+        assert_eq!(amp_desc.default, 0.0, "amplitude identity default = 0.0");
+    }
+
+    #[test]
+    fn portal_warp_is_source_modifier_group() {
+        assert_eq!(
+            treatment_group(PORTAL_WARP_PRESET_ID),
             TreatmentGroup::SourceModifier
         );
     }

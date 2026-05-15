@@ -696,6 +696,21 @@ impl TreatmentParticlePipeline {
         )
     }
 
+    /// PCleanup.2.11 — Construct a `TreatmentParticlePipeline` for the
+    /// `portal_warp` preset.
+    ///
+    /// Compute is the shared spotlights compute (drift through the mask).
+    /// Fragment displaces source UVs toward / away from each nearby
+    /// particle, producing a soft "ghost" warp that travels with them.
+    pub fn new_portal_warp(device: &wgpu::Device, target_format: wgpu::TextureFormat) -> Self {
+        Self::new_with_frag_shader(
+            device,
+            target_format,
+            include_str!("shaders/treat_portal_warp.wgsl"),
+            "treat_portal_warp",
+        )
+    }
+
     /// PCleanup.2.5a — Shared constructor body, parameterised by the
     /// fragment-shader source and label prefix.
     ///
@@ -1496,6 +1511,82 @@ impl TreatmentParticlePipeline {
 
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("treat_collision_ripples render pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: dst,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&self.render_pipeline);
+        pass.set_bind_group(0, &render_bg, &[]);
+        pass.draw(0..6, 0..1);
+    }
+
+    /// PCleanup.2.11 — Fragment pass for `portal_warp`.
+    /// Reads `amplitude` (default 0.0), `radius` (0.05), and `pull`
+    /// (default +1.0 — smear toward particle).  The compute pass is the
+    /// shared spotlights compute via `dispatch_compute` from the existing
+    /// `render` method — caller invokes that, then this.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_portal_warp(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        dst: &wgpu::TextureView,
+        source: &wgpu::TextureView,
+        params: &HashMap<String, f32>,
+        n_particles: u32,
+    ) {
+        let n = n_particles.min(MAX_SPOTLIGHTS);
+        let amplitude = params.get("amplitude").copied().unwrap_or(0.0);
+        let radius = params.get("radius").copied().unwrap_or(0.05);
+        let pull = params.get("pull").copied().unwrap_or(1.0);
+
+        // PortalWarpFragParams: 8 × f32 = 32 bytes.
+        // Layout: [amplitude, radius, n_particles, pull, _pad0..3]
+        let mut frag_bytes = [0u8; 32];
+        let frag_floats = [amplitude, radius, n as f32, pull, 0.0f32, 0.0, 0.0, 0.0];
+        for (i, f) in frag_floats.iter().enumerate() {
+            frag_bytes[i * 4..(i + 1) * 4].copy_from_slice(&f.to_le_bytes());
+        }
+        queue.write_buffer(&self.frag_params_buf, 0, &frag_bytes);
+
+        let read_idx = 1 - self.write_idx.get();
+
+        let render_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("treat_portal_warp render bg"),
+            layout: &self.render_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(source),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: self.frag_params_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: self.ssbo[read_idx].as_entire_binding(),
+                },
+            ],
+        });
+
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("treat_portal_warp render pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: dst,
                 depth_slice: None,

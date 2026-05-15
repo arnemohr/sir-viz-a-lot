@@ -71,15 +71,15 @@ const TREATMENT_PARTICLE_COMPUTE_CONSUMERS: &[&str] = &[
     "treat_collision_ripples_compute",
 ];
 
-/// PCleanup.2.4 / PCleanup.2.5a / PCleanup.2.5b / PCleanup.2.6 / PCleanup.2.8
-/// — Treatment fragment shaders that need ONLY the particle helper prepended
-/// (no SDF calls in the fragment pass).
+/// W2 — Treatment fragment shaders that need ONLY the particle helper
+/// prepended (no SDF calls in the fragment pass).
 const TREATMENT_PARTICLE_FRAG_CONSUMERS: &[&str] = &[
     "treat_spotlights",
     "treat_drift_pinholes",
     "treat_drift_brushstrokes",
     "treat_edge_sparks",
     "treat_collision_ripples",
+    "treat_portal_warp",
 ];
 
 fn main() {
