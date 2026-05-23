@@ -1204,6 +1204,44 @@ fn show_add_picker(
             }
         }
 
+        // T4.2 — LightTrail entry (Animate group, SVG layers only)
+        if group == Animate {
+            let is_svg = matches!(
+                project.layers[layer_idx].kind,
+                crate::project::schema::LayerKind::Svg { .. }
+            );
+            let label = egui::Button::new("Light trail").selected(false);
+            let resp = ui.add_enabled(is_svg, label);
+            let resp = if is_svg {
+                resp.on_hover_text("Comet-style head + fading tail that travels an SVG path")
+            } else {
+                resp.on_disabled_hover_text("Requires an SVG layer")
+            };
+            if resp.clicked() {
+                use crate::effects::light_trail::Palette;
+                let new_node = EffectNode {
+                    enabled: true,
+                    effect: Effect::LightTrail {
+                        progress: Modulator::Static(0.0),
+                        trail_length: 0.2,
+                        head_size: 12.0,
+                        stroke_width: 3.0,
+                        glow_blur: 8.0,
+                        opacity_fade: 0.7,
+                        palette: Palette::default(),
+                        gradient_spread: 1.0,
+                        start: 0.0,
+                        end: 1.0,
+                        align: false,
+                        path_index: 0,
+                        sample_resolution: 512,
+                    },
+                };
+                add_node_to_chain(new_node, project, st, layer_idx);
+                ui.close();
+            }
+        }
+
         // Treatment presets in this group
         for (preset_id, preset_label) in crate::render::treatments::registry() {
             let preset_group = crate::render::treatments::intent_group_for_preset(preset_id);
