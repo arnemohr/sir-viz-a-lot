@@ -45,7 +45,7 @@ pub fn migrate(mut value: Value) -> Result<(Value, MigrationOutcome), ProjectErr
         // layer's new `warp` field. `Project.warps` is preserved during
         // T3.0a so the renderer + audit + mutations keep compiling; T3.0b
         // deletes it once the render graph reads per-layer warps.
-        0..=11 => {
+        0..=12 => {
             if version <= 2 {
                 migrate_v2_to_v3_layers(&mut value);
             }
@@ -125,6 +125,15 @@ pub fn migrate(mut value: Value) -> Result<(Value, MigrationOutcome), ProjectErr
             //     `{"enabled": true, "effect": <old>}` (EffectNode shape).
             if version <= 11 {
                 migrate_v11_to_v12_fold_treatment_into_effects(&mut value);
+            }
+            // v12 → v13 (005-T2.1):
+            //   • No structural change. The version step is reserved for the
+            //     upcoming `Effect::LightTrail` variant (005-T2.2+) so that
+            //     future readers can detect when LightTrail first appeared.
+            //   • No data transformation needed: projects without a
+            //     `LightTrail` effect node are fully compatible with v13.
+            if version <= 12 {
+                migrate_v12_to_v13_noop(&mut value);
             }
             value["schema_version"] = serde_json::json!(CURRENT_SCHEMA_VERSION);
             Ok((value, outcome))
@@ -803,6 +812,20 @@ fn migrate_v11_to_v12_fold_treatment_into_effects(value: &mut Value) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// 005-T2.1 — v12 → v13: no-op version bump (reserved for LightTrail effect)
+// ---------------------------------------------------------------------------
+
+/// 005-T2.1 — No structural change.  The step registers the version boundary
+/// so that `schema_version: 13` in a saved file unambiguously means "this
+/// project was saved after the `Effect::LightTrail` variant was introduced
+/// (005-T2.2+)".  Old v12 projects with no `LightTrail` nodes load without
+/// any data transformation.
+fn migrate_v12_to_v13_noop(_value: &mut Value) {
+    // Intentionally empty.  The `schema_version` field is updated by the
+    // caller (`migrate()`) after all step functions return.
+}
+
 #[cfg(test)]
 mod tests {
     use super::migrate;
@@ -1414,12 +1437,12 @@ mod tests {
 
     // --- P3.2.2 schema migration v7 → v8 tests ---
 
-    /// 004-T1.3 — `CURRENT_SCHEMA_VERSION == 12` (bumped from 11 by 004-T1.3).
+    /// 005-T2.1 — `CURRENT_SCHEMA_VERSION == 13` (bumped from 12 by 005-T2.1).
     #[test]
-    fn current_schema_version_is_12() {
+    fn current_schema_version_is_13() {
         assert_eq!(
-            CURRENT_SCHEMA_VERSION, 12,
-            "CURRENT_SCHEMA_VERSION must be 12 after 004-T1.3"
+            CURRENT_SCHEMA_VERSION, 13,
+            "CURRENT_SCHEMA_VERSION must be 13 after 005-T2.1"
         );
     }
 
@@ -2006,6 +2029,69 @@ mod tests {
         assert!(
             arr[0]["effect"].get("Color").is_some(),
             "Color node preserved"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // 005-T2.1 — v12 → v13 migration tests
+    // ---------------------------------------------------------------------------
+
+    /// 005-T2.1 — A v12 project migrates to v13 with no semantic change:
+    /// all layer data is preserved byte-for-byte; only schema_version changes.
+    #[test]
+    fn migrate_v12_to_v13_no_semantic_change() {
+        let v12 = serde_json::json!({
+            "schema_version": 12,
+            "layers": [{
+                "id": "a",
+                "kind": { "Svg": { "svg_path": "/tmp/a.svg" } },
+                "enabled": true,
+                "transform": { "translate": [0.0, 0.0], "rotate_deg": 0.0, "scale": [1.0, 1.0], "anchor": [0.0, 0.0] },
+                "blend_mode": "Normal",
+                "opacity": 1.0,
+                "effects": [
+                    { "enabled": true, "effect": { "Color": { "hue": { "Static": 0.0 }, "saturation": { "Static": 1.0 }, "brightness": { "Static": 0.0 }, "contrast": { "Static": 1.0 } } } }
+                ]
+            }]
+        });
+
+        let (migrated, _) = migrate(v12).expect("migrate v12 → v13");
+        assert_eq!(
+            migrated["schema_version"],
+            serde_json::json!(CURRENT_SCHEMA_VERSION),
+            "schema_version must be bumped to CURRENT_SCHEMA_VERSION (13)"
+        );
+
+        // Layer data must be semantically unchanged.
+        let layer = &migrated["layers"][0];
+        assert_eq!(layer["id"], "a");
+        assert_eq!(layer["blend_mode"], "Normal");
+        let effects = layer["effects"].as_array().expect("effects is array");
+        assert_eq!(effects.len(), 1, "still 1 effect after no-op migration");
+        assert_eq!(effects[0]["enabled"], serde_json::json!(true));
+        assert!(
+            effects[0]["effect"].get("Color").is_some(),
+            "Color effect preserved"
+        );
+
+        // Full typed round-trip.
+        let project: crate::project::Project =
+            serde_json::from_value(migrated).expect("deserialize migrated v12 project");
+        assert_eq!(project.schema_version, CURRENT_SCHEMA_VERSION);
+        assert_eq!(project.layers.len(), 1);
+    }
+
+    /// 005-T2.1 — Saving a default project produces `schema_version: 13`.
+    #[test]
+    fn new_project_saves_with_schema_version_13() {
+        use crate::project::Project;
+
+        let project = Project::default();
+        let json_value = serde_json::to_value(&project).expect("serialize project");
+        assert_eq!(
+            json_value["schema_version"],
+            serde_json::json!(13u32),
+            "a freshly created project must serialize with schema_version 13"
         );
     }
 
