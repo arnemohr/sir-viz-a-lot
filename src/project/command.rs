@@ -4997,6 +4997,13 @@ mod tests {
             SetLayerEffectsAndMask {
                 new_mask_polygon: Vec<[f32; 2]>,
             },
+            /// 005-T2.4 — replace layer 0's effect chain with a single
+            /// `Effect::LightTrail` node. Exercises the Effects-Vec Reverse
+            /// rule 2 and verifies that the whole-vec snapshot round-trips
+            /// for the new variant, including both `Palette` arms.
+            SetLayerEffectsLightTrail {
+                node: crate::effects::EffectNode,
+            },
         }
 
         fn to_mutation(kind: &MutationKind, project: &Project) -> Mutation {
@@ -5106,7 +5113,17 @@ mod tests {
                     if project.layers.is_empty() || project.layers[0].effects.len() <= *effect_idx {
                         project.set_gamma_mutation(project.gamma) // no-op fallback
                     } else {
-                        project.set_modulator_mutation(0, *effect_idx, *field, new.clone())
+                        // Guard: `modulator_at_ref` returns None when `field` doesn't
+                        // apply to the effect variant (e.g. ColorHue on a LightTrail).
+                        // This can happen after `SetLayerEffectsLightTrail` replaces
+                        // the chain and a subsequent `SetModulator` targets the old
+                        // variant. Fall back to a no-op rather than panicking.
+                        let effect = &project.layers[0].effects[*effect_idx].effect;
+                        if modulator_at_ref(effect, *field).is_some() {
+                            project.set_modulator_mutation(0, *effect_idx, *field, new.clone())
+                        } else {
+                            project.set_gamma_mutation(project.gamma) // no-op fallback
+                        }
                     }
                 }
                 MutationKind::LayerEffectsDragTranslate { dx, dy } => {
@@ -5511,6 +5528,16 @@ mod tests {
                         )
                     }
                 }
+                // 005-T2.4 — SetLayerEffectsLightTrail: install a chain with
+                // one LightTrail node, exercising the Effects-Vec Reverse rule 2
+                // for the new variant across both Palette arms.
+                MutationKind::SetLayerEffectsLightTrail { node } => {
+                    if project.layers.is_empty() {
+                        project.set_gamma_mutation(project.gamma) // no-op fallback
+                    } else {
+                        project.set_layer_effects_mutation(0, vec![node.clone()])
+                    }
+                }
             }
         }
 
@@ -5597,6 +5624,86 @@ mod tests {
                     },
                 ),
             ]
+        }
+
+        /// 005-T2.4 — strategy covering both `Palette` variants.
+        ///
+        /// `Fixed` carries 0–10 RGBA entries (extras beyond 8 are preserved in
+        /// serde but truncated at GPU upload; round-trip still byte-exact because
+        /// serde keeps the full vec).
+        /// `HueShift` speed is capped to [0.0, 2.0] matching the UI slider range.
+        fn arb_palette() -> impl Strategy<Value = crate::effects::light_trail::Palette> {
+            use crate::effects::light_trail::Palette;
+            prop_oneof![
+                proptest::collection::vec(
+                    (any::<u8>(), any::<u8>(), any::<u8>(), any::<u8>())
+                        .prop_map(|(r, g, b, a)| [r, g, b, a]),
+                    0..=10,
+                )
+                .prop_map(Palette::Fixed),
+                (0.0_f32..=2.0_f32).prop_map(|speed| Palette::HueShift { speed }),
+            ]
+        }
+
+        /// 005-T2.4 — strategy for a complete `Effect::LightTrail` wrapped in an
+        /// `EffectNode`.  Scalar ranges match the `de_clamp_*` helpers so a
+        /// serde round-trip leaves every field bit-identical.
+        ///
+        /// The generator is split into two nested tuples (7 + 7 = 14 fields)
+        /// because proptest's `Strategy` impl for tuples tops out at 12.
+        fn arb_light_trail_effect_node() -> impl Strategy<Value = crate::effects::EffectNode> {
+            use crate::effects::{Effect, EffectNode};
+            // Group A: progress + first 6 scalar fields.
+            let group_a = (
+                arb_modulator(),
+                0.0_f32..=1.0_f32,   // trail_length
+                1.0_f32..=256.0_f32, // head_size
+                0.5_f32..=32.0_f32,  // stroke_width
+                0.0_f32..=128.0_f32, // glow_blur
+                0.0_f32..=1.0_f32,   // opacity_fade
+                arb_palette(),
+            );
+            // Group B: remaining scalar fields + EffectNode metadata.
+            let group_b = (
+                0.0_f32..=1.0_f32, // gradient_spread
+                0.0_f32..=1.0_f32, // start
+                0.0_f32..=1.0_f32, // end
+                any::<bool>(),     // align
+                0u32..=4u32,       // path_index
+                64u32..=4096u32,   // sample_resolution
+                any::<bool>(),     // enabled flag on EffectNode
+            );
+            (group_a, group_b).prop_map(
+                |(
+                    (
+                        progress,
+                        trail_length,
+                        head_size,
+                        stroke_width,
+                        glow_blur,
+                        opacity_fade,
+                        palette,
+                    ),
+                    (gradient_spread, start, end, align, path_index, sample_resolution, enabled),
+                )| EffectNode {
+                    enabled,
+                    effect: Effect::LightTrail {
+                        progress,
+                        trail_length,
+                        head_size,
+                        stroke_width,
+                        glow_blur,
+                        opacity_fade,
+                        palette,
+                        gradient_spread,
+                        start,
+                        end,
+                        align,
+                        path_index,
+                        sample_resolution,
+                    },
+                },
+            )
         }
 
         /// 003-T1.22 — (effect_idx, field) pairs valid for `default_effect_chain()`
@@ -5787,6 +5894,12 @@ mod tests {
                 .prop_map(|new_mask_polygon| {
                     MutationKind::SetLayerEffectsAndMask { new_mask_polygon }
                 }),
+                // 005-T2.4 — SetLayerEffectsLightTrail: install a chain with one
+                // arbitrary LightTrail node. Exercises Effects-Vec Reverse rule 2
+                // for the new variant across both Palette arms in the main sequence
+                // proptest (`apply_then_undo_round_trips`, `undo_redo_round_trips`).
+                arb_light_trail_effect_node()
+                    .prop_map(|node| MutationKind::SetLayerEffectsLightTrail { node }),
             ]
         }
 
@@ -6201,6 +6314,214 @@ mod tests {
         assert!(
             !m.is_non_undoable(),
             "SetLayerEffectsAndMask must be undoable (is_non_undoable must return false)"
+        );
+    }
+
+    // --- 005-T2.4 SetLayerEffects + LightTrail targeted tests ---
+
+    /// 005-T2.4-1 — add → undo: `SetLayerEffects` installs a LightTrail onto
+    /// an empty layer; applying the returned reverse restores the chain to `[]`.
+    ///
+    /// Exercises Effects-Vec Reverse rule 2 for `Effect::LightTrail` with a
+    /// `Palette::HueShift` palette.
+    #[test]
+    fn set_layer_effects_light_trail_add_undo_round_trips() {
+        use crate::effects::light_trail::Palette;
+        use crate::effects::{Effect, EffectNode};
+        use crate::modulators::Modulator;
+
+        let mut p = fresh_project();
+        // Start with an empty effect chain.
+        p.layers[0].effects = vec![];
+        let original = p.layers[0].effects.clone();
+        assert_eq!(original.len(), 0, "starting chain should be empty");
+
+        // Build a chain with a single LightTrail node.
+        let lt_node = EffectNode {
+            enabled: true,
+            effect: Effect::LightTrail {
+                progress: Modulator::Static(0.5),
+                trail_length: 0.3,
+                head_size: 16.0,
+                stroke_width: 4.0,
+                glow_blur: 10.0,
+                opacity_fade: 0.8,
+                palette: Palette::HueShift { speed: 0.5 },
+                gradient_spread: 0.9,
+                start: 0.1,
+                end: 0.9,
+                align: true,
+                path_index: 0,
+                sample_resolution: 512,
+            },
+        };
+        let new_chain = vec![lt_node];
+
+        let mutation = p.set_layer_effects_mutation(0, new_chain);
+        let reverse = mutation.apply(&mut p);
+
+        // After apply: chain has one LightTrail.
+        assert_eq!(
+            p.layers[0].effects.len(),
+            1,
+            "after apply: chain should have 1 LightTrail"
+        );
+        assert!(
+            matches!(p.layers[0].effects[0].effect, Effect::LightTrail { .. }),
+            "after apply: effects[0] should be LightTrail"
+        );
+
+        // Undo: chain should be restored to empty.
+        let _ = reverse.apply(&mut p);
+        let after_undo = serde_json::to_value(&p.layers[0].effects).unwrap();
+        let original_val = serde_json::to_value(&original).unwrap();
+        assert_eq!(
+            after_undo, original_val,
+            "after undo: effect chain should be restored to empty"
+        );
+    }
+
+    /// 005-T2.4-2 — edit → undo: `SetLayerEffects` replaces a LightTrail with
+    /// a LightTrail at different params; reverse restores the original variant.
+    ///
+    /// Uses a `Palette::Fixed` palette to cover that arm of the Reverse rule.
+    #[test]
+    fn set_layer_effects_light_trail_edit_undo_round_trips() {
+        use crate::effects::light_trail::Palette;
+        use crate::effects::{Effect, EffectNode};
+        use crate::modulators::Modulator;
+
+        let mut p = fresh_project();
+
+        // Install a LightTrail with specific params as the original state.
+        let original_node = EffectNode {
+            enabled: true,
+            effect: Effect::LightTrail {
+                progress: Modulator::Static(0.0),
+                trail_length: 0.2,
+                head_size: 12.0,
+                stroke_width: 3.0,
+                glow_blur: 8.0,
+                opacity_fade: 0.7,
+                palette: Palette::Fixed(vec![[255, 0, 0, 255], [0, 0, 255, 255]]),
+                gradient_spread: 1.0,
+                start: 0.0,
+                end: 1.0,
+                align: false,
+                path_index: 0,
+                sample_resolution: 256,
+            },
+        };
+        p.layers[0].effects = vec![original_node];
+        let original_val = serde_json::to_value(&p.layers[0].effects).unwrap();
+
+        // Build a replacement LightTrail with different trail_length and palette.
+        let edited_node = EffectNode {
+            enabled: true,
+            effect: Effect::LightTrail {
+                progress: Modulator::Static(0.5),
+                trail_length: 0.6,
+                head_size: 24.0,
+                stroke_width: 6.0,
+                glow_blur: 20.0,
+                opacity_fade: 0.4,
+                palette: Palette::Fixed(vec![[0, 255, 0, 255]]),
+                gradient_spread: 0.5,
+                start: 0.2,
+                end: 0.8,
+                align: true,
+                path_index: 1,
+                sample_resolution: 1024,
+            },
+        };
+
+        let mutation = p.set_layer_effects_mutation(0, vec![edited_node]);
+        let reverse = mutation.apply(&mut p);
+
+        // After apply: chain contains the edited LightTrail.
+        assert_eq!(
+            p.layers[0].effects.len(),
+            1,
+            "chain should still have 1 node"
+        );
+        assert!(
+            matches!(p.layers[0].effects[0].effect, Effect::LightTrail { trail_length, .. } if (trail_length - 0.6).abs() < 1e-6),
+            "after apply: trail_length should be 0.6"
+        );
+
+        // Undo: chain should be restored to the original LightTrail params.
+        let _ = reverse.apply(&mut p);
+        let after_undo = serde_json::to_value(&p.layers[0].effects).unwrap();
+        assert_eq!(
+            after_undo, original_val,
+            "after undo: effect chain should be restored to original LightTrail params"
+        );
+    }
+
+    /// 005-T2.4-3 — remove → undo: `SetLayerEffects` removes a LightTrail from
+    /// a `[LightTrail, Blur]` chain; reverse restores both entries identically.
+    ///
+    /// Confirms whole-vec snapshot fidelity: both entries are byte-equal after
+    /// undo, not just the surviving Blur node.
+    #[test]
+    fn set_layer_effects_light_trail_remove_undo_round_trips() {
+        use crate::effects::light_trail::Palette;
+        use crate::effects::{Effect, EffectNode};
+        use crate::modulators::Modulator;
+
+        let mut p = fresh_project();
+
+        // Install [LightTrail, Blur] as the original chain.
+        let lt_node = EffectNode {
+            enabled: true,
+            effect: Effect::LightTrail {
+                progress: Modulator::Static(0.25),
+                trail_length: 0.4,
+                head_size: 18.0,
+                stroke_width: 5.0,
+                glow_blur: 15.0,
+                opacity_fade: 0.6,
+                palette: Palette::Fixed(vec![[128, 0, 128, 255]]),
+                gradient_spread: 0.75,
+                start: 0.05,
+                end: 0.95,
+                align: false,
+                path_index: 2,
+                sample_resolution: 768,
+            },
+        };
+        let blur_node = EffectNode {
+            enabled: true,
+            effect: Effect::Blur {
+                radius_px: Modulator::Static(3.0),
+            },
+        };
+        p.layers[0].effects = vec![lt_node, blur_node];
+        let original_val = serde_json::to_value(&p.layers[0].effects).unwrap();
+        assert_eq!(
+            p.layers[0].effects.len(),
+            2,
+            "starting chain: [LightTrail, Blur]"
+        );
+
+        // Remove the LightTrail, leaving just the Blur.
+        let new_chain = vec![p.layers[0].effects[1].clone()]; // keep only Blur
+        let mutation = p.set_layer_effects_mutation(0, new_chain);
+        let reverse = mutation.apply(&mut p);
+
+        // After apply: only Blur remains.
+        assert_eq!(p.layers[0].effects.len(), 1, "after apply: only Blur");
+        assert!(
+            matches!(p.layers[0].effects[0].effect, Effect::Blur { .. }),
+            "after apply: effects[0] should be Blur"
+        );
+
+        // Undo: the full [LightTrail, Blur] chain must be restored byte-exactly.
+        let _ = reverse.apply(&mut p);
+        let after_undo = serde_json::to_value(&p.layers[0].effects).unwrap();
+        assert_eq!(
+            after_undo, original_val,
+            "after undo: [LightTrail, Blur] chain must be restored byte-exactly"
         );
     }
 
