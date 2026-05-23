@@ -1963,3 +1963,73 @@ fn window_reveal_template_structure_and_gpu_adapter() {
     let _adapter_info = h.adapter.get_info();
     // adapter confirmed; golden comparison pending the pipeline exposure.
 }
+
+// ---------------------------------------------------------------------------
+// T1.3 — LightTrail polyline GPU buffer Metal/wgpu compat check.
+//
+// Creates a storage buffer sized for a 16-sample polyline fixture, writes
+// the data via queue.write_buffer, and asserts the operation completes
+// without wgpu validation errors. No render pass is needed — the buffer
+// creation + write is the entire Metal-compat verification.
+//
+// The crate has no lib.rs, so we cannot call `LightTrailGpuPolyline::upload`
+// directly here. Instead we rebuild the buffer creation inline, mirroring the
+// production function in src/effects/light_trail.rs. This is the established
+// pattern for integration tests in this file (see color_pass_golden comment at
+// line ~605).
+// ---------------------------------------------------------------------------
+
+/// T1.3: create a `STORAGE | COPY_DST` buffer for a 16-sample polyline fixture
+/// and write the data.  Asserts no wgpu validation errors by completing without
+/// panic.  Buffer size = 16 * 3 * 4 = 192 bytes.
+#[test]
+fn light_trail_gpu_buffer_upload() {
+    const SAMPLE_COUNT: u32 = 16;
+    // Each sample: [point_x, point_y, cumulative_arclen] — 3 f32s.
+    const FLOATS_PER_SAMPLE: u32 = 3;
+    const BUFFER_BYTES: u64 = (SAMPLE_COUNT * FLOATS_PER_SAMPLE * 4) as u64; // 192
+
+    let h = Headless::new().expect("Headless::new");
+
+    // Build fixture payload: straight horizontal line x=0..15, y=0, arclen=0..15.
+    let mut payload: Vec<f32> = Vec::with_capacity((SAMPLE_COUNT * FLOATS_PER_SAMPLE) as usize);
+    for i in 0..SAMPLE_COUNT {
+        payload.push(i as f32); // point_x
+        payload.push(0.0_f32); // point_y
+        payload.push(i as f32); // cumulative_arclen
+    }
+    assert_eq!(
+        payload.len() as u32,
+        SAMPLE_COUNT * FLOATS_PER_SAMPLE,
+        "payload must be sample_count * 3 floats"
+    );
+
+    let byte_payload: Vec<u8> = payload.iter().flat_map(|f| f.to_le_bytes()).collect();
+    assert_eq!(
+        byte_payload.len() as u64,
+        BUFFER_BYTES,
+        "byte payload must be 192 bytes for 16-sample polyline"
+    );
+
+    // T1.3: storage buffer chosen — already used by treatment_particles +
+    // fx_compute; verified Metal-OK on wgpu 29.
+    let buffer = h.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("T1.3 light_trail polyline storage test"),
+        size: BUFFER_BYTES,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    // Upload — any wgpu validation error here causes a panic (wgpu's default
+    // uncaptured-error handler panics in debug mode).
+    h.queue.write_buffer(&buffer, 0, &byte_payload);
+
+    // Flush to ensure the write completes on the device.
+    h.queue.submit(std::iter::empty());
+    h.device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .expect("device.poll Wait failed");
+
+    // Structural assertions.
+    assert_eq!(buffer.size(), BUFFER_BYTES, "buffer size must be 192 bytes");
+}

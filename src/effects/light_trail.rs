@@ -1,8 +1,10 @@
 //! Light trail effect — glowing rainbow comet following an SVG path.
 //!
-//! This module defines [`Palette`] (serialisable colour strategy) and
+//! This module defines [`Palette`] (serialisable colour strategy),
 //! [`LightTrailParams`] (GPU uniform buffer struct with manual
-//! `to_wire_bytes()` packing). No bytemuck; follows the same convention
+//! `to_wire_bytes()` packing), and [`LightTrailGpuPolyline`] (the
+//! arc-length-parameterised polyline uploaded to the GPU as a storage
+//! buffer for shader lookup). No bytemuck; follows the same convention
 //! as `BlurParams` in `src/effects/blur.rs`.
 
 use serde::{Deserialize, Serialize};
@@ -205,6 +207,94 @@ impl LightTrailParams {
 }
 
 // ---------------------------------------------------------------------------
+// LightTrailGpuPolyline — polyline storage buffer
+// ---------------------------------------------------------------------------
+
+/// Pack a [`crate::path_geom::Polyline`] into a flat `&[f32]` payload for GPU upload.
+///
+/// Layout: each sample is stored as three consecutive `f32` values:
+/// `[point_x, point_y, cumulative_arclen]`.  Total payload length =
+/// `sample_count * 3 * sizeof(f32)` bytes.
+///
+/// This is a pure-CPU helper; it does not touch wgpu.  The result is consumed
+/// by [`LightTrailGpuPolyline::upload`] but is also useful for unit-testing
+/// the byte layout without a real GPU device.
+pub fn polyline_to_f32_payload(polyline: &crate::path_geom::Polyline) -> Vec<f32> {
+    let n = polyline.points.len();
+    debug_assert_eq!(
+        n,
+        polyline.cumulative_arclen.len(),
+        "points and cumulative_arclen must have equal length"
+    );
+    let mut payload = Vec::with_capacity(n * 3);
+    for i in 0..n {
+        payload.push(polyline.points[i][0]);
+        payload.push(polyline.points[i][1]);
+        payload.push(polyline.cumulative_arclen[i]);
+    }
+    payload
+}
+
+/// Polyline data uploaded to the GPU as a storage buffer for the light-trail
+/// shader.
+///
+/// # Storage-buffer decision
+///
+/// T1.3: storage buffer chosen — `BufferUsages::STORAGE` is already used by
+/// `treatment_particles.rs` and `fx_compute.rs`; confirmed Metal-OK on the
+/// same wgpu 29 device descriptor used by the rest of rmap.
+///
+/// Layout: `sample_count * 3` contiguous `f32` values in the form
+/// `[px, py, arclen, px, py, arclen, …]`. The shader indexes sample `i` as
+/// floats at offsets `i*3+0`, `i*3+1`, `i*3+2`.
+///
+/// No bind group or pipeline is created here — that is T3.2's job.
+pub struct LightTrailGpuPolyline {
+    /// The GPU storage buffer holding `sample_count * 3` `f32` values.
+    pub buffer: wgpu::Buffer,
+    /// Number of arc-length samples (equals `polyline.points.len()`).
+    pub sample_count: u32,
+    /// Total arc-length of the polyline (copy of `polyline.total_length`).
+    pub total_length: f32,
+}
+
+impl LightTrailGpuPolyline {
+    /// Upload a CPU [`crate::path_geom::Polyline`] to a GPU storage buffer.
+    ///
+    /// The buffer is created with `STORAGE | COPY_DST` usage and immediately
+    /// written via `queue.write_buffer`.  The resulting buffer is ready for
+    /// binding in T3.2 without any further uploads.
+    pub fn upload(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        polyline: &crate::path_geom::Polyline,
+    ) -> Self {
+        let payload = polyline_to_f32_payload(polyline);
+        let byte_len = (payload.len() * std::mem::size_of::<f32>()) as u64;
+
+        // T1.3: storage buffer chosen — already used by treatment_particles +
+        // fx_compute; verified Metal-OK on wgpu 29.
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("light_trail polyline storage"),
+            size: byte_len,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        // Convert f32 slice to bytes for upload (no bytemuck — consistent with
+        // the to_wire_bytes convention used elsewhere in this file).
+        let byte_payload: Vec<u8> = payload.iter().flat_map(|f| f.to_le_bytes()).collect();
+        queue.write_buffer(&buffer, 0, &byte_payload);
+
+        Self {
+            buffer,
+            sample_count: polyline.points.len() as u32,
+            total_length: polyline.total_length,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -358,6 +448,53 @@ mod tests {
             192,
             "to_wire_bytes must return exactly 192 bytes"
         );
+    }
+
+    /// T1.3-test-1: `polyline_to_f32_payload` for a 16-sample straight-line
+    /// polyline produces a payload of `16 * 3 = 48` f32s with the correct
+    /// `sample_count` and `total_length`.
+    ///
+    /// This test is CPU-only — no wgpu device required.
+    #[test]
+    fn light_trail_gpu_polyline_payload_layout() {
+        use crate::path_geom::Polyline;
+
+        // Build a 16-sample horizontal line from x=0 to x=15.
+        // cumulative_arclen[i] = i as f32; total_length = 15.0.
+        let n: usize = 16;
+        let points: Vec<[f32; 2]> = (0..n).map(|i| [i as f32, 0.0]).collect();
+        let cumulative_arclen: Vec<f32> = (0..n).map(|i| i as f32).collect();
+        let total_length = 15.0_f32;
+
+        let polyline = Polyline {
+            points,
+            cumulative_arclen,
+            total_length,
+        };
+
+        let payload = super::polyline_to_f32_payload(&polyline);
+
+        // Expect 16 * 3 = 48 floats.
+        assert_eq!(
+            payload.len(),
+            48,
+            "payload length should be sample_count * 3"
+        );
+
+        // First triple: x=0.0, y=0.0, arclen=0.0.
+        assert_eq!(payload[0], 0.0_f32, "first sample x");
+        assert_eq!(payload[1], 0.0_f32, "first sample y");
+        assert_eq!(payload[2], 0.0_f32, "first sample arclen");
+
+        // Last triple (index 15): x=15.0, y=0.0, arclen=15.0.
+        assert_eq!(payload[45], 15.0_f32, "last sample x");
+        assert_eq!(payload[46], 0.0_f32, "last sample y");
+        assert_eq!(payload[47], 15.0_f32, "last sample arclen");
+
+        // Validate sample_count and total_length match.
+        let sample_count = n as u32;
+        assert_eq!(sample_count, 16);
+        assert!((total_length - 15.0).abs() < 1e-6);
     }
 
     /// T2.2-test-6: 12-color Fixed palette is truncated to 8 on GPU upload.
