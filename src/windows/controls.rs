@@ -1659,6 +1659,10 @@ fn collect_osc_bindings_in_effect(
             // Effect::Transform's `translate`).
             out.extend(extract("decay", decay));
         }
+        Effect::LightTrail { progress, .. } => {
+            // 005-T2.2 — `progress` is the only Modulator-typed field.
+            out.extend(extract("progress", progress));
+        }
     }
     out
 }
@@ -1675,6 +1679,8 @@ fn effect_kind_label(effect: &crate::effects::Effect) -> &'static str {
         Effect::Treatment { .. } => "Treatment",
         // PCleanup.1.4 — feedback / trails.
         Effect::Feedback { .. } => "Feedback",
+        // 005-T2.2 — light trail comet.
+        Effect::LightTrail { .. } => "Light trail",
     }
 }
 

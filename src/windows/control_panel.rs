@@ -1914,6 +1914,8 @@ pub(super) fn effect_label(e: &Effect) -> &'static str {
         Effect::Treatment { .. } => "Treatment",
         // PCleanup.1.4 — feedback / trails.
         Effect::Feedback { .. } => "Feedback",
+        // 005-T2.2 — light trail comet.
+        Effect::LightTrail { .. } => "Light trail",
     }
 }
 
@@ -2217,6 +2219,10 @@ pub(super) fn show_effect(
                         .prefix("y: "),
                 );
             });
+        }
+        // 005-T2.2 — placeholder; full widget set lands in T4.1.
+        Effect::LightTrail { .. } => {
+            ui.label("Light trail (params UI: T4.1)");
         }
         Effect::Treatment { id, params, .. } => {
             // PCleanup.1.3 — per-layer treatment dispatch. Inline editor

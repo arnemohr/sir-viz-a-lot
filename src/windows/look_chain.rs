@@ -55,6 +55,8 @@ fn effect_display_name(effect: &Effect) -> String {
         Effect::Transform { .. } => "Transform".to_string(),
         Effect::Feedback { .. } => "Feedback".to_string(),
         Effect::External { .. } => "External".to_string(),
+        // 005-T2.2 — placeholder; full UI lands in T4.1.
+        Effect::LightTrail { .. } => "Light trail".to_string(),
         Effect::Treatment { id, .. } => {
             // Replace underscores with spaces and capitalize the first letter.
             let with_spaces = id.replace('_', " ");
@@ -305,6 +307,10 @@ fn show_effect_full_params(
             let changes = show_treatment_params_read_only(ui, id, params, node_idx);
             treatment_changes.extend(changes);
         }
+        // 005-T2.2 — placeholder; full widget set lands in T4.1.
+        Effect::LightTrail { .. } => {
+            ui.weak("Light trail params (T4.1)");
+        }
     }
 }
 
@@ -514,8 +520,7 @@ pub fn show_look_chain_section(
                 |ui| {
                     if let Some((open_li, open_ei)) = detail_open {
                         // Bounds re-checked: auto-close guard at top handles stale indices.
-                        if open_li == layer_idx
-                            && open_ei < project.layers[layer_idx].effects.len()
+                        if open_li == layer_idx && open_ei < project.layers[layer_idx].effects.len()
                         {
                             show_effect_detail_panel(
                                 ui,
@@ -544,10 +549,7 @@ pub fn show_look_chain_section(
         );
         // Narrow-mode: detail panel stacked below when selected.
         if let Some((open_li, open_ei)) = detail_open {
-            if narrow
-                && open_li == layer_idx
-                && open_ei < project.layers[layer_idx].effects.len()
-            {
+            if narrow && open_li == layer_idx && open_ei < project.layers[layer_idx].effects.len() {
                 ui.separator();
                 show_effect_detail_panel(
                     ui,
@@ -677,7 +679,6 @@ fn render_chain_rail(
     pending_reorder: &mut Option<(usize, usize)>,
     pending_remove: &mut Option<usize>,
 ) {
-
     for idx in 0..effects_len {
         let (_, drop_payload) = ui.dnd_drop_zone::<usize, _>(egui::Frame::default(), |ui| {
             // Determine if this row is selected (for highlight frame).
@@ -711,8 +712,7 @@ fn render_chain_rail(
                         handle_rect = Some(handle.rect);
 
                         // ---- Intent-group glyph --------------------------------
-                        let group =
-                            intent_group(&project.layers[layer_idx].effects[idx].effect);
+                        let group = intent_group(&project.layers[layer_idx].effects[idx].effect);
                         let (glyph, glyph_color) = intent_group_glyph(group);
                         ui.label(RichText::new(glyph).color(glyph_color));
 
@@ -733,18 +733,15 @@ fn render_chain_rail(
                         };
 
                         // Allocate a clickable 12×12 rect for the dot
-                        let dot_resp =
-                            ui.allocate_response(Vec2::splat(12.0), Sense::click());
+                        let dot_resp = ui.allocate_response(Vec2::splat(12.0), Sense::click());
                         ui.painter()
                             .circle_filled(dot_resp.rect.center(), 5.0, dot_color);
                         dot_rect = Some(dot_resp.rect);
                         if dot_resp.clicked() {
-                            let mut new_effects =
-                                project.layers[layer_idx].effects.clone();
+                            let mut new_effects = project.layers[layer_idx].effects.clone();
                             new_effects[idx].enabled = !new_effects[idx].enabled;
-                            st.pending_mutations.push(
-                                project.set_layer_effects_mutation(layer_idx, new_effects),
-                            );
+                            st.pending_mutations
+                                .push(project.set_layer_effects_mutation(layer_idx, new_effects));
                         }
                         dot_resp.on_hover_text(if !node.enabled {
                             "Bypassed \u{2014} click to enable".to_string()
@@ -755,8 +752,7 @@ fn render_chain_rail(
                         });
 
                         // ---- Effect name (flex, truncates) ---------------------
-                        let effect_ref =
-                            &project.layers[layer_idx].effects[idx].effect;
+                        let effect_ref = &project.layers[layer_idx].effects[idx].effect;
                         let name = effect_display_name(effect_ref);
                         ui.add(egui::Label::new(name).truncate());
 
@@ -779,8 +775,7 @@ fn render_chain_rail(
             // click landed inside the drag handle, status dot, or delete ×
             // (those have their own handlers), or while a drag is active.
             let row_rect = row_resp.response.rect;
-            let row_click =
-                ui.interact(row_rect, ui.id().with(("row_click", idx)), Sense::click());
+            let row_click = ui.interact(row_rect, ui.id().with(("row_click", idx)), Sense::click());
             if row_click.clicked() && handle_not_dragged(ui) {
                 let on_child = row_click.interact_pointer_pos().is_some_and(|p| {
                     handle_rect.is_some_and(|r| r.contains(p))

@@ -4,6 +4,7 @@
 pub mod blur;
 pub mod color;
 pub mod feedback;
+pub mod light_trail;
 pub mod registry;
 pub mod tint;
 pub mod transform;
@@ -11,9 +12,33 @@ pub mod transform;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::modulators::Modulator;
+
+// ---------------------------------------------------------------------------
+// Serde clamp helpers for Effect::LightTrail fields
+// ---------------------------------------------------------------------------
+
+fn de_clamp_unit<'de, D: Deserializer<'de>>(d: D) -> Result<f32, D::Error> {
+    Ok(f32::deserialize(d)?.clamp(0.0, 1.0))
+}
+
+fn de_clamp_head_size<'de, D: Deserializer<'de>>(d: D) -> Result<f32, D::Error> {
+    Ok(f32::deserialize(d)?.clamp(1.0, 256.0))
+}
+
+fn de_clamp_stroke_width<'de, D: Deserializer<'de>>(d: D) -> Result<f32, D::Error> {
+    Ok(f32::deserialize(d)?.clamp(0.5, 32.0))
+}
+
+fn de_clamp_glow_blur<'de, D: Deserializer<'de>>(d: D) -> Result<f32, D::Error> {
+    Ok(f32::deserialize(d)?.clamp(0.0, 128.0))
+}
+
+fn de_clamp_sample_resolution<'de, D: Deserializer<'de>>(d: D) -> Result<u32, D::Error> {
+    Ok(u32::deserialize(d)?.clamp(64, 4096))
+}
 
 /// 004-T1.1 — A single node in the per-layer Look chain.
 ///
@@ -123,6 +148,60 @@ pub enum Effect {
         decay: Modulator,
         #[serde(default)]
         offset: [f32; 2],
+    },
+    /// 005-T2.2 — glowing rainbow comet following the layer's source SVG
+    /// path geometry. The comet head position is driven by `progress`
+    /// (Modulator-eligible: use `Modulator::Time` for autoplay). All
+    /// f32 fields are clamped to their stated ranges at deserialise time.
+    ///
+    /// Render dispatch is a no-op stub until T3.2 wires the
+    /// `LightTrailPipeline`; the schema + serde contract is fully
+    /// operational from T2.2 onward.
+    LightTrail {
+        /// Normalised head position along the path (0..1). Use
+        /// `Modulator::Time { period_secs: 4.0 }` for smooth autoplay.
+        progress: Modulator,
+        /// Length of the visible tail as a fraction of total path length
+        /// (0..1, **normalised** — not pixels).
+        #[serde(deserialize_with = "de_clamp_unit")]
+        trail_length: f32,
+        /// Radius of the bright head core in render-target pixels (1..256).
+        #[serde(deserialize_with = "de_clamp_head_size")]
+        head_size: f32,
+        /// Trail core thickness in render-target pixels (0.5..32).
+        #[serde(deserialize_with = "de_clamp_stroke_width")]
+        stroke_width: f32,
+        /// Gaussian stdDev-equivalent halo softness in render-target pixels
+        /// (0..128). NOT path-space — shifts with projector resolution.
+        #[serde(deserialize_with = "de_clamp_glow_blur")]
+        glow_blur: f32,
+        /// Falloff exponent from head (1.0) to tail end (0.0); higher =
+        /// faster decay (0..1).
+        #[serde(deserialize_with = "de_clamp_unit")]
+        opacity_fade: f32,
+        /// Color strategy: `Fixed(palette)` or `HueShift { speed }`.
+        #[serde(default)]
+        palette: light_trail::Palette,
+        /// Fraction of visible trail over which colors are distributed (0..1).
+        #[serde(deserialize_with = "de_clamp_unit")]
+        gradient_spread: f32,
+        /// Lower bound of the animated subrange (0..1 of path).
+        #[serde(deserialize_with = "de_clamp_unit")]
+        start: f32,
+        /// Upper bound of the animated subrange (0..1 of path). If
+        /// `end <= start`, the effect is a visual no-op.
+        #[serde(deserialize_with = "de_clamp_unit")]
+        end: f32,
+        /// Rotate the head sprite to the path tangent when `true`.
+        #[serde(default)]
+        align: bool,
+        /// Which `<path>` element in the SVG to follow (0-indexed).
+        #[serde(default)]
+        path_index: u32,
+        /// Arc-length polyline sampling resolution (64..4096). Changing
+        /// this at runtime rebuilds the polyline — not free.
+        #[serde(deserialize_with = "de_clamp_sample_resolution")]
+        sample_resolution: u32,
     },
 }
 
@@ -347,6 +426,10 @@ impl Effect {
                 );
                 true
             }
+            Effect::LightTrail { .. } => {
+                // 005-T2.2 — no-op stub until LightTrailPipeline lands in T3.2.
+                false
+            }
             Effect::Treatment { id, params, .. } => {
                 // 004-T1.7 — per-layer treatment dispatch. Reuses the shared
                 // TreatmentPipeline (the same instance the global
@@ -427,7 +510,7 @@ pub fn intent_group(effect: &Effect) -> IntentGroup {
         Effect::Color { .. } | Effect::Tint { .. } => IntentGroup::Color,
         Effect::Blur { .. } => IntentGroup::Texture,
         Effect::Transform { .. } => IntentGroup::Warp,
-        Effect::Feedback { .. } => IntentGroup::Animate,
+        Effect::Feedback { .. } | Effect::LightTrail { .. } => IntentGroup::Animate,
         Effect::External { .. } => IntentGroup::Generative,
         Effect::Treatment { id, .. } => crate::render::treatments::intent_group_for_preset(id),
     }
@@ -509,6 +592,14 @@ pub fn effect_is_no_op(
             }
         }
         Effect::External { .. } => None,
+        Effect::LightTrail { end, start, .. } => {
+            // A light trail where the subrange is empty is a visual no-op.
+            if end <= start {
+                Some("LightTrail end <= start (empty subrange)")
+            } else {
+                None
+            }
+        }
         Effect::Treatment { id, params, .. } => {
             crate::render::treatments::treatment_is_no_op(id, params, layer)
         }

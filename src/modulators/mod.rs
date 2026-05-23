@@ -267,6 +267,14 @@ pub fn project_audio_modulator_count(project: &crate::project::schema::Project) 
                         n += 1;
                     }
                 }
+                Effect::LightTrail { progress, .. } => {
+                    // 005-T2.2 — LightTrail has one Modulator-typed field:
+                    // `progress` (head position along the path). All other
+                    // fields are static scalars.
+                    if progress.is_audio_bound() {
+                        n += 1;
+                    }
+                }
             }
         }
     }
