@@ -14,6 +14,8 @@ pub mod lighting;
 pub mod macos;
 pub mod modulators;
 pub mod monitors;
+/// 005-T1.2 — SVG path geometry extraction and arc-length parameterization.
+pub mod path_geom;
 pub mod project;
 pub mod scene_pack;
 /// P6.12.1 — Timecode sync decoders (MTC; LTC planned).

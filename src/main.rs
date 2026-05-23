@@ -17,6 +17,8 @@ mod lighting;
 mod macos;
 mod modulators;
 mod monitors;
+/// 005-T1.2 — SVG path geometry extraction and arc-length parameterization.
+mod path_geom;
 mod project;
 mod render;
 /// P7.10.1 — Scene pack export/import (.rmap-scene-pack.zip).
