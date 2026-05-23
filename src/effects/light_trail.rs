@@ -302,6 +302,236 @@ impl LightTrailGpuPolyline {
 }
 
 // ---------------------------------------------------------------------------
+// LightTrailPipeline — GPU render pipeline for the light trail SDF shader
+// ---------------------------------------------------------------------------
+
+/// GPU render pipeline for the light trail effect.
+///
+/// Mirrors `BlurPipeline` in `src/effects/blur.rs`:
+/// - One render pipeline (single-pass SDF, per the T3.2 decision doc).
+/// - A `BindGroupLayout` for bind group creation at render time.
+/// - A `Sampler` for the source texture.
+/// - A placeholder polyline buffer (16 zeroed samples, `[px, py, arclen]`
+///   triples) used until T3.3 wires the real per-layer SVG geometry.
+///
+/// Bind group layout:
+/// | Binding | Type | Purpose |
+/// |---------|------|---------|
+/// | 0 | Texture (Float filterable) | source layer pixels |
+/// | 1 | Sampler (Filtering) | clamp-to-edge linear |
+/// | 2 | Uniform buffer | `LightTrailParams` (192 bytes) |
+/// | 3 | Storage buffer (read-only) | polyline `[px, py, arclen]` f32 triples |
+pub struct LightTrailPipeline {
+    pipeline: wgpu::RenderPipeline,
+    pub bind_group_layout: wgpu::BindGroupLayout,
+    pub sampler: wgpu::Sampler,
+    /// Placeholder polyline storage buffer (16 zeroed samples).
+    /// T3.3 will replace this with the real per-layer SVG polyline buffer.
+    pub placeholder_polyline: wgpu::Buffer,
+}
+
+impl LightTrailPipeline {
+    /// Build the light trail pipeline.
+    ///
+    /// `format` must match the ping-pong texture format (same as all other
+    /// effect pipelines).
+    pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("light_trail.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(
+                include_str!("../render/shaders/light_trail.wgsl").into(),
+            ),
+        });
+
+        // Bind group layout:
+        //   binding 0 — 2D float texture (filterable), fragment-visible.
+        //   binding 1 — filtering sampler, fragment-visible.
+        //   binding 2 — uniform buffer (LightTrailParams, 192 bytes), fragment-visible.
+        //   binding 3 — storage buffer read-only (polyline f32 triples), fragment-visible.
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("light trail effect bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("light trail effect pipeline layout"),
+            bind_group_layouts: &[Some(&bind_group_layout)],
+            immediate_size: 0,
+        });
+
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("light trail pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    // REPLACE: this is a pass-through-with-modification, not
+                    // alpha compositing.
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        // Linear filter + ClampToEdge: matches SvgLayerPipeline sampler.
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("light trail effect sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
+        });
+
+        // Placeholder polyline: 16 zeroed samples × 3 f32 each = 48 f32 = 192 bytes.
+        // T3.3: real polyline hookup from layer's SVG geometry.
+        let placeholder_data = [0.0f32; 16 * 3];
+        let placeholder_bytes: Vec<u8> = placeholder_data
+            .iter()
+            .flat_map(|f| f.to_le_bytes())
+            .collect();
+        let placeholder_polyline = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("light trail placeholder polyline"),
+            size: placeholder_bytes.len() as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        Self {
+            pipeline,
+            bind_group_layout,
+            sampler,
+            placeholder_polyline,
+        }
+    }
+
+    /// Render one light trail pass: `source_view` → `dst_view`.
+    ///
+    /// For T3.2 this is a source passthrough (the shader returns
+    /// `textureSample(source, sampler, uv)` unchanged). T3.3 will add
+    /// the SDF comet rendering.
+    ///
+    /// `params_uniform` must be a 192-byte buffer pre-filled via
+    /// `LightTrailParams::to_wire_bytes`. `polyline_buffer` holds the
+    /// `[px, py, arclen]` f32 triples storage buffer; pass
+    /// `&self.placeholder_polyline` until T3.3 hooks up the real geometry.
+    pub fn render(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        source_view: &wgpu::TextureView,
+        dst_view: &wgpu::TextureView,
+        params_uniform: &wgpu::Buffer,
+        polyline_buffer: &wgpu::Buffer,
+    ) {
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("light trail bind group"),
+            layout: &self.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(source_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: params_uniform.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: polyline_buffer.as_entire_binding(),
+                },
+            ],
+        });
+
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("light trail pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: dst_view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.draw(0..6, 0..1);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 

@@ -256,6 +256,10 @@ pub struct RenderCtx<'a> {
     /// frame's output of the Feedback effect. The pass updates it
     /// in-place at the end of `Effect::Feedback::render`.
     pub history_view: &'a wgpu::TextureView,
+    /// 005-T3.2 — LightTrail pipeline (SDF single-pass, skeleton).
+    pub light_trail: &'a crate::effects::light_trail::LightTrailPipeline,
+    /// 005-T3.2 — per-layer light trail uniform (192 bytes, LightTrailParams).
+    pub light_trail_uniform: &'a wgpu::Buffer,
     // ---- 004-T1.5: six new fields for full Treatment plumbing -----------
     // T1.8 wires all six fields with real per-layer values in app.rs.
     /// 004-T1.5 — per-layer SDF texture view (R32Float). Populated after
@@ -433,16 +437,26 @@ impl Effect {
                 true
             }
             Effect::LightTrail { .. } => {
-                // 005-T2.3: stub — full pipeline lands in T3.*. Confirm layer
-                // kind is Svg and warn if not, so misconfiguration shows up
-                // before the pipeline lands.
+                // 005-T3.2: real dispatch with source-passthrough shader.
+                // Warn and skip for non-SVG layers (no polyline to follow).
                 if !ctx.is_svg_layer {
                     tracing::warn!(
                         target: "rmap::effects::light_trail",
                         "LightTrail effect on non-SVG layer; will no-op until layer kind is changed"
                     );
+                    return false;
                 }
-                false // no-op until T3.*
+                // T3.3: real polyline hookup from layer's SVG geometry.
+                // For now, use the pipeline's 16-sample placeholder polyline buffer.
+                ctx.light_trail.render(
+                    ctx.device,
+                    ctx.encoder,
+                    ctx.source_view,
+                    ctx.dst_view,
+                    ctx.light_trail_uniform,
+                    &ctx.light_trail.placeholder_polyline,
+                );
+                true
             }
             Effect::Treatment { id, params, .. } => {
                 // 004-T1.7 — per-layer treatment dispatch. Reuses the shared

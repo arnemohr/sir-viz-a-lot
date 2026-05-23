@@ -53,6 +53,7 @@ use crate::effects::RenderCtx;
 use crate::effects::blur::BlurPipeline;
 use crate::effects::color::ColorPipeline;
 use crate::effects::feedback::FeedbackPipeline;
+use crate::effects::light_trail::LightTrailPipeline;
 use crate::effects::registry::ExternalRegistry;
 use crate::effects::tint::TintPipeline;
 use crate::effects::transform::TransformPipeline;
@@ -486,6 +487,9 @@ struct EditingState {
     tint_pipeline: TintPipeline,
     /// PCleanup.1.4 — Feedback / trails pipeline (mix + blit two-pass).
     feedback_pipeline: FeedbackPipeline,
+    /// 005-T3.2 — LightTrail SDF pipeline (source-passthrough skeleton;
+    /// full comet rendering lands in T3.3).
+    light_trail_pipeline: LightTrailPipeline,
     /// Extension-pass lookup for [`Effect::External`] (T-M7-07). Empty in
     /// stock v1; populated by future plugins or in-tree extensions.
     external_registry: ExternalRegistry,
@@ -1585,6 +1589,9 @@ struct LayerState {
     /// PCleanup.1.4 — per-layer feedback uniform (16 bytes; see
     /// `feedback::FeedbackParams`).
     feedback_uniform: wgpu::Buffer,
+    /// 005-T3.2 — per-layer light trail uniform (192 bytes; see
+    /// `light_trail::LightTrailParams`).
+    light_trail_uniform: wgpu::Buffer,
     /// PCleanup.1.4 — per-layer history texture for the Feedback effect.
     /// Stored as `_history_texture` so wgpu's reference count keeps the
     /// GPU resource alive; the rendering path samples `history_view`.
@@ -1684,6 +1691,7 @@ fn create_layer_uniform_buffers(
     wgpu::Buffer,
     wgpu::Buffer,
     wgpu::Buffer,
+    wgpu::Buffer,
 ) {
     let mk = |label: &'static str, size: u64| {
         device.create_buffer(&wgpu::BufferDescriptor {
@@ -1720,6 +1728,8 @@ fn create_layer_uniform_buffers(
         mk("layer compositor uniform", 16),
         mk("layer fit uniform", 16),
         identity_fit_uniform,
+        // 005-T3.2 — LightTrailParams is 192 bytes.
+        mk("layer light trail uniform", 192),
     )
 }
 
@@ -2115,6 +2125,8 @@ struct OutputBundle {
     tint_pipeline: TintPipeline,
     /// PCleanup.1.4 — Feedback / trails pipeline (mix + blit two-pass).
     feedback_pipeline: FeedbackPipeline,
+    /// 005-T3.2 — LightTrail SDF pipeline skeleton.
+    light_trail_pipeline: LightTrailPipeline,
     /// One `SleepAssertion` per output window (index-aligned). Held for
     /// the lifetime of the `EditingState` so each active display stays
     /// awake. Dropped (and the corresponding assertion released) when
@@ -2205,6 +2217,8 @@ fn init_output_window(
     let tint_pipeline = TintPipeline::new(&gpu.device, reference_format);
     // PCleanup.1.4 — Feedback / trails pipeline.
     let feedback_pipeline = FeedbackPipeline::new(&gpu.device, reference_format);
+    // 005-T3.2 — LightTrail SDF pipeline skeleton.
+    let light_trail_pipeline = LightTrailPipeline::new(&gpu.device, reference_format);
     let renderer = Renderer::new(gpu, reference_format)?;
     Ok(OutputBundle {
         outputs,
@@ -2215,6 +2229,7 @@ fn init_output_window(
         transform_pipeline,
         tint_pipeline,
         feedback_pipeline,
+        light_trail_pipeline,
         sleep_assertions,
     })
 }
@@ -2346,6 +2361,7 @@ fn assemble_editing_state(
         transform_pipeline: output.transform_pipeline,
         tint_pipeline: output.tint_pipeline,
         feedback_pipeline: output.feedback_pipeline,
+        light_trail_pipeline: output.light_trail_pipeline,
         external_registry: ExternalRegistry::new(),
         #[cfg(feature = "audio")]
         _audio_capture: inputs.audio_capture,
@@ -3548,6 +3564,7 @@ fn rebuild_layers(
                 compositor_uniform,
                 fit_uniform,
                 identity_fit_uniform,
+                light_trail_uniform,
             ) = create_layer_uniform_buffers(device);
             // PCleanup.1.4 — per-layer feedback history texture.
             let (_history_texture, history_view) =
@@ -3576,6 +3593,7 @@ fn rebuild_layers(
                 transform_uniform,
                 tint_uniform,
                 feedback_uniform,
+                light_trail_uniform,
                 _history_texture,
                 history_view,
                 compositor_uniform,
@@ -3714,6 +3732,7 @@ fn rebuild_layers(
             compositor_uniform,
             fit_uniform,
             identity_fit_uniform,
+            light_trail_uniform,
         ) = create_layer_uniform_buffers(device);
         // PCleanup.1.4 — per-layer feedback history texture.
         let (_history_texture, history_view) =
@@ -3737,6 +3756,7 @@ fn rebuild_layers(
             transform_uniform,
             tint_uniform,
             feedback_uniform,
+            light_trail_uniform,
             _history_texture,
             history_view,
             compositor_uniform,
@@ -4270,6 +4290,7 @@ fn render_m5_pipeline(
     transform: &TransformPipeline,
     tint: &TintPipeline,
     feedback: &FeedbackPipeline,
+    light_trail: &LightTrailPipeline,
     external_registry: &ExternalRegistry,
     _surface_format: wgpu::TextureFormat,
     clock: &Clock,
@@ -4554,6 +4575,9 @@ fn render_m5_pipeline(
                         feedback,
                         feedback_uniform: &ls.feedback_uniform,
                         history_view: &ls.history_view,
+                        // 005-T3.2 — LightTrail pipeline + per-layer uniform.
+                        light_trail,
+                        light_trail_uniform: &ls.light_trail_uniform,
                         // T1.8 — real per-layer values (SDF, zone, seed, overlay, collage).
                         sdf_view: Some(sdf_view_for_chain),
                         zone_role: cfg.warp.zone_role,
@@ -6062,6 +6086,7 @@ fn handle_editing_window_event(
                     &state.transform_pipeline,
                     &state.tint_pipeline,
                     &state.feedback_pipeline,
+                    &state.light_trail_pipeline,
                     &state.external_registry,
                     surface_format,
                     &state.clock,
