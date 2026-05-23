@@ -3,6 +3,12 @@
 //! This module provides infrastructure for the `Effect::LightTrail` effect and any future
 //! motion-path effects. It is independent of SVG rasterization (`svg_layer`).
 //!
+//! Public items are silenced from `dead_code` while the production call sites land
+//! (T3.* will wire the polyline into the render pipeline). Remove the allow once
+//! `extract_path` and `Polyline::sample_at_distance` are called from `Effect::render`.
+
+#![allow(dead_code)]
+//!
 //! # Coordinate space
 //!
 //! All output is in **SVG user-space** coordinates (the same space `usvg::Tree::root()

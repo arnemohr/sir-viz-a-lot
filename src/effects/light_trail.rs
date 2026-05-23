@@ -6,6 +6,12 @@
 //! arc-length-parameterised polyline uploaded to the GPU as a storage
 //! buffer for shader lookup). No bytemuck; follows the same convention
 //! as `BlurParams` in `src/effects/blur.rs`.
+//!
+//! `LightTrailParams` and `LightTrailGpuPolyline` are silenced from `dead_code`
+//! until T3.2 wires them into the render pipeline. `Palette` and the
+//! `Effect::LightTrail` variant are live (used by the UI in T4.1).
+
+#![allow(dead_code)]
 
 use serde::{Deserialize, Serialize};
 
@@ -98,7 +104,7 @@ impl LightTrailParams {
     ///
     /// No bytemuck — every field packed via `.to_le_bytes()` (following the
     /// `BlurParams::to_wire_bytes` convention).
-    pub fn to_wire_bytes(&self) -> Vec<u8> {
+    pub fn to_wire_bytes(self) -> Vec<u8> {
         let mut out = Vec::with_capacity(192);
 
         macro_rules! push_f32 {
@@ -145,6 +151,7 @@ impl LightTrailParams {
     /// resolved `progress` value (pre-evaluated from the Modulator).
     ///
     /// Truncates `Fixed` palettes longer than 8 entries with a `warn!`.
+    #[allow(clippy::too_many_arguments)]
     pub fn from_fields(
         progress: f32,
         trail_length: f32,

@@ -630,6 +630,7 @@ fn show_effect_full_params(
 // ---------------------------------------------------------------------------
 
 /// Render the detail panel for the currently selected effect.
+#[allow(clippy::too_many_arguments)]
 fn show_effect_detail_panel(
     ui: &mut Ui,
     project: &mut Project,
