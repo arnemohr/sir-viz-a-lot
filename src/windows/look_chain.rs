@@ -4,7 +4,7 @@
 //! Gated on `#[cfg(feature = "v3")]` at the module-registration site in
 //! `windows/mod.rs`; no inner attribute needed.
 
-use egui::{Color32, RichText, Sense, Ui, Vec2};
+use egui::{Color32, Frame, RichText, Sense, Ui, Vec2};
 
 use crate::effects::{Effect, EffectNode, IntentGroup, effect_is_no_op, intent_group};
 use crate::modulators::Modulator;
@@ -39,57 +39,34 @@ pub(crate) fn full_quad_polygon() -> Vec<[f32; 2]> {
 }
 
 // ---------------------------------------------------------------------------
-// T1.25 — headline param key enum + helpers
+// Effect display name helper (master-detail overhaul)
 // ---------------------------------------------------------------------------
 
-/// The headline parameter for a given `Effect` variant, expressed either
-/// as a `ModulatorField` (for Modulator-typed slots) or a treatment param
-/// key string (for `Effect::Treatment`).
-pub(crate) enum HeadlineParam {
-    /// Modulator-typed slot on a non-Treatment variant.
-    Modulator(ModulatorField),
-    /// Key into `Treatment.params` HashMap.
-    TreatmentParam(&'static str),
-}
-
-/// Returns the headline parameter for the given `Effect`, if any.
-pub(crate) fn headline_for_effect(effect: &Effect) -> Option<HeadlineParam> {
+/// Human-readable name for displaying an effect in the chain row and detail panel header.
+///
+/// For non-Treatment variants, returns the variant name.
+/// For `Effect::Treatment`, prettifies the preset id: replaces `_` with ` ` and
+/// capitalizes the first letter (e.g. `"ripple_lens"` → `"Ripple lens"`).
+fn effect_display_name(effect: &Effect) -> String {
     match effect {
-        Effect::Color { .. } => Some(HeadlineParam::Modulator(ModulatorField::ColorBrightness)),
-        Effect::Blur { .. } => Some(HeadlineParam::Modulator(ModulatorField::BlurRadius)),
-        Effect::Tint { .. } => Some(HeadlineParam::Modulator(ModulatorField::TintAmount)),
-        Effect::Transform { .. } => Some(HeadlineParam::Modulator(ModulatorField::TransformScaleX)),
-        Effect::Feedback { .. } => Some(HeadlineParam::Modulator(ModulatorField::FeedbackDecay)),
-        Effect::External { .. } => None,
+        Effect::Color { .. } => "Color".to_string(),
+        Effect::Blur { .. } => "Blur".to_string(),
+        Effect::Tint { .. } => "Tint".to_string(),
+        Effect::Transform { .. } => "Transform".to_string(),
+        Effect::Feedback { .. } => "Feedback".to_string(),
+        Effect::External { .. } => "External".to_string(),
         Effect::Treatment { id, .. } => {
-            let cap = crate::render::treatments::capability(id);
-            cap.headline_param.map(HeadlineParam::TreatmentParam)
+            // Replace underscores with spaces and capitalize the first letter.
+            let with_spaces = id.replace('_', " ");
+            let mut chars = with_spaces.chars();
+            match chars.next() {
+                None => String::new(),
+                Some(first) => {
+                    let up: String = first.to_uppercase().collect();
+                    up + chars.as_str()
+                }
+            }
         }
-    }
-}
-
-/// Human-readable label for the headline parameter.
-fn headline_label(headline: &HeadlineParam) -> &'static str {
-    match headline {
-        HeadlineParam::Modulator(ModulatorField::ColorBrightness) => "brightness",
-        HeadlineParam::Modulator(ModulatorField::BlurRadius) => "radius",
-        HeadlineParam::Modulator(ModulatorField::TintAmount) => "amount",
-        HeadlineParam::Modulator(ModulatorField::TransformScaleX) => "scale x",
-        HeadlineParam::Modulator(ModulatorField::FeedbackDecay) => "decay",
-        HeadlineParam::TreatmentParam(key) => key,
-        _ => "param",
-    }
-}
-
-/// Modulator field range for the headline param (non-treatment variants).
-fn headline_modulator_range(field: ModulatorField) -> std::ops::RangeInclusive<f32> {
-    match field {
-        ModulatorField::ColorBrightness => -1.0..=1.0,
-        ModulatorField::BlurRadius => 0.0..=32.0,
-        ModulatorField::TintAmount => 0.0..=1.0,
-        ModulatorField::TransformScaleX | ModulatorField::TransformScaleY => 0.1..=3.0,
-        ModulatorField::FeedbackDecay => 0.0..=1.0,
-        _ => 0.0..=1.0,
     }
 }
 
@@ -225,7 +202,6 @@ fn show_effect_full_params(
             ) {
                 staged.push((node_idx, c));
             }
-            ui.weak("(color RGBA editable via headline slider row)");
         }
         Effect::Blur { radius_px } => {
             let mut r = radius_px.clone();
@@ -333,14 +309,97 @@ fn show_effect_full_params(
 }
 
 // ---------------------------------------------------------------------------
+// Detail panel — master-detail overhaul
+// ---------------------------------------------------------------------------
+
+/// Render the detail panel for the currently selected effect.
+fn show_effect_detail_panel(
+    ui: &mut Ui,
+    project: &mut Project,
+    st: &mut ControlPanelState,
+    layer_idx: usize,
+    effect_idx: usize,
+    staged_changes: &mut Vec<(usize, EffectChange)>,
+    treatment_param_changes: &mut Vec<TreatmentParamChange>,
+) {
+    let node = &project.layers[layer_idx].effects[effect_idx];
+    let effect_snap = node.effect.clone();
+    let layer = &project.layers[layer_idx];
+
+    // Compute no-op reason before any borrows that touch project mutably.
+    let no_op_reason = if node.enabled {
+        effect_is_no_op(node, layer)
+    } else {
+        None
+    };
+
+    // Intent glyph + color for header.
+    let group = intent_group(&effect_snap);
+    let (glyph, glyph_color) = intent_group_glyph(group);
+    let display_name = effect_display_name(&effect_snap);
+
+    // ---- Header row --------------------------------------------------------
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(glyph).color(glyph_color));
+        ui.heading(&display_name);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui
+                .add(egui::Button::new("\u{00D7}").small())
+                .on_hover_text("Close detail panel")
+                .clicked()
+            {
+                st.effect_detail_open = None;
+            }
+        });
+    });
+    ui.separator();
+
+    // ---- Autofix banner ----------------------------------------------------
+    if let Some(reason) = no_op_reason {
+        // Amber-tinted frame
+        let amber_bg = Color32::from_rgba_unmultiplied(0xFF, 0xB0, 0x30, 0x30);
+        Frame::default()
+            .fill(amber_bg)
+            .inner_margin(egui::Margin::same(6))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(format!("\u{26A0} {reason}")).strong());
+                    if ui.button("Auto-fix").clicked() {
+                        handle_autofix(reason, effect_idx, layer_idx, project, st);
+                    }
+                });
+            });
+        ui.add_space(4.0);
+    }
+
+    // ---- Body — full params ------------------------------------------------
+    match &effect_snap {
+        Effect::Treatment { id, params, .. } => {
+            let changes = show_treatment_params_read_only(ui, id, params, effect_idx);
+            treatment_param_changes.extend(changes);
+        }
+        _ => {
+            show_effect_full_params(
+                ui,
+                &effect_snap,
+                effect_idx,
+                layer_idx,
+                staged_changes,
+                treatment_param_changes,
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Main entry point — T1.25–T1.32
 // ---------------------------------------------------------------------------
 
 /// 004-T1.25–T1.32 — Unified Look chain section.
 ///
 /// Renders the full Look-chain rail for the given layer: A/B compare header
-/// (T1.29), drag-reorder rows (T1.25), expand-body param panels (T1.26),
-/// autofix chips (T1.28), and the Add picker (T1.27 / T1.32).
+/// (T1.29), drag-reorder rows (T1.25), master-detail param panel (overhaul),
+/// and the Add picker (T1.27 / T1.32).
 pub fn show_look_chain_section(
     ui: &mut Ui,
     project: &mut Project,
@@ -350,6 +409,14 @@ pub fn show_look_chain_section(
     if layer_idx >= project.layers.len() {
         ui.weak("(no layer selected)");
         return;
+    }
+
+    // ---- Auto-close guard: clear stale detail selection --------------------
+    let effects_len = project.layers[layer_idx].effects.len();
+    if let Some((open_li, open_ei)) = st.effect_detail_open {
+        if open_li != layer_idx || open_ei >= effects_len {
+            st.effect_detail_open = None;
+        }
     }
 
     // ---- T1.29 — A/B compare header toggle --------------------------------
@@ -402,205 +469,95 @@ pub fn show_look_chain_section(
         ui.add_space(2.0);
     }
 
-    // ---- Collect the effects length before borrowing ----------------------
-    let effects_len = project.layers[layer_idx].effects.len();
-
     if effects_len == 0 {
         ui.weak("No effects. Use '+ Add to chain' below.");
     }
+
+    // ---- Staged changes collected during the row loop / detail panel ------
+    let mut staged_changes: Vec<(usize, EffectChange)> = Vec::new();
+    let mut treatment_param_changes: Vec<TreatmentParamChange> = Vec::new();
 
     // ---- T1.25 — drag-reorder / remove state captured during loop ---------
     let mut pending_reorder: Option<(usize, usize)> = None;
     let mut pending_remove: Option<usize> = None;
 
-    // Staged changes from modulator sliders and transform translate.
-    let mut staged_changes: Vec<(usize, EffectChange)> = Vec::new();
-    // Staged treatment param edits (node_idx, key, value).
-    let mut treatment_param_changes: Vec<TreatmentParamChange> = Vec::new();
+    // ---- Master-detail layout split ----------------------------------------
+    let detail_open = st.effect_detail_open;
+    let available = ui.available_width();
+    let narrow = available < 520.0;
 
-    // ---- Row loop ----------------------------------------------------------
-    for idx in 0..effects_len {
-        let (_, drop_payload) = ui.dnd_drop_zone::<usize, _>(egui::Frame::default(), |ui| {
-            ui.horizontal(|ui| {
-                // ---- Drag handle: ≡ glyph, payload = source index ------
-                let handle = ui.add(egui::Label::new("\u{2261}").sense(Sense::drag()));
-                handle.dnd_set_drag_payload(idx);
+    if detail_open.is_some() && !narrow {
+        // Side-by-side: left rail + right detail panel.
+        let left_width = available * 0.55;
+        let right_width = available - left_width - 8.0;
 
-                // ---- Intent-group glyph --------------------------------
-                let group = intent_group(&project.layers[layer_idx].effects[idx].effect);
-                let (glyph, glyph_color) = intent_group_glyph(group);
-                ui.label(RichText::new(glyph).color(glyph_color));
-
-                // ---- T1.25 — status dot (click toggles enabled) --------
-                let layer = &project.layers[layer_idx];
-                let node = &layer.effects[idx];
-                let no_op_reason = if node.enabled {
-                    effect_is_no_op(node, layer)
-                } else {
-                    None
-                };
-                let dot_color = if !node.enabled {
-                    Color32::from_rgb(0x88, 0x88, 0x88) // grey — bypassed
-                } else if no_op_reason.is_some() {
-                    Color32::from_rgb(0xFF, 0xB0, 0x30) // amber — no-op
-                } else {
-                    Color32::from_rgb(0x40, 0xD0, 0x60) // green — active
-                };
-
-                // Allocate a clickable 12×12 rect for the dot
-                let dot_resp = ui.allocate_response(Vec2::splat(12.0), Sense::click());
-                ui.painter()
-                    .circle_filled(dot_resp.rect.center(), 5.0, dot_color);
-                if dot_resp.clicked() {
-                    let mut new_effects = project.layers[layer_idx].effects.clone();
-                    new_effects[idx].enabled = !new_effects[idx].enabled;
-                    st.pending_mutations
-                        .push(project.set_layer_effects_mutation(layer_idx, new_effects));
-                }
-                dot_resp.on_hover_text(if !node.enabled {
-                    "Bypassed \u{2014} click to enable".to_string()
-                } else if let Some(reason) = no_op_reason {
-                    format!("\u{26A0} {reason}")
-                } else {
-                    "Active".to_string()
-                });
-
-                // ---- T1.28 — autofix chip (inline, next to dot) --------
-                if let Some(reason) = no_op_reason {
-                    if ui
-                        .add(
-                            egui::Button::new(format!("\u{26A0} {reason} \u{2014} auto-fix"))
-                                .small(),
-                        )
-                        .clicked()
-                    {
-                        handle_autofix(reason, idx, layer_idx, project, st);
-                    }
-                }
-
-                // ---- T1.25 — headline param slider on-row ---------------
-                // We read from the live project (immutable borrow of effect)
-                // and clone the Modulator for the slider. On change, push
-                // EffectChange. For Treatment, use a read-only param slider.
-                let effect_ref = &project.layers[layer_idx].effects[idx].effect;
-                if let Some(headline) = headline_for_effect(effect_ref) {
-                    match headline {
-                        HeadlineParam::Modulator(field) => {
-                            // Clone the current Modulator to drive the slider
-                            let mut m = match field {
-                                ModulatorField::ColorBrightness => {
-                                    if let Effect::Color { brightness, .. } = effect_ref {
-                                        brightness.clone()
-                                    } else {
-                                        return;
-                                    }
-                                }
-                                ModulatorField::BlurRadius => {
-                                    if let Effect::Blur { radius_px } = effect_ref {
-                                        radius_px.clone()
-                                    } else {
-                                        return;
-                                    }
-                                }
-                                ModulatorField::TintAmount => {
-                                    if let Effect::Tint { amount, .. } = effect_ref {
-                                        amount.clone()
-                                    } else {
-                                        return;
-                                    }
-                                }
-                                ModulatorField::TransformScaleX => {
-                                    if let Effect::Transform { scale_x, .. } = effect_ref {
-                                        scale_x.clone()
-                                    } else {
-                                        return;
-                                    }
-                                }
-                                ModulatorField::FeedbackDecay => {
-                                    if let Effect::Feedback { decay, .. } = effect_ref {
-                                        decay.clone()
-                                    } else {
-                                        return;
-                                    }
-                                }
-                                _ => return,
-                            };
-                            let range = headline_modulator_range(field);
-                            let label = headline_label(&HeadlineParam::Modulator(field));
-                            if let Some(c) = modulator_slider(
+        ui.horizontal_top(|ui| {
+            ui.allocate_ui_with_layout(
+                egui::vec2(left_width, ui.available_height()),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    render_chain_rail(
+                        ui,
+                        project,
+                        st,
+                        layer_idx,
+                        effects_len,
+                        &mut pending_reorder,
+                        &mut pending_remove,
+                    );
+                },
+            );
+            ui.separator();
+            ui.allocate_ui_with_layout(
+                egui::vec2(right_width, ui.available_height()),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    if let Some((open_li, open_ei)) = detail_open {
+                        // Bounds re-checked: auto-close guard at top handles stale indices.
+                        if open_li == layer_idx
+                            && open_ei < project.layers[layer_idx].effects.len()
+                        {
+                            show_effect_detail_panel(
                                 ui,
-                                (idx, "headline"),
-                                label,
-                                &mut m,
-                                range,
-                                field,
-                                idx,
-                                layer_idx,
-                            ) {
-                                staged_changes.push((idx, c));
-                            }
-                        }
-                        HeadlineParam::TreatmentParam(key) => {
-                            if let Effect::Treatment { id, params, .. } = effect_ref {
-                                let descs = crate::render::treatments::param_descriptors(id);
-                                if let Some(d) = descs.iter().find(|d| d.key == key) {
-                                    let cur = params.get(key).copied().unwrap_or(d.default);
-                                    let mut edit = cur;
-                                    let resp = ui.add(
-                                        egui::Slider::new(&mut edit, d.min..=d.max).text(d.label),
-                                    );
-                                    if (resp.drag_stopped() || resp.lost_focus())
-                                        && (edit - cur).abs() > 1e-6
-                                    {
-                                        treatment_param_changes.push(TreatmentParamChange {
-                                            node_idx: idx,
-                                            key: key.to_string(),
-                                            value: edit,
-                                        });
-                                    }
-                                }
-                            }
+                                project,
+                                st,
+                                open_li,
+                                open_ei,
+                                &mut staged_changes,
+                                &mut treatment_param_changes,
+                            );
                         }
                     }
-                }
-
-                // ---- T1.25 — expand chevron via CollapsingHeader --------
-                // Empty label: the row already identifies the effect via glyph
-                // + headline slider; the chevron is purely an expander. The
-                // id_salt is still required for egui to track collapse state
-                // per (layer, node) slot.
-                egui::CollapsingHeader::new("")
-                    .id_salt((layer_idx, idx))
-                    .default_open(false)
-                    .show(ui, |ui| {
-                        // T1.26 — full param list (read-only borrows,
-                        // staged changes returned for post-loop dispatch)
-                        let effect_snap = project.layers[layer_idx].effects[idx].effect.clone();
-                        show_effect_full_params(
-                            ui,
-                            &effect_snap,
-                            idx,
-                            layer_idx,
-                            &mut staged_changes,
-                            &mut treatment_param_changes,
-                        );
-                    });
-
-                // ---- T1.25 — delete × button ----------------------------
-                if ui
-                    .add(egui::Button::new("\u{00D7}").small())
-                    .on_hover_text("Remove from chain")
-                    .clicked()
-                {
-                    pending_remove = Some(idx);
-                }
-            });
+                },
+            );
         });
-
-        if let Some(source) = drop_payload {
-            let source_idx = *source;
-            if source_idx != idx {
-                pending_reorder = Some((source_idx, idx));
+    } else {
+        // Single-column: just the chain rail.
+        render_chain_rail(
+            ui,
+            project,
+            st,
+            layer_idx,
+            effects_len,
+            &mut pending_reorder,
+            &mut pending_remove,
+        );
+        // Narrow-mode: detail panel stacked below when selected.
+        if let Some((open_li, open_ei)) = detail_open {
+            if narrow
+                && open_li == layer_idx
+                && open_ei < project.layers[layer_idx].effects.len()
+            {
+                ui.separator();
+                show_effect_detail_panel(
+                    ui,
+                    project,
+                    st,
+                    open_li,
+                    open_ei,
+                    &mut staged_changes,
+                    &mut treatment_param_changes,
+                );
             }
         }
     }
@@ -617,6 +574,18 @@ pub fn show_look_chain_section(
 
     // ---- Apply remove (P2.7.2 pattern) ---------------------------------------
     if let Some(remove_idx) = pending_remove {
+        tracing::debug!(
+            target: "rmap",
+            "look_chain pending_remove dispatched remove_idx={remove_idx}"
+        );
+        // Auto-close detail if the removed effect was open.
+        if st
+            .effect_detail_open
+            .map(|(l, e)| l == layer_idx && e == remove_idx)
+            .unwrap_or(false)
+        {
+            st.effect_detail_open = None;
+        }
         let mut new = project.layers[layer_idx].effects.clone();
         new.remove(remove_idx);
         st.pending_mutations
@@ -690,6 +659,153 @@ pub fn show_look_chain_section(
     ui.menu_button("+ Add to chain \u{25BE}", |ui| {
         show_add_picker(ui, project, st, layer_idx);
     });
+}
+
+// ---------------------------------------------------------------------------
+// Chain rail — row loop (extracted for master-detail split)
+// ---------------------------------------------------------------------------
+
+/// Render the drag-reorder row list. Collects `pending_reorder` and
+/// `pending_remove`. The caller dispatches mutations and handles the detail
+/// panel (which stages `staged_changes` / `treatment_param_changes`).
+fn render_chain_rail(
+    ui: &mut Ui,
+    project: &mut Project,
+    st: &mut ControlPanelState,
+    layer_idx: usize,
+    effects_len: usize,
+    pending_reorder: &mut Option<(usize, usize)>,
+    pending_remove: &mut Option<usize>,
+) {
+
+    for idx in 0..effects_len {
+        let (_, drop_payload) = ui.dnd_drop_zone::<usize, _>(egui::Frame::default(), |ui| {
+            // Determine if this row is selected (for highlight frame).
+            let is_selected = st.effect_detail_open == Some((layer_idx, idx));
+            let highlight_color = if is_selected {
+                // Use selection bg_fill with reduced alpha for a subtle highlight.
+                let sel = ui.visuals().selection.bg_fill;
+                Color32::from_rgba_unmultiplied(sel.r(), sel.g(), sel.b(), 60)
+            } else {
+                Color32::TRANSPARENT
+            };
+
+            // `ui.interact` over the row rect resolves "last wins" against
+            // children with `Sense::click()` underneath — clicks on the drag
+            // handle, status dot, and delete × can land on the row rect.
+            // We compare the click position to each child rect after the fact
+            // and suppress row-open if the click was inside any of them.
+            let mut handle_rect: Option<egui::Rect> = None;
+            let mut dot_rect: Option<egui::Rect> = None;
+            let mut del_rect: Option<egui::Rect> = None;
+
+            let row_resp = Frame::default()
+                .fill(highlight_color)
+                .inner_margin(egui::Margin::symmetric(2, 1))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        // ---- Drag handle: ≡ glyph, payload = source index ------
+                        let handle =
+                            ui.add(egui::Label::new("\u{2261}").sense(Sense::click_and_drag()));
+                        handle.dnd_set_drag_payload(idx);
+                        handle_rect = Some(handle.rect);
+
+                        // ---- Intent-group glyph --------------------------------
+                        let group =
+                            intent_group(&project.layers[layer_idx].effects[idx].effect);
+                        let (glyph, glyph_color) = intent_group_glyph(group);
+                        ui.label(RichText::new(glyph).color(glyph_color));
+
+                        // ---- T1.25 — status dot (click toggles enabled) --------
+                        let layer = &project.layers[layer_idx];
+                        let node = &layer.effects[idx];
+                        let no_op_reason = if node.enabled {
+                            effect_is_no_op(node, layer)
+                        } else {
+                            None
+                        };
+                        let dot_color = if !node.enabled {
+                            Color32::from_rgb(0x88, 0x88, 0x88) // grey — bypassed
+                        } else if no_op_reason.is_some() {
+                            Color32::from_rgb(0xFF, 0xB0, 0x30) // amber — no-op
+                        } else {
+                            Color32::from_rgb(0x40, 0xD0, 0x60) // green — active
+                        };
+
+                        // Allocate a clickable 12×12 rect for the dot
+                        let dot_resp =
+                            ui.allocate_response(Vec2::splat(12.0), Sense::click());
+                        ui.painter()
+                            .circle_filled(dot_resp.rect.center(), 5.0, dot_color);
+                        dot_rect = Some(dot_resp.rect);
+                        if dot_resp.clicked() {
+                            let mut new_effects =
+                                project.layers[layer_idx].effects.clone();
+                            new_effects[idx].enabled = !new_effects[idx].enabled;
+                            st.pending_mutations.push(
+                                project.set_layer_effects_mutation(layer_idx, new_effects),
+                            );
+                        }
+                        dot_resp.on_hover_text(if !node.enabled {
+                            "Bypassed \u{2014} click to enable".to_string()
+                        } else if let Some(reason) = no_op_reason {
+                            format!("\u{26A0} {reason}")
+                        } else {
+                            "Active".to_string()
+                        });
+
+                        // ---- Effect name (flex, truncates) ---------------------
+                        let effect_ref =
+                            &project.layers[layer_idx].effects[idx].effect;
+                        let name = effect_display_name(effect_ref);
+                        ui.add(egui::Label::new(name).truncate());
+
+                        // ---- Delete × button ----------------------------------
+                        let del_resp = ui
+                            .add(egui::Button::new("\u{00D7}").small())
+                            .on_hover_text("Remove from chain");
+                        del_rect = Some(del_resp.rect);
+                        if del_resp.clicked() {
+                            tracing::debug!(
+                                target: "rmap",
+                                "look_chain × click registered idx={idx}"
+                            );
+                            *pending_remove = Some(idx);
+                        }
+                    })
+                });
+
+            // Row-click sensing over the full row rect. Suppress when the
+            // click landed inside the drag handle, status dot, or delete ×
+            // (those have their own handlers), or while a drag is active.
+            let row_rect = row_resp.response.rect;
+            let row_click =
+                ui.interact(row_rect, ui.id().with(("row_click", idx)), Sense::click());
+            if row_click.clicked() && handle_not_dragged(ui) {
+                let on_child = row_click.interact_pointer_pos().is_some_and(|p| {
+                    handle_rect.is_some_and(|r| r.contains(p))
+                        || dot_rect.is_some_and(|r| r.contains(p))
+                        || del_rect.is_some_and(|r| r.contains(p))
+                });
+                if !on_child {
+                    st.effect_detail_open = Some((layer_idx, idx));
+                }
+            }
+        });
+
+        if let Some(source) = drop_payload {
+            let source_idx = *source;
+            if source_idx != idx {
+                *pending_reorder = Some((source_idx, idx));
+            }
+        }
+    }
+}
+
+/// Returns `true` when nothing is currently being DnD-dragged. A drag in
+/// progress should not also open the detail panel.
+fn handle_not_dragged(ui: &Ui) -> bool {
+    ui.ctx().dragged_id().is_none()
 }
 
 // ---------------------------------------------------------------------------
@@ -955,5 +1071,92 @@ fn handle_autofix(
             // effect_is_no_op to check overlay_path in src/effects/mod.rs.
             tracing::warn!(reason, "autofix chip: unknown reason, no action taken");
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Unit tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::modulators::Modulator;
+
+    #[test]
+    fn effect_display_name_non_treatment_variants() {
+        assert_eq!(
+            effect_display_name(&Effect::Color {
+                hue: Modulator::Static(0.0),
+                saturation: Modulator::Static(1.0),
+                brightness: Modulator::Static(0.0),
+                contrast: Modulator::Static(1.0),
+            }),
+            "Color"
+        );
+        assert_eq!(
+            effect_display_name(&Effect::Blur {
+                radius_px: Modulator::Static(0.0),
+            }),
+            "Blur"
+        );
+        assert_eq!(
+            effect_display_name(&Effect::Tint {
+                rgba: [1.0, 1.0, 1.0, 1.0],
+                amount: Modulator::Static(0.0),
+                mode: crate::effects::tint::TintMode::Multiply,
+            }),
+            "Tint"
+        );
+        assert_eq!(
+            effect_display_name(&Effect::Transform {
+                translate: [0.0, 0.0],
+                rotate_deg: Modulator::Static(0.0),
+                scale_x: Modulator::Static(1.0),
+                scale_y: Modulator::Static(1.0),
+            }),
+            "Transform"
+        );
+        assert_eq!(
+            effect_display_name(&Effect::Feedback {
+                decay: Modulator::Static(0.0),
+                offset: [0.0, 0.0],
+            }),
+            "Feedback"
+        );
+        assert_eq!(
+            effect_display_name(&Effect::External {
+                id: "test".to_string(),
+                params: Default::default(),
+            }),
+            "External"
+        );
+    }
+
+    #[test]
+    fn effect_display_name_treatment_prettify() {
+        let treatment = Effect::Treatment {
+            id: "ripple_lens".to_string(),
+            params: Default::default(),
+            overlay_path: None,
+            collage_paths: vec![],
+        };
+        assert_eq!(effect_display_name(&treatment), "Ripple lens");
+
+        let single = Effect::Treatment {
+            id: "tone_map".to_string(),
+            params: Default::default(),
+            overlay_path: None,
+            collage_paths: vec![],
+        };
+        assert_eq!(effect_display_name(&single), "Tone map");
+
+        let no_underscore = Effect::Treatment {
+            id: "blur".to_string(),
+            params: Default::default(),
+            overlay_path: None,
+            collage_paths: vec![],
+        };
+        assert_eq!(effect_display_name(&no_underscore), "Blur");
     }
 }

@@ -393,6 +393,10 @@ pub struct ControlPanelState {
     /// T1.29 adds the UI toggle; for now this defaults false and the render
     /// path reads it so the wiring is complete.
     pub ab_compare: bool,
+    /// Master-detail selection: which effect row is currently open in the
+    /// detail panel. `(layer_idx, effect_idx)`. Session-only, not undoable,
+    /// not persisted — same lifecycle as `ab_compare`.
+    pub effect_detail_open: Option<(usize, usize)>,
 }
 
 pub enum ControlPanelAction {
