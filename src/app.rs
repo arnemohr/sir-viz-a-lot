@@ -4561,6 +4561,11 @@ fn render_m5_pipeline(
                         t_layer_added_secs: 0.0,
                         overlay_view: overlay_view_ref,
                         collage_views: &collage_views,
+                        // 005-T2.3 — LightTrail warn guard: true only for SVG layers.
+                        is_svg_layer: matches!(
+                            cfg.kind,
+                            crate::project::schema::LayerKind::Svg { .. }
+                        ),
                     };
                     if effect.render(&mut ctx, clock) {
                         ls.effect_pipeline.flip();
