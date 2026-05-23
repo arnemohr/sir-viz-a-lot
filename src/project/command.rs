@@ -91,6 +91,8 @@ pub enum ModulatorField {
     TransformScaleY,
     /// PCleanup.1.4 — `Effect::Feedback::decay`.
     FeedbackDecay,
+    /// 005-T4.1 — `Effect::LightTrail::progress`.
+    LightTrailProgress,
 }
 
 /// Resolve a `ModulatorField` to the matching `&Modulator` slot
@@ -115,6 +117,8 @@ fn modulator_at_ref(
         (Effect::Transform { scale_y, .. }, ModulatorField::TransformScaleY) => Some(scale_y),
         // PCleanup.1.4 — Effect::Feedback::decay.
         (Effect::Feedback { decay, .. }, ModulatorField::FeedbackDecay) => Some(decay),
+        // 005-T4.1 — Effect::LightTrail::progress.
+        (Effect::LightTrail { progress, .. }, ModulatorField::LightTrailProgress) => Some(progress),
         _ => None,
     }
 }
@@ -141,6 +145,8 @@ fn modulator_at_mut(
         (Effect::Transform { scale_y, .. }, ModulatorField::TransformScaleY) => Some(scale_y),
         // PCleanup.1.4 — Effect::Feedback::decay.
         (Effect::Feedback { decay, .. }, ModulatorField::FeedbackDecay) => Some(decay),
+        // 005-T4.1 — Effect::LightTrail::progress.
+        (Effect::LightTrail { progress, .. }, ModulatorField::LightTrailProgress) => Some(progress),
         _ => None,
     }
 }

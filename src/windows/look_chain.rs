@@ -11,7 +11,8 @@ use crate::modulators::Modulator;
 use crate::project::command::{ModulatorField, Mutation};
 use crate::project::schema::Project;
 use crate::windows::control_panel::{
-    ControlPanelState, EffectChange, load_presets_from_disk, modulator_slider,
+    ControlPanelState, EffectChange, command_checkbox, command_dragvalue_u32, command_slider,
+    load_presets_from_disk, modulator_slider,
 };
 
 // ---------------------------------------------------------------------------
@@ -83,6 +84,29 @@ struct TreatmentParamChange {
     value: f32,
 }
 
+/// 005-T4.1 — Staged LightTrail scalar-field change for flush to `SetLayerEffects`.
+/// Mirrors `TreatmentParamChange` but uses a typed field discriminant instead of
+/// a string key, since `Effect::LightTrail` fields are known at compile time.
+enum LightTrailFieldChange {
+    TrailLength(f32),
+    HeadSize(f32),
+    StrokeWidth(f32),
+    GlowBlur(f32),
+    OpacityFade(f32),
+    GradientSpread(f32),
+    Start(f32),
+    End(f32),
+    Align(bool),
+    PathIndex(u32),
+    SampleResolution(u32),
+    Palette(crate::effects::light_trail::Palette),
+}
+
+struct LightTrailParamChange {
+    node_idx: usize,
+    field: LightTrailFieldChange,
+}
+
 /// Render per-param sliders for a Treatment node.
 /// Returns a list of (key, new_value) pairs for params that changed on
 /// drag-stop or focus-loss. The caller dispatches SetLayerEffects after the loop.
@@ -114,7 +138,7 @@ fn show_treatment_params_read_only(
 }
 
 /// Render sliders for all fields of a non-Treatment Effect.
-/// Returns staged `EffectChange`s; also returns treatment param changes.
+/// Returns staged `EffectChange`s; also returns treatment and light-trail param changes.
 fn show_effect_full_params(
     ui: &mut Ui,
     effect: &Effect,
@@ -122,6 +146,7 @@ fn show_effect_full_params(
     layer_idx: usize,
     staged: &mut Vec<(usize, EffectChange)>,
     treatment_changes: &mut Vec<TreatmentParamChange>,
+    light_trail_changes: &mut Vec<LightTrailParamChange>,
 ) {
     // We take `&Effect` (not `&mut Effect`) to avoid writing to the live
     // project during rendering. Modulator changes are returned as EffectChange;
@@ -307,9 +332,295 @@ fn show_effect_full_params(
             let changes = show_treatment_params_read_only(ui, id, params, node_idx);
             treatment_changes.extend(changes);
         }
-        // 005-T2.2 — placeholder; full widget set lands in T4.1.
-        Effect::LightTrail { .. } => {
-            ui.weak("Light trail params (T4.1)");
+        // 005-T4.1 — full LightTrail parameter widgets.
+        Effect::LightTrail {
+            progress,
+            trail_length,
+            head_size,
+            stroke_width,
+            glow_blur,
+            opacity_fade,
+            palette,
+            gradient_spread,
+            start,
+            end,
+            align,
+            path_index,
+            sample_resolution,
+        } => {
+            // --- progress (Modulator-eligible) ---
+            let mut prog_m = progress.clone();
+            if let Some(c) = modulator_slider(
+                ui,
+                (node_idx, "lt_prog"),
+                "Progress",
+                &mut prog_m,
+                0.0..=1.0,
+                crate::project::command::ModulatorField::LightTrailProgress,
+                node_idx,
+                layer_idx,
+            ) {
+                staged.push((node_idx, c));
+            }
+
+            // --- trail_length ---
+            if let Some(v) = command_slider(
+                ui,
+                &format!("lt_tl_{node_idx}"),
+                "Trail length (path %)",
+                *trail_length,
+                0.0..=1.0,
+            ) {
+                light_trail_changes.push(LightTrailParamChange {
+                    node_idx,
+                    field: LightTrailFieldChange::TrailLength(v),
+                });
+            }
+
+            // --- head_size ---
+            if let Some(v) = command_slider(
+                ui,
+                &format!("lt_hs_{node_idx}"),
+                "Head size (px)",
+                *head_size,
+                1.0..=64.0,
+            ) {
+                light_trail_changes.push(LightTrailParamChange {
+                    node_idx,
+                    field: LightTrailFieldChange::HeadSize(v),
+                });
+            }
+
+            // --- stroke_width ---
+            if let Some(v) = command_slider(
+                ui,
+                &format!("lt_sw_{node_idx}"),
+                "Stroke width (px)",
+                *stroke_width,
+                0.5..=16.0,
+            ) {
+                light_trail_changes.push(LightTrailParamChange {
+                    node_idx,
+                    field: LightTrailFieldChange::StrokeWidth(v),
+                });
+            }
+
+            // --- glow_blur ---
+            if let Some(v) = command_slider(
+                ui,
+                &format!("lt_gb_{node_idx}"),
+                "Glow blur (px)",
+                *glow_blur,
+                0.0..=64.0,
+            ) {
+                light_trail_changes.push(LightTrailParamChange {
+                    node_idx,
+                    field: LightTrailFieldChange::GlowBlur(v),
+                });
+            }
+
+            // --- opacity_fade ---
+            if let Some(v) = command_slider(
+                ui,
+                &format!("lt_of_{node_idx}"),
+                "Opacity fade",
+                *opacity_fade,
+                0.0..=1.0,
+            ) {
+                light_trail_changes.push(LightTrailParamChange {
+                    node_idx,
+                    field: LightTrailFieldChange::OpacityFade(v),
+                });
+            }
+
+            // --- palette ---
+            {
+                use crate::effects::light_trail::Palette;
+                let is_fixed = matches!(palette, Palette::Fixed(_));
+                let is_hue = matches!(palette, Palette::HueShift { .. });
+                ui.separator();
+                ui.label("Palette:");
+                ui.horizontal(|ui| {
+                    if ui.radio(is_fixed, "Fixed colors").clicked() && !is_fixed {
+                        // Seed with one white swatch when switching to Fixed.
+                        light_trail_changes.push(LightTrailParamChange {
+                            node_idx,
+                            field: LightTrailFieldChange::Palette(Palette::Fixed(vec![[
+                                255, 255, 255, 255,
+                            ]])),
+                        });
+                    }
+                    if ui.radio(is_hue, "Hue shift").clicked() && !is_hue {
+                        light_trail_changes.push(LightTrailParamChange {
+                            node_idx,
+                            field: LightTrailFieldChange::Palette(Palette::HueShift { speed: 0.2 }),
+                        });
+                    }
+                });
+
+                match palette {
+                    Palette::Fixed(colors) => {
+                        // Color swatches + remove buttons.
+                        let mut to_remove: Option<usize> = None;
+                        let mut modified_colors: Option<Vec<[u8; 4]>> = None;
+                        for (i, rgba) in colors.iter().enumerate() {
+                            ui.horizontal(|ui| {
+                                // egui color button using Color32
+                                let mut c32 = egui::Color32::from_rgba_unmultiplied(
+                                    rgba[0], rgba[1], rgba[2], rgba[3],
+                                );
+                                if egui::color_picker::color_edit_button_srgba(
+                                    ui,
+                                    &mut c32,
+                                    egui::color_picker::Alpha::OnlyBlend,
+                                )
+                                .changed()
+                                {
+                                    let mut new_colors = colors.clone();
+                                    new_colors[i] = [c32.r(), c32.g(), c32.b(), c32.a()];
+                                    modified_colors = Some(new_colors);
+                                }
+                                if ui
+                                    .small_button("\u{2212}")
+                                    .on_hover_text("Remove color")
+                                    .clicked()
+                                {
+                                    to_remove = Some(i);
+                                }
+                            });
+                        }
+                        // Apply color edit (committed on close of popup).
+                        if let Some(new_colors) = modified_colors {
+                            light_trail_changes.push(LightTrailParamChange {
+                                node_idx,
+                                field: LightTrailFieldChange::Palette(Palette::Fixed(new_colors)),
+                            });
+                        }
+                        // Apply removal.
+                        if let Some(idx) = to_remove {
+                            let mut new_colors = colors.clone();
+                            new_colors.remove(idx);
+                            light_trail_changes.push(LightTrailParamChange {
+                                node_idx,
+                                field: LightTrailFieldChange::Palette(Palette::Fixed(new_colors)),
+                            });
+                        }
+                        // Add color (cap at 8).
+                        let at_max =
+                            colors.len() >= crate::effects::light_trail::MAX_PALETTE_COLORS;
+                        if !at_max && ui.button("+ Add color").clicked() {
+                            let mut new_colors = colors.clone();
+                            new_colors.push([255, 255, 255, 255]);
+                            light_trail_changes.push(LightTrailParamChange {
+                                node_idx,
+                                field: LightTrailFieldChange::Palette(Palette::Fixed(new_colors)),
+                            });
+                        } else if at_max {
+                            ui.weak("(max 8 colors)");
+                        }
+                    }
+                    Palette::HueShift { speed } => {
+                        if let Some(v) = command_slider(
+                            ui,
+                            &format!("lt_hss_{node_idx}"),
+                            "Hue cycle speed",
+                            *speed,
+                            0.0..=2.0,
+                        ) {
+                            light_trail_changes.push(LightTrailParamChange {
+                                node_idx,
+                                field: LightTrailFieldChange::Palette(Palette::HueShift {
+                                    speed: v,
+                                }),
+                            });
+                        }
+                    }
+                }
+                ui.separator();
+            }
+
+            // --- gradient_spread ---
+            if let Some(v) = command_slider(
+                ui,
+                &format!("lt_gs_{node_idx}"),
+                "Gradient spread",
+                *gradient_spread,
+                0.0..=1.0,
+            ) {
+                light_trail_changes.push(LightTrailParamChange {
+                    node_idx,
+                    field: LightTrailFieldChange::GradientSpread(v),
+                });
+            }
+
+            // --- start / end (paired range) ---
+            // Enforce start <= end at commit: clamp after drag-release.
+            ui.label("Range:");
+            ui.horizontal(|ui| {
+                if let Some(v) =
+                    command_slider(ui, &format!("lt_st_{node_idx}"), "Start", *start, 0.0..=1.0)
+                {
+                    // Clamp: start must not exceed end.
+                    let clamped = v.min(*end);
+                    light_trail_changes.push(LightTrailParamChange {
+                        node_idx,
+                        field: LightTrailFieldChange::Start(clamped),
+                    });
+                }
+                if let Some(v) =
+                    command_slider(ui, &format!("lt_en_{node_idx}"), "End", *end, 0.0..=1.0)
+                {
+                    // Clamp: end must not be less than start.
+                    let clamped = v.max(*start);
+                    light_trail_changes.push(LightTrailParamChange {
+                        node_idx,
+                        field: LightTrailFieldChange::End(clamped),
+                    });
+                }
+            });
+
+            // --- align ---
+            if let Some(v) = command_checkbox(ui, "Align head to tangent", *align) {
+                light_trail_changes.push(LightTrailParamChange {
+                    node_idx,
+                    field: LightTrailFieldChange::Align(v),
+                });
+            }
+
+            // --- path_index ---
+            ui.horizontal(|ui| {
+                ui.label("Path index:");
+                if let Some(v) = command_dragvalue_u32(
+                    ui,
+                    &format!("lt_pi_{node_idx}"),
+                    *path_index,
+                    0..=255,
+                    "",
+                ) {
+                    light_trail_changes.push(LightTrailParamChange {
+                        node_idx,
+                        field: LightTrailFieldChange::PathIndex(v),
+                    });
+                }
+            });
+
+            // --- sample_resolution ---
+            ui.horizontal(|ui| {
+                ui.label("Sample resolution:")
+                    .on_hover_text("Higher = smoother on tight curves; rebuilds polyline");
+                if let Some(v) = command_dragvalue_u32(
+                    ui,
+                    &format!("lt_sr_{node_idx}"),
+                    *sample_resolution,
+                    64..=4096,
+                    "",
+                ) {
+                    light_trail_changes.push(LightTrailParamChange {
+                        node_idx,
+                        field: LightTrailFieldChange::SampleResolution(v),
+                    });
+                }
+            });
         }
     }
 }
@@ -327,6 +638,7 @@ fn show_effect_detail_panel(
     effect_idx: usize,
     staged_changes: &mut Vec<(usize, EffectChange)>,
     treatment_param_changes: &mut Vec<TreatmentParamChange>,
+    light_trail_changes: &mut Vec<LightTrailParamChange>,
 ) {
     let node = &project.layers[layer_idx].effects[effect_idx];
     let effect_snap = node.effect.clone();
@@ -392,6 +704,7 @@ fn show_effect_detail_panel(
                 layer_idx,
                 staged_changes,
                 treatment_param_changes,
+                light_trail_changes,
             );
         }
     }
@@ -482,6 +795,7 @@ pub fn show_look_chain_section(
     // ---- Staged changes collected during the row loop / detail panel ------
     let mut staged_changes: Vec<(usize, EffectChange)> = Vec::new();
     let mut treatment_param_changes: Vec<TreatmentParamChange> = Vec::new();
+    let mut light_trail_changes: Vec<LightTrailParamChange> = Vec::new();
 
     // ---- T1.25 — drag-reorder / remove state captured during loop ---------
     let mut pending_reorder: Option<(usize, usize)> = None;
@@ -530,6 +844,7 @@ pub fn show_look_chain_section(
                                 open_ei,
                                 &mut staged_changes,
                                 &mut treatment_param_changes,
+                                &mut light_trail_changes,
                             );
                         }
                     }
@@ -559,6 +874,7 @@ pub fn show_look_chain_section(
                     open_ei,
                     &mut staged_changes,
                     &mut treatment_param_changes,
+                    &mut light_trail_changes,
                 );
             }
         }
@@ -644,6 +960,56 @@ pub fn show_look_chain_section(
             if let Some(node) = new_effects.get_mut(change.node_idx) {
                 if let Effect::Treatment { params, .. } = &mut node.effect {
                     params.insert(change.key, change.value);
+                }
+            }
+        }
+        st.pending_mutations.push(Mutation::SetLayerEffects(
+            crate::project::command::SetLayerEffects {
+                layer_idx,
+                new: new_effects,
+                old,
+            },
+        ));
+    }
+
+    // ---- Flush LightTrail param changes (005-T4.1) -------------------------
+    // Same Effects-Vec Reverse rule 2 as Treatment param changes: one
+    // SetLayerEffects per frame even when multiple fields changed.
+    if !light_trail_changes.is_empty() {
+        let old = project.layers[layer_idx].effects.clone();
+        let mut new_effects = old.clone();
+        for change in light_trail_changes {
+            if let Some(node) = new_effects.get_mut(change.node_idx) {
+                if let Effect::LightTrail {
+                    trail_length,
+                    head_size,
+                    stroke_width,
+                    glow_blur,
+                    opacity_fade,
+                    palette,
+                    gradient_spread,
+                    start,
+                    end,
+                    align,
+                    path_index,
+                    sample_resolution,
+                    ..
+                } = &mut node.effect
+                {
+                    match change.field {
+                        LightTrailFieldChange::TrailLength(v) => *trail_length = v,
+                        LightTrailFieldChange::HeadSize(v) => *head_size = v,
+                        LightTrailFieldChange::StrokeWidth(v) => *stroke_width = v,
+                        LightTrailFieldChange::GlowBlur(v) => *glow_blur = v,
+                        LightTrailFieldChange::OpacityFade(v) => *opacity_fade = v,
+                        LightTrailFieldChange::GradientSpread(v) => *gradient_spread = v,
+                        LightTrailFieldChange::Start(v) => *start = v,
+                        LightTrailFieldChange::End(v) => *end = v,
+                        LightTrailFieldChange::Align(v) => *align = v,
+                        LightTrailFieldChange::PathIndex(v) => *path_index = v,
+                        LightTrailFieldChange::SampleResolution(v) => *sample_resolution = v,
+                        LightTrailFieldChange::Palette(p) => *palette = p,
+                    }
                 }
             }
         }
